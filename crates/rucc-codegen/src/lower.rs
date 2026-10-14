@@ -677,6 +677,26 @@ fn letters_outside(constraints: &str, swap: impl Fn(char) -> char) -> String {
         .collect()
 }
 
+/// Whether an x86 constraint allows a vector register, which is `x` or `v`, and whether it allows a
+/// general purpose register as well. A register named in braces is not a letter.
+fn x86_letters(constraint: &str) -> (bool, bool) {
+    let mut inside = false;
+    let (mut vector, mut general) = (false, false);
+    for c in constraint.chars() {
+        match c {
+            '{' => inside = true,
+            '}' => inside = false,
+            _ if inside => {}
+            'x' | 'v' => vector = true,
+            'r' | 'q' | 'Q' | 'R' | 'a' | 'b' | 'c' | 'd' | 'S' | 'D' | 'A' | 'g' | 'l' => {
+                general = true;
+            }
+            _ => {}
+        }
+    }
+    (vector, general)
+}
+
 /// Whether an AArch64 constraint asks for a floating point or vector register, which is what `w`
 /// means there. A register named in braces is not a letter, so a `w` inside one is not read.
 fn vector_letter(constraint: &str) -> bool {
@@ -5877,19 +5897,25 @@ impl<'a> Lowering<'a> {
         // On i386 every template is kept, since the reader below is x86-64's and would take a
         // template's registers for the sixty four bit ones.
         let i386 = std::ptr::eq(self.selector.shapes, &rucc_target::x86::MACHINE);
+        // So does a template with an operand in a vector register, for the same reason.
+        let vectors = constraints
+            .split(',')
+            .zip(&list)
+            .any(|(entry, operand)| self.x86_vector(entry, operand));
         if goto
             || i386
+            || vectors
             || clobbers.split(',').any(|entry| vector_named(entry).is_some())
             || bare_constant(&template, &list, |value| self.named_address(value).is_some())
         {
-            return self.kept(inst, &template, &list, &widths, &memory);
+            return self.kept(inst, &template, &constraints, &list, &widths, &memory);
         }
         let steps = if template.trim().is_empty() {
             Vec::new()
         } else {
             match x86_64::read_in(&template, &widths, &memory) {
                 Some(steps) => steps,
-                None => return self.kept(inst, &template, &list, &widths, &memory),
+                None => return self.kept(inst, &template, &constraints, &list, &widths, &memory),
             }
         };
 
@@ -5998,7 +6024,7 @@ impl<'a> Lowering<'a> {
                 writes[index] > 0 && !reads[index] && operands.tied_to(index).is_some()
             });
         if tied_unread {
-            return self.kept(inst, &template, &list, &widths, &memory);
+            return self.kept(inst, &template, &constraints, &list, &widths, &memory);
         }
 
         // Where every operand is. Worked out in full before the first instruction is written, since
@@ -6136,6 +6162,7 @@ impl<'a> Lowering<'a> {
         &mut self,
         inst: Inst,
         template: &str,
+        constraints: &str,
         list: &[AsmOperand<'_>],
         widths: &[Option<x86_64::Width>],
         memory: &[bool],
@@ -6207,25 +6234,24 @@ impl<'a> Lowering<'a> {
         // input tied to an output is in that output's file. A value whose type puts it in the other
         // file would need a move into this one first, which gcc makes and this does not yet, so
         // that is refused below.
+        // On x86-64 `x` and `v` are a vector register. See [`Self::x86_vector`].
         let mut files = vec![self.gpr; list.len()];
-        if a64 {
-            let constraints = self.names.resolve(self.source[asm].constraints);
-            for (file, entry) in files.iter_mut().zip(constraints.split(',')) {
-                if vector_letter(entry) {
-                    *file = self.conv.sse_class;
-                }
+        for (index, entry) in constraints.split(',').enumerate().take(list.len()) {
+            let vector =
+                if a64 { vector_letter(entry) } else { self.x86_vector(entry, &list[index]) };
+            if vector {
+                files[index] = self.conv.sse_class;
             }
-            for index in 0..list.len() {
-                if let Some(&file) = list[index].tied.and_then(|output| files.get(output)) {
-                    files[index] = file;
-                }
+        }
+        for index in 0..list.len() {
+            if let Some(&file) = list[index].tied.and_then(|output| files.get(output)) {
+                files[index] = file;
             }
         }
         let mut pins: Vec<_> = list.iter().map(|operand| self.pinned_here(operand)).collect();
         if !a64 && self.conv.word == 4 {
-            let constraints = self.names.resolve(self.source[asm].constraints).to_string();
-            bytes_pinned(&mut pins, list, &constraints, &clobbered, self.gpr);
-            byte_inputs_pinned(&mut pins, list, &constraints, &clobbered, self.gpr);
+            bytes_pinned(&mut pins, list, constraints, &clobbered, self.gpr);
+            byte_inputs_pinned(&mut pins, list, constraints, &clobbered, self.gpr);
         }
         // A register the text spells and the list does not name, given to an output nothing reads
         // rather than taken away as a clobber. gcc reads no text, so it puts such an output in a
@@ -6363,7 +6389,6 @@ impl<'a> Lowering<'a> {
         // A `q` operand left to the allocator is never put in `esi` or `edi`, which it hands out
         // on i386 too and which have no low byte for `%b0` to name.
         if !a64 && self.conv.word == 4 {
-            let constraints = self.names.resolve(self.source[asm].constraints).to_string();
             for (index, entry) in constraints.split(',').enumerate() {
                 if !entry.contains(['q', 'Q']) {
                     continue;
@@ -6388,16 +6413,18 @@ impl<'a> Lowering<'a> {
         // list names or an operand is pinned to stays where it is. What is left does not count the
         // two scratch registers the allocator holds back, since no operand is ever given one of
         // those, and counting them left two outputs short above -O0 with nothing to carry them.
+        let int = self.conv.int_class;
         let fixed_to: Vec<PhysReg> = defs
             .iter()
             .chain(&uses)
+            .filter(|operand| operand.class == int)
             .filter_map(|operand| match operand.constraint {
                 Constraint::Fixed(at) => Some(at),
                 _ => None,
             })
             .collect();
-        let wanted = defs.iter().chain(&uses).count() - fixed_to.len();
-        let int = self.conv.int_class;
+        let wanted = defs.iter().chain(&uses).filter(|operand| operand.class == int).count()
+            - fixed_to.len();
         let held: &[PhysReg] =
             if a64 { &crate::pipeline::AARCH64_SCRATCH } else { &crate::pipeline::SCRATCH };
         let free = |clobbered: &[(PhysReg, RegClass)]| {
@@ -6484,10 +6511,18 @@ impl<'a> Lowering<'a> {
             def_of.get(index).is_some_and(Option::is_some)
                 || use_of.get(index).is_some_and(Option::is_some)
         };
+        // A line that names an operand in a vector register is not one the reader takes at all,
+        // since it reads only the general purpose file, so what it says about that line is not a
+        // reason.
+        let gpr = self.gpr;
+        let vector = |index: usize| files.get(index).is_some_and(|&file| file != gpr);
         if !a64 && (0..list.len()).any(registered) {
             for line in template.split(['\n', ';']) {
                 let line = x86_64::unlabelled(line);
-                if names_one(line, registered) && x86_64::refused(line, widths, memory) {
+                if names_one(line, registered)
+                    && !names_one(line, vector)
+                    && x86_64::refused(line, widths, memory)
+                {
                     return Err(refused());
                 }
             }
@@ -6626,6 +6661,13 @@ impl<'a> Lowering<'a> {
                             (None, 8 | 16 | 32) | (Some('w'), _) => 'w',
                             (None, 64) | (Some('x'), _) => 'x',
                             _ => return Err(refused()),
+                        }
+                    } else if files[index] != self.gpr {
+                        // A vector register is named as `xmm`, which is what gcc writes with no
+                        // modifier and with `%x`.
+                        match modifier {
+                            None | Some('x') => 'x',
+                            Some(_) => return Err(refused()),
                         }
                     } else {
                         let natural = match bits {
@@ -7455,12 +7497,26 @@ impl<'a> Lowering<'a> {
         aarch64::named(name.strip_prefix('%').unwrap_or(name))
     }
 
+    /// Whether an operand on x86-64 goes in a vector register, which its constraint `x` or `v`
+    /// asks for. A constraint that allows a general purpose register too, `rx`, puts a float or a
+    /// vector there and anything else in the general purpose file, which is the choice gcc makes
+    /// for it. musl's `sqrt` is `"=x"` and `"x"` on a `double`, and its `lrint` is `cvtsd2si` from
+    /// `"x"` into `"=r"`.
+    fn x86_vector(&self, constraint: &str, operand: &AsmOperand<'_>) -> bool {
+        let (vector, general) = x86_letters(constraint);
+        if !vector || operand.memory || self.conv.word != 8 {
+            return false;
+        }
+        let ty = operand.result.or(operand.value).map(|value| self.source[value].ty);
+        !general || ty.is_some_and(|ty| !on_x87(ty) && self.class_of(ty) == self.conv.sse_class)
+    }
+
     /// An `asm` statement whose operands are `long double` values on the x87 stack.
     ///
     /// `t` is the top of the stack and `u` is the register under it, and those two letters, or a
-    /// number tying an input to an output in one of them, are the only places taken here. That is
-    /// what glibc's old `<bits/mathinline.h>` writes, `fpatan` with `=t`, `0` and `u` and `st(1)`
-    /// in the clobber list, and it is gcc-torture `execute/990413-2.c`.
+    /// number tying an input to an output in one of them, are the only places on the stack taken
+    /// here. That is what glibc's old `<bits/mathinline.h>` writes, `fpatan` with `=t`, `0` and
+    /// `u` and `st(1)` in the clobber list, and it is gcc-torture `execute/990413-2.c`.
     ///
     /// The group is the shape every other one in [`Self::x87`] has. The inputs are pushed from the
     /// deepest up, so the `t` one is pushed last and ends up on top, then the template runs, then
@@ -7470,6 +7526,11 @@ impl<'a> Lowering<'a> {
     /// tied to an output or named in the clobber list is one the template pops. So a statement
     /// with an input it leaves behind is refused, as is one with an operand anywhere other than
     /// `st(0)` and `st(1)`, since nothing here would know what to do with the stack after it.
+    ///
+    /// The other operands of the same statement are not on the stack, and they go the way of any
+    /// template kept as text, between the pushes and the pops. See [`Self::kept`]. musl's `fmodl`
+    /// is `fprem` with `+t`, `u` and the status word out in `=a`, and its `llrintl` is `fistpll`
+    /// from `t` into `=m`.
     fn x87_assembly(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
@@ -7484,26 +7545,30 @@ impl<'a> Lowering<'a> {
             .ok_or_else(refused)?;
         let list: Vec<AsmOperand<'_>> = operands.iter().copied().collect();
 
-        // Where on the stack each operand is, as a depth from the top.
+        // Where on the stack each operand is, as a depth from the top, or nothing for one that is
+        // not on the stack.
         let letters: Vec<&str> = constraints.split(',').collect();
-        let mut depths = Vec::with_capacity(list.len());
+        let mut depths: Vec<Option<usize>> = Vec::with_capacity(list.len());
         for (operand, letter) in list.iter().zip(&letters) {
             let value = operand.result.or(operand.value).ok_or_else(refused)?;
-            if operand.memory || !on_x87(self.source[value].ty) {
-                return Err(refused());
-            }
+            let stacked = !operand.memory && on_x87(self.source[value].ty);
             let depth = match operand.tied {
                 Some(output) => *depths.get(output).ok_or_else(refused)?,
                 None => match letter.trim_start_matches(['=', '+', '&']) {
-                    "t" => 0,
-                    "u" => 1,
-                    _ => return Err(refused()),
+                    "t" => Some(0),
+                    "u" => Some(1),
+                    _ => None,
                 },
             };
+            if stacked != depth.is_some() {
+                return Err(refused());
+            }
             depths.push(depth);
         }
+        let mixed = depths.iter().any(Option::is_none);
 
-        // Which depths the clobber list says the template pops.
+        // Which depths the clobber list says the template pops. Anything else in it is the
+        // business of the operands that are not on the stack, when there are some.
         let clobbers = self.names.resolve(info.clobbers).to_string();
         let mut popped = [false; 2];
         for entry in clobbers.split(',') {
@@ -7513,6 +7578,7 @@ impl<'a> Lowering<'a> {
                 "" | "memory" | "cc" | "flags" => {}
                 "st" | "st(0)" => popped[0] = true,
                 "st(1)" => popped[1] = true,
+                _ if mixed => {}
                 _ => return Err(Unsupported::Assembly { inst, refused: Written::Clobber }),
             }
         }
@@ -7521,7 +7587,7 @@ impl<'a> Lowering<'a> {
         let mut inputs: Vec<Option<Value>> = vec![None; 2];
         let mut outputs: Vec<Option<Value>> = vec![None; 2];
         for (index, operand) in list.iter().enumerate() {
-            let depth = depths[index];
+            let Some(depth) = depths[index] else { continue };
             if let Some(result) = operand.result {
                 if outputs[depth].replace(result).is_some() {
                     return Err(refused());
@@ -7543,7 +7609,19 @@ impl<'a> Lowering<'a> {
             return Err(refused());
         }
 
-        // The text, with an operand spelled as the register it is in.
+        // The operands not on the stack, numbered again from nought in the order they had.
+        let mut renumbered: Vec<Option<usize>> = Vec::with_capacity(list.len());
+        let mut count = 0;
+        for depth in &depths {
+            renumbered.push(depth.is_none().then(|| {
+                count += 1;
+                count - 1
+            }));
+        }
+
+        // The text, with an operand on the stack spelled as the register it is in. A template with
+        // other operands as well goes on to [`Self::kept`], which reads `%%` and the numbers of
+        // those operands again, so they are left for it in its own terms.
         let template = self.names.resolve(info.template).to_string();
         let mut text = String::with_capacity(template.len());
         let mut chars = template.chars().peekable();
@@ -7553,26 +7631,41 @@ impl<'a> Lowering<'a> {
                 continue;
             }
             match chars.peek().copied() {
+                Some(c @ ('%' | '=')) if mixed => {
+                    chars.next();
+                    text.push('%');
+                    text.push(c);
+                    continue;
+                }
                 Some('%') => {
                     chars.next();
                     text.push('%');
+                    continue;
                 }
                 Some('=') => {
                     chars.next();
                     text.push_str(&inst.index().to_string());
+                    continue;
                 }
-                Some(digit) if digit.is_ascii_digit() => {
-                    chars.next();
-                    if chars.peek().is_some_and(char::is_ascii_digit) {
-                        return Err(refused());
-                    }
-                    let index = digit.to_digit(10).map_or(usize::MAX, |it| it as usize);
-                    match depths.get(index).ok_or_else(refused)? {
-                        0 => text.push_str("%st"),
-                        depth => text.push_str(&format!("%st({depth})")),
-                    }
+                _ => {}
+            }
+            let modifier = chars.next_if(char::is_ascii_alphabetic);
+            let mut digits = String::new();
+            while let Some(c) = chars.next_if(char::is_ascii_digit) {
+                digits.push(c);
+            }
+            let index: usize = digits.parse().map_err(|_| refused())?;
+            let sign = if mixed { "%%" } else { "%" };
+            match (depths.get(index).ok_or_else(refused)?, renumbered[index]) {
+                (Some(_), _) if modifier.is_some() => return Err(refused()),
+                (Some(0), _) => text.push_str(&format!("{sign}st")),
+                (Some(depth), _) => text.push_str(&format!("{sign}st({depth})")),
+                (None, Some(at)) => {
+                    text.push('%');
+                    text.extend(modifier);
+                    text.push_str(&at.to_string());
                 }
-                _ => return Err(refused()),
+                (None, None) => return Err(refused()),
             }
         }
 
@@ -7582,10 +7675,39 @@ impl<'a> Lowering<'a> {
             let from = self.through(from);
             self.x87_at("fld_t", span, from);
         }
-        let symbol = self.names.intern(&text);
-        let opcode = self.named(x86_64::TEMPLATE);
-        let block = self.at.expect("a block is being filled");
-        self.out.build(block, opcode).at(span).symbol(symbol).finish();
+        if mixed {
+            let mut rest = Vec::with_capacity(count);
+            let mut kept_letters = Vec::with_capacity(count);
+            for (index, operand) in list.iter().enumerate() {
+                if depths[index].is_some() {
+                    continue;
+                }
+                let mut operand = *operand;
+                operand.tied = match operand.tied {
+                    Some(output) => Some(renumbered[output].ok_or_else(refused)?),
+                    None => None,
+                };
+                rest.push(operand);
+                kept_letters.push(letters[index]);
+            }
+            let widths: Vec<Option<x86_64::Width>> = rest
+                .iter()
+                .map(|operand| {
+                    let ty = self.source[operand.result.or(operand.value)?].ty;
+                    if !ty.is_scalar() {
+                        return None;
+                    }
+                    x86_64::Width::of_bits(held_bits(ty, self.address_bits()))
+                })
+                .collect();
+            let memory: Vec<bool> = rest.iter().map(|operand| operand.memory).collect();
+            self.kept(inst, &text, &kept_letters.join(","), &rest, &widths, &memory)?;
+        } else {
+            let symbol = self.names.intern(&text);
+            let opcode = self.named(x86_64::TEMPLATE);
+            let block = self.at.expect("a block is being filled");
+            self.out.build(block, opcode).at(span).symbol(symbol).finish();
+        }
         for value in outputs.iter().flatten() {
             let into = self.x87_slot(*value);
             let into = self.through(into);
@@ -7620,7 +7742,7 @@ impl<'a> Lowering<'a> {
         let widths = vec![None; list.len()];
         let memory: Vec<bool> = list.iter().map(|operand| operand.memory).collect();
         let template = self.names.resolve(info.template).to_string();
-        self.kept(inst, &template, &list, &widths, &memory)
+        self.kept(inst, &template, &constraints, &list, &widths, &memory)
     }
 
     /// One instruction of a template, as the machine instruction it was read back into.
