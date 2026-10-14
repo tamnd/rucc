@@ -33,6 +33,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-mindirect-branch=`, `-mfunction-return=`, `-mindirect-branch-cs-prefix` and `-mharden-sls=` are now read on i386 as well as x86-64, as in gcc. The 32 bit kernel's `CC_HAS_RETPOLINE` check no longer fails, so an X32 build with rucc keeps `MITIGATION_RETPOLINE` (#3635).
 - The simplifier turns `(a << s) - (b << s)` into `(a - b) << s`, and the same for `+`, `&`, `|` and `^` (the bitwise three through a right shift too), when nothing else reads either shift. On i386 this is about ten instructions fewer in the perf uncore counter update (#3636).
 - A block copy or clear of up to 96 bytes is now inline moves when optimizing for speed, at thresholds measured by the new `cargo xtask stringop`, and a clear now has its own thresholds, 12 moves for speed and 2 for size, while a copy for size now stops at 3 moves (#3626).
+- `*d = (block){ { 0 } }` now clears the block with aligned stores, eight of them for 64 bytes, where it was fifty misaligned stores and a copy out of a stack temporary, and an initializer that names the same element twice, as `{ [0] = v, [0] = w }` does, no longer leaves the elements it does not name unset (#3639).
 
 ### Fixed
 

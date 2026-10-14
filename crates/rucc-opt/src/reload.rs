@@ -82,6 +82,21 @@
 //! by asking about the same distance into the copy's source instead. `through` says what has to be
 //! known for that to be the same bytes rather than a guess.
 //!
+//! # A copy of a fill
+//!
+//! A compound literal of zeros assigned to a structure lowers to a fill of a temporary and a copy
+//! of the temporary into the structure, and so does any initializer the front end builds in a
+//! temporary first. The copy's walk asks about the source the way a load's does, and when it stops
+//! at a `memset` that covered the whole of what the copy reads, what the copy puts in the
+//! destination is that byte at every place. So the copy becomes a fill of the destination with
+//! the same byte, and the temporary is left with a fill nothing reads, which is dead store
+//! elimination's to remove. gcc writes four stores for `*d = (block){ { 0 } }` of a 64 byte block,
+//! and before this rucc filled a temporary and copied it, sixteen moves where four would do
+//! (tamnd/rucc#3586).
+//!
+//! The byte is the fill's own operand, and it is defined above the fill, which is above the copy
+//! on every path for the reason a store the walk names is above the load.
+//!
 //! # What is not here
 //!
 //! Phi translation, which is asking about a load whose address is a block parameter in the terms of
@@ -142,6 +157,12 @@ const NOT_A_STORE: &str = "load kept, what covers it writes memory without stori
 /// Recorded for a load that would have gone if there had been fuel for it.
 const NO_FUEL: &str = "redundant load kept, the pass ran out of fuel";
 
+/// Recorded for a copy whose whole source was a fill, which became a fill of its destination.
+const REFILLED: &str = "copy of a fill replaced by the same fill of the destination";
+
+/// Recorded for a copy of a fill that would have become a fill if there had been fuel for it.
+const COPY_NO_FUEL: &str = "copy of a fill kept, the pass ran out of fuel";
+
 /// The pass.
 #[derive(Debug)]
 pub struct RedundantLoad;
@@ -173,6 +194,8 @@ impl Pass for RedundantLoad {
         // walk over the function per load and there is nothing to gain by it.
         let mut forward: Map<Value, Value> = Map::default();
         let mut gone: Vec<Inst> = Vec::new();
+        // Each copy whose source was a fill, with the byte the fill wrote.
+        let mut refills: Vec<(Inst, Value)> = Vec::new();
 
         // The walk borrows the function, so it is a scope of its own and every edit happens after
         // it. Built once, because the alias oracle inside it holds an escape analysis that is one
@@ -194,6 +217,15 @@ impl Pass for RedundantLoad {
             let order: Vec<Block> = an.cfg(body).reverse_postorder().collect();
             for block in order {
                 for inst in func.insts(block).collect::<Vec<Inst>>() {
+                    if let Some(byte) = filled(body, &mut walk, inst) {
+                        if fuel.take() {
+                            refills.push((inst, byte));
+                            stats.optimized(REFILLED);
+                        } else {
+                            stats.missed(COPY_NO_FUEL);
+                        }
+                        continue;
+                    }
                     let Some((result, ty)) = reads(func, inst) else {
                         continue;
                     };
@@ -268,6 +300,16 @@ impl Pass for RedundantLoad {
         for inst in gone {
             func.remove_inst(inst);
         }
+        // In place, so the copy keeps its place on the chain. A fill and a copy carry the same
+        // operands but the second, and the same results.
+        for (inst, byte) in refills {
+            let mut args = func[func[inst].args].to_vec();
+            args[1] = byte;
+            let args = func.push_values(&args);
+            let data = &mut func[inst];
+            data.opcode = Opcode::Memset;
+            data.args = args;
+        }
         if !forward.is_empty() {
             substitute(func, &forward);
         }
@@ -337,6 +379,43 @@ fn through(func: &Func, reference: &Access, inst: Inst) -> Option<Access> {
         restrict: Restrict::NONE,
         volatile: reference.volatile,
     })
+}
+
+/// The byte a copy's whole source held because a fill wrote it, when that is what it held.
+///
+/// The walk is asked about the copy the way it is asked about a load, since what a copy reads is
+/// its source. It has to stop at a `memset` that wrote every byte the copy reads, which is an
+/// `Exact` when the two are the same size and a `Partial` when the fill was wider. A `Partial`
+/// that left some of the source to something older is not that, so the bytes the fill wrote are
+/// checked to cover the source rather than taken on the walk's word. Neither side may carry its
+/// length as an operand, be `volatile`, or be one the program asked to keep, since a fill of the
+/// destination is then not the same thing as the copy.
+fn filled(func: &Func, walk: &mut Walk<'_>, inst: Inst) -> Option<Value> {
+    let data = func[inst];
+    if !matches!(data.opcode, Opcode::Memcpy | Opcode::Memmove)
+        || data.flags.intersects(Flags::KEEP)
+        || func.bulk(inst)?.length.is_some()
+    {
+        return None;
+    }
+    let read = walk.alias().reads(inst)?;
+    if read.volatile {
+        return None;
+    }
+    let (start, end) = read.range()?;
+    let (Clobber::Exact(wrote) | Clobber::Partial(wrote)) = walk.clobber(inst) else {
+        return None;
+    };
+    if func[wrote].opcode != Opcode::Memset || func[wrote].flags.intersects(Flags::KEEP) {
+        return None;
+    }
+    let fill = func.bulk(wrote)?;
+    let written = walk.alias().writes(wrote)?;
+    if fill.length.is_some() || written.volatile || written.origin != read.origin {
+        return None;
+    }
+    let (low, high) = written.range()?;
+    (low <= start && end <= high).then_some(fill.with)
 }
 
 /// Where a load reads, as two loads can be equal on.
@@ -1274,6 +1353,75 @@ block2:
         let (module, stats) = run(&text);
         assert!(!stats.changed());
         assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_copy_of_a_fill_is_the_same_fill_of_where_it_was_copied_to() {
+        // `*d = (block){ { 0 } }`, which is a fill of a temporary and a copy of all of it.
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    %1 = alloca, size 64, align 16
+    %2 = iconst.i8 0
+    memset %1, %2, size 64, align 16
+    memcpy %0, %1, size 64, align 8
+    return
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REFILLED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Memcpy), 0);
+        assert_eq!(count_of(func, Opcode::Memset), 2);
+        let fill = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Memset)
+            .last()
+            .expect("the copy, now a fill");
+        let args = &func[func[fill].args];
+        assert_eq!(args[0], func[func.entry().expect("an entry")].params[0]);
+        let Extra::Mem(info) = func[fill].extra else { panic!("a fill says how much it writes") };
+        assert_eq!((func[info].size, func[info].align), (64, 8));
+    }
+
+    #[test]
+    fn a_copy_of_a_fill_something_wrote_into_since_stays_a_copy() {
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    %1 = alloca, size 64, align 16
+    %2 = iconst.i8 0
+    memset %1, %2, size 64, align 16
+    %3 = iconst.i32 7
+    store %3 -> %1, align 16
+    memcpy %0, %1, size 64, align 8
+    return
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REFILLED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Memcpy), 1);
+    }
+
+    #[test]
+    fn a_copy_wider_than_the_fill_stays_a_copy() {
+        // The second half of what is copied is whatever the temporary held before, which is not
+        // the byte the fill wrote.
+        let text = wrap(
+            "(ptr)",
+            "block0(%0: ptr):
+    %1 = alloca, size 64, align 16
+    %2 = iconst.i8 0
+    memset %1, %2, size 32, align 16
+    memcpy %0, %1, size 64, align 8
+    return
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REFILLED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Memcpy), 1);
     }
 
     #[test]
