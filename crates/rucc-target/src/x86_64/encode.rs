@@ -2631,6 +2631,12 @@ static ENCODINGS: &[Encoding] = &[
     bytes("cvttss2siq", &VR, SingleQuad, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
     bytes("cvttsd2sil", &VR, Double, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
     bytes("cvttsd2siq", &VR, DoubleQuad, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    // The same four that round in the current mode, one opcode higher. No C conversion writes
+    // them, but `lrint` and `lrintf` in musl's x86-64 code are one of them in an `asm`.
+    bytes("cvtss2sil", &VR, Single, &[0x0F, 0x2D], pair(0, 1), NO_IMM),
+    bytes("cvtss2siq", &VR, SingleQuad, &[0x0F, 0x2D], pair(0, 1), NO_IMM),
+    bytes("cvtsd2sil", &VR, Double, &[0x0F, 0x2D], pair(0, 1), NO_IMM),
+    bytes("cvtsd2siq", &VR, DoubleQuad, &[0x0F, 0x2D], pair(0, 1), NO_IMM),
     // An integer to a float, which is the same two questions the other way round and one opcode
     // lower. The mnemonic carries the width of the integer here because the register it reads is
     // the one the assembler cannot see in a memory form, and this table writes the suffix on
@@ -2932,6 +2938,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("cvttss2siq", &MR, SingleQuad, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
     bytes("cvttsd2sil", &MR, Double, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
     bytes("cvttsd2siq", &MR, DoubleQuad, &[0x0F, 0x2C], pair(0, 1), NO_IMM),
+    bytes("cvtss2sil", &MR, Single, &[0x0F, 0x2D], pair(0, 1), NO_IMM),
+    bytes("cvtss2siq", &MR, SingleQuad, &[0x0F, 0x2D], pair(0, 1), NO_IMM),
+    bytes("cvtsd2sil", &MR, Double, &[0x0F, 0x2D], pair(0, 1), NO_IMM),
+    bytes("cvtsd2siq", &MR, DoubleQuad, &[0x0F, 0x2D], pair(0, 1), NO_IMM),
     // The comparisons with memory on the left, and the ones that also raise the invalid exception
     // on a quiet NaN, which is what an ordered comparison in C is and what gcc writes for `<`.
     bytes("ucomiss", &MV, Long, &[0x0F, 0x2E], pair(0, 1), NO_IMM),
@@ -6801,6 +6811,10 @@ mod tests {
         assert_eq!(hex("movd", &[Value::Mem(from), x(0)]), "66 0f 6e 06");
         assert_eq!(hex("sqrtsd", &[x(1), x(0)]), "f2 0f 51 c1");
         assert_eq!(hex("cvttsd2siq", &[Value::Mem(from), quad(RAX)]), "f2 48 0f 2c 06");
+        assert_eq!(hex("cvtsd2siq", &[x(0), quad(RAX)]), "f2 48 0f 2d c0");
+        assert_eq!(hex("cvtss2sil", &[x(1), long(RAX)]), "f3 0f 2d c1");
+        assert_eq!(hex("cvtss2siq", &[x(9), quad(R10)]), "f3 4d 0f 2d d1");
+        assert_eq!(hex("cvtsd2sil", &[Value::Mem(from), long(RCX)]), "f2 0f 2d 0e");
     }
 
     #[test]
