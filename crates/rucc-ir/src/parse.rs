@@ -279,6 +279,7 @@ enum PendingExtra<'a> {
     Depth(u32),
     Question(u8),
     Member(u32),
+    Array(u32),
     Lane(u8),
     Shuffle(Shuffle),
     Class(StorageClass),
@@ -1010,11 +1011,16 @@ impl<'a, 'n> Parser<'a, 'n> {
         let extra = match opcode.extra_kind() {
             // `ptr_add %0, %1, member 16` is the address of a member sixteen bytes long, which
             // only a `ptr_add` may say and which it may leave out. No opcode carries one always.
+            // `array 16` says the same of a member that is an array.
             ExtraKind::None | ExtraKind::Member => {
                 args = self.value_list()?;
                 if opcode == Opcode::PtrAdd && self.eat(",") {
-                    self.expect("member")?;
-                    PendingExtra::Member(self.u32()?)
+                    if self.eat("array") {
+                        PendingExtra::Array(self.u32()?)
+                    } else {
+                        self.expect("member")?;
+                        PendingExtra::Member(self.u32()?)
+                    }
                 } else {
                     PendingExtra::None
                 }
@@ -1668,6 +1674,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             PendingExtra::Depth(depth) => Extra::Depth(*depth),
             PendingExtra::Question(kind) => Extra::Question(*kind),
             PendingExtra::Member(size) => Extra::Member(*size),
+            PendingExtra::Array(size) => Extra::Array(*size),
             PendingExtra::Lane(lane) => Extra::Lane(*lane),
             PendingExtra::Shuffle(shuffle) => Extra::Shuffle(*shuffle),
             PendingExtra::Class(class) => Extra::Class(*class),

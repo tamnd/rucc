@@ -200,11 +200,14 @@ pub enum Frame {
 #[must_use]
 pub fn remaining(module: &Module, names: &Interner) -> Map<Symbol, usize> {
     let wrappers = wrappers(names).map(|symbol| (symbol, 1));
+    // The note `crate::wrap` puts in front of a call handed an array member reads no frame, so it
+    // is sorted with the callees that have no checks left and nothing is published for it.
+    let notes = names.find(crate::wrap::MEMBER).map(|symbol| (symbol, 0));
     let defined = module.funcs().filter(|&id| !module[id].is_declaration()).map(|id| {
         let func = &module[id];
         (func.name, checks_left(func) + usize::from(returns_a_local(func)))
     });
-    let mut left: Map<Symbol, usize> = wrappers.chain(defined).collect();
+    let mut left: Map<Symbol, usize> = wrappers.chain(notes).chain(defined).collect();
     loop {
         let mut more = Vec::new();
         for id in module.funcs() {

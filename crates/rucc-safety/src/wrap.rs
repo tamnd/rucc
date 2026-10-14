@@ -50,9 +50,26 @@
 //!
 //! That is the module's own definition and not the whole program's, which is the limit of what one
 //! file can know. Document 10 section 10.7's mixed link is where the rest of that question lives.
+//!
+//! # A call handed an array member
+//!
+//! `memcpy(s.first, src, sizeof s)` copies past the end of `first` into whatever member follows
+//! it, and the capability the call is handed is the whole of `s`, which the copy fits. Document 09
+//! section 9.4 keeps a capability at the granularity of its object and says why, so this does not
+//! narrow one. It writes down, for this one call, that the address is an array member and how long
+//! the member is, with a `__rucc_member(address, length)` in front of it, and the wrapper judges
+//! that argument against the member. This is what `__builtin_object_size(p, 1)` answers and what
+//! `_FORTIFY_SOURCE` holds the string functions to.
+//!
+//! Only an array, and only one the lowering could measure. `Extra::Array` is on the `ptr_add` that
+//! stepped to an array member, and is zero for one at the end of its record, which a program may
+//! allocate past, and absent for a member of a union. A member of any other type is left to the
+//! whole object, because `memset(&s->first, 0, ...)` over a run of members is written on purpose.
+//! It has to be read here, before the optimizer, because `rucc_opt::objsize` takes it off and the
+//! `ptr_add` of nothing it is on at the start of a record is folded away.
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{AttrSet, CallInfo, Extra, Inst, Module, Opcode};
+use rucc_ir::{AttrSet, CallInfo, Def, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type};
 
 /// What every wrapper's symbol starts with.
 ///
@@ -191,6 +208,7 @@ pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
         .iter()
         .any(|&name| names.find(name).is_some_and(|symbol| defined.contains(&symbol)));
 
+    let word = Type::int(module.datalayout.pointer_bits);
     let mut moved = 0;
     for id in ids {
         if module[id].is_declaration() {
@@ -236,6 +254,7 @@ pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
             // name.
             let redirected = func.add_call(CallInfo { callee: Some(wrapper), ..info });
             func[inst].extra = Extra::Call(redirected);
+            noted(func, names, inst, word);
             moved += 1;
         }
     }
@@ -255,9 +274,41 @@ pub fn redirect(module: &mut Module, names: &mut Interner) -> usize {
     moved
 }
 
+/// What the runtime calls the note that an argument is an array member, which takes no frame.
+pub const MEMBER: &str = "__rucc_member";
+
+/// A `__rucc_member(address, length)` in front of a call whose pointer arguments include the
+/// address of an array member the lowering measured, for the first of them.
+///
+/// One, because the runtime keeps one note and the wrapper only believes it for an argument at the
+/// same address. The length goes as a word rather than the pointer going as an integer, so the note
+/// hands over a pointer like any other call and `crate::handover` is told it takes no frame.
+fn noted(func: &mut Func, names: &mut Interner, inst: Inst, word: Type) {
+    let span = func.span(inst);
+    let measured = crate::handover::pointers(func, inst).find_map(|arg| {
+        let Def::Result { inst: made, .. } = func[arg].def else { return None };
+        match func[made].extra {
+            Extra::Array(size) if func[made].opcode == Opcode::PtrAdd && size != 0 => {
+                Some((arg, size))
+            }
+            _ => None,
+        }
+    });
+    let Some((arg, size)) = measured else { return };
+    let extra = Extra::Imm(func.add_imm(Imm::int(i128::from(size), word)));
+    let length =
+        func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[word], span);
+    func.insert_before(length, inst);
+    let length = func[length].first_result.expect("one result was asked for");
+    let params = [Type::PTR, word];
+    let data = crate::lower::calling(func, names, MEMBER, &params, &[], &[arg, length]);
+    let made = func.create_inst(data, &[], span);
+    func.insert_before(made, inst);
+}
+
 #[cfg(test)]
 mod tests {
-    use rucc_ir::{Builder, Func, Signature, Type};
+    use rucc_ir::{Builder, Signature};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
@@ -318,6 +369,41 @@ mod tests {
         let (mut module, _) = calling(&mut names, "memcpy");
         assert_eq!(redirect(&mut module, &mut names), 1);
         assert_eq!(callees(&module, &names), ["__rucc_wrap_memcpy", "puts"]);
+    }
+
+    #[test]
+    fn a_call_handed_an_array_member_is_noted_and_one_handed_any_other_member_is_not() {
+        // `memcpy(s.first, ...)` with `first` sixteen bytes, then the same through a member that is
+        // not an array, which a program clears a run of members from on purpose, then an array at
+        // the end of its record, which a program may allocate past.
+        let mut names = Interner::new();
+        let ptr = Type::PTR;
+        let word = Type::int(64);
+        let mut func =
+            Func::new(names.intern("run"), Signature::new().with_params(&[ptr, ptr, word]));
+        let entry = func.create_block();
+        let dst = func.append_param(entry, ptr);
+        let src = func.append_param(entry, ptr);
+        let n = func.append_param(entry, word);
+        let memcpy = names.intern("memcpy");
+        let mut b = Builder::new(&mut func, entry);
+        let takes = Signature::new().with_params(&[ptr, ptr, word]).with_returns(&[ptr]);
+        let signature = b.func().add_signature(takes);
+        let zero = b.iconst(word, 0);
+        for extra in [Extra::Array(16), Extra::Member(8), Extra::Array(0)] {
+            let args = b.func().push_values(&[dst, zero]);
+            let member = b.value(InstData { args, extra, ..InstData::new(Opcode::PtrAdd) }, ptr);
+            b.call(memcpy, signature, &[member, src, n]);
+        }
+        b.ret(&[]);
+        let mut module = Module::new(names.intern("run.c"), &target());
+        module.add_func(func);
+
+        assert_eq!(redirect(&mut module, &mut names), 3);
+        let wrapper = "__rucc_wrap_memcpy";
+        assert_eq!(callees(&module, &names), [MEMBER, wrapper, wrapper, wrapper]);
+        let text = rucc_ir::print(&module, &names);
+        assert!(text.contains("iconst.i64 16"), "the note says how long the member is:\n{text}");
     }
 
     #[test]

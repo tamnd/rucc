@@ -180,11 +180,12 @@ pub fn answer(
     answered
 }
 
-/// Takes every `Extra::Member` and every `counted` off, which nothing after the questions reads.
+/// Takes every `Extra::Member` and `Extra::Array` and every `counted` off, which nothing after
+/// the questions reads.
 fn forget(func: &mut Func) {
     for block in func.blocks().collect::<Vec<_>>() {
         for inst in func.insts(block).collect::<Vec<_>>() {
-            if let Extra::Member(_) = func[inst].extra {
+            if func[inst].extra.member().is_some() {
                 func[inst].extra = Extra::None;
             }
             func[inst].flags = func[inst].flags.without(Flags::COUNTED);
@@ -418,16 +419,16 @@ impl Walk<'_> {
                     // The start of a member, which is the closest object to an address in it.
                     Opcode::PtrAdd
                         if ask.closest
-                            && matches!(data.extra, Extra::Member(size) if size != 0) =>
+                            && data.extra.member().is_some_and(|size| size != 0) =>
                     {
-                        let Extra::Member(size) = data.extra else { return Err(()) };
+                        let Some(size) = data.extra.member() else { return Err(()) };
                         Ok(Some(u64::from(size)))
                     }
                     // A member that may run past its end is in the member under it where that
                     // has room left for it. One that has none is not in it at all: the program
                     // reached it from another member, as `container_of` does, and the closest
                     // object is the whole one.
-                    Opcode::PtrAdd if ask.closest && data.extra == Extra::Member(0) => {
+                    Opcode::PtrAdd if ask.closest && data.extra.member() == Some(0) => {
                         match self.stepped(inst, ask, depth, on) {
                             Ok(Some(0)) if largest => {
                                 self.stepped(inst, Ask { closest: false, ..ask }, depth, on)
@@ -857,7 +858,7 @@ impl Walk<'_> {
                         let then = self.object(then, ask, depth, seen);
                         same(then, self.object(other, ask, depth, seen))
                     }
-                    Opcode::PtrAdd if ask.closest && matches!(data.extra, Extra::Member(_)) => {
+                    Opcode::PtrAdd if ask.closest && data.extra.member().is_some() => {
                         Err(())
                     }
                     Opcode::PtrAdd => self.object(*args.first().ok_or(())?, ask, depth, seen),
