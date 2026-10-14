@@ -40,8 +40,8 @@ use rucc_ir::{
 };
 use rucc_sema::{
     Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
-    Eval, ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, StorageDuration,
-    StrId, Tast, Version, Visibility,
+    Eval, ExprId, ExprKind, InitEntry, InitList, LabelId, Linkage, Priority, SimdClone,
+    StorageDuration, StrId, Tast, Version, Visibility,
 };
 use rucc_target::{Convention, ObjectFormat, TargetInfo};
 use rucc_types::{ArrayLen, TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
@@ -1514,7 +1514,37 @@ impl Unit<'_> {
         if let Some(body) = body {
             self.bodies.push((body, name));
         }
+        // The vector versions `__attribute__((simd))` asked for, which go wherever the body does.
+        let clones = tast.simd_clones(decl);
+        if body.is_some() && node.inline.emits() && !copied && !clones.is_empty() {
+            self.simd_clones(&func, clones);
+        }
         self.place_func(func);
+    }
+
+    /// Builds the vector versions of a function the checker made, each under the vector function
+    /// ABI's name for it, which is the prefix the checker wrote, an underscore and the function's
+    /// symbol. Each has the function's linkage and visibility, which is what gcc gives them: a
+    /// program's library exports `_ZGVbN2v_f` wherever it exports `f`.
+    fn simd_clones(&mut self, func: &Func, clones: &[SimdClone]) {
+        let tast = self.tast;
+        let called = self.names.resolve(func.name).to_owned();
+        for clone in clones {
+            let span = tast.decl_span(clone.decl);
+            let Some(plan) = self.plan(tast[clone.decl].ty, &[], span) else { continue };
+            let name = self.names.intern(&format!("{}_{called}", clone.prefix));
+            let mut built = Func::new(name, plan.signature.clone());
+            built.declared = func.declared;
+            built.named = func.named;
+            built.linkage = func.linkage;
+            built.visibility = func.visibility;
+            built.target = func.target;
+            body::lower(self, clone.decl, &mut built, &plan);
+            if let Some(body) = tast[clone.decl].body {
+                self.bodies.push((body, name));
+            }
+            self.place_func(built);
+        }
     }
 
     /// Whether a nested function can be built for this target, saying why not when it cannot.

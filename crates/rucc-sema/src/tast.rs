@@ -201,6 +201,32 @@ pub struct Version {
     pub test: Option<(CpuObject, u8, u8)>,
 }
 
+/// The calls `__attribute__((simd))` said a function is called in from a loop the vectorizer
+/// made of the calls to it, one lane for each iteration: under a mask, not under one, or both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Branches {
+    /// Called with every lane wanted, which is gcc's `N` and the attribute's `notinbranch`.
+    pub notinbranch: bool,
+    /// Called with a mask saying which lanes are wanted, which is gcc's `M` and `inbranch`.
+    pub inbranch: bool,
+}
+
+/// One function `__attribute__((simd))` asked for beside the one the program wrote, which takes
+/// a vector for each parameter and gives a vector back, one lane for each call it stands for.
+///
+/// Its declaration is one the checker made, with a body calling the program's function once for
+/// each lane, and it is in no scope and not in the unit's list of declarations, since nothing in
+/// the program can name it. The lowering builds it under the name gcc's vector function ABI
+/// gives it, which is [`SimdClone::prefix`], an underscore and the function's own symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimdClone {
+    /// The declaration made for it, a definition.
+    pub decl: DeclId,
+    /// The name up to the function's symbol: `_ZGV`, the extensions, `N` or `M`, the number of
+    /// lanes and a `v` for each parameter, as in `_ZGVbN2v`.
+    pub prefix: String,
+}
+
 /// The strings of the `btf_type_tag`s on the levels of one declaration's type, each level
 /// counted from the outside in: the type the declaration gives what it declares is level 0, what
 /// that points at, is an array of or returns is level 1, and so on. Each level's strings are the
@@ -230,6 +256,8 @@ pub struct Tast {
     prototypes: Map<DeclId, Vec<Prototype>>,
     targets: Vec<(DeclId, Isa)>,
     versions: Vec<(DeclId, Vec<Version>)>,
+    simd: Map<DeclId, Branches>,
+    simd_clones: Map<DeclId, Vec<SimdClone>>,
     sections: Map<DeclId, StrId>,
     function_names: Set<StrId>,
     alloc_sizes: Map<DeclId, AllocSize>,
@@ -527,6 +555,31 @@ impl Tast {
     #[must_use]
     pub fn versions(&self, decl: DeclId) -> Option<&[Version]> {
         self.versions.iter().find(|(at, _)| *at == decl).map(|(_, versions)| &versions[..])
+    }
+
+    /// Records the calls `__attribute__((simd))` asked a function to be built for, which every
+    /// declaration adds to: a declaration saying `notinbranch` and a definition saying `inbranch`
+    /// ask for both, which is what gcc 16 builds.
+    pub fn record_simd(&mut self, decl: DeclId, branches: Branches) {
+        let asked = self.simd.entry(decl).or_default();
+        asked.notinbranch |= branches.notinbranch;
+        asked.inbranch |= branches.inbranch;
+    }
+
+    /// The functions `__attribute__((simd))` was written on, with the calls it asked for.
+    pub fn simd_asked(&self) -> impl Iterator<Item = (DeclId, Branches)> + '_ {
+        self.simd.iter().map(|(&decl, &branches)| (decl, branches))
+    }
+
+    /// Records the vector versions built of a function, in the order they are emitted.
+    pub fn record_simd_clones(&mut self, decl: DeclId, clones: Vec<SimdClone>) {
+        self.simd_clones.insert(decl, clones);
+    }
+
+    /// The vector versions built of a function, and nothing for a function without any.
+    #[must_use]
+    pub fn simd_clones(&self, decl: DeclId) -> &[SimdClone] {
+        self.simd_clones.get(&decl).map_or(&[], |clones| &clones[..])
     }
 
     /// Records the section `__attribute__((section(...)))` put a function or an object in.

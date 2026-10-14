@@ -452,6 +452,10 @@ impl Checker<'_> {
         if let Some((isa, _)) = targeted {
             self.tast.record_target(id, isa);
         }
+        // The specifiers only, for the reason `noreturn` above reads them only.
+        if let Some(branches) = self.simd_branches(&[specs.attrs], DeclKind::Function) {
+            self.tast.record_simd(id, branches);
+        }
         // After the merge, since a handler is usually declared as one in a header and defined
         // without saying so again, and after the `target` attribute, since that is the usual
         // way of building one without the registers it would not save.
@@ -1083,6 +1087,13 @@ impl Checker<'_> {
         } else if kind == DeclKind::Function {
             if let Some((isa, _)) = self.targeted(&[specs.attrs, item.attrs], specs.options, span) {
                 self.tast.record_target(id, isa);
+            }
+        }
+        // Both places, for the reason `noreturn` above reads both. glibc's `<bits/math-vector.h>`
+        // writes it in front of the declarations of `<math.h>` under `-ffast-math`.
+        if may!(carried, "simd") {
+            if let Some(branches) = self.simd_branches(&[specs.attrs, item.attrs], kind) {
+                self.tast.record_simd(id, branches);
             }
         }
         // Both places, for the reason `noreturn` above reads both. The kernel writes it after the
