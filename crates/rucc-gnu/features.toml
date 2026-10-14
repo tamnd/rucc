@@ -4260,6 +4260,15 @@ used_by = ["glibc"]
 tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::builtin_complex_is_the_two_halves_with_no_arithmetic", "rucc-driver::builtin_complex_refuses_what_gcc_refuses"]
 
 [[feature]]
+name = "__builtin_tgmath"
+kind = "builtin"
+gcc_version = "8.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::tgmath_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::tgmath_calls_the_function_the_arguments_pick", "rucc-driver::tgmath_refuses_what_gcc_refuses"]
+
+[[feature]]
 name = "__builtin_conj"
 kind = "builtin"
 gcc_version = "3.0"
