@@ -713,7 +713,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let scoped = rucc_diag::Scoped::new(&opts.named_warnings, &diagnostic_pragmas, &sess.sources);
     let mut messages = Vec::with_capacity(diagnostics.len());
     let mut errors = 0;
-    for diag in &diagnostics {
+    for diag in &mut diagnostics {
         // `-w` drops the warning here rather than at the several hundred places one is raised,
         // and it drops it before the count, so `-w -Werror` compiles. A warning that was never
         // raised is not a warning there is anything to promote. A warning about something in a
@@ -723,6 +723,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         // or kept a warning under `-Werror` by name, is counted and labelled by that, whether the
         // name was given on the command line or by a `#pragma GCC diagnostic` above it.
         let named = scoped.at(diag.span.lo);
+        // One of the rules gcc 14 made an error is first put where its own option says, which
+        // can take it away or leave a warning that everything below then treats as one.
+        if !named.permit(diag) {
+            continue;
+        }
         if rucc_diag::dropped(diag, &sess.sources, opts.warnings, opts.system_header_warnings)
             || named.silenced(diag)
         {
@@ -8442,6 +8447,73 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                     wanted,
                     "under -std={}{how}, {source} was answered with `{said}`",
                     std.as_str()
+                );
+                if wanted.is_empty() {
+                    assert!(said.is_empty(), "nothing to say, but said `{said}`");
+                }
+            }
+        }
+    }
+
+    /// What the `-W` flags do to the rules of the table above, which gcc raises as errors that
+    /// still answer to their own options.
+    ///
+    /// Measured the same way, the seven files through gcc 16 with `-std=gnu17` under each command
+    /// line below. `-Wno-` of a rule's option takes the error away and `-Wno-error=` of it leaves
+    /// a warning, under `-Werror` as well, which `-w` then drops. `-w`, `-Wno-error`, and either
+    /// flag naming another rule's option leave the error where it was. The LLVM test suite builds
+    /// its older programs with `-Wno-implicit-int` and its neighbours, and rucc refused 32 of them
+    /// for it before this (tamnd/rucc#3646).
+    #[test]
+    fn the_rules_gcc_promoted_answer_to_their_own_options() {
+        let cases = [
+            ("static counted;\n", "implicit-int"),
+            ("int f(void) { return g(); }\n", "implicit-function-declaration"),
+            ("int f(x) { return x; }\n", "implicit-int"),
+            ("int *p;\nvoid h(void) { p = 1; }\n", "int-conversion"),
+            ("char *q;\nint *r;\nvoid k(void) { r = q; }\n", "incompatible-pointer-types"),
+            ("int f(void) { return; }\n", "return-mismatch"),
+            ("void g(void) { return 1; }\n", "return-mismatch"),
+        ];
+
+        for (source, option) in cases {
+            let other = if option == "int-conversion" { "implicit-int" } else { "int-conversion" };
+            let lines = [
+                (vec![], "error"),
+                (vec!["-w".to_owned()], "error"),
+                (vec!["-Werror".to_owned(), "-Wno-error".to_owned()], "error"),
+                (vec![format!("-Wno-{option}")], ""),
+                (vec![format!("-Wno-error={option}")], "warning"),
+                (vec![format!("-Wno-error={option}"), "-w".to_owned()], ""),
+                (vec!["-Werror".to_owned(), format!("-Wno-error={option}")], "warning"),
+                (vec![format!("-Wno-{option}"), format!("-Werror={option}")], "error"),
+                (vec![format!("-Wno-{other}")], "error"),
+                (vec![format!("-Wno-error={other}")], "error"),
+            ];
+            for (flags, wanted) in lines {
+                let mut opts = options();
+                opts.std = Std::C17;
+                for flag in &flags {
+                    match flag.as_str() {
+                        "-w" => opts.warnings = false,
+                        "-Werror" => opts.warnings_are_errors = true,
+                        "-Wno-error" => opts.warnings_are_errors = false,
+                        named => opts.named_warnings.flag(&named[2..]),
+                    }
+                }
+                let said = run(&opts, source).messages.join("\n");
+                let severity = if said.contains(": error: ") {
+                    "error"
+                } else if said.contains(": warning: ") {
+                    "warning"
+                } else {
+                    ""
+                };
+                assert_eq!(
+                    severity,
+                    wanted,
+                    "under {}, {source} was answered with `{said}`",
+                    flags.join(" ")
                 );
                 if wanted.is_empty() {
                     assert!(said.is_empty(), "nothing to say, but said `{said}`");

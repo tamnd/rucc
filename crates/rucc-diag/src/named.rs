@@ -26,6 +26,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0512", "incompatible-pointer-types"),
     ("E0513", "int-conversion"),
     ("E0514", "discarded-qualifiers"),
+    ("E0521", "implicit-function-declaration"),
     ("E0522", "shift-count-negative"),
     ("E0523", "shift-count-overflow"),
     ("E0524", "overflow"),
@@ -34,8 +35,8 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0568", "int-to-pointer-cast"),
     ("E0572", "pointer-arith"),
     ("E0625", "switch-outside-range"),
-    ("E0633", "return-type"),
-    ("E0634", "return-type"),
+    ("E0633", "return-mismatch"),
+    ("E0634", "return-mismatch"),
     ("E0664", "varargs"),
     ("E0673", "pointer-sign"),
     ("E0677", "pragmas"),
@@ -102,6 +103,7 @@ const PEDWARNS: &[&str] = &[
     "declaration-after-statement",
     "discarded-qualifiers",
     "expansion-to-defined",
+    "implicit-function-declaration",
     "implicit-int",
     "incompatible-pointer-types",
     "int-conversion",
@@ -110,7 +112,24 @@ const PEDWARNS: &[&str] = &[
     "pedantic",
     "pointer-arith",
     "pointer-sign",
-    "return-type",
+    "return-mismatch",
+];
+
+/// The options of the rules gcc 14 turned from warnings into errors, which gcc calls permerrors.
+/// Sorted.
+///
+/// gcc raises each of them as an error that still answers to its option. Measured against gcc 16
+/// one command line at a time: `-Wno-` of the option takes the error away altogether, and
+/// `-Wno-error=` of it makes it a warning again, under `-Werror` too, which `-w` then drops like
+/// any other warning. `-w` and `-Wno-error` on their own leave it an error, and so does either
+/// flag naming another rule's option. The LLVM test suite builds its older programs with
+/// `-Wno-implicit-int` and its neighbours rather than with `-fpermissive`.
+const PERMERRORS: &[&str] = &[
+    "implicit-function-declaration",
+    "implicit-int",
+    "incompatible-pointer-types",
+    "int-conversion",
+    "return-mismatch",
 ];
 
 /// The options gcc leaves off until something asks for them, each with the group that turns it
@@ -215,6 +234,26 @@ impl Named {
     /// `-std=c23 -pedantic-errors` with a warning, and one that `-Werror` stops.
     pub fn pedantic_errors(&mut self) {
         self.pedantic_errors = true;
+    }
+
+    /// Applies what the command line said to one of the rules in [`PERMERRORS`] raised as an
+    /// error, and says whether there is anything left of it to report. Any other diagnostic is
+    /// left as it is and kept.
+    pub fn permit(&self, diag: &mut Diagnostic) -> bool {
+        if diag.severity != Severity::Error {
+            return true;
+        }
+        let Some(name) = diag.code.and_then(option_of) else { return true };
+        if PERMERRORS.binary_search(&name).is_err() {
+            return true;
+        }
+        if self.off.contains(name) {
+            return false;
+        }
+        if self.errors.get(name) == Some(&false) {
+            diag.severity = Severity::Warning;
+        }
+        true
     }
 
     /// Whether this is a warning the command line turned off by name.
@@ -466,6 +505,47 @@ mod tests {
         assert!(!named.silenced(&unknown));
     }
 
+    fn permerror(code: &'static str) -> Diagnostic {
+        Diagnostic::error("type defaults to 'int'".to_owned(), Span::DUMMY).with_code(code)
+    }
+
+    /// A rule gcc made an error goes away with `-Wno-` of its option and is a warning again with
+    /// `-Wno-error=` of it, and nothing said about another option or about warnings in general
+    /// touches it.
+    #[test]
+    fn a_rule_gcc_made_an_error_answers_to_its_own_option() {
+        let permitted = |flags: &[&str], code: &'static str| {
+            let mut named = Named::default();
+            for flag in flags {
+                named.flag(flag);
+            }
+            let mut diag = permerror(code);
+            named.permit(&mut diag).then_some(diag.severity)
+        };
+        assert_eq!(permitted(&[], "E0526"), Some(Severity::Error));
+        assert_eq!(permitted(&["no-implicit-int"], "E0526"), None);
+        assert_eq!(permitted(&["no-error=implicit-int"], "E0526"), Some(Severity::Warning));
+        assert_eq!(permitted(&["no-int-conversion"], "E0526"), Some(Severity::Error));
+        assert_eq!(permitted(&["no-error=int-conversion"], "E0526"), Some(Severity::Error));
+        assert_eq!(permitted(&["no-error"], "E0526"), Some(Severity::Error));
+        assert_eq!(
+            permitted(&["no-implicit-int", "error=implicit-int"], "E0526"),
+            Some(Severity::Error)
+        );
+        assert_eq!(permitted(&["no-implicit-function-declaration"], "E0521"), None);
+        assert_eq!(permitted(&["no-error=return-mismatch"], "E0634"), Some(Severity::Warning));
+        // An error that is not one of the rules stays one whatever is said about its option.
+        assert_eq!(permitted(&["no-pointer-sign"], "E0673"), Some(Severity::Error));
+        // A warning is the business of `silenced` and `promoted`.
+        let mut warning = warning("E0526");
+        let mut named = Named::default();
+        named.flag("no-implicit-int");
+        assert!(named.permit(&mut warning));
+        assert!(named.silenced(&warning));
+        assert!(PERMERRORS.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(PERMERRORS.iter().all(|name| OPTIONS.iter().any(|&(_, known)| known == *name)));
+    }
+
     #[test]
     fn the_table_is_sorted_so_a_code_can_be_found() {
         assert!(OPTIONS.windows(2).all(|pair| pair[0].0 < pair[1].0));
@@ -476,7 +556,8 @@ mod tests {
     /// A code names one option, so two warnings gcc files under different names cannot share
     /// one. The reserved constructor priority is `prio-ctor-dtor` rather than `attributes`, and
     /// comparing pointers to distinct types is an option of its own where comparing a pointer
-    /// with an integer answers to none.
+    /// with an integer answers to none. A division by zero used to share its code with the
+    /// implicit declaration, which now answers to `implicit-function-declaration` alone.
     #[test]
     fn warnings_gcc_files_apart_have_codes_of_their_own() {
         assert_eq!(option_of("E0703"), Some("attributes"));
@@ -484,7 +565,7 @@ mod tests {
         assert_eq!(option_of("E0768"), Some("compare-distinct-pointer-types"));
         assert_eq!(option_of("E0517"), None);
         assert_eq!(option_of("E0812"), Some("div-by-zero"));
-        assert_eq!(option_of("E0521"), None);
+        assert_eq!(option_of("E0521"), Some("implicit-function-declaration"));
     }
 
     #[test]
