@@ -1,0 +1,15 @@
+ctor 101 rucc
+ctor 200 gcc
+ctor 300 rucc
+ctor 400 gcc
+ctor rucc
+ctor gcc
+main
+atexit gcc
+atexit rucc
+dtor gcc
+dtor rucc
+dtor 400 gcc
+dtor 300 rucc
+dtor 200 gcc
+dtor 101 rucc

@@ -1,0 +1,18 @@
+open 0
+ctor 150
+ctor
+used 3
+close
+dtor, count 3
+atexit, count 3
+dtor 150
+closed
+open 1
+ctor 150
+ctor
+used 3
+close
+dtor, count 3
+atexit, count 3
+dtor 150
+closed
