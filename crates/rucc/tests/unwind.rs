@@ -192,6 +192,58 @@ fn the_section_follows_the_directives() {
     assert!(!without.windows(9).any(|w| w == b".eh_frame"), "a section nothing asked for");
 }
 
+/// Two `cleanup` variables whose cleanup function is inlined into the landing pad at each level.
+///
+/// Once the function is inlined, the pad reads the argument and the sum made before the call
+/// rather than the address of a slot. The unwinder starts the pad with no machine edge into it, so
+/// these have to come through the frame. Before that, both targets refused the function at `-O1`
+/// and above.
+const CLEANUP: &str = "\
+int printf(const char *, ...);
+void deep(int k);
+static inline __attribute__((always_inline)) void note(int *p) { printf(\"%d\\n\", *p); }
+void layer(int k) {
+    int a __attribute__((cleanup(note))) = k;
+    int b __attribute__((cleanup(note))) = k + 100;
+    deep(k);
+}
+";
+
+/// Two cleanups of other types and two calls, so that the call in the first cleanup of the pad
+/// unwinds into a pad of its own, and the normal path after the second call does too.
+const MIXED: &str = "\
+int printf(const char *, ...);
+void deep(int k);
+static void wide(double *p) { printf(\"%g\\n\", *p); }
+static void long_one(long *p) { printf(\"%ld\\n\", *p); }
+void layer(int k, double x, long y) {
+    double a __attribute__((cleanup(wide))) = x * 2;
+    long b __attribute__((cleanup(long_one))) = y + k;
+    deep(k);
+    deep(k + 1);
+}
+";
+
+#[test]
+fn a_pad_can_read_what_was_made_before_the_call() {
+    for target in [TARGET, "aarch64-unknown-linux-gnu"] {
+        for level in ["-O1", "-O2"] {
+            let flags = [format!("--target={target}"), level.to_owned(), "-fexceptions".to_owned()];
+            let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+            let text = asm(&format!("pad-{}{level}", &target[..3]), &flags, CLEANUP);
+            let lines = body(&text, "layer");
+            assert!(lines.iter().any(|l| l.starts_with(".cfi_lsda")), "{target} {level}:\n{text}");
+            // Two on the normal path and two in the pad, and one more in the pad that the first
+            // call in the pad unwinds into.
+            let calls = lines.iter().filter(|l| l.contains("printf")).count();
+            assert!(calls >= 4, "{target} {level}: the two cleanups on each path\n{text}");
+            let text = asm(&format!("mixed-{}{level}", &target[..3]), &flags, MIXED);
+            let lines = body(&text, "layer");
+            assert!(lines.iter().any(|l| l.starts_with(".cfi_lsda")), "{target} {level}:\n{text}");
+        }
+    }
+}
+
 /// The object the compiler produces for [`SHAPES`] under those flags.
 fn object(what: &str, flags: &[&str]) -> Vec<u8> {
     let dir = std::env::temp_dir().join(format!("rucc-unwind-obj-{}-{what}", std::process::id()));
