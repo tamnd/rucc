@@ -489,9 +489,8 @@ pub const BUNDLED_GLIBC: Version = Version::new(2, 44);
 /// tuple, and [`BUNDLED_GLIBC`] when it asked for nothing. Asking for an older release is how a
 /// program is kept off symbols and declarations the target's libc does not have, and it is honest
 /// only as far as the text goes: the declarations are guarded by the macro and the structure
-/// layouts in the same files are one release's. Issue #926's last box is where that is finished and
-/// it is the same direction as the compat symbol gap of #920, too permissive rather than wrong
-/// about what it does say.
+/// layouts in the same files are one release's. Issue #926's last box is where that is finished.
+/// The gap is too permissive rather than wrong about what it does say.
 ///
 /// # Errors
 ///
