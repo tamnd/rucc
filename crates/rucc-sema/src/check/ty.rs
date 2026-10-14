@@ -1234,8 +1234,16 @@ impl Checker<'_> {
             let declarator = ast[param.declarator];
             let span = if declarator.name.is_some() { declarator.name_span } else { param.span };
             self.check_void_parameter(ty, declarator.name, index, span);
+            // Every check of a parameter's attributes reads the two lists and nothing else, and
+            // nearly every parameter a header declares has nothing in either, so a parameter with
+            // none is not walked through each of them to find that out.
+            let attributed = param
+                .specs
+                .is_some_and(|specs| !ast[specs].attrs.is_empty() || !param.attrs.is_empty());
             if let Some(specs) = param.specs {
                 self.check_parameter_storage(specs, declarator.name, span);
+            }
+            if let Some(specs) = param.specs.filter(|_| attributed) {
                 self.no_reordered(&[ast[specs].attrs, param.attrs], false);
                 self.strict_flex_refused(&[ast[specs].attrs, param.attrs], declarator.name);
                 self.ms_hooked(&[ast[specs].attrs, param.attrs], false);
@@ -1319,7 +1327,11 @@ impl Checker<'_> {
             if let Some((name, of)) = named {
                 self.tast.record_spelling(decl, name, of);
             }
-            if let Some(specs) = param.specs {
+            // A tag can be on a `*` of the declarator as well as in the two lists.
+            let starred = ast[declarator.derived]
+                .iter()
+                .any(|step| matches!(step, Derived::Pointer { attrs, .. } if !attrs.is_empty()));
+            if let Some(specs) = param.specs.filter(|_| attributed || starred) {
                 let mut lists = self.btf_starred_decl_tags(declarator.derived);
                 lists.extend([param.attrs, ast[specs].attrs]);
                 let tags = self.btf_decl_tags(&lists);

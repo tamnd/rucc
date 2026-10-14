@@ -132,9 +132,14 @@ impl Checker<'_> {
     }
 
     /// Keeps the lists a declaration was written with, beside those of its earlier declarations.
+    ///
+    /// A declaration written with none is not kept at all, which is most of those a header
+    /// makes, and asking about one that was not kept finds nothing as it should.
     pub(in crate::check) fn annotate_decl(&mut self, decl: DeclId, lists: &[AttrList]) {
-        let kept = self.annotations.decls.entry(decl).or_default();
-        kept.extend(lists.iter().copied().filter(|list| !list.is_empty()));
+        let mut written = lists.iter().copied().filter(|list| !list.is_empty()).peekable();
+        if written.peek().is_some() {
+            self.annotations.decls.entry(decl).or_default().extend(written);
+        }
     }
 
     /// Keeps the lists a member was written with.
