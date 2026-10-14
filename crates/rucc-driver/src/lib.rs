@@ -2687,18 +2687,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fconserve-stack" => opts.conserve_stack = true,
             "-fno-conserve-stack" => opts.conserve_stack = false,
             // The speculation hardening the kernel builds with when its mitigations are
-            // configured, x86-64 only as in gcc. Each is last one wins. See `rucc_codegen::thunks`,
+            // configured, on either x86 as in gcc. Each is last one wins. See `rucc_codegen::thunks`,
             // tamnd/rucc#2280 and tamnd/rucc#2326.
-            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mindirect-branch=") => {
+            _ if x86 && arg.starts_with("-mindirect-branch=") => {
                 opts.speculation.indirect = thunked(arg, "-mindirect-branch=")?;
             }
-            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mfunction-return=") => {
+            _ if x86 && arg.starts_with("-mfunction-return=") => {
                 opts.speculation.returns = thunked(arg, "-mfunction-return=")?;
             }
-            "-mindirect-branch-cs-prefix" if arch == rucc_target::Arch::X86_64 => {
+            "-mindirect-branch-cs-prefix" if x86 => {
                 opts.speculation.padded = true;
             }
-            "-mno-indirect-branch-cs-prefix" if arch == rucc_target::Arch::X86_64 => {
+            "-mno-indirect-branch-cs-prefix" if x86 => {
                 opts.speculation.padded = false;
             }
             // Which functions sign their return address and whether indirect branches land on
@@ -2719,7 +2719,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // somewhere an indirect branch may land. x86 only, as in gcc.
             "-mmanual-endbr" if x86 => opts.manual_endbr = true,
             "-mno-manual-endbr" if x86 => opts.manual_endbr = false,
-            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mharden-sls=") => {
+            _ if x86 && arg.starts_with("-mharden-sls=") => {
                 let (after_return, after_jump) = match &arg["-mharden-sls=".len()..] {
                     "none" => (false, false),
                     "return" => (true, false),
@@ -10239,6 +10239,18 @@ mod tests {
         );
         let bad = refused(&[KERNEL_X86, "-mindirect-branch=extern", "-c", "a.c"]);
         assert!(bad.contains("keep, thunk, thunk-inline or thunk-extern"), "{bad}");
+        // The same on i386, where the 32 bit kernel's `CC_HAS_RETPOLINE` asks for the first two.
+        let i386 = [
+            "--target=i686-unknown-linux-gnu",
+            "-mindirect-branch=thunk-extern",
+            "-mindirect-branch-register",
+            "-mindirect-branch-cs-prefix",
+            "-mfunction-return=thunk-extern",
+            "-mharden-sls=all",
+            "-c",
+            "a.c",
+        ];
+        assert_eq!(compile(&i386).0.speculation, all);
         // A jump table is a question every target answers.
         assert!(!compile(&[KERNEL_ARM64, "-fno-jump-tables", "-c", "a.c"]).0.jump_tables);
     }

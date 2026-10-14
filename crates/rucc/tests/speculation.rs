@@ -1,4 +1,4 @@
-//! What the x86-64 speculation hardening flags do to the code, end to end.
+//! What the x86 speculation hardening flags do to the code, end to end.
 //!
 //! Design: `spec/04-driver-and-cli.md` section 4.12. tamnd/rucc#2280.
 //!
@@ -58,9 +58,14 @@ void pick(int x) {
 
 /// The assembly the compiler writes for this C under these flags, at `-O2`.
 fn asm(flags: &[&str], source: &str) -> String {
+    asm_for(TARGET, flags, source)
+}
+
+/// The same for another target.
+fn asm_for(target: &str, flags: &[&str], source: &str) -> String {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .env("LC_ALL", "C")
-        .args([TARGET, "-O2", "-S", "-o", "-"])
+        .args([target, "-O2", "-S", "-o", "-"])
         .args(flags)
         .args(["-x", "c", "-"])
         .stdin(Stdio::piped())
@@ -103,6 +108,28 @@ fn an_indirect_call_goes_to_the_thunk_for_its_register() {
     assert!(!lines.contains(&"cs"), "{text}");
     // Nothing is said about where the call sites are: objtool writes .retpoline_sites itself.
     assert!(!text.contains("retpoline_sites"), "{text}");
+}
+
+/// The 32 bit kernel passes the same three flags, and its `retpoline.S` defines a thunk for each
+/// 32 bit register. No register needs a REX byte there, so nothing is padded.
+#[test]
+fn an_indirect_call_on_i386_goes_to_the_thunk_for_its_register() {
+    let flags = [
+        "-mregparm=3",
+        "-mindirect-branch=thunk-extern",
+        "-mindirect-branch-register",
+        "-mindirect-branch-cs-prefix",
+    ];
+    let text = asm_for("--target=i686-unknown-linux-gnu", &flags, CALLS);
+    let lines = insts(&text);
+    for reg in ["ebx", "esi", "edi"] {
+        let call = format!("call\t__x86_indirect_thunk_{reg}");
+        assert_eq!(lines.iter().filter(|line| **line == call).count(), 2, "{text}");
+    }
+    assert!(!lines.iter().any(|line| line.contains('*')), "{text}");
+    assert!(!lines.contains(&"cs"), "{text}");
+    let text = asm_for("--target=i686-unknown-linux-gnu", &flags, TAIL);
+    assert!(insts(&text).contains(&"jmp\t__x86_indirect_thunk_ecx"), "{text}");
 }
 
 #[test]
