@@ -56,7 +56,7 @@
 //! stored on one thread and loaded on another finds nothing, since each thread has its own table.
 //! And a copy that is too long to walk word by word clears what it covers rather than moving it.
 //!
-//! The one way it could say too much is a word a copy wrote, which is why [`moved`] is called for
+//! The one way it could say too much is a word a copy wrote, which is why `moved` is called for
 //! every copy into storage with no aux. Without it a structure copied over a word that still had an
 //! entry would leave the entry in place, and the same pointer value copied in would be believed
 //! with whatever the entry said about it.
