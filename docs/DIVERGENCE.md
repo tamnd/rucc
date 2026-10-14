@@ -46,6 +46,18 @@ The build system fixtures in `probes/linux/buildsys/` of tamnd/rucc-compat confi
 | CMake | `CMAKE_C_IMPLICIT_LINK_LIBRARIES` has `librucc_builtins.a` and no `libatomic`. | The rucc runtime library gives the `__atomic_*` routines and the other compiler routines. rucc still links `libgcc` and `libgcc_s` for the unwinder. |
 | CMake, meson | `-fopenmp` and `-fsanitize=address` are refused. | rucc has no OpenMP runtime. For the sanitizers, the message names `-fsafety=detect`. A refused flag is better than a flag that does nothing. |
 
+## _BitInt width on Linux
+
+**`BITINT_MAXWIDTH` is 128 in rucc. In GCC 16 on x86-64 and AArch64 it is 65535.** rucc refuses `_BitInt(N)` when N is more than 128, and it gives an error at the declaration. It does not truncate the width. C23 requires only the width of `unsigned long long`, so 128 is conforming.
+
+The limit stays at 128 until a real program needs more. These are the reasons:
+
+- The constant folder holds 128 bits. A wider `_BitInt` needs a wider constant type in `rucc-sema`, and the folder must use it for each operation.
+- A wider value is an array of limbs. Multiply, divide and remainder call the libgcc routines `__mulbitint3` and `__divmodbitint4`. A conversion to or from a float calls the `__floatbitint*` and `__fix*bitint` routines. The rucc runtime library has none of these yet.
+- The psABI passes and returns a `_BitInt` wider than 128 bits in memory. This is the work of #425.
+
+The programs we compile on Linux do not use a width over 128. Tests that do, such as `tst-stdbit-builtins.c` in glibc, check `BITINT_MAXWIDTH` first and skip the wide cases. `__BITINT_MAXWIDTH__` and `BITINT_MAXWIDTH` in `<limits.h>` give 128, so these tests take the narrow path. #2490 tracks the wider widths.
+
 ## The architectures the reference corpora run on
 
 `aarch64-linux-musl`, `riscv64-linux-musl`, `armv7-linux-musleabihf` and `x86_64-linux-musl` run the layout, executing and signature corpora under qemu, built by the reference on both sides, and `x86_64-linux-gnu` runs them on the runner's own hardware. The first run of the signature corpus over that set was five rows passing, none failing and no crash retried, with the ninety two functions including the thirty four variadic ones. So the corpus is a program that runs on four architectures rather than one, which is a fact worth having about the corpus before it is used to say anything about the compiler.
