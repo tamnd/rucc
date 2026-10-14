@@ -5,6 +5,7 @@
 //! and the byte a comparison writes for its branch is not one of those.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SOURCE: &str = "\
 unsigned mix(const unsigned *p, unsigned n) {
@@ -19,9 +20,15 @@ unsigned count(const unsigned char *p, const unsigned char *e, unsigned char k) 
 }
 ";
 
+/// The two tests run at the same time in one process, so each call gets a directory of its own.
+/// With only the process and the level in the name, one test removed the directory while the
+/// other still compiled in it.
+static CALLS: AtomicUsize = AtomicUsize::new(0);
+
 fn listing(level: &str) -> String {
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir()
-        .join(format!("rucc-i386-handed-scratch-{}-{level}", std::process::id()));
+        .join(format!("rucc-i386-handed-scratch-{}-{call}{level}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, SOURCE).expect("the fixture can be written");
