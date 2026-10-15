@@ -152,7 +152,7 @@ pub static FEATURES: &[Row] = &[
     yes("bmi2", &[]),
     named("tbm", &[]),
     yes("movbe", &[]),
-    named("cx16", &[]),
+    yes("cx16", &[]),
     yes("sahf", &[]),
     named("rdrnd", &[]),
     named("rdseed", &[]),
@@ -249,8 +249,10 @@ impl Feature {
     /// instructions of `shstk`, the AES steps of `aes`, the carryless multiplication of `pclmul`,
     /// AVX, AVX2, the zero counts of `lzcnt` and `bmi`, the bit manipulation of `bmi` and `bmi2`,
     /// the swapping move of `movbe`, the fused multiply and add of `fma`, the half precision
-    /// conversions of `f16c`, the flag moves of `sahf`, and the three the baseline already has. For
-    /// those the headers have the intrinsics that gcc has and the assembler has the instructions.
+    /// conversions of `f16c`, the flag moves of `sahf`, the sixteen byte compare and exchange of
+    /// `cx16`, and the three the baseline already has. For those the headers have the intrinsics
+    /// that gcc has and the assembler has the instructions, and for `cx16` the `__sync_` names use
+    /// the instruction as gcc's do.
     /// For every other name gcc knows, a program can say it and have it remembered, which is what
     /// an attribute on a function built for a processor chosen at run time needs, but the command
     /// line may not turn it on for a whole unit and no macro claims it.
@@ -264,12 +266,15 @@ impl Feature {
     }
 
     /// The macro gcc defines while this extension is on: the name in capitals with the dots and
-    /// dashes turned into underscores, so `sse4.2` is `__SSE4_2__`. `sahf` is the one exception.
-    /// gcc names its macro after both instructions, so it is `__LAHF_SAHF__`.
+    /// dashes turned into underscores, so `sse4.2` is `__SSE4_2__`. There are two exceptions. gcc
+    /// names the macro for `sahf` after both instructions, so it is `__LAHF_SAHF__`. The one for
+    /// `cx16` says what a program can do with it, so it is `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16`.
     #[must_use]
     pub fn macro_name(self) -> String {
-        if self.name() == "sahf" {
-            return "__LAHF_SAHF__".to_owned();
+        match self.name() {
+            "sahf" => return "__LAHF_SAHF__".to_owned(),
+            "cx16" => return "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16".to_owned(),
+            _ => {}
         }
         let spelled: String = self
             .name()
@@ -952,7 +957,18 @@ mod tests {
         assert!(sahf.honoured());
         assert_eq!(sahf.macro_name(), "__LAHF_SAHF__");
         assert_eq!(macros(&["sahf"]), said(&["FXSR", "MMX", "SSE", "SSE2", "LAHF_SAHF"]));
-        assert!(!Feature::named("cx16").unwrap().honoured());
+    }
+
+    #[test]
+    fn cx16_is_honoured_under_the_name_gcc_gives_its_macro() {
+        let cx16 = Feature::named("cx16").unwrap();
+        assert!(cx16.honoured());
+        assert_eq!(cx16.macro_name(), "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16");
+        let got = macros(&["cx16"]);
+        let mut want = said(&["FXSR", "MMX", "SSE", "SSE2"]);
+        want.push("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16".to_owned());
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[test]
@@ -976,7 +992,10 @@ mod tests {
         told.read("no-sse3").unwrap();
         let mut got: Vec<String> = told.over(v2).macros().collect();
         got.sort();
-        assert_eq!(got, said(&["FXSR", "MMX", "SSE", "SSE2", "POPCNT", "LAHF_SAHF"]));
+        let mut want = said(&["FXSR", "MMX", "SSE", "SSE2", "POPCNT", "LAHF_SAHF"]);
+        want.push("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16".to_owned());
+        want.sort();
+        assert_eq!(got, want);
         let mut told = Choices::new();
         told.read("no-sse4.2").unwrap();
         let got: Vec<String> = told.over(v2).macros().collect();
@@ -993,7 +1012,9 @@ mod tests {
             "FXSR", "MMX", "SSE", "SSE2", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "POPCNT", "CRC32",
             "XSAVE", "AVX", "AVX2", "BMI", "BMI2", "LZCNT", "MOVBE", "FMA", "F16C",
         ];
-        let want = said(&[&v3[..], &["LAHF_SAHF"]].concat());
+        let mut want = said(&[&v3[..], &["LAHF_SAHF"]].concat());
+        want.push("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16".to_owned());
+        want.sort();
         assert_eq!(got, want);
         let v3 = Isa::level("x86-64-v3").unwrap();
         assert!(v3.has(Feature::named("avx2").unwrap()));

@@ -440,6 +440,10 @@ pub enum ExprKind {
         op: AtomicOp,
         /// How strongly it is ordered, after the source's number has been read and checked.
         order: Ordering,
+        /// Whether the name is one of the older `__sync_` family. gcc writes a sixteen byte one of
+        /// those inline on x86-64 when the function has `cx16`, and calls libatomic for a C11 one
+        /// whatever the function has, so the two ask for different code at that width.
+        older: bool,
         /// The address for a load, the address and then the value for a store, and nothing at all
         /// for a barrier.
         args: ExprList,

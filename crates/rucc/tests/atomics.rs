@@ -437,6 +437,65 @@ _Bool did(__int128 old, __int128 new) { return __sync_bool_compare_and_swap(&w, 
     assert!(!text.contains("cmpxchg16b"), "{text}");
 }
 
+/// With `cx16` the older family is `lock cmpxchg16b` at sixteen bytes, as gcc's `-mcx16` makes it.
+/// A read modify write and a store are a loop around it, and nothing calls libatomic.
+#[test]
+fn with_cx16_the_older_names_are_the_instruction() {
+    let source = "\
+__int128 w;
+__int128 was(__int128 old, __int128 new) { return __sync_val_compare_and_swap(&w, old, new); }
+_Bool did(__int128 old, __int128 new) { return __sync_bool_compare_and_swap(&w, old, new); }
+__int128 add(__int128 v) { return __sync_fetch_and_add(&w, v); }
+__int128 nand(__int128 v) { return __sync_nand_and_fetch(&w, v); }
+__int128 take(__int128 v) { return __sync_lock_test_and_set(&w, v); }
+void drop(void) { __sync_lock_release(&w); }
+";
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = compile_with("cx16-sync", source, &["-mcx16", level]);
+        assert!(ok, "{said}");
+        assert_eq!(text.matches("lock; cmpxchg16b").count(), 6, "{level}: {text}");
+        assert!(!text.contains("call"), "{level}: {text}");
+    }
+}
+
+/// The C11 names call libatomic at sixteen bytes even with `cx16`, which is what gcc does too, so
+/// `__atomic_always_lock_free(16, 0)` stays false and the answer agrees with the code.
+#[test]
+fn with_cx16_the_c11_names_still_call() {
+    let source = "\
+__int128 w;
+__int128 swap(__int128 v) { return __atomic_exchange_n(&w, v, __ATOMIC_SEQ_CST); }
+_Bool swing(__int128 *want, __int128 v) {
+  return __atomic_compare_exchange_n(&w, want, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+";
+    let (ok, text, said) = compile_with("cx16-c11", source, &["-mcx16"]);
+    assert!(ok, "{said}");
+    assert!(text.contains("__atomic_exchange"), "{text}");
+    assert!(text.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!text.contains("cmpxchg16b"), "{text}");
+}
+
+/// The attribute is enough on its own, and only for the function that carries it.
+#[test]
+fn a_function_built_for_cx16_uses_the_instruction_and_its_neighbour_does_not() {
+    let text = asm(
+        "cx16-attr",
+        "\
+__int128 w;
+__attribute__((target(\"cx16\"))) _Bool fast(__int128 old, __int128 new) {
+  return __sync_bool_compare_and_swap(&w, old, new);
+}
+_Bool slow(__int128 old, __int128 new) { return __sync_bool_compare_and_swap(&w, old, new); }
+",
+    );
+    let (fast, slow) = text.split_once("slow:").expect("both functions are written");
+    assert!(fast.contains("lock; cmpxchg16b"), "{text}");
+    assert!(!fast.contains("call"), "{text}");
+    assert!(slow.contains("__atomic_compare_exchange"), "{text}");
+    assert!(!slow.contains("cmpxchg16b"), "{text}");
+}
+
 /// A bit-field cannot carry the qualifier, because 6.7.2.1p5 says what a bit-field's type may be
 /// and an atomic type is not one of them. gcc refuses the same declaration.
 #[test]

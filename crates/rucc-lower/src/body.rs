@@ -2230,6 +2230,24 @@ impl<'u> Body<'_, 'u> {
         matches!(repr::size_of(self.types(), self.target(), ty), 1 | 2 | 4 | 8)
     }
 
+    /// Whether a `__sync_` name over an object of that type is `lock cmpxchg16b` rather than a
+    /// call, which is true of a sixteen byte integer on x86-64 in a function built with `cx16`.
+    ///
+    /// gcc asks the same three things, and asks them of the `__sync_` names only. A C11 name at
+    /// sixteen bytes calls libatomic whatever the function is built for, and so does this, so that
+    /// `__atomic_always_lock_free` stays false and the two agree on which calls the library sees.
+    /// What the instruction becomes is `rucc_codegen::locked`'s business.
+    fn in_a_pair(&mut self, ty: TypeId) -> bool {
+        if self.target().tuple.arch() != Arch::X86_64 {
+            return false;
+        }
+        if repr::value_type(self.types(), self.target(), ty) != Some(Type::int(128)) {
+            return false;
+        }
+        let isa = self.func.target.unwrap_or(self.unit.isa);
+        rucc_target::Feature::named("cx16").is_some_and(|cx16| isa.has(cx16))
+    }
+
     /// Whether an object of that type is something a register holds, which a structure, a union, a
     /// complex object and a vector are not.
     fn has_value(&mut self, ty: TypeId) -> bool {
@@ -7198,7 +7216,9 @@ impl<'u> Body<'_, 'u> {
             }
             // An access with an ordering on it, or the ordering by itself. A load answers with what
             // it read and the other two answer with nothing, which is what their type in C says.
-            ExprKind::Atomic { op, order, args } => self.atomic(op, order, args, ty, span),
+            ExprKind::Atomic { op, order, older, args } => {
+                self.atomic(op, (order, older), args, ty, span)
+            }
             // A promise and not a computation, so it is written where it was written and read by
             // whoever comes to read promises. The block goes on here, since this can be the middle
             // of an expression and a block cannot end there, and `rucc_opt::simplify_cfg` is what
@@ -8913,10 +8933,13 @@ impl<'u> Body<'_, 'u> {
     /// expression answers is the whole difference between three of the four names that reach here.
     /// The fourth difference, which is the C11 pair writing what they found back through the pointer
     /// they were handed, is the branch [`Body::exchanged`] writes.
+    ///
+    /// `older` says whether the name was one of the `__sync_` family, which is the one family
+    /// [`Self::in_a_pair`] reaches.
     fn atomic(
         &mut self,
         op: AtomicOp,
-        order: Ordering,
+        (order, older): (Ordering, bool),
         args: ExprList,
         ty: TypeId,
         span: Span,
@@ -8960,7 +8983,7 @@ impl<'u> Body<'_, 'u> {
                     return None;
                 }
                 let value = self.value(written);
-                if !self.in_one_instruction(stored) {
+                if !self.in_one_instruction(stored) && !(older && self.in_a_pair(stored)) {
                     self.library_store(addr, value, stored, order, span);
                     return None;
                 }
@@ -8995,12 +9018,12 @@ impl<'u> Body<'_, 'u> {
                 None
             }
             AtomicOp::CompareExchange | AtomicOp::SwapBool | AtomicOp::SwapValue => {
-                let answer = self.exchanged(op, order, args, addr, span);
+                let answer = self.exchanged(op, (order, older), args, addr, span);
                 self.fully(full, span);
                 answer
             }
             AtomicOp::Exchange | AtomicOp::Fetch(_) | AtomicOp::Update(_) => {
-                let answer = self.modified(op, order, args, addr, span);
+                let answer = self.modified(op, (order, older), args, addr, span);
                 self.fully(full, span);
                 answer
             }
@@ -9020,7 +9043,7 @@ impl<'u> Body<'_, 'u> {
                     self.ordered_exchange(addr, (from, out), held, order, span);
                     return None;
                 }
-                let old = self.modified(AtomicOp::Exchange, order, args, addr, span)?;
+                let old = self.modified(AtomicOp::Exchange, (order, false), args, addr, span)?;
                 let place = self.tast()[args][2];
                 let object = self.pointee(self.tast()[place].ty);
                 let plain = self.access(object);
@@ -9038,7 +9061,7 @@ impl<'u> Body<'_, 'u> {
             // the raw byte, and the two agree wherever the flag is only ever touched through this
             // pair, which is the only way C says the object may be touched at all.
             AtomicOp::TestAndSet => {
-                let old = self.modified(AtomicOp::Exchange, order, args, addr, span)?;
+                let old = self.modified(AtomicOp::Exchange, (order, false), args, addr, span)?;
                 let byte = self.func[old].ty;
                 let none = self.build(span).iconst(byte, 0);
                 Some(self.build(span).icmp(IntPred::Ne, old, none))
@@ -9099,10 +9122,12 @@ impl<'u> Body<'_, 'u> {
     /// this does. The front end has already converted the operand to the object's type, which for a
     /// pointer object means it arrives as a pointer, and the conversion to an address here is the
     /// same rename it always is on this machine.
+    ///
+    /// `older` is the flag [`Self::atomic`] was handed.
     fn modified(
         &mut self,
         op: AtomicOp,
-        order: MemOrder,
+        (order, older): (MemOrder, bool),
         args: ExprList,
         addr: Value,
         span: Span,
@@ -9120,7 +9145,7 @@ impl<'u> Body<'_, 'u> {
         let address = self.address;
         let pointer = self.value_type(object, span).is_ptr();
         let operand = self.value(written);
-        if !self.in_one_instruction(object) {
+        if !self.in_one_instruction(object) && !(older && self.in_a_pair(object)) {
             // A pointer object cannot get here, since no target in the matrix has a pointer wider
             // than a doubleword, so the operand goes to the library as the value it already is.
             return self.library_modify(op, addr, object, operand, order, span);
@@ -9214,7 +9239,7 @@ impl<'u> Body<'_, 'u> {
     fn exchanged(
         &mut self,
         op: AtomicOp,
-        order: MemOrder,
+        (order, older): (MemOrder, bool),
         args: ExprList,
         addr: Value,
         span: Span,
@@ -9243,7 +9268,7 @@ impl<'u> Body<'_, 'u> {
         let flags = self.flags(stored);
 
         let place = self.value(wanted);
-        if !self.in_one_instruction(stored) {
+        if !self.in_one_instruction(stored) && !(older && self.in_a_pair(stored)) {
             let desired = self.value(put);
             return self.library_exchanged(op, addr, stored, (place, desired), order, span);
         }

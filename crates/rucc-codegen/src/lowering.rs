@@ -65,7 +65,7 @@ use rucc_target::{CallRegs, CountInst};
 
 use crate::switch::{Force, Lowered};
 use crate::{
-    decimal, divide, eight, expand, forks, half, maths, quad, retry, switch, varargs, wide, widths,
+    decimal, divide, expand, forks, half, locked, maths, quad, retry, switch, varargs, wide, widths,
 };
 
 /// One member of the group.
@@ -340,7 +340,7 @@ impl Step {
             Self::Retries => retry::loops(func, conv.word),
             Self::Orderings => {
                 expand::orderings(func, conv.word, conv.total_store_order);
-                eight::pairs(func, names, conv.word);
+                locked::ordered(func, names, conv);
             }
             Self::Overflows => expand::overflows(func),
             Self::Decimals => decimal::calls(func, names, conv.abi),

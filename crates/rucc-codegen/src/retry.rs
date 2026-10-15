@@ -78,8 +78,9 @@ use rucc_ir::{
 ///
 /// `word` is how many bytes a register holds. A value wider than that has no instruction for any
 /// operation, so on i386 an exchange or an add of a `long long` is a loop as well, and so is a
-/// store of one, which is an exchange whose answer nobody reads. What the loop's compare and
-/// exchange becomes there is `crate::eight`'s business.
+/// store of one, which is an exchange whose answer nobody reads. The same goes for an `__int128`
+/// on x86-64 in a function built with `cx16`. What the loop's compare and exchange becomes there
+/// is `crate::locked`'s business.
 ///
 /// The function is changed in place. It gains two blocks and loses one instruction for each one
 /// rewritten, and every function without one of these is untouched.
@@ -102,10 +103,10 @@ pub fn loops(func: &mut Func, word: u32) {
     }
 }
 
-/// Whether the value is an integer wider than a register, up to the sixty four bits a compare and
-/// exchange of two registers covers.
+/// Whether the value is an integer wider than a register, up to the two registers a compare and
+/// exchange covers.
 fn wide(ty: Type, word: u32) -> bool {
-    ty.is_int() && ty.lanes() == 1 && ty.bits() > word * 8 && ty.bits() <= 64
+    ty.is_int() && ty.lanes() == 1 && ty.bits() > word * 8 && ty.bits() <= word * 16
 }
 
 /// Whether this is an ordered store of an integer wider than a register.
@@ -146,7 +147,7 @@ fn wanted(func: &Func, inst: Inst, word: u32) -> bool {
     if matches!(op, RmwOp::Xchg | RmwOp::Add | RmwOp::Sub) && !wide(ty, word) {
         return false;
     }
-    ty.is_int() && matches!(ty.bits(), 8 | 16 | 32 | 64)
+    ty.is_int() && (matches!(ty.bits(), 8 | 16 | 32 | 64) || wide(ty, word))
 }
 
 /// One read modify write, as the three blocks the loop is.
