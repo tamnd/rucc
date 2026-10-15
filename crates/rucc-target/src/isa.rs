@@ -19,7 +19,7 @@
 //! a name gcc knows is not one this compiler may refuse. Knowing a name is not the same as
 //! providing what it stands for, and [`Feature::honoured`] is the line between the two: only the
 //! honoured ones can be turned on from the command line and only they get a macro, since a macro is
-//! a promise that the intrinsics behind it exist and for FMA they do not yet.
+//! a promise that the intrinsics behind it exist and for SHA they do not yet.
 //!
 //! Turning one extension on turns on the ones it is built over, so `sse4.2` brings `sse4.1` and
 //! everything under it. Turning one off turns off everything built over it, so `-mno-sse3` takes
@@ -111,8 +111,8 @@ pub static FEATURES: &[Row] = &[
     named("xsaves", &["xsave"]),
     yes("avx", &["sse4.2", "xsave"]),
     yes("avx2", &["avx"]),
-    named("fma", &["avx"]),
-    named("f16c", &["avx"]),
+    yes("fma", &["avx"]),
+    yes("f16c", &["avx"]),
     named("fma4", &["sse4a", "avx"]),
     named("xop", &["fma4"]),
     named("avx512f", &["avx2", "fma", "f16c"]),
@@ -248,15 +248,16 @@ impl Feature {
     /// The SSE line up to 4.2, the population count, the CRC-32C step, `xsave`, the shadow stack
     /// instructions of `shstk`, the AES steps of `aes`, the carryless multiplication of `pclmul`,
     /// AVX, AVX2, the zero counts of `lzcnt` and `bmi`, the bit manipulation of `bmi` and `bmi2`,
-    /// the swapping move of `movbe`, and the three the baseline already has. For those the headers have the intrinsics
-    /// and the assembler has the instructions. For every other name gcc knows, a program can say it
-    /// and have it remembered, which is what an attribute on a function built for a processor
-    /// chosen at run time needs, but the command line may not turn it on for a whole unit and no
-    /// macro claims it.
+    /// the swapping move of `movbe`, the fused multiply and add of `fma`, the half precision
+    /// conversions of `f16c`, and the three the baseline already has. For those the headers have
+    /// the intrinsics and the assembler has the instructions. For every other name gcc knows, a
+    /// program can say it and have it remembered, which is what an attribute on a function built
+    /// for a processor chosen at run time needs, but the command line may not turn it on for a
+    /// whole unit and no macro claims it.
     ///
     /// The AVX-512 names and `vpclmulqdq` have the few intrinsics PostgreSQL calls, from functions
-    /// that carry the attribute. They are still not honoured. The AVX-512 names are built over FMA
-    /// and F16C, which have no intrinsics here yet, and `__AVX512F__` would promise hundreds more.
+    /// that carry the attribute. They are still not honoured, because `__AVX512F__` would promise
+    /// hundreds more.
     /// `vpclmulqdq` has only its 64 byte form here, and gcc has a 32 byte form too.
     #[must_use]
     pub fn honoured(self) -> bool {
@@ -932,6 +933,17 @@ mod tests {
     }
 
     #[test]
+    fn fma_and_f16c_are_honoured_and_bring_the_avx_line() {
+        let avx =
+            ["AVX", "FXSR", "MMX", "SSE", "SSE2", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "XSAVE"];
+        let avx = [&avx[..], &["POPCNT", "CRC32"]].concat();
+        for (name, spelled) in [("fma", "FMA"), ("f16c", "F16C")] {
+            assert_eq!(macros(&[name]), said(&[&avx[..], &[spelled]].concat()), "{name}");
+        }
+        assert!(!Feature::named("fma4").unwrap().honoured());
+    }
+
+    #[test]
     fn the_count_and_the_checksum_follow_sse4_2_unless_they_were_mentioned() {
         let mut base = said(&["FXSR", "MMX", "SSE", "SSE2", "POPCNT"]);
         base.sort();
@@ -967,7 +979,7 @@ mod tests {
         got.sort();
         let want = said(&[
             "FXSR", "MMX", "SSE", "SSE2", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "POPCNT", "CRC32",
-            "XSAVE", "AVX", "AVX2", "BMI", "BMI2", "LZCNT", "MOVBE",
+            "XSAVE", "AVX", "AVX2", "BMI", "BMI2", "LZCNT", "MOVBE", "FMA", "F16C",
         ]);
         assert_eq!(got, want);
         let v3 = Isa::level("x86-64-v3").unwrap();

@@ -9112,8 +9112,8 @@ mod tests {
     #[test]
     fn an_extension_this_compiler_cannot_provide_for_a_whole_unit_is_refused() {
         let x86 = ["--target=x86_64-unknown-linux-gnu", "-c", "a.c"];
-        let said = refused(&[&x86[..], &["-mfma"]].concat());
-        assert!(said.contains("no intrinsics for fma"), "{said}");
+        let said = refused(&[&x86[..], &["-msha"]].concat());
+        assert!(said.contains("no intrinsics for sha"), "{said}");
         // Turning the baseline off is what a kernel asks for, and it takes the vector registers
         // away with it.
         let (opts, _) = compile(&[&x86[..], &["-mno-sse2"]].concat());

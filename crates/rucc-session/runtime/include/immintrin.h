@@ -39,6 +39,8 @@
  * `<wmmintrin.h>` is too, and holds the AES steps and the carryless multiplication.
  * `<avxintrin.h>` is too, and holds the AVX names on 32 byte vectors.
  * `<avx2intrin.h>` is too, and holds the AVX2 integer names, the gathers and the reductions.
+ * `<fmaintrin.h>` is too, and holds the fused multiply and add.
+ * `<f16cintrin.h>` is too, and holds the half precision conversions.
  *
  * So are the AVX-512 headers, which hold what PostgreSQL's AVX-512 CRC32C and population count
  * call and nothing more yet. See `tamnd/rucc#1988`.
@@ -69,6 +71,8 @@
 #include <wmmintrin.h>
 #include <avxintrin.h>
 #include <avx2intrin.h>
+#include <fmaintrin.h>
+#include <f16cintrin.h>
 
 /* Unguarded for the same reason. Each function is built for its own extension, and a macro among
  * them writes instructions only where it is used, which is inside a function built for it. */
