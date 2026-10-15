@@ -315,7 +315,7 @@ pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
     optimization(&mut d, opts);
     platform(&mut d, target, opts);
     hardening(&mut d, target, opts);
-    sizes(&mut d, target);
+    sizes(&mut d, target, opts.isa);
     integers(&mut d, target);
     floats(&mut d, target, opts);
     atomics(&mut d, target);
@@ -1074,7 +1074,7 @@ fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
 }
 
 /// `__CHAR_BIT__`, the `__SIZEOF_*__` family and the alignment macros.
-fn sizes(d: &mut Defs, target: &TargetInfo) {
+fn sizes(d: &mut Defs, target: &TargetInfo, isa: Isa) {
     let pointer = target.pointer_width / 8;
     // The two hardware interference sizes, which say how far apart two objects have to be for
     // a write to one not to invalidate the other's cache line, and how close together two have
@@ -1130,8 +1130,18 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     // `long double` is sixteen bytes and eight on Apple arm64, where it is a `double`. What
     // `aligned` with no argument gives is a separate number and is sixteen on every target,
     // clang for Apple included.
-    let biggest = match (target.tuple.arch(), target.tuple.os()) {
-        (tuple::Arch::Aarch64, tuple::Os::MacOs | tuple::Os::IOs) => "8",
+    //
+    // gcc for x86-64 counts the vector registers too, so the number is 32 under `-mavx` and 64
+    // under `-mavx512f`, and `aligned` with no argument still gives 16. clang keeps 16 whatever
+    // the flags say, so Apple and the MSVC targets keep 16 here as well.
+    let has = |name| Feature::named(name).is_some_and(|it| isa.has(it));
+    let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
+    let msvc = target.tuple.env() == tuple::Env::Msvc;
+    let wide = target.tuple.arch() == tuple::Arch::X86_64 && !apple && !msvc;
+    let biggest = match target.tuple.arch() {
+        tuple::Arch::Aarch64 if apple => "8",
+        _ if wide && has("avx512f") => "64",
+        _ if wide && has("avx") => "32",
         _ => "16",
     };
     d.set("__BIGGEST_ALIGNMENT__", biggest);
@@ -1985,6 +1995,32 @@ mod tests {
         assert!(has(&intel, "#define __INT64_TYPE__ long long int"));
         assert!(has(&intel, "#define __BIGGEST_ALIGNMENT__ 16"));
         assert!(!intel.contains("#define __unix__ "));
+    }
+
+    #[test]
+    fn the_biggest_alignment_follows_avx_where_gcc_says_so() {
+        // gcc 16.2.0 says 32 under `-mavx` and `-mfma` and 16 under `-mfma -mno-avx`. clang says
+        // 16 under every flag, so Apple and MSVC keep 16.
+        let biggest = |triple: &str, flags: &[&str]| {
+            let triple: Triple = triple.parse().expect("a triple");
+            let mut choices = rucc_target::Choices::new();
+            for flag in flags {
+                choices.read(flag).expect("a name gcc knows");
+            }
+            let opts = Predef { isa: choices.over(Isa::baseline()), ..Predef::new() };
+            let text = built_in(&TargetInfo::new(triple), &opts);
+            let line = text.lines().find(|line| line.starts_with("#define __BIGGEST_ALIGNMENT__ "));
+            line.expect("defined").rsplit(' ').next().expect("a value").to_owned()
+        };
+        let linux = "x86_64-unknown-linux-gnu";
+        assert_eq!(biggest(linux, &[]), "16");
+        assert_eq!(biggest(linux, &["avx"]), "32");
+        assert_eq!(biggest(linux, &["avx2"]), "32");
+        assert_eq!(biggest(linux, &["fma"]), "32");
+        assert_eq!(biggest(linux, &["fma", "no-avx"]), "16");
+        assert_eq!(biggest("x86_64-pc-windows-gnu", &["avx"]), "32");
+        assert_eq!(biggest("x86_64-pc-windows-msvc", &["avx"]), "16");
+        assert_eq!(biggest("x86_64-apple-darwin", &["avx"]), "16");
     }
 
     #[test]

@@ -77,6 +77,10 @@ pub(in crate::check) struct Packing {
 /// than taken from [`rucc_target::TargetInfo`] because the target table has no field for it and
 /// inventing one to hold a number that is the same everywhere would be describing a difference
 /// that does not exist.
+///
+/// The `__BIGGEST_ALIGNMENT__` macro is a different number on x86-64. gcc 16.2.0 makes it 32
+/// under `-mavx` and 64 under `-mavx512f`, and still gives 16 for `aligned` with no argument, so
+/// this stays 16 whatever the unit is built for.
 pub(in crate::check) const BIGGEST_ALIGNMENT: u32 = 16;
 
 /// What `alias` says of an argument that is not a string, which `weakref` shares.

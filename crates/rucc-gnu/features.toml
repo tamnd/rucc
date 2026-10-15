@@ -4643,6 +4643,37 @@ used_by = ["wasm_simd128.h"]
 tests = ["rucc-sema::the_square_roots_are_calls_to_the_library_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 
 [[feature]]
+name = "__builtin_fma"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double, double, double)"
+library = "fma"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+notes = "A call to the library function. gcc writes the vfmadd instruction where the function is built for fma, and rucc does not yet."
+
+[[feature]]
+name = "__builtin_fmaf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float, float, float)"
+library = "fmaf"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_fmal"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double, long double, long double)"
+library = "fmal"
+used_by = ["glibc"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
 name = "__builtin_fmax"
 kind = "builtin"
 gcc_version = "3.0"

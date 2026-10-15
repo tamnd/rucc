@@ -4606,8 +4606,8 @@ decl #0 x : int object external static defined
             "struct A { char c; int i; } __attribute__((packed));\n",
             "_Static_assert(sizeof(struct A) == 5 && _Alignof(struct A) == 1, \"A\");\n",
             "_Static_assert(__builtin_offsetof(struct A, i) == 1, \"A.i\");\n",
-            // `aligned` with nothing in the parentheses is the largest alignment the target
-            // has, which gcc calls BIGGEST_ALIGNMENT and which is sixteen everywhere here.
+            // `aligned` with nothing in the parentheses is sixteen everywhere here. gcc gives
+            // sixteen too, even under `-mavx` where its `__BIGGEST_ALIGNMENT__` says 32.
             "struct B { char c; int i; } __attribute__((aligned));\n",
             "_Static_assert(sizeof(struct B) == 16 && _Alignof(struct B) == 16, \"B\");\n",
             "struct C { char c; int i __attribute__((packed)); };\n",
@@ -12048,6 +12048,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "double h(double x, double y) { return __builtin_fmax(x, y); }\n",
             "float r(float x) { return __builtin_sqrtf(x); }\n",
             "double s(void) { return __builtin_sqrt(4.0); }\n",
+            "double t(double x, double y, double z) { return __builtin_fma(x, y, z); }\n",
+            "float u(float x, float y, float z) { return __builtin_fmaf(x, y, z); }\n",
         ));
         // Marked as the library's own, which is what lets wasm write the instruction in its place.
         // `fmax` is not one of those, so its call carries no mark.
@@ -12058,6 +12060,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // root of a constant is something the compiler works out.
         assert!(text.contains("call.library @sqrtf("), "{text}");
         assert!(text.contains("call.library @sqrt("), "{text}");
+        // A fused multiply add is a call to the library's own too, at every width.
+        assert!(text.contains("call @fma("), "{text}");
+        assert!(text.contains("call @fmaf("), "{text}");
 
         // The two the rounding mode decides are calls even when the argument is a constant, since
         // what they answer is not known until the program runs. gcc refuses a static initializer
