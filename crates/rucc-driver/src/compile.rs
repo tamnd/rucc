@@ -3837,6 +3837,62 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// libsodium's configure passes `-maes -mpclmul` and then includes `<wmmintrin.h>` by name,
+    /// under the two pragmas. Each step is one instruction at `-O0` and at `-O2`. Without the flags
+    /// the call is refused the way gcc refuses it, so the probe says no.
+    #[test]
+    fn the_shipped_wmmintrin_passes_the_libsodium_probe_under_aes_and_pclmul() {
+        let source = concat!(
+            "#pragma GCC target(\"aes\")\n",
+            "#pragma GCC target(\"pclmul\")\n",
+            "#include <wmmintrin.h>\n",
+            "__m128i x, y;\n",
+            "void probe(void) {\n",
+            "  x = _mm_aesimc_si128(_mm_setzero_si128());\n",
+            "  y = _mm_clmulepi64_si128(_mm_setzero_si128(), _mm_setzero_si128(), 0x11);\n",
+            "}\n",
+            "__m128i round(__m128i s, __m128i k) {\n",
+            "  s = _mm_aesenc_si128(s, k);\n",
+            "  s = _mm_aesenclast_si128(s, k);\n",
+            "  s = _mm_aesdec_si128(s, k);\n",
+            "  s = _mm_aesdeclast_si128(s, k);\n",
+            "  return _mm_aeskeygenassist_si128(s, 0x1b);\n",
+            "}\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = freestanding();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let mut choices = rucc_target::Choices::new();
+            choices.read("aes").expect("gcc knows aes");
+            choices.read("pclmul").expect("gcc knows pclmul");
+            opts.isa = choices.over(opts.isa);
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            for step in [
+                "aesimc",
+                "pclmulqdq $17",
+                "aesenc ",
+                "aesenclast",
+                "aesdec ",
+                "aesdeclast",
+                "aeskeygenassist $27",
+            ] {
+                assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
+            }
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
+        }
+        let result = run(
+            &freestanding(),
+            "#include <wmmintrin.h>\n__m128i f(__m128i x) { return _mm_aesimc_si128(x); }\n",
+        );
+        let said = result.messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_mm_aesimc_si128': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
     /// A function carrying the attribute is built for the instruction whatever the unit is, which
     /// is how PostgreSQL writes its checksum: no flag, the attribute on the one function, and the
     /// step inlined into it as one instruction. PostgreSQL's probe writes the attribute only when

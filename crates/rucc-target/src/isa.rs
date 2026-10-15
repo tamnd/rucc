@@ -137,8 +137,8 @@ pub static FEATURES: &[Row] = &[
     named("avxneconvert", &["avx2"]),
     named("avxvnniint8", &["avx2"]),
     named("avxvnniint16", &["avx2"]),
-    named("aes", &["sse2"]),
-    named("pclmul", &["sse2"]),
+    yes("aes", &["sse2"]),
+    yes("pclmul", &["sse2"]),
     named("sha", &["sse2"]),
     named("gfni", &["sse2"]),
     named("vaes", &["avx", "aes"]),
@@ -246,10 +246,12 @@ impl Feature {
     /// Whether this compiler provides what the name stands for.
     ///
     /// The SSE line up to 4.2, the population count, the CRC-32C step, `xsave`, the shadow stack
-    /// instructions of `shstk`, and the three the baseline already has. For those the headers have
-    /// the intrinsics and the assembler has the instructions. For every other name gcc knows, a program can say it and have it remembered,
-    /// which is what an attribute on a function built for a processor chosen at run time needs, but
-    /// the command line may not turn it on for a whole unit and no macro claims it.
+    /// instructions of `shstk`, the AES steps of `aes`, the carryless multiplication of `pclmul`,
+    /// and the three the baseline already has. For those the headers have the intrinsics and the
+    /// assembler has the instructions. For every other name gcc knows, a program can say it and
+    /// have it remembered, which is what an attribute on a function built for a processor chosen at
+    /// run time needs, but the command line may not turn it on for a whole unit and no macro claims
+    /// it.
     ///
     /// The AVX-512 names and `vpclmulqdq` have the few intrinsics PostgreSQL calls, from functions
     /// that carry the attribute. They are still not honoured, because each is built over AVX and
@@ -906,6 +908,14 @@ mod tests {
     fn shstk_is_honoured_and_brings_nothing_with_it() {
         assert_eq!(macros(&["shstk"]), said(&["FXSR", "MMX", "SSE", "SSE2", "SHSTK"]));
         assert!(Feature::named("shstk").unwrap().honoured());
+    }
+
+    #[test]
+    fn aes_and_pclmul_are_honoured_and_bring_only_sse2() {
+        assert_eq!(macros(&["aes"]), said(&["AES", "FXSR", "MMX", "SSE", "SSE2"]));
+        assert_eq!(macros(&["pclmul"]), said(&["FXSR", "MMX", "PCLMUL", "SSE", "SSE2"]));
+        assert!(!Feature::named("vaes").unwrap().honoured());
+        assert!(!Feature::named("vpclmulqdq").unwrap().honoured());
     }
 
     #[test]

@@ -71,6 +71,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("vadefs.h", include_str!("../runtime/include/vadefs.h")),
     ("vpclmulqdqintrin.h", include_str!("../runtime/include/vpclmulqdqintrin.h")),
     ("wasm_simd128.h", include_str!("../runtime/include/wasm_simd128.h")),
+    ("wmmintrin.h", include_str!("../runtime/include/wmmintrin.h")),
     ("x86intrin.h", include_str!("../runtime/include/x86intrin.h")),
     ("xmmintrin.h", include_str!("../runtime/include/xmmintrin.h")),
     ("xsaveintrin.h", include_str!("../runtime/include/xsaveintrin.h")),
