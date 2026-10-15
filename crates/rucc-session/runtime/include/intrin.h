@@ -5,13 +5,13 @@
  * declares every intrinsic cl knows as an ordinary prototype, and then includes the vendor
  * headers, which here are this compiler's own <immintrin.h>. Those define several of the same
  * names as macros, `_mm_prefetch` and `_mm_extract_epi16` among them, so a prototype of one turns
- * into a syntax error, and AMD's <ammintrin.h> after them wants AVX types this compiler does not
+ * into a syntax error, and AMD's <ammintrin.h> after them wants names this compiler does not
  * have. clang ships an intrin.h of its own for the same reason, and this is the same answer.
  *
- * On a Microsoft row this is the vector intrinsics this compiler has, the bit scans, and the
- * handful of AVX2 names <wchar.h> needs, which are described where they are defined. The other
- * Microsoft names, `__cpuid` and the `_Interlocked` family among them, are not here, and a program
- * that calls one gets a diagnostic at the call.
+ * On a Microsoft row this is the vector intrinsics this compiler has and the bit scans. The four
+ * 32 byte names <wchar.h> needs are described below. The other Microsoft names, `__cpuid` and the
+ * `_Interlocked` family among them, are not here, and a program that calls one gets a diagnostic
+ * at the call.
  *
  * Anywhere else the name belongs to the library. mingw-w64 ships an intrin.h written for gcc, so
  * the search goes on to find it.
@@ -33,40 +33,9 @@ unsigned char _BitScanReverse64(unsigned long *_Index, unsigned long long _Mask)
 
 /* The inline `wmemchr` and `wmemcmp` in <wchar.h> have a 32 byte loop that runs when the CRT has
  * found AVX2 on the machine, and the header compiles it for any compiler that is not clang. So the
- * four operations in that loop have to exist for <wchar.h> to compile at all, in a function that is
- * not built for AVX2. `__m256i` and `_mm256_loadu_si256` come from <avxintrin.h>, which defines the
- * load with no target on this row. The other three are here. They are plain C over the vector's
- * lanes rather than the instructions, since this compiler has no AVX2 yet, which gives the same
- * answers more slowly, and nothing else is promised by them. */
-typedef short __rucc_v16hi __attribute__((__vector_size__(32)));
-typedef unsigned char __rucc_v32qu __attribute__((__vector_size__(32)));
-
-static __inline__ __m256i __attribute__((__always_inline__))
-_mm256_broadcastw_epi16(__m128i __a)
-{
-  short __low = ((__v8hi)__a)[0];
-  __rucc_v16hi __to;
-  int __i;
-  for (__i = 0; __i < 16; __i++)
-    __to[__i] = __low;
-  return (__m256i)__to;
-}
-
-static __inline__ __m256i __attribute__((__always_inline__))
-_mm256_cmpeq_epi16(__m256i __a, __m256i __b)
-{
-  return (__m256i)((__rucc_v16hi)__a == (__rucc_v16hi)__b);
-}
-
-static __inline__ int __attribute__((__always_inline__)) _mm256_movemask_epi8(__m256i __a)
-{
-  __rucc_v32qu __from = (__rucc_v32qu)__a;
-  unsigned int __answer = 0;
-  int __i;
-  for (__i = 0; __i < 32; __i++)
-    __answer |= (unsigned int)(__from[__i] >> 7) << __i;
-  return (int)__answer;
-}
+ * four operations in that loop have to exist, in a function that is not built for AVX2, for
+ * <wchar.h> to compile at all. <avxintrin.h> and <avx2intrin.h> define those four with no target on
+ * this row, in plain C over the lanes of the vector. */
 
 #endif /* __RUCC_INTRIN_H */
 
