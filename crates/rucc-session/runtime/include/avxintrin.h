@@ -146,11 +146,11 @@ typedef double __m256d_u __attribute__((__vector_size__(32), __may_alias__, __al
 /* The flag shape: the two vectors loaded, the test run, and the byte the `set` writes widened to
  * the `int` gcc answers with. `__w` is `x` or `y`, for the width. */
 #define __RUCC_AVX_FLAG2(__insn, __set, __w, __answer, __x, __y)                                   \
-  __asm__("vmovdqu (%1), %%" __w "mm0\n\tvmovdqu (%2), %%" __w "mm1\n\t" __insn " %%" __w          \
-          "mm1, %%" __w "mm0\n\t" __set " %0\n\tvzeroupper"                                        \
-          : "=r"(__answer)                                                                         \
-          : "r"(&(__x)), "r"(&(__y))                                                               \
-          : "xmm0", "xmm1", "cc", "memory")
+  __asm__ __volatile__("vmovdqu (%1), %%" __w "mm0\n\tvmovdqu (%2), %%" __w "mm1\n\t" __insn       \
+                       " %%" __w "mm1, %%" __w "mm0\n\t" __set " %0\n\tvzeroupper"                 \
+                       : "=r"(__answer)                                                            \
+                       : "r"(&(__x)), "r"(&(__y))                                                  \
+                       : "xmm0", "xmm1", "cc", "memory")
 
 /* # Arithmetic
  *
@@ -1279,10 +1279,10 @@ static __inline__ int __attribute__((__always_inline__, __target__("avx")))
 _mm256_movemask_pd(__m256d __A)
 {
   int __R;
-  __asm__("vmovdqu (%1), %%ymm0\n\tvmovmskpd %%ymm0, %0\n\tvzeroupper"
-          : "=r"(__R)
-          : "r"(&__A)
-          : "xmm0", "memory");
+  __asm__ __volatile__("vmovdqu (%1), %%ymm0\n\tvmovmskpd %%ymm0, %0\n\tvzeroupper"
+                       : "=r"(__R)
+                       : "r"(&__A)
+                       : "xmm0", "memory");
   return __R;
 }
 
@@ -1290,10 +1290,10 @@ static __inline__ int __attribute__((__always_inline__, __target__("avx")))
 _mm256_movemask_ps(__m256 __A)
 {
   int __R;
-  __asm__("vmovdqu (%1), %%ymm0\n\tvmovmskps %%ymm0, %0\n\tvzeroupper"
-          : "=r"(__R)
-          : "r"(&__A)
-          : "xmm0", "memory");
+  __asm__ __volatile__("vmovdqu (%1), %%ymm0\n\tvmovmskps %%ymm0, %0\n\tvzeroupper"
+                       : "=r"(__R)
+                       : "r"(&__A)
+                       : "xmm0", "memory");
   return __R;
 }
 

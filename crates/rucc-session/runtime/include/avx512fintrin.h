@@ -187,17 +187,17 @@ static __inline__ long long __attribute__((__always_inline__, __target__("avx512
 _mm512_reduce_add_epi64(__m512i __A)
 {
   long long __R;
-  __asm__("vmovdqu64 (%1), %%zmm16\n\t"
-          "vshufi64x2 $0x4e, %%zmm16, %%zmm16, %%zmm17\n\t"
-          "vpaddq %%zmm17, %%zmm16, %%zmm16\n\t"
-          "vshufi64x2 $0xb1, %%zmm16, %%zmm16, %%zmm17\n\t"
-          "vpaddq %%zmm17, %%zmm16, %%zmm16\n\t"
-          "vpshufd $0x4e, %%zmm16, %%zmm17\n\t"
-          "vpaddq %%zmm17, %%zmm16, %%zmm16\n\t"
-          "vmovq %%xmm16, %0"
-          : "=r"(__R)
-          : "r"(&__A)
-          : "memory");
+  __asm__ __volatile__("vmovdqu64 (%1), %%zmm16\n\t"
+                       "vshufi64x2 $0x4e, %%zmm16, %%zmm16, %%zmm17\n\t"
+                       "vpaddq %%zmm17, %%zmm16, %%zmm16\n\t"
+                       "vshufi64x2 $0xb1, %%zmm16, %%zmm16, %%zmm17\n\t"
+                       "vpaddq %%zmm17, %%zmm16, %%zmm16\n\t"
+                       "vpshufd $0x4e, %%zmm16, %%zmm17\n\t"
+                       "vpaddq %%zmm17, %%zmm16, %%zmm16\n\t"
+                       "vmovq %%xmm16, %0"
+                       : "=r"(__R)
+                       : "r"(&__A)
+                       : "memory");
   return __R;
 }
 

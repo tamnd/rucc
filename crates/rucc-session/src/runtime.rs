@@ -202,4 +202,55 @@ mod tests {
             assert!(text.contains(&guard), "{name} does not mention {guard}");
         }
     }
+
+    /// An assembly statement that has an output and reads its input through an address looks to
+    /// gcc like a function of the address alone. gcc then moves it out of a loop where the vector
+    /// behind the address changes, and the answer is wrong. rucc does not move it, but the headers
+    /// have to stay right under a compiler that does, so each such statement is `volatile`.
+    #[test]
+    fn an_assembly_statement_that_answers_from_an_address_is_volatile() {
+        for &(name, text) in HEADERS {
+            for (at, _) in text.match_indices("__asm__(") {
+                let parts = operands(&text[at + "__asm__(".len()..]);
+                let answers = parts.get(1).is_some_and(|part| part.contains("\"="));
+                let through = parts.get(2).is_some_and(|part| part.contains("(&"));
+                let line = text[at..].lines().next().unwrap_or_default();
+                assert!(!(answers && through), "{name}: {line}");
+            }
+        }
+    }
+
+    /// The parts of an assembly statement, from just after its opening bracket to its closing
+    /// one, split at each colon outside a string and outside brackets.
+    fn operands(text: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let (mut depth, mut start, mut quoted, mut escaped) = (0usize, 0, false, false);
+        for (at, c) in text.char_indices() {
+            if quoted {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    quoted = false;
+                }
+                continue;
+            }
+            match c {
+                '"' => quoted = true,
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    parts.push(&text[start..at]);
+                    return parts;
+                }
+                ')' => depth -= 1,
+                ':' if depth == 0 => {
+                    parts.push(&text[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        parts
+    }
 }
