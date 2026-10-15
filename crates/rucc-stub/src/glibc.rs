@@ -34,6 +34,18 @@
 //! `bin/glibc-compat` in `tamnd/rucc-cross` makes the list from real Debian libraries, one per
 //! release and architecture. It is run by hand and the list is committed, the same as the blobs.
 //!
+//! # What moved
+//!
+//! The blobs are from glibc 2.44, and glibc moved names between its libraries before that. In 2.34
+//! the contents of `libpthread`, `libdl`, `libutil` and `libanl` went into `libc`, and 2.44's `libc`
+//! abilist lists those names at their old nodes, as `pthread_create@GLIBC_2.2.5`. A `libc` stub cut
+//! at 2.28 would then export `pthread_create`, and the program would ask the real 2.28 `libc.so.6`
+//! for a name it does not have. `glibc/moved.txt` gives, for each such definition, the release it
+//! moved in and the library it was in before, and [`moved`] gives it back to that library. So a
+//! target below 2.34 gets real stubs for the four libraries, with the definitions they had then.
+//! `bin/glibc-compat moved` in `tamnd/rucc-cross` makes the list from the same Debian libraries as
+//! `glibc/compat.txt`. That is tamnd/rucc#3666.
+//!
 //! The loader is written under its `SONAME`, which is a different name on each port, and `ld.so`
 //! beside it is a linker script with the one line `INPUT ( AS_NEEDED ( <soname> ) )`. glibc's own
 //! `libc.so` names the loader in the same way. A program needs it for `__tls_get_addr`, and on
@@ -50,8 +62,8 @@ use std::collections::BTreeSet;
 use rucc_tuple::{Abi, Arch, DataModel, Env, Os, TargetTuple};
 
 use crate::blob::{self, Blob};
-use crate::compat::{Form, compat};
-use crate::describe::{self, Library as Stub, Symbol};
+use crate::compat::{Form, GLIBC, MERGED, compat};
+use crate::describe::{self, Library as Stub, Symbol, defaults};
 
 /// One glibc library this crate carries a description of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +108,15 @@ pub const LIBRARIES: &[Library] = &[
 /// never. The release after the name is the one for every architecture that the line does not name
 /// again.
 const COMPAT: &str = include_str!("../glibc/compat.txt");
+
+/// The definitions that moved into a library after the release a target asked for.
+///
+/// Each line is `library name origin release [arch=release]...`. Before the release, the library had
+/// no definition of the name, and the origin library had it. The origin is a dash when no library
+/// had it. A name written as `name@node` is about the definition at that node alone, because the
+/// library already had the name at another node. The release after the origin is the one for every
+/// architecture that the line does not name again, and a dash means the definition did not move.
+const MOVED: &str = include_str!("../glibc/moved.txt");
 
 /// The architectures in every blob, spelled the way `bin/abilist` names its directories.
 pub const ARCHITECTURES: &[&str] =
@@ -208,6 +229,102 @@ pub fn compat_only(library: &str, arch: &str, minor: u32, symbols: &mut [Symbol]
     changed
 }
 
+/// Gives each definition that moved into a library after glibc 2.`minor` back to the library it came
+/// from.
+///
+/// `sets` holds a [`Library::name`] and the definitions of each library, cut at the release. A
+/// definition that [`MOVED`] says was not in its library yet goes out of that library, and into its
+/// origin when the origin is in `sets`. The highest node of a name can change, so the caller runs the
+/// rule for the defaults again after this. Returns how many definitions went out.
+pub fn moved(arch: &str, minor: u32, sets: &mut [(&str, Vec<Symbol>)]) -> usize {
+    let mut count = 0;
+    for line in MOVED.lines().filter(|line| !line.starts_with('#')) {
+        let mut fields = line.split_whitespace();
+        let (Some(library), Some(name), Some(origin), Some(mut since)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        for field in fields {
+            if let Some((other, release)) = field.split_once('=') {
+                if other == arch {
+                    since = release;
+                }
+            }
+        }
+        if !since.parse::<u32>().is_ok_and(|since| minor < since) {
+            continue;
+        }
+        let (name, node) = match name.split_once('@') {
+            Some((name, node)) => (name, Some(node)),
+            None => (name, None),
+        };
+        let Some(from) = sets.iter().position(|(one, _)| *one == library) else {
+            continue;
+        };
+        let mut gone = Vec::new();
+        sets[from].1.retain(|symbol| {
+            let hit = symbol.name == name
+                && node.is_none_or(|node| {
+                    symbol.version.as_ref().is_some_and(|version| version.node == node)
+                });
+            if hit {
+                gone.push(symbol.clone());
+            }
+            !hit
+        });
+        count += gone.len();
+        let Some(to) = sets.iter().position(|(one, _)| *one == origin) else {
+            continue;
+        };
+        for symbol in gone {
+            let node = symbol.version.as_ref().map(|version| &version.node);
+            let have = sets[to].1.iter().any(|one| {
+                one.name == symbol.name && one.version.as_ref().map(|version| &version.node) == node
+            });
+            if !have {
+                sets[to].1.push(symbol);
+            }
+        }
+    }
+    count
+}
+
+/// Every library's definitions on `arch` at glibc 2.`minor`, by [`Library::name`].
+///
+/// The four libraries of [`LIBRARIES`] come first, in their order. Before 2.34 the four libraries
+/// that glibc then emptied into `libc` come after them, with what [`moved`] gave back. Each name has
+/// its default from the highest node, and then [`compat_only`] takes the default away where glibc
+/// keeps the name only for old programs.
+///
+/// # Errors
+///
+/// A blob that does not read or has no section for `arch`, and a library that has two definitions
+/// of a name at one node after the moves.
+pub fn exports(arch: &str, minor: u32) -> Result<Vec<(&'static str, Vec<Symbol>)>, Error> {
+    let ceiling = format!("GLIBC_2.{minor}");
+    let mut sets = Vec::new();
+    for library in LIBRARIES {
+        let exports = library
+            .description()
+            .and_then(|blob| blob.exports_at(arch, &ceiling))
+            .map_err(|why| Error::Blob { library: library.name, why })?;
+        sets.push((library.name, exports.symbols));
+    }
+    if MERGED.minor_part().is_some_and(|merged| minor < merged) {
+        for &(file, _) in GLIBC {
+            sets.push((file.strip_suffix(".so").unwrap_or(file), Vec::new()));
+        }
+    }
+    moved(arch, minor, &mut sets);
+    for (library, symbols) in &mut sets {
+        let library: &'static str = library;
+        defaults(symbols).map_err(|_| Error::Moved { library })?;
+        compat_only(library, arch, minor, symbols);
+    }
+    Ok(sets)
+}
+
 /// One file of a glibc sysroot that this crate writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
@@ -229,30 +346,35 @@ pub struct File {
 /// loongarch64's `e_flags`.
 pub fn stubs(target: TargetTuple, minor: u32) -> Result<Vec<File>, Error> {
     let arch = architecture(target).ok_or(Error::NoPort { target })?;
-    let ceiling = format!("GLIBC_2.{minor}");
     let mut out = Vec::new();
-    for library in LIBRARIES {
-        let mut exports = library
-            .description()
-            .and_then(|blob| blob.exports_at(arch, &ceiling))
-            .map_err(|why| Error::Blob { library: library.name, why })?;
-        let soname = library.soname.or_else(|| loader(target)).ok_or(Error::NoPort { target })?;
-        compat_only(library.name, arch, minor, &mut exports.symbols);
+    for (index, (name, symbols)) in exports(arch, minor)?.into_iter().enumerate() {
+        let (file, soname) = match LIBRARIES.get(index) {
+            Some(library) => (library.file, library.soname),
+            None => match GLIBC.get(index - LIBRARIES.len()) {
+                Some(&(file, soname)) => (file, Some(soname)),
+                None => continue,
+            },
+        };
+        let soname = soname.or_else(|| loader(target)).ok_or(Error::NoPort { target })?;
         let mut stub = Stub::new(soname);
-        for symbol in exports.symbols {
+        for symbol in symbols {
             stub.export(symbol);
         }
-        let bytes = crate::write(&stub, target)
-            .map_err(|why| Error::Write { library: library.name, why })?;
-        if library.soname.is_some() {
-            out.push(File { name: library.file.to_owned(), bytes });
+        let bytes =
+            crate::write(&stub, target).map_err(|why| Error::Write { library: name, why })?;
+        if LIBRARIES.get(index).is_none_or(|library| library.soname.is_some()) {
+            out.push(File { name: file.to_owned(), bytes });
         } else {
             out.push(File { name: soname.to_owned(), bytes });
             let script = format!("INPUT ( AS_NEEDED ( {soname} ) )\n");
-            out.push(File { name: library.file.to_owned(), bytes: script.into_bytes() });
+            out.push(File { name: file.to_owned(), bytes: script.into_bytes() });
         }
     }
     for one in compat(target) {
+        // A target whose tuple and release disagree about 2.34 has the real one already.
+        if out.iter().any(|file| file.name == one.file) {
+            continue;
+        }
         // Every glibc entry is a shared object, and an archive here would be a musl row reaching a
         // glibc target, which is a bug in the table rather than a file to write.
         debug_assert!(matches!(one.form, Form::Shared(_)), "{}", one.file);
@@ -277,6 +399,11 @@ pub enum Error {
         /// What the reader said.
         why: blob::Error,
     },
+    /// A library has two definitions of a name at one node after [`moved`] gave definitions back.
+    Moved {
+        /// Which library.
+        library: &'static str,
+    },
     /// The writer refused.
     Write {
         /// Which library it was writing.
@@ -293,6 +420,9 @@ impl fmt::Display for Error {
                 write!(f, "{} is not a target glibc has a port for", target.to_canonical_string())
             }
             Error::Blob { library, why } => write!(f, "the description of {library}: {why}"),
+            Error::Moved { library } => {
+                write!(f, "the stub for {library} has a name twice at one node after the moves")
+            }
             Error::Write { library, why } => write!(f, "the stub for {library}: {why}"),
         }
     }
@@ -379,6 +509,91 @@ mod tests {
         assert!(has_default(0, "x86_64", "__finitel", 44));
     }
 
+    /// A library this module writes a stub for, from the blobs or from what moved.
+    fn known(name: &str) -> bool {
+        LIBRARIES.iter().any(|library| library.name == name)
+            || GLIBC.iter().any(|(file, _)| file.strip_suffix(".so") == Some(name))
+    }
+
+    /// A library `bin/glibc-compat` measures. It reads libresolv too, and this module writes no stub
+    /// of libresolv yet, so a definition that moved out of it is only dropped.
+    fn measured(name: &str) -> bool {
+        known(name) || name == "libresolv"
+    }
+
+    /// Every node of `name` in `library`, lowest first, and whether it is the default.
+    fn nodes(sets: &[(&str, Vec<Symbol>)], library: &str, name: &str) -> Vec<(String, bool)> {
+        let mut out: Vec<(String, bool)> = sets
+            .iter()
+            .filter(|(one, _)| *one == library)
+            .flat_map(|(_, symbols)| symbols)
+            .filter(|symbol| symbol.name == name)
+            .filter_map(|symbol| symbol.version.clone())
+            .map(|version| (version.node, version.default))
+            .collect();
+        out.sort_by(|one, two| describe::by_version(&one.0, &two.0));
+        out
+    }
+
+    fn at(list: &[(&str, bool)]) -> Vec<(String, bool)> {
+        list.iter().map(|&(node, default)| (node.to_owned(), default)).collect()
+    }
+
+    /// glibc 2.34 moved libpthread and libdl into libc. Before it, the real libc has no
+    /// `pthread_create`, and a program that takes it from libc does not load. tamnd/rucc#3666.
+    #[test]
+    fn pthread_create_is_in_libpthread_before_glibc_2_34_and_in_libc_after() {
+        let old = exports("x86_64", 28).expect("x86_64");
+        assert_eq!(nodes(&old, "libc", "pthread_create"), at(&[]));
+        assert_eq!(nodes(&old, "libpthread", "pthread_create"), at(&[("GLIBC_2.2.5", true)]));
+        assert_eq!(nodes(&old, "libc", "dlopen"), at(&[]));
+        assert_eq!(nodes(&old, "libdl", "dlopen"), at(&[("GLIBC_2.2.5", true)]));
+        let new = exports("x86_64", 34).expect("x86_64");
+        let both = at(&[("GLIBC_2.2.5", false), ("GLIBC_2.34", true)]);
+        assert_eq!(nodes(&new, "libc", "pthread_create"), both);
+        assert!(new.iter().all(|(library, _)| *library != "libpthread"));
+    }
+
+    /// Before 2.34 the x86 libc has `open64` at `GLIBC_2.1` alone, and the `GLIBC_2.2` definition is
+    /// in libpthread. Only that one definition moves.
+    #[test]
+    fn one_node_of_open64_moves_on_x86() {
+        let old = exports("x86", 28).expect("x86");
+        assert_eq!(nodes(&old, "libc", "open64"), at(&[("GLIBC_2.1", true)]));
+        assert_eq!(nodes(&old, "libpthread", "open64"), at(&[("GLIBC_2.2", true)]));
+    }
+
+    /// Before 2.31 the old `clock_gettime` is in librt and libc has only the `GLIBC_2.17` one.
+    #[test]
+    fn the_old_clock_gettime_is_in_librt_before_glibc_2_31() {
+        let old = exports("x86_64", 28).expect("x86_64");
+        assert_eq!(nodes(&old, "libc", "clock_gettime"), at(&[("GLIBC_2.17", true)]));
+        assert_eq!(nodes(&old, "librt", "clock_gettime"), at(&[("GLIBC_2.2.5", true)]));
+        let new = exports("x86_64", 31).expect("x86_64");
+        let both = at(&[("GLIBC_2.2.5", false), ("GLIBC_2.17", true)]);
+        assert_eq!(nodes(&new, "libc", "clock_gettime"), both);
+    }
+
+    /// Every line of the list reads, and names libraries and architectures that are known.
+    #[test]
+    fn every_line_of_the_moved_list_reads() {
+        let release = |text: &str| text == "-" || text.parse::<u32>().is_ok();
+        let mut lines = 0;
+        for line in MOVED.lines().filter(|line| !line.starts_with('#')) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert!(fields.len() >= 4, "{line}");
+            assert!(known(fields[0]), "{line}");
+            assert!(fields[2] == "-" || measured(fields[2]), "{line}");
+            assert!(release(fields[3]), "{line}");
+            for other in &fields[4..] {
+                let (arch, since) = other.split_once('=').expect("arch=release");
+                assert!(ARCHITECTURES.contains(&arch) && release(since), "{line}");
+            }
+            lines += 1;
+        }
+        assert!(lines > 200, "{lines}");
+    }
+
     /// Every line of the list reads, and names a library and architectures that the blobs have.
     #[test]
     fn every_line_of_the_compat_list_reads() {
@@ -387,7 +602,7 @@ mod tests {
         for line in COMPAT.lines().filter(|line| !line.starts_with('#')) {
             let fields: Vec<&str> = line.split_whitespace().collect();
             assert!(fields.len() >= 3, "{line}");
-            assert!(LIBRARIES.iter().any(|library| library.name == fields[0]), "{line}");
+            assert!(measured(fields[0]), "{line}");
             assert!(release(fields[2]), "{line}");
             for other in &fields[3..] {
                 let (arch, since) = other.split_once('=').expect("arch=release");
@@ -428,6 +643,20 @@ mod tests {
         );
         // The same request twice is the same bytes, which is claim 5 of document 02.
         assert_eq!(files, stubs(target("x86_64-linux-gnu"), 39).expect("again"));
+    }
+
+    /// Before 2.34 the same four files are there, written from what moved rather than empty.
+    #[test]
+    fn a_target_before_glibc_2_34_gets_the_four_with_their_names() {
+        let old = stubs(target("x86_64-linux-gnu.2.28"), 28).expect("x86_64 writes");
+        let new = stubs(target("x86_64-linux-gnu"), 39).expect("x86_64 writes");
+        let names = |files: &[File]| files.iter().map(|file| file.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&old), names(&new));
+        let size = |files: &[File], name: &str| {
+            files.iter().find(|file| file.name == name).map_or(0, |file| file.bytes.len())
+        };
+        assert!(size(&old, "libpthread.so") > size(&new, "libpthread.so"));
+        assert!(size(&old, "libdl.so") > size(&new, "libdl.so"));
     }
 
     /// The stack protector's guard is a variable in the loader on four ports and a field of the

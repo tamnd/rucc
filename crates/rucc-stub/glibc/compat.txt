@@ -1,6 +1,7 @@
 # Made by bin/glibc-compat in tamnd/rucc-cross from the packages in sysroots/glibc-compat.
 # library name release [arch=release]...
 ld __rtld_version_placeholder 34
+libanl __libanl_version_placeholder 34
 libc _IO_stderr_ 40
 libc _IO_stdin_ 40
 libc _IO_stdout_ 40
@@ -364,6 +365,7 @@ libc xdrstdio_create 31
 libc xencrypt 31
 libc xprt_register 31
 libc xprt_unregister 31
+libdl __libdl_version_placeholder 34
 libm _LIB_VERSION 27
 libm __acos_finite 31
 libm __acosf128_finite 31
@@ -478,9 +480,35 @@ libm matherr 27
 libm pow10 27
 libm pow10f 27
 libm pow10l 27
+libpthread __fcntl 28
+libpthread __fork 22
+libpthread __libpthread_version_placeholder 34 s390x=31 x86=30 x86_64=31
+libpthread __vfork 21
+libpthread fcntl 28
+libpthread fork 22
+libpthread longjmp 22 powerpc64=-
+libpthread pthread_atfork 13
+libpthread pthread_kill_other_threads_np 13 aarch64=18 powerpc64=19 riscv64=27
+libpthread pthread_self 27
+libpthread siglongjmp 22 powerpc64=-
+libpthread system 22
+libpthread vfork 21
+libresolv __p_secstodate 27
+libresolv _gethtbyaddr 25
+libresolv _gethtbyname 25
+libresolv _gethtbyname2 25
+libresolv _gethtent 25
+libresolv _res_opcodes 40
+libresolv _sethtent 25
+libresolv res_gethostbyaddr 25
+libresolv res_gethostbyname 25
+libresolv res_gethostbyname2 25
+libresolv res_send_setqhook 25
+libresolv res_send_setrhook 25
 librt __librt_version_placeholder 34
 librt clock_getcpuclockid 30
 librt clock_getres 30
 librt clock_gettime 30
 librt clock_nanosleep 30
 librt clock_settime 30
+libutil __libutil_version_placeholder 34

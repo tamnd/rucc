@@ -3966,8 +3966,9 @@ mod tests {
         assert!(dir.join("ld-linux-x86-64.so.2").is_file());
         let script = fs::read_to_string(dir.join("ld.so")).expect("ld.so was written");
         assert_eq!(script, "INPUT ( AS_NEEDED ( ld-linux-x86-64.so.2 ) )\n");
-        // 2.28 is before the release that emptied libpthread, so there is no empty one to write.
-        assert!(!dir.join("libpthread.so").exists());
+        // 2.28 is before the release that emptied libpthread, so libpthread is real and has the
+        // names that later moved into libc.
+        assert!(dir.join("libpthread.so").is_file());
         // The second time finds the same bytes and leaves the file alone, which is what keeps a
         // linker in another build from ever reading one that is being replaced.
         let before = fs::metadata(&libc).and_then(|m| m.modified()).expect("a time");

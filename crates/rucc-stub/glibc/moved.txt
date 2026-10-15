@@ -1,0 +1,269 @@
+# Made by bin/glibc-compat in tamnd/rucc-cross from the packages in sysroots/glibc-compat.
+# library name origin release [arch=release]...
+libc __dn_comp libresolv 34
+libc __dn_expand libresolv 34
+libc __dn_skipname libresolv 34
+libc __isnanf128 libm 34
+libc __mq_open_2 librt 34 loongarch64=-
+libc __pread64@GLIBC_2.2 libpthread - x86=34
+libc __pthread_cleanup_routine libpthread 34 loongarch64=-
+libc __pthread_getspecific libpthread 34
+libc __pthread_key_create libpthread 34 loongarch64=-
+libc __pthread_mutex_destroy libpthread 34
+libc __pthread_mutex_init libpthread 34
+libc __pthread_mutex_lock libpthread 34
+libc __pthread_mutex_trylock libpthread 34
+libc __pthread_mutex_unlock libpthread 34
+libc __pthread_mutexattr_destroy libpthread 34
+libc __pthread_mutexattr_init libpthread 34
+libc __pthread_mutexattr_settype libpthread 34
+libc __pthread_once libpthread 34
+libc __pthread_register_cancel libpthread 34 loongarch64=-
+libc __pthread_register_cancel_defer libpthread 34 loongarch64=-
+libc __pthread_rwlock_destroy libpthread 34
+libc __pthread_rwlock_init libpthread 34
+libc __pthread_rwlock_rdlock libpthread 34
+libc __pthread_rwlock_tryrdlock libpthread 34
+libc __pthread_rwlock_trywrlock libpthread 34
+libc __pthread_rwlock_unlock libpthread 34 loongarch64=-
+libc __pthread_rwlock_wrlock libpthread 34
+libc __pthread_setspecific libpthread 34
+libc __pthread_unregister_cancel libpthread 34 loongarch64=-
+libc __pthread_unregister_cancel_restore libpthread 34 loongarch64=-
+libc __pthread_unwind_next libpthread 34 loongarch64=-
+libc __pwrite64@GLIBC_2.2 libpthread - x86=34
+libc __res_dnok libresolv 34
+libc __res_hnok libresolv 34
+libc __res_mailok libresolv 34
+libc __res_mkquery libresolv 34
+libc __res_nmkquery libresolv 34
+libc __res_nquery libresolv 34
+libc __res_nquerydomain libresolv 34
+libc __res_nsearch libresolv 34
+libc __res_nsend libresolv 34
+libc __res_ownok libresolv 34
+libc __res_query libresolv 34
+libc __res_querydomain libresolv 34
+libc __res_search libresolv 34
+libc __res_send libresolv 34
+libc __send libpthread - aarch64=34
+libc _pthread_cleanup_pop libpthread 34 loongarch64=-
+libc _pthread_cleanup_pop_restore libpthread 34
+libc _pthread_cleanup_push libpthread 34 loongarch64=-
+libc _pthread_cleanup_push_defer libpthread 34
+libc aio_cancel librt 34 loongarch64=-
+libc aio_cancel64 librt 34 loongarch64=-
+libc aio_error librt 34 loongarch64=-
+libc aio_error64 librt 34 loongarch64=-
+libc aio_fsync librt 34 loongarch64=-
+libc aio_fsync64 librt 34 loongarch64=-
+libc aio_init librt 34 loongarch64=-
+libc aio_read librt 34 loongarch64=-
+libc aio_read64 librt 34 loongarch64=-
+libc aio_return librt 34 loongarch64=-
+libc aio_return64 librt 34 loongarch64=-
+libc aio_suspend librt 34 loongarch64=-
+libc aio_suspend64 librt 34 loongarch64=-
+libc aio_write librt 34 loongarch64=-
+libc aio_write64 librt 34 loongarch64=-
+libc call_once libpthread 34 loongarch64=-
+libc clock_getcpuclockid@GLIBC_2.2 librt 31
+libc clock_getcpuclockid@GLIBC_2.2.5 librt 31
+libc clock_getcpuclockid@GLIBC_2.4 librt 31
+libc clock_getres@GLIBC_2.2 librt 31
+libc clock_getres@GLIBC_2.2.5 librt 31
+libc clock_getres@GLIBC_2.4 librt 31
+libc clock_gettime@GLIBC_2.2 librt 31
+libc clock_gettime@GLIBC_2.2.5 librt 31
+libc clock_gettime@GLIBC_2.4 librt 31
+libc clock_nanosleep@GLIBC_2.2 librt 31
+libc clock_nanosleep@GLIBC_2.2.5 librt 31
+libc clock_nanosleep@GLIBC_2.4 librt 31
+libc clock_settime@GLIBC_2.2 librt 31
+libc clock_settime@GLIBC_2.2.5 librt 31
+libc clock_settime@GLIBC_2.4 librt 31
+libc cnd_broadcast libpthread 34 loongarch64=-
+libc cnd_destroy libpthread 34 loongarch64=-
+libc cnd_init libpthread 34 loongarch64=-
+libc cnd_signal libpthread 34 loongarch64=-
+libc cnd_timedwait libpthread 34 loongarch64=-
+libc cnd_wait libpthread 34 loongarch64=-
+libc dladdr libdl 34 loongarch64=-
+libc dladdr1 libdl 34 loongarch64=-
+libc dlclose libdl 34 loongarch64=-
+libc dlerror libdl 34 loongarch64=-
+libc dlinfo libdl 34 loongarch64=-
+libc dlmopen libdl 34 loongarch64=-
+libc dlopen libdl 34 loongarch64=-
+libc dlsym libdl 34 loongarch64=-
+libc dlvsym libdl 34 loongarch64=-
+libc dn_expand libresolv - x86=34
+libc forkpty libutil 34 loongarch64=-
+libc gai_cancel libanl 34 loongarch64=-
+libc gai_error libanl 34 loongarch64=-
+libc gai_suspend libanl 34 loongarch64=-
+libc getaddrinfo_a libanl 34 loongarch64=-
+libc lio_listio librt 34 loongarch64=-
+libc lio_listio64 librt 34 loongarch64=-
+libc login libutil 34 loongarch64=-
+libc login_tty libutil 34 loongarch64=-
+libc logout libutil 34 loongarch64=-
+libc logwtmp libutil 34 loongarch64=-
+libc lseek64@GLIBC_2.2 libpthread - x86=34
+libc mq_close librt 34 loongarch64=-
+libc mq_getattr librt 34 loongarch64=-
+libc mq_notify librt 34 loongarch64=-
+libc mq_open librt 34 loongarch64=-
+libc mq_receive librt 34 loongarch64=-
+libc mq_send librt 34 loongarch64=-
+libc mq_setattr librt 34 loongarch64=-
+libc mq_timedreceive librt 34 loongarch64=-
+libc mq_timedsend librt 34 loongarch64=-
+libc mq_unlink librt 34 loongarch64=-
+libc mtx_destroy libpthread 34 loongarch64=-
+libc mtx_init libpthread 34 loongarch64=-
+libc mtx_lock libpthread 34 loongarch64=-
+libc mtx_timedlock libpthread 34 loongarch64=-
+libc mtx_trylock libpthread 34 loongarch64=-
+libc mtx_unlock libpthread 34 loongarch64=-
+libc ns_name_compress libresolv 34 loongarch64=-
+libc ns_name_ntop libresolv 34 loongarch64=-
+libc ns_name_pack libresolv 34 loongarch64=-
+libc ns_name_pton libresolv 34 loongarch64=-
+libc ns_name_skip libresolv 34 loongarch64=-
+libc ns_name_uncompress libresolv 34 loongarch64=-
+libc ns_name_unpack libresolv 34 loongarch64=-
+libc open64@GLIBC_2.2 libpthread - x86=34
+libc openpty libutil 34 loongarch64=-
+libc pread64@GLIBC_2.2 libpthread - x86=34
+libc pread@GLIBC_2.2 libpthread - x86=34
+libc profil_counter - 17
+libc pthread_atfork libpthread 34
+libc pthread_attr_getaffinity_np libpthread 34 loongarch64=-
+libc pthread_attr_getguardsize libpthread 34 loongarch64=-
+libc pthread_attr_getstack libpthread 34 loongarch64=-
+libc pthread_attr_getstackaddr libpthread 34 loongarch64=-
+libc pthread_attr_getstacksize libpthread 34 loongarch64=-
+libc pthread_attr_setaffinity_np libpthread 32 loongarch64=-
+libc pthread_attr_setguardsize libpthread 34 loongarch64=-
+libc pthread_attr_setstack libpthread 34 loongarch64=-
+libc pthread_attr_setstackaddr libpthread 34 loongarch64=-
+libc pthread_attr_setstacksize libpthread 34 loongarch64=-
+libc pthread_barrier_destroy libpthread 34 loongarch64=-
+libc pthread_barrier_init libpthread 34 loongarch64=-
+libc pthread_barrier_wait libpthread 34 loongarch64=-
+libc pthread_barrierattr_destroy libpthread 34 loongarch64=-
+libc pthread_barrierattr_getpshared libpthread 34 loongarch64=-
+libc pthread_barrierattr_init libpthread 34 loongarch64=-
+libc pthread_barrierattr_setpshared libpthread 34 loongarch64=-
+libc pthread_cancel libpthread 34 loongarch64=-
+libc pthread_clockjoin_np libpthread 34 loongarch64=-
+libc pthread_cond_clockwait libpthread 34 loongarch64=-
+libc pthread_condattr_getclock libpthread 34 loongarch64=-
+libc pthread_condattr_getpshared libpthread 34 loongarch64=-
+libc pthread_condattr_setclock libpthread 34 loongarch64=-
+libc pthread_condattr_setpshared libpthread 34 loongarch64=-
+libc pthread_create libpthread 34 loongarch64=-
+libc pthread_detach libpthread 34 loongarch64=-
+libc pthread_getaffinity_np libpthread 32 loongarch64=-
+libc pthread_getattr_default_np libpthread 34 loongarch64=-
+libc pthread_getattr_np libpthread 32 loongarch64=-
+libc pthread_getconcurrency libpthread 34 loongarch64=-
+libc pthread_getcpuclockid libpthread 34 loongarch64=-
+libc pthread_getname_np libpthread 34 loongarch64=-
+libc pthread_getspecific libpthread 34 loongarch64=-
+libc pthread_join libpthread 34 loongarch64=-
+libc pthread_key_create libpthread 34 loongarch64=-
+libc pthread_key_delete libpthread 34 loongarch64=-
+libc pthread_kill libpthread 34 loongarch64=-
+libc pthread_kill_other_threads_np libpthread 34
+libc pthread_mutex_clocklock libpthread 34 loongarch64=-
+libc pthread_mutex_consistent libpthread 34 loongarch64=-
+libc pthread_mutex_consistent_np libpthread 34
+libc pthread_mutex_getprioceiling libpthread 34 loongarch64=-
+libc pthread_mutex_setprioceiling libpthread 34 loongarch64=-
+libc pthread_mutex_timedlock libpthread 34 loongarch64=-
+libc pthread_mutex_trylock libpthread 34 loongarch64=-
+libc pthread_mutexattr_destroy libpthread 34 loongarch64=-
+libc pthread_mutexattr_getkind_np libpthread 34
+libc pthread_mutexattr_getprioceiling libpthread 34 loongarch64=-
+libc pthread_mutexattr_getprotocol libpthread 34 loongarch64=-
+libc pthread_mutexattr_getpshared libpthread 34 loongarch64=-
+libc pthread_mutexattr_getrobust libpthread 34 loongarch64=-
+libc pthread_mutexattr_getrobust_np libpthread 34
+libc pthread_mutexattr_gettype libpthread 34 loongarch64=-
+libc pthread_mutexattr_init libpthread 34 loongarch64=-
+libc pthread_mutexattr_setkind_np libpthread 34
+libc pthread_mutexattr_setprioceiling libpthread 34 loongarch64=-
+libc pthread_mutexattr_setprotocol libpthread 34 loongarch64=-
+libc pthread_mutexattr_setpshared libpthread 34 loongarch64=-
+libc pthread_mutexattr_setrobust libpthread 34 loongarch64=-
+libc pthread_mutexattr_setrobust_np libpthread 34
+libc pthread_mutexattr_settype libpthread 34 loongarch64=-
+libc pthread_once libpthread 34 loongarch64=-
+libc pthread_rwlock_clockrdlock libpthread 34 loongarch64=-
+libc pthread_rwlock_clockwrlock libpthread 34 loongarch64=-
+libc pthread_rwlock_destroy libpthread 34 loongarch64=-
+libc pthread_rwlock_init libpthread 34 loongarch64=-
+libc pthread_rwlock_rdlock libpthread 34 loongarch64=-
+libc pthread_rwlock_timedrdlock libpthread 34 loongarch64=-
+libc pthread_rwlock_timedwrlock libpthread 34 loongarch64=-
+libc pthread_rwlock_tryrdlock libpthread 34 loongarch64=-
+libc pthread_rwlock_trywrlock libpthread 34 loongarch64=-
+libc pthread_rwlock_unlock libpthread 34 loongarch64=-
+libc pthread_rwlock_wrlock libpthread 34 loongarch64=-
+libc pthread_rwlockattr_destroy libpthread 34 loongarch64=-
+libc pthread_rwlockattr_getkind_np libpthread 34 loongarch64=-
+libc pthread_rwlockattr_getpshared libpthread 34 loongarch64=-
+libc pthread_rwlockattr_init libpthread 34 loongarch64=-
+libc pthread_rwlockattr_setkind_np libpthread 34 loongarch64=-
+libc pthread_rwlockattr_setpshared libpthread 34 loongarch64=-
+libc pthread_setaffinity_np libpthread 34 loongarch64=-
+libc pthread_setattr_default_np libpthread 34 loongarch64=-
+libc pthread_setconcurrency libpthread 34 loongarch64=-
+libc pthread_setname_np libpthread 34 loongarch64=-
+libc pthread_setschedprio libpthread 34 loongarch64=-
+libc pthread_setspecific libpthread 34 loongarch64=-
+libc pthread_sigmask libpthread 32 loongarch64=-
+libc pthread_sigqueue libpthread 34 loongarch64=-
+libc pthread_spin_destroy libpthread 34 loongarch64=-
+libc pthread_spin_init libpthread 34 loongarch64=-
+libc pthread_spin_lock libpthread 34 loongarch64=-
+libc pthread_spin_trylock libpthread 34 loongarch64=-
+libc pthread_spin_unlock libpthread 34 loongarch64=-
+libc pthread_testcancel libpthread 34 loongarch64=-
+libc pthread_timedjoin_np libpthread 34 loongarch64=-
+libc pthread_tryjoin_np libpthread 34 loongarch64=-
+libc pthread_yield libpthread 34
+libc pwrite64@GLIBC_2.2 libpthread - x86=34
+libc pwrite@GLIBC_2.2 libpthread - x86=34
+libc res_mkquery libresolv - x86=34
+libc res_query libresolv - x86=34
+libc res_querydomain libresolv - x86=34
+libc res_search libresolv - x86=34
+libc sem_clockwait libpthread 34 loongarch64=-
+libc sem_close libpthread 34 loongarch64=-
+libc sem_destroy libpthread 34 loongarch64=-
+libc sem_getvalue libpthread 34 loongarch64=-
+libc sem_init libpthread 34 loongarch64=-
+libc sem_open libpthread 34 loongarch64=-
+libc sem_post libpthread 34 loongarch64=-
+libc sem_timedwait libpthread 34 loongarch64=-
+libc sem_trywait libpthread 34 loongarch64=-
+libc sem_unlink libpthread 34 loongarch64=-
+libc sem_wait libpthread 34 loongarch64=-
+libc shm_open librt 34 loongarch64=-
+libc shm_unlink librt 34 loongarch64=-
+libc thrd_create libpthread 34 loongarch64=-
+libc thrd_detach libpthread 34 loongarch64=-
+libc thrd_exit libpthread 34 loongarch64=-
+libc thrd_join libpthread 34 loongarch64=-
+libc timer_create librt 34 loongarch64=-
+libc timer_delete librt 34 loongarch64=-
+libc timer_getoverrun librt 34 loongarch64=-
+libc timer_gettime librt 34 loongarch64=-
+libc timer_settime librt 34 loongarch64=-
+libc tss_create libpthread 34 loongarch64=-
+libc tss_delete libpthread 34 loongarch64=-
+libc tss_get libpthread 34 loongarch64=-
+libc tss_set libpthread 34 loongarch64=-
