@@ -4650,8 +4650,8 @@ status = "implemented"
 signature = "double(double, double, double)"
 library = "fma"
 used_by = ["glibc"]
-tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library", "rucc-driver::a_call_to_fma_is_one_instruction_in_a_function_built_for_fma"]
-notes = "A call to the library function, or the vfmadd instruction on x86-64 where the function is built for fma, as gcc writes it."
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library", "rucc-driver::a_call_to_fma_is_one_instruction_in_a_function_built_for_fma", "rucc-driver::a_call_to_fma_is_fmadd_on_aarch64"]
+notes = "A call to the library function, or the vfmadd instruction on x86-64 where the function is built for fma, or fmadd on AArch64, as gcc writes it."
 
 [[feature]]
 name = "__builtin_fmaf"
@@ -4661,7 +4661,7 @@ status = "implemented"
 signature = "float(float, float, float)"
 library = "fmaf"
 used_by = ["glibc"]
-tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library", "rucc-driver::a_call_to_fma_is_one_instruction_in_a_function_built_for_fma"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library", "rucc-driver::a_call_to_fma_is_one_instruction_in_a_function_built_for_fma", "rucc-driver::a_call_to_fma_is_fmadd_on_aarch64"]
 
 [[feature]]
 name = "__builtin_fmal"

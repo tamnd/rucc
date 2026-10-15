@@ -497,6 +497,8 @@
 (semantics (a64.fmul_f64 l r) (fp.mul l r))
 (semantics (a64.fdiv_f32 l r) (fp.div l r))
 (semantics (a64.fdiv_f64 l r) (fp.div l r))
+(semantics (a64.fmadd_f32 a b c) (fp.fma a b c))
+(semantics (a64.fmadd_f64 a b c) (fp.fma a b c))
 
 ;; A float compare and the `cset` behind it. The head is named after the condition C's operator
 ;; asks for where the machine has one, and after the IR's predicate for the rest.

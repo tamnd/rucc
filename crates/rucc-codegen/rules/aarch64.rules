@@ -1739,6 +1739,18 @@
       (a64.fdiv_f64 x y)
       (spec (= (fp.div x y) (result))))
 
+;; The fused multiply add, which every AArch64 processor has, so a call to `fma` or `fmaf` from the
+;; C library is this in every function that may use the vector registers. `fmadd d, n, m, a` is
+;; the product of `n` and `m` with `a` added, which is the order of the arguments to `fma`.
+
+(rule (lower (fma.f32 (value.f32 x) (value.f32 y) (value.f32 z)))
+      (a64.fmadd_f32 x y z)
+      (spec (= (fp.fma x y z) (result))))
+
+(rule (lower (fma.f64 (value.f64 x) (value.f64 y) (value.f64 z)))
+      (a64.fmadd_f64 x y z)
+      (spec (= (fp.fma x y z) (result))))
+
 (rule (lower (ret.f32 (value.f32 v)))
       (a64.ret_val_f32 v)
       (spec (= v (result))))
