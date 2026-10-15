@@ -119,12 +119,17 @@ use crate::capability;
 struct Width {
     /// How many bits one half is.
     half: u32,
+    /// Whether an assembly statement may put a value this wide in a pair of registers named the
+    /// way x86 names them, which is `A` for the pair that starts at the accumulator. The two x86
+    /// conventions are the only ones here whose stores are seen in the order they were made, so
+    /// that is how they are told apart from AArch64.
+    pairs: bool,
 }
 
 impl Width {
     /// The width of a register under that convention, which is how many bytes one takes saved.
     fn of(conv: &CallRegs) -> Self {
-        Self { half: conv.word * 8 }
+        Self { half: conv.word * 8, pairs: conv.total_store_order }
     }
 
     /// How many bits the value this pass splits is, which is two registers.
@@ -383,7 +388,7 @@ fn can_split(
         return false;
     }
     if data.opcode == Opcode::RegisterValue
-        && !matches!(data.extra, Extra::Symbol(name) if width.half == 32 && next_register(names.resolve(name)).is_some())
+        && !matches!(data.extra, Extra::Symbol(name) if width.pairs && next_register(names.resolve(name)).is_some())
     {
         return false;
     }
@@ -809,8 +814,8 @@ fn constant(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     replace(func, halves, inst, low, high);
 }
 
-/// A `long long` local register variable read where it is declared, which is the register it
-/// names and the one after it. See [`next_register`].
+/// A local register variable two registers wide read where it is declared, which is the register
+/// it names and the one after it. See [`next_register`].
 fn register_pair(
     func: &mut Func,
     names: &mut Interner,
@@ -829,13 +834,13 @@ fn register_pair(
     replace(func, halves, inst, low, high);
 }
 
-/// The register gcc puts the high half of an i386 `long long` in, given the one its low half is
-/// named in, spelled the way that one was.
+/// The register gcc puts the high half of an i386 `long long` or an x86-64 `__int128` in, given
+/// the one its low half is named in, spelled the way that one was.
 ///
 /// gcc numbers the registers `eax`, `edx`, `ecx`, `ebx`, `esi`, `edi`, and a value two registers
 /// wide takes the one it is given and the next. That is how the kernel hands `__put_user_8` its
 /// value in `edx:eax` with `register u64 val asm("%eax")`, and how `__get_user_8` gives one back
-/// in `ecx:edx` with `asm("%edx")`.
+/// in `ecx:edx` with `asm("%edx")`. The 64 bit registers are in the same order.
 fn next_register(name: &str) -> Option<String> {
     let (percent, bare) = match name.strip_prefix('%') {
         Some(bare) => ("%", bare),
@@ -847,12 +852,17 @@ fn next_register(name: &str) -> Option<String> {
         "ecx" => "ebx",
         "ebx" => "esi",
         "esi" => "edi",
+        "rax" => "rdx",
+        "rdx" => "rcx",
+        "rcx" => "rbx",
+        "rbx" => "rsi",
+        "rsi" => "rdi",
         _ => return None,
     };
     Some(format!("{percent}{next}"))
 }
 
-/// The constraint for the high half of an i386 pair whose low half is written `letters`, when that
+/// The constraint for the high half of an x86 pair whose low half is written `letters`, when that
 /// names one register: a letter for one, or a register in braces, which is how the front end writes
 /// a local register variable. See [`next_register`].
 fn high_letters(letters: &str) -> Option<String> {
@@ -1943,19 +1953,22 @@ fn site(func: &Func, inst: Inst) -> Option<(Signature, bool)> {
 /// the two numbers of its halves. The template's numbers move with the operands, and a reference to
 /// the pair is to its low half, which is the register GCC prints for it too.
 ///
+/// x86-64 is the same one size up. An `__int128` written `A` is `rdx:rax`, which is where `mulq`
+/// leaves its product and where `cmpxchg16b` wants the value it compares, and gcc splits it the
+/// same way.
+///
 /// A wide operand under any other constraint is two operands under that constraint when the
 /// template never names it, which is what an empty template that only hides a value from the
 /// optimizer is. The kernel's `__iter_div_u64_rem` writes `asm("" : "+rm"(dividend))` over a
 /// `u64`, and `OPTIMIZER_HIDE_VAR` does the same with `"=r"` and `"0"`. Where it is placed does
 /// not matter to a template that does not read it, only that both halves go through it.
 ///
-/// Nothing for a wide operand the template names under any other letter, and for every width but
-/// i386's, since sixty four bit `A` is one register rather than two and a pair the template spells
-/// has no one register to be spelled as.
+/// Nothing for a wide operand the template names under any other letter, since a pair the
+/// template spells has no one register to be spelled as, and nothing off x86.
 fn paired(func: &Func, names: &Interner, width: Width, inst: Inst) -> Option<(String, String)> {
     let Extra::Asm(asm) = func[inst].extra else { return None };
     let asm = func[asm];
-    if width.half != 32 {
+    if !width.pairs {
         return None;
     }
     let constraints = names.resolve(asm.constraints);
@@ -3206,7 +3219,7 @@ mod tests {
     ///
     /// No target with such registers lowers yet, so the pass is driven at the width directly, over
     /// the System V registers standing in for a convention that puts both halves in two of them.
-    const NARROW: super::Width = super::Width { half: 32 };
+    const NARROW: super::Width = super::Width { half: 32, pairs: true };
 
     /// Splits at thirty two bits, which is what the pass does on i386.
     fn narrow(func: &mut Func, names: &mut Interner) -> bool {
@@ -3447,7 +3460,7 @@ mod tests {
 
     #[test]
     fn at_sixty_four_bits_the_width_is_the_one_the_registers_say() {
-        assert_eq!(super::Width::of(&SYSV), super::Width { half: HALF });
+        assert_eq!(super::Width::of(&SYSV), super::Width { half: HALF, pairs: true });
         assert_eq!(super::Width::of(&SYSV).mode(), "i128");
         assert_eq!(NARROW.mode(), "i64");
     }
