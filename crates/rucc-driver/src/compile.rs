@@ -4014,6 +4014,56 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// simdjson's Haswell kernel counts zeros and clears the lowest set bit with these, from
+    /// functions built for `bmi` and `lzcnt`. Each count, extract, deposit and gather is the
+    /// instruction, inlined at every level, and a function not built for BMI2 is refused the call.
+    #[test]
+    fn the_shipped_bit_manipulation_headers_are_the_instructions() {
+        let source = concat!(
+            "#include <immintrin.h>\n",
+            "unsigned long long f(unsigned long long a, unsigned long long b, unsigned *p) {\n",
+            "  unsigned long long hi;\n",
+            "  unsigned long long r = _tzcnt_u64(a) + _lzcnt_u64(b) + _blsr_u64(a);\n",
+            "  r += _bextr_u64(a, 4, 8) + _bzhi_u64(b, 12) + _pdep_u64(a, b) + _pext_u64(a, b);\n",
+            "  r += _mulx_u64(a, b, &hi) + hi + __tzcnt_u16((unsigned short)a);\n",
+            "  return r + _tzcnt_u32(*p) + _lzcnt_u32(*p) + _bextr_u32(*p, 1, 2) +\n",
+            "         _bzhi_u32(*p, 5) + _pdep_u32(*p, 3) + _pext_u32(*p, 3) + __lzcnt16(*p);\n",
+            "}\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = freestanding();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let mut choices = rucc_target::Choices::new();
+            for name in ["bmi", "bmi2", "lzcnt"] {
+                choices.read(name).expect("gcc knows the name");
+            }
+            opts.isa = choices.over(opts.isa);
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            for step in [
+                "tzcntq", "lzcntq", "bextrq", "bzhiq", "pdepq", "pextq", "tzcntl", "lzcntl",
+                "bextrl", "bzhil", "pdepl", "pextl",
+            ] {
+                assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
+            }
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
+        }
+        let result = run(
+            &freestanding(),
+            concat!(
+                "#include <immintrin.h>\n",
+                "__attribute__((target(\"bmi\")))\n",
+                "unsigned long long f(unsigned long long x) { return _pdep_u64(x, 3); }\n",
+            ),
+        );
+        let said = result.messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_pdep_u64': target specific \
+                       option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
     /// A function carrying the attribute is built for the instruction whatever the unit is, which
     /// is how PostgreSQL writes its checksum: no flag, the attribute on the one function, and the
     /// step inlined into it as one instruction. PostgreSQL's probe writes the attribute only when

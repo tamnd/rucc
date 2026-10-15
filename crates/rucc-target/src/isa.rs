@@ -147,11 +147,11 @@ pub static FEATURES: &[Row] = &[
     named("sm3", &["avx"]),
     named("sm4", &["avx2"]),
     named("abm", &[]),
-    named("lzcnt", &[]),
-    named("bmi", &[]),
-    named("bmi2", &[]),
+    yes("lzcnt", &[]),
+    yes("bmi", &[]),
+    yes("bmi2", &[]),
     named("tbm", &[]),
-    named("movbe", &[]),
+    yes("movbe", &[]),
     named("cx16", &[]),
     named("sahf", &[]),
     named("rdrnd", &[]),
@@ -247,7 +247,8 @@ impl Feature {
     ///
     /// The SSE line up to 4.2, the population count, the CRC-32C step, `xsave`, the shadow stack
     /// instructions of `shstk`, the AES steps of `aes`, the carryless multiplication of `pclmul`,
-    /// AVX, AVX2, and the three the baseline already has. For those the headers have the intrinsics
+    /// AVX, AVX2, the zero counts of `lzcnt` and `bmi`, the bit manipulation of `bmi` and `bmi2`,
+    /// the swapping move of `movbe`, and the three the baseline already has. For those the headers have the intrinsics
     /// and the assembler has the instructions. For every other name gcc knows, a program can say it
     /// and have it remembered, which is what an attribute on a function built for a processor
     /// chosen at run time needs, but the command line may not turn it on for a whole unit and no
@@ -920,6 +921,17 @@ mod tests {
     }
 
     #[test]
+    fn the_bit_manipulation_names_are_honoured_and_bring_nothing_with_them() {
+        let base = ["FXSR", "MMX", "SSE", "SSE2"];
+        for (name, spelled) in
+            [("bmi", "BMI"), ("bmi2", "BMI2"), ("lzcnt", "LZCNT"), ("movbe", "MOVBE")]
+        {
+            assert_eq!(macros(&[name]), said(&[&base[..], &[spelled]].concat()), "{name}");
+        }
+        assert!(!Feature::named("tbm").unwrap().honoured());
+    }
+
+    #[test]
     fn the_count_and_the_checksum_follow_sse4_2_unless_they_were_mentioned() {
         let mut base = said(&["FXSR", "MMX", "SSE", "SSE2", "POPCNT"]);
         base.sort();
@@ -955,7 +967,7 @@ mod tests {
         got.sort();
         let want = said(&[
             "FXSR", "MMX", "SSE", "SSE2", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "POPCNT", "CRC32",
-            "XSAVE", "AVX", "AVX2",
+            "XSAVE", "AVX", "AVX2", "BMI", "BMI2", "LZCNT", "MOVBE",
         ]);
         assert_eq!(got, want);
         let v3 = Isa::level("x86-64-v3").unwrap();
