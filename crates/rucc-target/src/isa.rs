@@ -153,7 +153,7 @@ pub static FEATURES: &[Row] = &[
     named("tbm", &[]),
     yes("movbe", &[]),
     named("cx16", &[]),
-    named("sahf", &[]),
+    yes("sahf", &[]),
     named("rdrnd", &[]),
     named("rdseed", &[]),
     named("adx", &[]),
@@ -249,25 +249,28 @@ impl Feature {
     /// instructions of `shstk`, the AES steps of `aes`, the carryless multiplication of `pclmul`,
     /// AVX, AVX2, the zero counts of `lzcnt` and `bmi`, the bit manipulation of `bmi` and `bmi2`,
     /// the swapping move of `movbe`, the fused multiply and add of `fma`, the half precision
-    /// conversions of `f16c`, and the three the baseline already has. For those the headers have
-    /// the intrinsics and the assembler has the instructions. For every other name gcc knows, a
-    /// program can say it and have it remembered, which is what an attribute on a function built
-    /// for a processor chosen at run time needs, but the command line may not turn it on for a
-    /// whole unit and no macro claims it.
+    /// conversions of `f16c`, the flag moves of `sahf`, and the three the baseline already has. For
+    /// those the headers have the intrinsics that gcc has and the assembler has the instructions.
+    /// For every other name gcc knows, a program can say it and have it remembered, which is what
+    /// an attribute on a function built for a processor chosen at run time needs, but the command
+    /// line may not turn it on for a whole unit and no macro claims it.
     ///
     /// The AVX-512 names and `vpclmulqdq` have the few intrinsics PostgreSQL calls, from functions
     /// that carry the attribute. They are still not honoured, because `__AVX512F__` would promise
-    /// hundreds more.
-    /// `vpclmulqdq` has only its 64 byte form here, and gcc has a 32 byte form too.
+    /// hundreds more. `vpclmulqdq` has only its 64 byte form here, and gcc has a 32 byte form too.
     #[must_use]
     pub fn honoured(self) -> bool {
         self.row().honoured
     }
 
     /// The macro gcc defines while this extension is on: the name in capitals with the dots and
-    /// dashes turned into underscores, so `sse4.2` is `__SSE4_2__`.
+    /// dashes turned into underscores, so `sse4.2` is `__SSE4_2__`. `sahf` is the one exception.
+    /// gcc names its macro after both instructions, so it is `__LAHF_SAHF__`.
     #[must_use]
     pub fn macro_name(self) -> String {
+        if self.name() == "sahf" {
+            return "__LAHF_SAHF__".to_owned();
+        }
         let spelled: String = self
             .name()
             .chars()
@@ -944,6 +947,15 @@ mod tests {
     }
 
     #[test]
+    fn sahf_is_honoured_under_the_name_gcc_gives_its_macro() {
+        let sahf = Feature::named("sahf").unwrap();
+        assert!(sahf.honoured());
+        assert_eq!(sahf.macro_name(), "__LAHF_SAHF__");
+        assert_eq!(macros(&["sahf"]), said(&["FXSR", "MMX", "SSE", "SSE2", "LAHF_SAHF"]));
+        assert!(!Feature::named("cx16").unwrap().honoured());
+    }
+
+    #[test]
     fn the_count_and_the_checksum_follow_sse4_2_unless_they_were_mentioned() {
         let mut base = said(&["FXSR", "MMX", "SSE", "SSE2", "POPCNT"]);
         base.sort();
@@ -964,7 +976,7 @@ mod tests {
         told.read("no-sse3").unwrap();
         let mut got: Vec<String> = told.over(v2).macros().collect();
         got.sort();
-        assert_eq!(got, said(&["FXSR", "MMX", "SSE", "SSE2", "POPCNT"]));
+        assert_eq!(got, said(&["FXSR", "MMX", "SSE", "SSE2", "POPCNT", "LAHF_SAHF"]));
         let mut told = Choices::new();
         told.read("no-sse4.2").unwrap();
         let got: Vec<String> = told.over(v2).macros().collect();
@@ -977,10 +989,11 @@ mod tests {
         let mut got: Vec<String> =
             Choices::new().over(Isa::level("x86-64-v3").unwrap()).macros().collect();
         got.sort();
-        let want = said(&[
+        let v3 = [
             "FXSR", "MMX", "SSE", "SSE2", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "POPCNT", "CRC32",
             "XSAVE", "AVX", "AVX2", "BMI", "BMI2", "LZCNT", "MOVBE", "FMA", "F16C",
-        ]);
+        ];
+        let want = said(&[&v3[..], &["LAHF_SAHF"]].concat());
         assert_eq!(got, want);
         let v3 = Isa::level("x86-64-v3").unwrap();
         assert!(v3.has(Feature::named("avx2").unwrap()));
