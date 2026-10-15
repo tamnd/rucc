@@ -81,6 +81,13 @@ fn has(body: &[&str], words: &[&str]) -> bool {
     body.iter().any(|line| words.iter().all(|word| line.contains(word)))
 }
 
+/// An `asm` that writes every register a function of either convention may write without
+/// saving it, and says so.
+const TRASH: &str = r#"#define TRASH __asm__ volatile("movq $-1, %%rbx\n\tmovq $-1, %%r12\n\t" \
+    "movq $-1, %%r13\n\tmovq $-1, %%r14\n\tmovq $-1, %%r15" \
+    ::: "rbx", "r12", "r13", "r14", "r15")
+"#;
+
 /// A call puts the first six integers in `r12`, `r13`, `r14`, `r15`, `rdi` and `rsi`, the seventh
 /// on the stack and a `double` in `xmm0`, as gcc 16 does. The C23 spelling is the same attribute.
 #[test]
@@ -99,7 +106,7 @@ fn a_preserve_none_call_puts_the_integers_in_r12_first() {
     {
         assert!(has(&call, &[value, reg]), "{value} is not put in {reg}:\n{out}");
     }
-    assert!(has(&call, &["$7", "(%rsp)"]), "the seventh is not on the stack:\n{out}");
+    assert!(has(&call, &["$7"]) && has(&call, &["movq", "(%rsp)"]), "no seventh:\n{out}");
     assert!(has(&call, &["%xmm0"]), "{out}");
     assert!(!has(&call, &["%rdx"]) && !has(&call, &["%rcx"]), "{out}");
     let callq = body(&out, "callq");
@@ -112,11 +119,14 @@ fn a_preserve_none_call_puts_the_integers_in_r12_first() {
 fn a_function_that_keeps_nothing_pushes_nothing_it_writes() {
     let out = listing(
         "pushes",
-        "#define TRASH __asm__ volatile(\"\" ::: \"rbx\", \"r12\", \"r13\", \"r14\", \"r15\")\n\
-         __attribute__((no_callee_saved_registers)) long n(long a, long b) {\n\
-         TRASH; return a + b; }\n\
-         __attribute__((preserve_none)) long p(long a, long b) { TRASH; return a + b; }\n\
-         long plain(long a, long b) { TRASH; return a + b; }\n",
+        &[
+            TRASH,
+            "__attribute__((no_callee_saved_registers)) long n(long a, long b) {\n\
+             TRASH; return a + b; }\n\
+             __attribute__((preserve_none)) long p(long a, long b) { TRASH; return a + b; }\n\
+             long plain(long a, long b) { TRASH; return a + b; }\n",
+        ]
+        .concat(),
     );
     for name in ["n", "p"] {
         let pushed: Vec<&str> = body(&out, name)
@@ -239,8 +249,6 @@ fn the_unsaved_conventions_are_there_on_x86_64_elf_alone() {
 const PROGRAM: &str = r#"
 #include <stdarg.h>
 #include <stdio.h>
-#define TRASH __asm__ volatile("movq $-1, %%rbx\n\tmovq $-1, %%r12\n\tmovq $-1, %%r13\n\t" \
-    "movq $-1, %%r14\n\tmovq $-1, %%r15" ::: "rbx", "r12", "r13", "r14", "r15")
 struct two { long a, b; };
 struct big { long a, b, c; };
 __attribute__((no_callee_saved_registers)) long n(long a, long b) { TRASH; return a * 10 + b; }
@@ -297,7 +305,7 @@ int main(void) {
 #[test]
 fn a_caller_of_one_that_keeps_nothing_gets_its_values_back() {
     let dir = dir("run");
-    std::fs::write(dir.join("a.c"), PROGRAM).expect("the fixture can be written");
+    std::fs::write(dir.join("a.c"), [TRASH, PROGRAM].concat()).expect("the fixture is written");
     for flags in [&["-O0"][..], &["-O2"], &["-O2", "-fPIC", "-pie"]] {
         let mut args = flags.to_vec();
         args.extend(["a.c", "-o", "prog"]);

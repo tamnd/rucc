@@ -8472,10 +8472,14 @@ impl<'a> Lowering<'a> {
         let variadic = self.source.signature().variadic;
         // A `regparm` count is the same platform's convention with fewer or more registers, and a
         // variadic function under `-mregparm` is always `regparm(0)`, so its list is the
-        // platform's own and is not foreign.
+        // platform's own and is not foreign. So is the list of gcc's two that keep nothing, whose
+        // save area holds the registers they take their arguments in.
         let foreign = !matches!(
             self.source.signature().convention,
-            Convention::Target | Convention::Regparm(_)
+            Convention::Target
+                | Convention::Regparm(_)
+                | Convention::NoCalleeSaved
+                | Convention::PreserveNone
         );
         let homes = variadic && !foreign && self.conv.home > 0;
         let conv = if homes { self.conv.homed() } else { *self.conv };
