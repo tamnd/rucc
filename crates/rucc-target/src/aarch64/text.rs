@@ -651,6 +651,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("fmul_f64", &[spell("fmul", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
     ("fdiv_f32", &[spell("fdiv", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
     ("fdiv_f64", &[spell("fdiv", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
+    ("fmadd_f32", &[spell("fmadd", &[Fp(0, S), Fp(1, S), Fp(2, S), Fp(3, S)])]),
+    ("fmadd_f64", &[spell("fmadd", &[Fp(0, D), Fp(1, D), Fp(2, D), Fp(3, D)])]),
     ("fmin_f32", &[spell("fmin", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
     ("fmin_f64", &[spell("fmin", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),
     ("fmax_f32", &[spell("fmax", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),

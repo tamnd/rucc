@@ -40,9 +40,9 @@ use crate::operand::{Constraint, OperandDesc};
 
 use Form::{
     Acquire, Address, Alu, AluI, AluShift, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI,
-    CmpSet, CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary,
-    FetchOp, FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp,
-    LoadImm, LoadPair, LoadPairFp, Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push,
+    CmpSet, CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FMulAdd,
+    FUnary, FetchOp, FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load,
+    LoadFp, LoadImm, LoadPair, LoadPairFp, Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push,
     PushPair, Release, Ret, RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select,
     Set, SetBits, Store, StoreFp, StorePair, StorePairFp, Swap, Template, Test, Trap, Unary,
 };
@@ -120,6 +120,9 @@ pub enum Form {
     StorePairFp,
     /// A destination and two sources in the other register file.
     FAlu,
+    /// A destination and three sources in the other register file, the product of the first two
+    /// with the third added and one rounding at the end.
+    FMulAdd,
     /// A destination and one source in the other register file.
     FUnary,
     /// A copy within the other register file.
@@ -250,6 +253,12 @@ static TWO_WRITTEN_FP: [OperandDesc; 2] = [OperandDesc::write(FPR), OperandDesc:
 static FP_TO_FP: [OperandDesc; 2] = [OperandDesc::write(FPR), OperandDesc::read(FPR)];
 static TWO_FP_TO_FP: [OperandDesc; 3] =
     [OperandDesc::write(FPR), OperandDesc::read(FPR), OperandDesc::read(FPR)];
+static THREE_FP_TO_FP: [OperandDesc; 4] = [
+    OperandDesc::write(FPR),
+    OperandDesc::read(FPR),
+    OperandDesc::read(FPR),
+    OperandDesc::read(FPR),
+];
 static GPR_TO_FP: [OperandDesc; 2] = [OperandDesc::write(FPR), OperandDesc::read(GPR)];
 static FP_TO_GPR: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(FPR)];
 static SET_BITS: [OperandDesc; 3] =
@@ -314,6 +323,7 @@ impl Form {
             StorePairFp => &TWO_FP_READ,
             FUnary | FMove | FConvert => &FP_TO_FP,
             FAlu => &TWO_FP_TO_FP,
+            FMulAdd => &THREE_FP_TO_FP,
             IntToFp => &GPR_TO_FP,
             FpToInt => &FP_TO_GPR,
             SetBits => &SET_BITS,
@@ -711,6 +721,8 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fmul_f64", FAlu),
     ("fdiv_f32", FAlu),
     ("fdiv_f64", FAlu),
+    ("fmadd_f32", FMulAdd),
+    ("fmadd_f64", FMulAdd),
     ("fmin_f32", FAlu),
     ("fmin_f64", FAlu),
     ("fmax_f32", FAlu),

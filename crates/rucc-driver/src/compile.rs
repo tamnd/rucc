@@ -4170,6 +4170,32 @@ mod tests {
         assert!(!result.text().contains("vfmadd"), "{}", result.text());
     }
 
+    /// On AArch64 `fmadd` is in the base set, so `fma` and `fmaf` are one instruction in every
+    /// function. gcc 16.2.0 writes the same from -O1 up, and `__FP_FAST_FMA` says so on every
+    /// AArch64 target.
+    #[test]
+    fn a_call_to_fma_is_fmadd_on_aarch64() {
+        let source = concat!(
+            "double fma(double, double, double);\n",
+            "double f(double x, double y, double z) { return fma(x, y, z); }\n",
+            "float g(float x, float y, float z) { return __builtin_fmaf(x, y, z); }\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            // Hosted, because a freestanding unit's own `fma` is not the C library's.
+            let mut opts = aarch64_asm("armv8-a");
+            opts.hosted = true;
+            opts.opt_level = level;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            let fused = text.lines().filter(|line| line.starts_with("\tfmadd "));
+            let widths: Vec<bool> = fused.map(|line| line.contains(" d0,")).collect();
+            assert_eq!(widths, [true, false], "at {level:?}:\n{text}");
+            let calls = text.lines().any(|line| line.starts_with("\tb") && line.contains("fma"));
+            assert!(!calls, "at {level:?}:\n{text}");
+        }
+    }
+
     /// A function carrying the attribute is built for the instruction whatever the unit is, which
     /// is how PostgreSQL writes its checksum: no flag, the attribute on the one function, and the
     /// step inlined into it as one instruction. PostgreSQL's probe writes the attribute only when

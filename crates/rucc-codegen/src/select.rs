@@ -42,10 +42,10 @@ pub struct Selector {
     /// processor without the extension, is written out as arithmetic before selection. See
     /// [`crate::expand::counts`].
     pub counts: &'static [rucc_target::CountInst],
-    /// The extension the fused multiply add rules need, or `None` where this machine has no rule
-    /// for one. A function built for a processor with the extension keeps a fused multiply add at
-    /// `float` and `double` for the rule, and every other one calls the library. See
-    /// [`crate::maths::calls`].
+    /// The extension the fused multiply add rules need, empty where every processor of the
+    /// architecture has the instruction, or `None` where this machine has no rule for one. A
+    /// function built for a processor with the extension keeps a fused multiply add at `float` and
+    /// `double` for the rule, and every other one calls the library. See [`crate::maths::calls`].
     pub fused: Option<&'static str>,
     /// The shape of each opcode, and the prefix a rule file puts in front of one.
     pub shapes: &'static MachineInsts,

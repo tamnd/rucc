@@ -101,6 +101,8 @@ fn plain(form: Form) -> Timing {
         // multiply is overridden in `slow` so this is the addition's number. The divides and the
         // square roots are there as well.
         FAlu => (2, Unit::Float),
+        // A multiply and an addition that waits for it, with no rounding between.
+        FMulAdd => (4, Unit::Float),
         FUnary | FConvert => (2, Unit::Float),
         FMove => (2, Unit::Float),
         // A general register into the other file and back, as a number or as bits. Both go across

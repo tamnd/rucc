@@ -863,7 +863,8 @@ pub fn compile_recording(
     // one, so a function without the vector registers calls the library instead.
     let fused = flags.vector
         && machine.selector.fused.is_some_and(|name| {
-            rucc_target::Feature::named(name).is_some_and(|feature| isa.has(feature))
+            name.is_empty()
+                || rucc_target::Feature::named(name).is_some_and(|feature| isa.has(feature))
         });
     // A value a landing pad reads from before the call goes through the frame, which is the one
     // way it reaches a block the unwinder starts. Before the lowerings, so that a load or a store
@@ -1905,6 +1906,29 @@ mod tests {
                 }
                 assert!(!text.contains("lsr") && !text.contains("mul"), "written out: {text}");
             }
+        }
+    }
+
+    /// A fused multiply add on AArch64 is `fmadd` in every function, since the instruction is in
+    /// the base set.
+    #[test]
+    fn an_aarch64_fused_multiply_add_is_one_instruction() {
+        for (format, wanted) in
+            [(rucc_ir::Float::F32, "a64.fmadd_f32"), (rucc_ir::Float::F64, "a64.fmadd_f64")]
+        {
+            let ty = Type::float(format);
+            let (mut names, mut source, block, args) = blank(&[ty, ty, ty]);
+            let mut build = Builder::new(&mut source, block);
+            let args = build.func().push_values(&args);
+            let fused = build.value(ir::InstData { args, ..ir::InstData::new(Opcode::Fma) }, ty);
+            build.ret(&[fused]);
+            let machine = Machine::aarch64(&aarch64::AAPCS64);
+            let out =
+                compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                    .expect("a fused multiply add is an instruction");
+            let text = mir::print_func(&out, &names, &aarch64::REGS);
+            assert!(text.contains(wanted), "{wanted}: {text}");
+            assert!(!text.contains("call"), "and no call: {text}");
         }
     }
 

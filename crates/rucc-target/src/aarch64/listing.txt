@@ -339,6 +339,8 @@ ad008921	stp q1, q2, [x9, #16]	stp_f128
 1e630841	fmul d1, d2, d3	fmul_f64
 1e231841	fdiv s1, s2, s3	fdiv_f32
 1e631841	fdiv d1, d2, d3	fdiv_f64
+1f031041	fmadd s1, s2, s3, s4	fmadd_f32
+1f431041	fmadd d1, d2, d3, d4	fmadd_f64
 1e235841	fmin s1, s2, s3	fmin_f32
 1e635841	fmin d1, d2, d3	fmin_f64
 1e234841	fmax s1, s2, s3	fmax_f32
