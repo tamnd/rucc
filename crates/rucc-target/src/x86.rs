@@ -680,7 +680,7 @@ pub fn form_here(name: &str) -> Option<Form> {
             let args: Vec<Kind> = inst.args.iter().map(|&arg| Kind::of(arg)).collect();
             // A row with the REX wide bit is found in either mode and refused only when it is
             // written, so it is refused here too.
-            encoding_in(Mode::Bits32, inst.mnemonic, &args, 0).is_some_and(|row| !row.size.wide())
+            encoding_in(Mode::Bits32, inst.mnemonic, &args, 0).is_some_and(|row| !row.long_only())
         })
         .then_some(found)
 }
