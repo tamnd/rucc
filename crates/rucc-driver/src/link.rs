@@ -1961,8 +1961,9 @@ fn startfile(opts: &LinkOptions, pie: bool) -> Option<&'static str> {
 /// A dynamic link also takes the atomic routines from the machine's `libatomic` when its gcc has
 /// one, ahead of ours and `--as-needed`. The two differ on the one point that matters: libatomic
 /// does a 16-byte access with `cmpxchg16b` or a register pair and no lock, and ours takes a lock
-/// from a table of its own. A process with both has two ways to reach one object, and neither
-/// stops the other. A rucc program that opens a GCC library built with `-latomic` lost updates
+/// from a table of its own. Ours now uses `cmpxchg16b` too on an x86-64 processor that has it,
+/// but elsewhere it still takes the lock. A process with both has two ways to reach one object,
+/// and neither stops the other. A rucc program that opens a GCC library built with `-latomic` lost updates
 /// to an object they both changed. With libatomic first, the process has one copy. A static
 /// link keeps ours, because the program is then the one copy there is.
 fn runtime_items(opts: &LinkOptions, runtime: &[PathBuf], ours: Option<&Path>) -> Vec<String> {
