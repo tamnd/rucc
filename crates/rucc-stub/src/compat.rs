@@ -34,7 +34,7 @@ use crate::describe::{Error, Library};
 /// glibc's own announcement for it names `libpthread`, `libdl`, `libutil` and `libanl`, and those
 /// four are the ones below. `librt` moved in the same direction over several releases and `libm`
 /// never moved at all, which is why neither is here. See [`compat`].
-const MERGED: Version = Version::new(2, 34);
+pub(crate) const MERGED: Version = Version::new(2, 34);
 
 /// The four glibc libraries that are empty from [`MERGED`] onwards, and the `SONAME` each carries.
 ///
@@ -42,7 +42,7 @@ const MERGED: Version = Version::new(2, 34);
 /// and the numbers on the right are not derivable from anything: they are the versions glibc has
 /// carried since before the merge and kept across it, because keeping them is the entire point of
 /// leaving the files behind.
-const GLIBC: &[(&str, &str)] = &[
+pub(crate) const GLIBC: &[(&str, &str)] = &[
     ("libpthread.so", "libpthread.so.0"),
     ("libdl.so", "libdl.so.2"),
     ("libutil.so", "libutil.so.1"),
@@ -109,7 +109,8 @@ impl Compat {
 /// `libpthread`, `libdl`, `libutil` and `libanl`, from 2.34 onwards. A tuple with no version pinned is
 /// treated as current, since the unpinned spelling is the one people write when they mean the machine
 /// in front of them, and a target pinned below 2.34 gets nothing from here because on those releases
-/// the libraries are real and their contents come from `abilist` like everything else.
+/// the libraries are real. [`crate::glibc::stubs`] writes them for such a target, with the
+/// definitions that `glibc/moved.txt` gives back to them.
 ///
 /// `librt` and `libm` are deliberately absent, and both for the same reason rather than out of doubt
 /// that the files are needed. `libm` on glibc is real code and always has been: `sin` lives in
