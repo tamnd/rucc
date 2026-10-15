@@ -531,21 +531,22 @@ static __inline__ int __attribute__((__always_inline__)) _mm_ucomineq_ss(__m128 
 
 /* # The comparison that takes the predicate as a number
  *
- * `cmpps` carries the comparison in an immediate, and these two are how a program names it. The
- * eight predicates below are the eight SSE has. AVX widened the immediate and added twenty four
- * more, which need the wider instruction.
+ * `cmpps` carries the comparison in an immediate, and these two are how a program names it. SSE has
+ * eight predicates. AVX widened the immediate to thirty two, and the `_CMP_` names in
+ * <avxintrin.h> name them. Predicates 8 to 15 are made from the SSE comparisons, and 16 to 31 are
+ * the same as 0 to 15 with the other choice of signalling, which a plain C comparison does not
+ * show.
  *
  * Two differences from gcc, both in the direction of accepting more, and both measured against
  * gcc 16.2.0. gcc requires the predicate to be a constant the compiler can see, since it ends up
- * in an instruction, and refuses one worked out at run time; this is an ordinary function and
- * takes either. gcc refuses a predicate of eight or above outright, asking for `-mavx`; this
- * answers a mask of zeros for those rather than refusing, because a header cannot refuse. Every
- * program that compiles under gcc gets the same answers here, which is what matters, and the
- * extra cases are ones gcc would not have built at all. */
+ * in an instruction. These are ordinary functions and take one worked out at run time too. gcc
+ * refuses a predicate of eight or above unless the function is built for `avx`. These give the
+ * same answer the AVX instruction gives, because a header cannot refuse. Every program that
+ * compiles under gcc gets the same answers here. */
 static __inline__ __m128 __attribute__((__always_inline__))
 _mm_cmp_ps(__m128 __a, __m128 __b, const int __predicate)
 {
-  switch (__predicate & 31)
+  switch (__predicate & 15)
   {
     case 0:
       return _mm_cmpeq_ps(__a, __b);
@@ -563,15 +564,29 @@ _mm_cmp_ps(__m128 __a, __m128 __b, const int __predicate)
       return _mm_cmpnle_ps(__a, __b);
     case 7:
       return _mm_cmpord_ps(__a, __b);
-    default:
+    case 8:
+      return _mm_or_ps(_mm_cmpeq_ps(__a, __b), _mm_cmpunord_ps(__a, __b));
+    case 9:
+      return _mm_cmpnge_ps(__a, __b);
+    case 10:
+      return _mm_cmpngt_ps(__a, __b);
+    case 11:
       return _mm_setzero_ps();
+    case 12:
+      return _mm_and_ps(_mm_cmpneq_ps(__a, __b), _mm_cmpord_ps(__a, __b));
+    case 13:
+      return _mm_cmpge_ps(__a, __b);
+    case 14:
+      return _mm_cmpgt_ps(__a, __b);
+    default:
+      return (__m128)(__v4su){ ~0u, ~0u, ~0u, ~0u };
   }
 }
 
 static __inline__ __m128 __attribute__((__always_inline__))
 _mm_cmp_ss(__m128 __a, __m128 __b, const int __predicate)
 {
-  switch (__predicate & 31)
+  switch (__predicate & 15)
   {
     case 0:
       return _mm_cmpeq_ss(__a, __b);
@@ -589,10 +604,28 @@ _mm_cmp_ss(__m128 __a, __m128 __b, const int __predicate)
       return _mm_cmpnle_ss(__a, __b);
     case 7:
       return _mm_cmpord_ss(__a, __b);
-    default:
+    case 8:
+      return _mm_or_ps(_mm_cmpeq_ss(__a, __b), _mm_cmpunord_ss(__a, __b));
+    case 9:
+      return _mm_cmpnge_ss(__a, __b);
+    case 10:
+      return _mm_cmpngt_ss(__a, __b);
+    case 11:
     {
       __v4su __answer = (__v4su)__a;
       __answer[0] = 0u;
+      return (__m128)__answer;
+    }
+    case 12:
+      return _mm_and_ps(_mm_cmpneq_ss(__a, __b), _mm_cmpord_ss(__a, __b));
+    case 13:
+      return _mm_cmpge_ss(__a, __b);
+    case 14:
+      return _mm_cmpgt_ss(__a, __b);
+    default:
+    {
+      __v4su __answer = (__v4su)__a;
+      __answer[0] = ~0u;
       return (__m128)__answer;
     }
   }

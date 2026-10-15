@@ -480,15 +480,12 @@ static __inline__ int __attribute__((__always_inline__)) _mm_ucomineq_sd(__m128d
   return ((__v2df)__a)[0] != ((__v2df)__b)[0];
 }
 
-/* The comparison that carries its predicate as a number. The same eight SSE has, and the same two
- * differences from gcc `<xmmintrin.h>` describes: this takes a predicate worked out at run time
- * where gcc wants a constant, and answers a mask of zeros for the twenty four AVX predicates
- * where gcc refuses them outright. Both accept more than gcc, so a program that builds under gcc
- * gets the same answers here. */
+/* The comparison that carries its predicate as a number. The same thirty two predicates as the
+ * `ps` forms take, with the same two differences from gcc that <xmmintrin.h> describes. */
 static __inline__ __m128d __attribute__((__always_inline__))
 _mm_cmp_pd(__m128d __a, __m128d __b, const int __predicate)
 {
-  switch (__predicate & 31)
+  switch (__predicate & 15)
   {
     case 0:
       return _mm_cmpeq_pd(__a, __b);
@@ -506,15 +503,29 @@ _mm_cmp_pd(__m128d __a, __m128d __b, const int __predicate)
       return _mm_cmpnle_pd(__a, __b);
     case 7:
       return _mm_cmpord_pd(__a, __b);
-    default:
+    case 8:
+      return _mm_or_pd(_mm_cmpeq_pd(__a, __b), _mm_cmpunord_pd(__a, __b));
+    case 9:
+      return _mm_cmpnge_pd(__a, __b);
+    case 10:
+      return _mm_cmpngt_pd(__a, __b);
+    case 11:
       return _mm_setzero_pd();
+    case 12:
+      return _mm_and_pd(_mm_cmpneq_pd(__a, __b), _mm_cmpord_pd(__a, __b));
+    case 13:
+      return _mm_cmpge_pd(__a, __b);
+    case 14:
+      return _mm_cmpgt_pd(__a, __b);
+    default:
+      return (__m128d)(__v2du){ ~0ULL, ~0ULL };
   }
 }
 
 static __inline__ __m128d __attribute__((__always_inline__))
 _mm_cmp_sd(__m128d __a, __m128d __b, const int __predicate)
 {
-  switch (__predicate & 31)
+  switch (__predicate & 15)
   {
     case 0:
       return _mm_cmpeq_sd(__a, __b);
@@ -532,10 +543,28 @@ _mm_cmp_sd(__m128d __a, __m128d __b, const int __predicate)
       return _mm_cmpnle_sd(__a, __b);
     case 7:
       return _mm_cmpord_sd(__a, __b);
-    default:
+    case 8:
+      return _mm_or_pd(_mm_cmpeq_sd(__a, __b), _mm_cmpunord_sd(__a, __b));
+    case 9:
+      return _mm_cmpnge_sd(__a, __b);
+    case 10:
+      return _mm_cmpngt_sd(__a, __b);
+    case 11:
     {
       __v2du __answer = (__v2du)__a;
       __answer[0] = 0ULL;
+      return (__m128d)__answer;
+    }
+    case 12:
+      return _mm_and_pd(_mm_cmpneq_sd(__a, __b), _mm_cmpord_sd(__a, __b));
+    case 13:
+      return _mm_cmpge_sd(__a, __b);
+    case 14:
+      return _mm_cmpgt_sd(__a, __b);
+    default:
+    {
+      __v2du __answer = (__v2du)__a;
+      __answer[0] = ~0ULL;
       return (__m128d)__answer;
     }
   }

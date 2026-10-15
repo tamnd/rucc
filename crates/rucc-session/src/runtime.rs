@@ -42,6 +42,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("avx512fintrin.h", include_str!("../runtime/include/avx512fintrin.h")),
     ("avx512vlintrin.h", include_str!("../runtime/include/avx512vlintrin.h")),
     ("avx512vpopcntdqintrin.h", include_str!("../runtime/include/avx512vpopcntdqintrin.h")),
+    ("avxintrin.h", include_str!("../runtime/include/avxintrin.h")),
     ("cet.h", include_str!("../runtime/include/cet.h")),
     ("cetintrin.h", include_str!("../runtime/include/cetintrin.h")),
     ("cpuid.h", include_str!("../runtime/include/cpuid.h")),

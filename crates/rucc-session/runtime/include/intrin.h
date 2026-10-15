@@ -33,23 +33,13 @@ unsigned char _BitScanReverse64(unsigned long *_Index, unsigned long long _Mask)
 
 /* The inline `wmemchr` and `wmemcmp` in <wchar.h> have a 32 byte loop that runs when the CRT has
  * found AVX2 on the machine, and the header compiles it for any compiler that is not clang. So the
- * type and the four operations in that loop have to exist for <wchar.h> to compile at all. They
- * are plain C over the vector's lanes rather than the instructions, since this compiler has no AVX2
- * yet, which gives the same answers more slowly, and nothing else is promised by them. */
-typedef long long __m256i __attribute__((__vector_size__(32), __may_alias__));
+ * four operations in that loop have to exist for <wchar.h> to compile at all, in a function that is
+ * not built for AVX2. `__m256i` and `_mm256_loadu_si256` come from <avxintrin.h>, which defines the
+ * load with no target on this row. The other three are here. They are plain C over the vector's
+ * lanes rather than the instructions, since this compiler has no AVX2 yet, which gives the same
+ * answers more slowly, and nothing else is promised by them. */
 typedef short __rucc_v16hi __attribute__((__vector_size__(32)));
 typedef unsigned char __rucc_v32qu __attribute__((__vector_size__(32)));
-
-static __inline__ __m256i __attribute__((__always_inline__))
-_mm256_loadu_si256(__m256i const *__p)
-{
-  __rucc_v32qu __to;
-  const unsigned char *__from = (const unsigned char *)__p;
-  int __i;
-  for (__i = 0; __i < 32; __i++)
-    __to[__i] = __from[__i];
-  return (__m256i)__to;
-}
 
 static __inline__ __m256i __attribute__((__always_inline__))
 _mm256_broadcastw_epi16(__m128i __a)
