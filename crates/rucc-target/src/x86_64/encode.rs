@@ -596,6 +596,25 @@ pub struct Encoding {
     pub evex: Option<Evex>,
 }
 
+impl Encoding {
+    /// Whether the wide bit of this row says sixty four bits, which thirty two bit mode cannot
+    /// write.
+    ///
+    /// On a legacy row the bit is in the REX byte, and that mode has no REX byte. On a VEX row the
+    /// bit is in the prefix, which both modes have. It makes the instruction sixty four bits only
+    /// where a general register or an integer in memory is that wide, which is a row with a
+    /// general register and the two that move a quadword between memory and a vector. Every other
+    /// VEX row reads the bit as part of the opcode, which is how `vfmadd213sd` is told from
+    /// `vfmadd213ss` and `vpermpd` from nothing at all, and i386 has those too.
+    #[must_use]
+    pub(crate) fn long_only(&self) -> bool {
+        self.size.wide()
+            && (self.vex.is_none()
+                || self.args.contains(&Kind::Reg)
+                || matches!(self.mnemonic, "vpextrq" | "vpinsrq"))
+    }
+}
+
 /// One row of the table below, for an instruction that carries no immediate or that carries one
 /// of any size at all.
 ///
@@ -5518,7 +5537,7 @@ pub fn encode_masked_in(
     if mask != Opmask::default() && row.evex.is_none() {
         return Err(Error::Mask { mnemonic: mnemonic.to_owned() });
     }
-    if mode == Mode::Bits32 && row.size.wide() {
+    if mode == Mode::Bits32 && row.long_only() {
         return Err(Error::Wide { mnemonic: mnemonic.to_owned() });
     }
     let mut writer = Writer {
@@ -8457,6 +8476,22 @@ mod tests {
         assert_eq!(holes, Holes { disp: Some(2), ..Holes::default() });
     }
 
+    /// A VEX row whose wide bit picks the instruction rather than the width of a general register
+    /// is written in thirty two bit mode, with the same bytes as in sixty four bit mode. The
+    /// bytes are what clang writes for `-m32`.
+    #[test]
+    fn i386_writes_a_vex_row_whose_wide_bit_is_part_of_the_opcode() {
+        for (mnemonic, values, want) in [
+            ("vfmadd213sd", vec![x(2), x(1), x(0)], "c4 e2 f1 a9 c2"),
+            ("vfmadd213ss", vec![x(2), x(1), x(0)], "c4 e2 71 a9 c2"),
+            ("vfmadd213sd", vec![at(RBX, 8), x(2), x(2)], "c4 e2 e9 a9 53 08"),
+            ("vpermpd", vec![Value::Imm(0x1b), y(3), y(1)], "c4 e3 fd 01 cb 1b"),
+        ] {
+            assert_eq!(hex32(mnemonic, &values), want, "{mnemonic}");
+            assert_eq!(hex(mnemonic, &values), want, "{mnemonic} in sixty four bit mode");
+        }
+    }
+
     #[test]
     fn what_i386_has_no_way_to_write_is_refused_rather_than_written_as_something_else() {
         let refused = |mnemonic: &str, values: &[Value]| {
@@ -8478,6 +8513,10 @@ mod tests {
         assert_eq!(refused("movl", &[index, long(RAX)]), register("movl", 10));
         let sse = [Value::Xmm(xmm(8)), Value::Xmm(xmm(0))];
         assert_eq!(refused("addsd", &sse), register("addsd", 8));
+        let quadword = [Value::Imm(1), at(RBX, 0), Value::Xmm(xmm(1)), Value::Xmm(xmm(1))];
+        assert_eq!(refused("vpinsrq", &quadword), wide("vpinsrq"));
+        let quadword = [Value::Imm(1), Value::Xmm(xmm(1)), at(RBX, 0)];
+        assert_eq!(refused("vpextrq", &quadword), wide("vpextrq"));
         assert_eq!(refused("addq", &[quad(RAX), quad(RBX)]), wide("addq"));
         assert_eq!(refused("cltq", &[]), wide("cltq"));
         assert_eq!(refused("movabsq", &[Value::Imm(1 << 40), quad(RAX)]), wide("movabsq"));
