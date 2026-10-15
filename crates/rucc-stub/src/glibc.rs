@@ -46,6 +46,15 @@
 //! `bin/glibc-compat moved` in `tamnd/rucc-cross` makes the list from the same Debian libraries as
 //! `glibc/compat.txt`. That is tamnd/rucc#3666.
 //!
+//! # Which node is the default
+//!
+//! The rule of [`describe`] takes the highest node of a name as its default. For 16 names that is
+//! wrong. On x86, `pread`, `open64` and six more have the default at `GLIBC_2.1`, and the `GLIBC_2.2`
+//! definition is the one libpthread had before 2.34. On s390x, `setjmp`, `longjmp` and six more have
+//! the default at `GLIBC_2.2` or `GLIBC_2.11`, and a later node keeps an old definition.
+//! `glibc/defaults.txt` gives the default node of each, and [`default_nodes`] sets it.
+//! `bin/glibc-compat defaults` in `tamnd/rucc-cross` makes the list. That is tamnd/rucc#3660.
+//!
 //! The loader is written under its `SONAME`, which is a different name on each port, and `ld.so`
 //! beside it is a linker script with the one line `INPUT ( AS_NEEDED ( <soname> ) )`. glibc's own
 //! `libc.so` names the loader in the same way. A program needs it for `__tls_get_addr`, and on
@@ -117,6 +126,12 @@ const COMPAT: &str = include_str!("../glibc/compat.txt");
 /// library already had the name at another node. The release after the origin is the one for every
 /// architecture that the line does not name again, and a dash means the definition did not move.
 const MOVED: &str = include_str!("../glibc/moved.txt");
+
+/// The names whose default definition is not at their highest node.
+///
+/// Each line is `library name arch node`. The node is the default on that architecture in every
+/// measured release that defines the name at it.
+const DEFAULTS: &str = include_str!("../glibc/defaults.txt");
 
 /// The architectures in every blob, spelled the way `bin/abilist` names its directories.
 pub const ARCHITECTURES: &[&str] =
@@ -229,6 +244,43 @@ pub fn compat_only(library: &str, arch: &str, minor: u32, symbols: &mut [Symbol]
     changed
 }
 
+/// Makes the node that [`DEFAULTS`] gives the default of its name, where that is not the highest node.
+///
+/// `library` is a [`Library::name`] and `arch` is one of [`ARCHITECTURES`]. The rule of [`describe`]
+/// has already made the highest node the default, so this runs after it. A name that has no
+/// definition at the node in `symbols` is left as it is. Returns how many definitions changed.
+pub fn default_nodes(library: &str, arch: &str, symbols: &mut [Symbol]) -> usize {
+    let mut changed = 0;
+    for line in DEFAULTS.lines().filter(|line| !line.starts_with('#')) {
+        let mut fields = line.split_whitespace();
+        let (Some(lib), Some(name), Some(on), Some(node)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if lib != library || on != arch {
+            continue;
+        }
+        let has = symbols.iter().any(|symbol| {
+            symbol.name == name
+                && symbol.version.as_ref().is_some_and(|version| version.node == node)
+        });
+        if !has {
+            continue;
+        }
+        for symbol in symbols.iter_mut().filter(|symbol| symbol.name == name) {
+            if let Some(version) = symbol.version.as_mut() {
+                let default = version.node == node;
+                if version.default != default {
+                    version.default = default;
+                    changed += 1;
+                }
+            }
+        }
+    }
+    changed
+}
+
 /// Gives each definition that moved into a library after glibc 2.`minor` back to the library it came
 /// from.
 ///
@@ -294,8 +346,9 @@ pub fn moved(arch: &str, minor: u32, sets: &mut [(&str, Vec<Symbol>)]) -> usize 
 ///
 /// The four libraries of [`LIBRARIES`] come first, in their order. Before 2.34 the four libraries
 /// that glibc then emptied into `libc` come after them, with what [`moved`] gave back. Each name has
-/// its default from the highest node, and then [`compat_only`] takes the default away where glibc
-/// keeps the name only for old programs.
+/// its default from the highest node, or from [`default_nodes`] for the few names where glibc keeps
+/// an older one. Then [`compat_only`] takes the default away where glibc keeps the name only for old
+/// programs.
 ///
 /// # Errors
 ///
@@ -320,6 +373,7 @@ pub fn exports(arch: &str, minor: u32) -> Result<Vec<(&'static str, Vec<Symbol>)
     for (library, symbols) in &mut sets {
         let library: &'static str = library;
         defaults(symbols).map_err(|_| Error::Moved { library })?;
+        default_nodes(library, arch, symbols);
         compat_only(library, arch, minor, symbols);
     }
     Ok(sets)
@@ -592,6 +646,53 @@ mod tests {
             lines += 1;
         }
         assert!(lines > 200, "{lines}");
+    }
+
+    /// On x86 `pread` and `open64` have the default at `GLIBC_2.1`, and the `GLIBC_2.2` definition is
+    /// the one that was in libpthread. tamnd/rucc#3660.
+    #[test]
+    fn pread_on_x86_has_the_default_at_glibc_2_1() {
+        let new = exports("x86", 39).expect("x86");
+        let old_first = at(&[("GLIBC_2.1", true), ("GLIBC_2.2", false)]);
+        assert_eq!(nodes(&new, "libc", "pread"), old_first);
+        assert_eq!(nodes(&new, "libc", "open64"), old_first);
+        let before = exports("x86", 28).expect("x86");
+        assert_eq!(nodes(&before, "libc", "pread"), at(&[("GLIBC_2.1", true)]));
+        assert_eq!(nodes(&before, "libpthread", "pread"), at(&[("GLIBC_2.2", true)]));
+        let wide = exports("x86_64", 39).expect("x86_64");
+        assert_eq!(nodes(&wide, "libc", "pread"), at(&[("GLIBC_2.2.5", true)]));
+    }
+
+    /// On s390x `setjmp` has the default at `GLIBC_2.2`, and `GLIBC_2.19` keeps an old definition.
+    #[test]
+    fn setjmp_on_s390x_has_the_default_at_glibc_2_2() {
+        for minor in [28, 39] {
+            let sets = exports("s390x", minor).expect("s390x");
+            assert_eq!(
+                nodes(&sets, "libc", "setjmp"),
+                at(&[("GLIBC_2.2", true), ("GLIBC_2.19", false)]),
+                "2.{minor}"
+            );
+            let chk = nodes(&sets, "libc", "__longjmp_chk");
+            let default: Vec<&str> =
+                chk.iter().filter(|(_, default)| *default).map(|(node, _)| node.as_str()).collect();
+            assert_eq!(default, ["GLIBC_2.11"], "2.{minor}");
+        }
+    }
+
+    /// Every line of the list reads, and names a library and an architecture that are known.
+    #[test]
+    fn every_line_of_the_defaults_list_reads() {
+        let mut lines = 0;
+        for line in DEFAULTS.lines().filter(|line| !line.starts_with('#')) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 4, "{line}");
+            assert!(known(fields[0]), "{line}");
+            assert!(ARCHITECTURES.contains(&fields[2]), "{line}");
+            assert!(fields[3].starts_with("GLIBC_2."), "{line}");
+            lines += 1;
+        }
+        assert!(lines >= 16, "{lines}");
     }
 
     /// Every line of the list reads, and names a library and architectures that the blobs have.
