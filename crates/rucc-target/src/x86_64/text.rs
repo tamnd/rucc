@@ -1433,6 +1433,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("mulsd_rr", &[spell("mulsd", &[Xmm(2), Xmm(0)])]),
     ("divss_rr", &[spell("divss", &[Xmm(2), Xmm(0)])]),
     ("divsd_rr", &[spell("divsd", &[Xmm(2), Xmm(0)])]),
+    // This is `x0 = x2 * x0 + x3`, and `x0` starts as `x1`, so the answer is the product of the
+    // first two sources with the third added.
+    ("vfmadd213ss_rr", &[spell("vfmadd213ss", &[Xmm(3), Xmm(2), Xmm(0)])]),
+    ("vfmadd213sd_rr", &[spell("vfmadd213sd", &[Xmm(3), Xmm(2), Xmm(0)])]),
     ("movdqu_rm", &[spell("movdqu", &[Mem, Xmm(0)])]),
     ("movdqu_mr", &[spell("movdqu", &[Xmm(0), Mem])]),
     ("paddd_rr", &[spell("paddd", &[Xmm(2), Xmm(0)])]),

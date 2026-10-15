@@ -11114,11 +11114,15 @@ impl<'u> Body<'_, 'u> {
     fn maths_library(&self, callee: ExprId, symbol: Symbol, signature: &Signature) -> bool {
         let Some(spelled) = self.builtin_named(callee) else { return false };
         let name = spelled.strip_prefix("__builtin_").unwrap_or(spelled);
-        // Each takes and answers a `double`, or a `float` for the `f` spelling, and `copysign`
-        // takes two.
+        // Each takes and answers a `double`, or a `float` for the `f` spelling. `copysign` takes
+        // two and `fma` takes three.
         let format = if name.ends_with('f') { rucc_ir::Float::F32 } else { rucc_ir::Float::F64 };
         let ty = Type::float(format);
-        let count = if name.starts_with("copysign") { 2 } else { 1 };
+        let count = match name {
+            "copysign" | "copysignf" => 2,
+            "fma" | "fmaf" => 3,
+            _ => 1,
+        };
         let typed = |params: &[Param], count| {
             params.len() == count && params.iter().all(|param| param.ty == ty)
         };

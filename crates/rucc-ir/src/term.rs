@@ -958,11 +958,15 @@ fn binary_head(opcode: Opcode, ty: Type, address: u32) -> Option<&'static str> {
         // The four the machine has one instruction each for. A remainder is not among them: there
         // is no scalar instruction for it and what C means by `fmod` is a call, so an `frem` that
         // reached here would find no rule and be reported rather than lowered to something else.
+        // A fused multiply add is named too. It takes three operands and is one instruction
+        // where the processor has FMA3, and `rucc_codegen::maths` makes it a call everywhere
+        // else before selection.
         let names: &[&'static str; 2] = match opcode {
             Opcode::FAdd => &["fadd.f32", "fadd.f64"],
             Opcode::FSub => &["fsub.f32", "fsub.f64"],
             Opcode::FMul => &["fmul.f32", "fmul.f64"],
             Opcode::FDiv => &["fdiv.f32", "fdiv.f64"],
+            Opcode::Fma => &["fma.f32", "fma.f64"],
             _ => return None,
         };
         return Some(names[at]);

@@ -231,7 +231,8 @@ impl Flags {
     /// A direct call to one of the maths functions of [`MATH_BUILTINS`] that means the
     /// function of the C library, because it was written with the `__builtin_` spelling or because
     /// `-fno-builtin` does not turn the plain spelling off. A fact from the front end, which the
-    /// wasm code generator reads to write the instruction of the function in place of the call.
+    /// wasm code generator reads to write the instruction of the function in place of the call,
+    /// and which x86-64 reads to write `vfmadd` for `fma` in a function built for `fma`.
     /// A pass that drops it leaves a call, which is still correct. Legal on the two direct
     /// spellings of a call.
     pub const LIBRARY: Self = Self(1 << 26);
@@ -463,6 +464,8 @@ pub const MATH_BUILTINS: &[&str] = &[
     "fabsf",
     "copysign",
     "copysignf",
+    "fma",
+    "fmaf",
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.

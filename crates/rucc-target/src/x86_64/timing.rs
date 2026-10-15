@@ -195,6 +195,8 @@ fn plain(form: Form) -> Timing {
         // number this family has had since it stopped having separate adders and multipliers.
         // Divides are overridden in `slow`.
         AluVec => (4, Unit::Float),
+        // A fused multiply add costs what one multiply costs on every core that has one.
+        FusedVec => (4, Unit::Float),
         MoveVec | ShuffleVec | ShiftVec => (1, Unit::Float),
         LoadVec => (1 + LOAD, Unit::Load),
         StoreVec => (1, Unit::Store),

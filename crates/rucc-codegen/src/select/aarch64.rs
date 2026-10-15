@@ -13,6 +13,7 @@ include!(concat!(env!("OUT_DIR"), "/aarch64.rs"));
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
     counts: rucc_target::aarch64::COUNTS,
+    fused: None,
     shapes: &rucc_target::aarch64::MACHINE,
     address: rucc_target::aarch64::address,
     frame: &rucc_target::aarch64::FRAME,

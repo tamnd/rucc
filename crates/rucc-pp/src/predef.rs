@@ -618,6 +618,16 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             if has("sse2") {
                 d.flag("__MMX_WITH_SSE__");
             }
+            // A fused multiply add is one instruction in a unit built for `fma`, so the same
+            // macros as on AArch64. gcc defines them here and clang does not, so an Apple or an
+            // MSVC row leaves them out. gcc leaves them out under `-m32` too, which is the i386
+            // arm below.
+            let clang = triple.os == Os::Darwin || triple.env == Env::Msvc;
+            if has("fma") && opts.vector && !clang {
+                for name in ["", "F", "F32", "F64", "F32x"] {
+                    d.set(&format!("__FP_FAST_FMA{name}"), "1");
+                }
+            }
         }
         Arch::Aarch64 => {
             d.flag("__aarch64__");
@@ -2669,6 +2679,29 @@ mod tests {
         let x86: Triple = "x86_64-unknown-linux-gnu".parse().expect("a triple");
         let opts = Predef { isa: Isa::aarch64_march("armv8-a+crc"), ..Predef::new() };
         assert!(!built_in(&TargetInfo::new(x86), &opts).contains("__ARM_FEATURE_CRC32"));
+    }
+
+    #[test]
+    fn a_unit_built_for_fma_says_the_fused_multiply_add_is_fast_where_gcc_says_so() {
+        // gcc 16.2.0 with `-mfma` defines the five on x86-64 and none under `-m32`. clang 18
+        // defines none on any x86-64 row.
+        let built = |triple: &str, flag: &str| {
+            let triple: Triple = triple.parse().expect("a triple");
+            let mut choices = rucc_target::Choices::new();
+            choices.read(flag).expect("a name gcc knows");
+            let opts = Predef { isa: choices.over(Isa::baseline()), ..Predef::new() };
+            built_in(&TargetInfo::new(triple), &opts)
+        };
+        for triple in ["x86_64-unknown-linux-gnu", "x86_64-w64-windows-gnu"] {
+            let text = built(triple, "fma");
+            for name in ["", "F", "F32", "F64", "F32x"] {
+                assert!(has(&text, &format!("#define __FP_FAST_FMA{name} 1")), "{triple} {name}");
+            }
+            assert!(!built(triple, "avx2").contains("__FP_FAST_FMA"), "{triple}");
+        }
+        for triple in ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "i686-unknown-linux-gnu"] {
+            assert!(!built(triple, "fma").contains("__FP_FAST_FMA"), "{triple}");
+        }
     }
 
     #[test]
