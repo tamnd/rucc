@@ -1019,8 +1019,9 @@ pub struct TargetInfo {
     /// It is what `__atomic_always_lock_free` and `__atomic_is_lock_free` answer from, and it is
     /// a claim about what this compiler emits rather than about what the processor is capable of.
     /// Sixty four on every target here. x86-64 does sixteen bytes atomically with `cmpxchg16b`,
-    /// which is not in the baseline the psABI names and which nothing in this compiler writes, and
-    /// AArch64 does the same with its pair instructions, which nothing writes either. A target
+    /// which is not in the baseline the psABI names. With `cx16` the `__sync_` names use it, as
+    /// gcc's do, but the C11 names still call libatomic, and gcc answers no here too. AArch64 does
+    /// the same with its pair instructions, which nothing writes. A target
     /// that answered yes for sixteen bytes and then called a library that has to take a lock for
     /// them would have two answers to one question, and the wrong one is the one in the header.
     pub lock_free_width: u32,

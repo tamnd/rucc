@@ -339,7 +339,9 @@ impl Checker<'_> {
             | AtomicOp::SignalFence => self.types.void(),
         };
         let args = self.tast.add_expr_refs(&operands);
-        self.tast.expr(Expr::new(ExprKind::Atomic { op, order, args }, ty, Category::Rvalue), span)
+        let older = spelled.starts_with("__sync_");
+        let kind = ExprKind::Atomic { op, order, older, args };
+        self.tast.expr(Expr::new(kind, ty, Category::Rvalue), span)
     }
 
     /// Which ordering the call asked for, out of however many orderings its name carries.
@@ -477,7 +479,8 @@ impl Checker<'_> {
     fn full_barrier(&mut self, span: Span) -> ExprId {
         let ty = self.types.void();
         let args = self.tast.add_expr_refs(&[]);
-        let kind = ExprKind::Atomic { op: AtomicOp::Fence, order: Ordering::SeqCst, args };
+        let kind =
+            ExprKind::Atomic { op: AtomicOp::Fence, order: Ordering::SeqCst, older: false, args };
         self.tast.expr(Expr::new(kind, ty, Category::Rvalue), span)
     }
 

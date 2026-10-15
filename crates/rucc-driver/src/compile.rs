@@ -6624,12 +6624,14 @@ decl #0 x : int object external static defined
     /// the instruction's own, so the message lands on the line rather than on the file.
     ///
     /// The inline assembly is what keeps the program refused. `rucc_codegen::wide` splits the rest
-    /// of a function at this width into halves, but an operand of 128 bits in one register is
-    /// something it does not split. So the function keeps its wide values and reaches the selector
-    /// the way every function of this width used to.
+    /// of a function at this width into halves, but on AArch64 an operand of 128 bits in one
+    /// register is something it does not split. So the function keeps its wide values and reaches
+    /// the selector the way every function of this width used to. On x86-64 the same operand is
+    /// the pair `rdx:rax`, as in gcc, and the function is split.
     #[test]
     fn an_opcode_with_no_name_in_the_rule_language_is_named_by_its_own_spelling() {
         let mut opts = options();
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         opts.emit = EmitKind::MirFinal;
         let source = "int f(int a) {\n  __int128 wide = a;\n  __asm__(\"\" : \"+r\"(wide));\n  \
                       return (int) wide;\n}\n";
@@ -6665,9 +6667,11 @@ decl #0 x : int object external static defined
     }
 
     /// The note names the issue tracker, which is where a reader finds out whether it is known.
+    /// The program is the one above, on AArch64 for the same reason.
     #[test]
     fn the_note_on_unfinished_work_points_at_the_issues_rather_than_at_the_plan() {
         let mut opts = options();
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         opts.emit = EmitKind::MirFinal;
         let source =
             "int f(int a) { __int128 wide = a; __asm__(\"\" : \"+r\"(wide)); return wide; }\n";
@@ -10169,8 +10173,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     ///
     /// Both answer from the size, which has to be a power of two no wider than the widest access
     /// this compiler writes, and from what the pointer says about the alignment. Sixteen bytes is
-    /// no here and is no in gcc without `-mcx16`, because `cmpxchg16b` is not in the baseline and
-    /// nothing here writes it. Three bytes is no because there is no three byte access at all.
+    /// no here and in gcc, with `-mcx16` or without it, because only the `__sync_` names use
+    /// `cmpxchg16b` and the C11 names call libatomic. Three bytes is no because there is no three
+    /// byte access at all.
     ///
     /// The whole point of both names is that the answer is available before the program runs, so
     /// what is checked is that a `mov` of a constant is the whole function and that no call was
