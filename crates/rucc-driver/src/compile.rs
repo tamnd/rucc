@@ -4064,6 +4064,56 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// ggml turns half precision values into floats with `_cvtsh_ss` when `__F16C__` is defined,
+    /// and Opus multiplies and adds with `_mm256_fmadd_ps` in a unit built for AVX2 and FMA. Each
+    /// one is the instruction, inlined at every level, and a function not built for FMA is refused
+    /// the call.
+    #[test]
+    fn the_shipped_fma_and_f16c_headers_are_the_instructions() {
+        let source = concat!(
+            "#include <immintrin.h>\n",
+            "float f(__m256 *p, __m128d *q, unsigned short h, __m128 *v) {\n",
+            "  p[0] = _mm256_fmadd_ps(p[1], p[2], p[3]);\n",
+            "  q[0] = _mm_fnmsub_sd(q[1], q[2], q[3]);\n",
+            "  p[4] = _mm256_fmaddsub_ps(p[1], p[2], p[3]);\n",
+            "  p[5] = _mm256_cvtph_ps(_mm256_cvtps_ph(p[0], 0));\n",
+            "  v[0] = _mm_cvtph_ps(_mm_cvtps_ph(v[1], 4));\n",
+            "  return _cvtsh_ss(h) + _cvtsh_ss(_cvtss_sh(_mm_cvtss_f32(v[0]), 0));\n",
+            "}\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = freestanding();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let mut choices = rucc_target::Choices::new();
+            for name in ["fma", "f16c"] {
+                choices.read(name).expect("gcc knows the name");
+            }
+            opts.isa = choices.over(opts.isa);
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            for step in
+                ["vfmadd213ps", "vfnmsub213sd", "vfmaddsub213ps", "vcvtph2ps", "vcvtps2ph $4"]
+            {
+                assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
+            }
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
+        }
+        let result = run(
+            &freestanding(),
+            concat!(
+                "#include <immintrin.h>\n",
+                "__attribute__((target(\"avx2\")))\n",
+                "__m256 f(__m256 a) { return _mm256_fmadd_ps(a, a, a); }\n",
+            ),
+        );
+        let said = result.messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_mm256_fmadd_ps': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
     /// A function carrying the attribute is built for the instruction whatever the unit is, which
     /// is how PostgreSQL writes its checksum: no flag, the attribute on the one function, and the
     /// step inlined into it as one instruction. PostgreSQL's probe writes the attribute only when
