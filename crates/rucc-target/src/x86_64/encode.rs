@@ -832,6 +832,8 @@ static IVM: [Kind; 3] = [Kind::Imm, Kind::Vec, Kind::Mem];
 /// and an address, and write a third vector.
 static VVV: [Kind; 3] = [Kind::Vec, Kind::Vec, Kind::Vec];
 static MVV: [Kind; 3] = [Kind::Mem, Kind::Vec, Kind::Vec];
+/// The store of `vmaskmovps`, which reads a vector and a mask and writes to memory.
+static VVM: [Kind; 3] = [Kind::Vec, Kind::Vec, Kind::Mem];
 static IVVV: [Kind; 4] = [Kind::Imm, Kind::Vec, Kind::Vec, Kind::Vec];
 static IMVV: [Kind; 4] = [Kind::Imm, Kind::Mem, Kind::Vec, Kind::Vec];
 static IRVV: [Kind; 4] = [Kind::Imm, Kind::Reg, Kind::Vec, Kind::Vec];
@@ -4484,6 +4486,144 @@ static ENCODINGS: &[Encoding] = &[
     avx("vperm2i128", &IMVV, Word, Map::Escape3A, &[0x46], Some(2), pair(1, 3)),
     avx("vperm2f128", &IVVV, Word, Map::Escape3A, &[0x06], Some(2), pair(1, 3)),
     avx("vperm2f128", &IMVV, Word, Map::Escape3A, &[0x06], Some(2), pair(1, 3)),
+    // The arithmetic of <avxintrin.h> on packed floats and doubles. Each is the VEX form of an
+    // SSE instruction, and the one row is the `xmm` and the `ymm` form.
+    avx("vaddps", &VVV, Long, Map::Escape, &[0x58], Some(1), pair(0, 2)),
+    avx("vaddps", &MVV, Long, Map::Escape, &[0x58], Some(1), pair(0, 2)),
+    avx("vaddpd", &VVV, Word, Map::Escape, &[0x58], Some(1), pair(0, 2)),
+    avx("vaddpd", &MVV, Word, Map::Escape, &[0x58], Some(1), pair(0, 2)),
+    avx("vmulps", &VVV, Long, Map::Escape, &[0x59], Some(1), pair(0, 2)),
+    avx("vmulps", &MVV, Long, Map::Escape, &[0x59], Some(1), pair(0, 2)),
+    avx("vmulpd", &VVV, Word, Map::Escape, &[0x59], Some(1), pair(0, 2)),
+    avx("vmulpd", &MVV, Word, Map::Escape, &[0x59], Some(1), pair(0, 2)),
+    avx("vsubps", &VVV, Long, Map::Escape, &[0x5C], Some(1), pair(0, 2)),
+    avx("vsubps", &MVV, Long, Map::Escape, &[0x5C], Some(1), pair(0, 2)),
+    avx("vsubpd", &VVV, Word, Map::Escape, &[0x5C], Some(1), pair(0, 2)),
+    avx("vsubpd", &MVV, Word, Map::Escape, &[0x5C], Some(1), pair(0, 2)),
+    avx("vminps", &VVV, Long, Map::Escape, &[0x5D], Some(1), pair(0, 2)),
+    avx("vminps", &MVV, Long, Map::Escape, &[0x5D], Some(1), pair(0, 2)),
+    avx("vminpd", &VVV, Word, Map::Escape, &[0x5D], Some(1), pair(0, 2)),
+    avx("vminpd", &MVV, Word, Map::Escape, &[0x5D], Some(1), pair(0, 2)),
+    avx("vdivps", &VVV, Long, Map::Escape, &[0x5E], Some(1), pair(0, 2)),
+    avx("vdivps", &MVV, Long, Map::Escape, &[0x5E], Some(1), pair(0, 2)),
+    avx("vdivpd", &VVV, Word, Map::Escape, &[0x5E], Some(1), pair(0, 2)),
+    avx("vdivpd", &MVV, Word, Map::Escape, &[0x5E], Some(1), pair(0, 2)),
+    avx("vmaxps", &VVV, Long, Map::Escape, &[0x5F], Some(1), pair(0, 2)),
+    avx("vmaxps", &MVV, Long, Map::Escape, &[0x5F], Some(1), pair(0, 2)),
+    avx("vmaxpd", &VVV, Word, Map::Escape, &[0x5F], Some(1), pair(0, 2)),
+    avx("vmaxpd", &MVV, Word, Map::Escape, &[0x5F], Some(1), pair(0, 2)),
+    avx("vunpcklps", &VVV, Long, Map::Escape, &[0x14], Some(1), pair(0, 2)),
+    avx("vunpcklps", &MVV, Long, Map::Escape, &[0x14], Some(1), pair(0, 2)),
+    avx("vunpcklpd", &VVV, Word, Map::Escape, &[0x14], Some(1), pair(0, 2)),
+    avx("vunpcklpd", &MVV, Word, Map::Escape, &[0x14], Some(1), pair(0, 2)),
+    avx("vunpckhps", &VVV, Long, Map::Escape, &[0x15], Some(1), pair(0, 2)),
+    avx("vunpckhps", &MVV, Long, Map::Escape, &[0x15], Some(1), pair(0, 2)),
+    avx("vunpckhpd", &VVV, Word, Map::Escape, &[0x15], Some(1), pair(0, 2)),
+    avx("vunpckhpd", &MVV, Word, Map::Escape, &[0x15], Some(1), pair(0, 2)),
+    avx("vaddsubps", &VVV, Double, Map::Escape, &[0xD0], Some(1), pair(0, 2)),
+    avx("vaddsubps", &MVV, Double, Map::Escape, &[0xD0], Some(1), pair(0, 2)),
+    avx("vaddsubpd", &VVV, Word, Map::Escape, &[0xD0], Some(1), pair(0, 2)),
+    avx("vaddsubpd", &MVV, Word, Map::Escape, &[0xD0], Some(1), pair(0, 2)),
+    avx("vhaddps", &VVV, Double, Map::Escape, &[0x7C], Some(1), pair(0, 2)),
+    avx("vhaddps", &MVV, Double, Map::Escape, &[0x7C], Some(1), pair(0, 2)),
+    avx("vhaddpd", &VVV, Word, Map::Escape, &[0x7C], Some(1), pair(0, 2)),
+    avx("vhaddpd", &MVV, Word, Map::Escape, &[0x7C], Some(1), pair(0, 2)),
+    avx("vhsubps", &VVV, Double, Map::Escape, &[0x7D], Some(1), pair(0, 2)),
+    avx("vhsubps", &MVV, Double, Map::Escape, &[0x7D], Some(1), pair(0, 2)),
+    avx("vhsubpd", &VVV, Word, Map::Escape, &[0x7D], Some(1), pair(0, 2)),
+    avx("vhsubpd", &MVV, Word, Map::Escape, &[0x7D], Some(1), pair(0, 2)),
+    // The permutes within each 128 bit lane, by a vector of selectors or by an immediate.
+    avx("vpermilps", &VVV, Word, Map::Escape38, &[0x0C], Some(1), pair(0, 2)),
+    avx("vpermilps", &MVV, Word, Map::Escape38, &[0x0C], Some(1), pair(0, 2)),
+    avx("vpermilpd", &VVV, Word, Map::Escape38, &[0x0D], Some(1), pair(0, 2)),
+    avx("vpermilpd", &MVV, Word, Map::Escape38, &[0x0D], Some(1), pair(0, 2)),
+    avx("vpermilps", &IVV, Word, Map::Escape3A, &[0x04], None, pair(1, 2)),
+    avx("vpermilps", &IMV, Word, Map::Escape3A, &[0x04], None, pair(1, 2)),
+    avx("vpermilpd", &IVV, Word, Map::Escape3A, &[0x05], None, pair(1, 2)),
+    avx("vpermilpd", &IMV, Word, Map::Escape3A, &[0x05], None, pair(1, 2)),
+    // The compares, whose immediate is one of the 32 `_CMP_` predicates, and the shuffles.
+    avx("vcmpps", &IVVV, Long, Map::Escape, &[0xC2], Some(2), pair(1, 3)),
+    avx("vcmpps", &IMVV, Long, Map::Escape, &[0xC2], Some(2), pair(1, 3)),
+    avx("vcmppd", &IVVV, Word, Map::Escape, &[0xC2], Some(2), pair(1, 3)),
+    avx("vcmppd", &IMVV, Word, Map::Escape, &[0xC2], Some(2), pair(1, 3)),
+    avx("vcmpss", &IVVV, Single, Map::Escape, &[0xC2], Some(2), pair(1, 3)),
+    avx("vcmpss", &IMVV, Single, Map::Escape, &[0xC2], Some(2), pair(1, 3)),
+    avx("vcmpsd", &IVVV, Double, Map::Escape, &[0xC2], Some(2), pair(1, 3)),
+    avx("vcmpsd", &IMVV, Double, Map::Escape, &[0xC2], Some(2), pair(1, 3)),
+    avx("vshufps", &IVVV, Long, Map::Escape, &[0xC6], Some(2), pair(1, 3)),
+    avx("vshufps", &IMVV, Long, Map::Escape, &[0xC6], Some(2), pair(1, 3)),
+    avx("vshufpd", &IVVV, Word, Map::Escape, &[0xC6], Some(2), pair(1, 3)),
+    avx("vshufpd", &IMVV, Word, Map::Escape, &[0xC6], Some(2), pair(1, 3)),
+    avx("vdpps", &IVVV, Word, Map::Escape3A, &[0x40], Some(2), pair(1, 3)),
+    avx("vdpps", &IMVV, Word, Map::Escape3A, &[0x40], Some(2), pair(1, 3)),
+    Encoding {
+        imm: ImmSize::Is4,
+        ..avx("vblendvps", &VVVV, Word, Map::Escape3A, &[0x4A], Some(2), pair(1, 3))
+    },
+    Encoding {
+        imm: ImmSize::Is4,
+        ..avx("vblendvps", &VMVV, Word, Map::Escape3A, &[0x4A], Some(2), pair(1, 3))
+    },
+    Encoding {
+        imm: ImmSize::Is4,
+        ..avx("vblendvpd", &VVVV, Word, Map::Escape3A, &[0x4B], Some(2), pair(1, 3))
+    },
+    Encoding {
+        imm: ImmSize::Is4,
+        ..avx("vblendvpd", &VMVV, Word, Map::Escape3A, &[0x4B], Some(2), pair(1, 3))
+    },
+    // The one source operations: roots, estimates, conversions and duplicates.
+    avx("vsqrtps", &VV, Long, Map::Escape, &[0x51], None, pair(0, 1)),
+    avx("vsqrtps", &MV, Long, Map::Escape, &[0x51], None, pair(0, 1)),
+    avx("vsqrtpd", &VV, Word, Map::Escape, &[0x51], None, pair(0, 1)),
+    avx("vsqrtpd", &MV, Word, Map::Escape, &[0x51], None, pair(0, 1)),
+    avx("vrsqrtps", &VV, Long, Map::Escape, &[0x52], None, pair(0, 1)),
+    avx("vrsqrtps", &MV, Long, Map::Escape, &[0x52], None, pair(0, 1)),
+    avx("vrcpps", &VV, Long, Map::Escape, &[0x53], None, pair(0, 1)),
+    avx("vrcpps", &MV, Long, Map::Escape, &[0x53], None, pair(0, 1)),
+    avx("vroundps", &IVV, Word, Map::Escape3A, &[0x08], None, pair(1, 2)),
+    avx("vroundps", &IMV, Word, Map::Escape3A, &[0x08], None, pair(1, 2)),
+    avx("vroundpd", &IVV, Word, Map::Escape3A, &[0x09], None, pair(1, 2)),
+    avx("vroundpd", &IMV, Word, Map::Escape3A, &[0x09], None, pair(1, 2)),
+    avx("vcvtdq2ps", &VV, Long, Map::Escape, &[0x5B], None, pair(0, 1)),
+    avx("vcvtdq2ps", &MV, Long, Map::Escape, &[0x5B], None, pair(0, 1)),
+    avx("vcvtps2dq", &VV, Word, Map::Escape, &[0x5B], None, pair(0, 1)),
+    avx("vcvtps2dq", &MV, Word, Map::Escape, &[0x5B], None, pair(0, 1)),
+    avx("vcvttps2dq", &VV, Single, Map::Escape, &[0x5B], None, pair(0, 1)),
+    avx("vcvttps2dq", &MV, Single, Map::Escape, &[0x5B], None, pair(0, 1)),
+    // A widening conversion reads an `xmm` and writes a `ymm`, and a narrowing one does the
+    // reverse. The length bit is the wider of the two in both.
+    avx("vcvtps2pd", &VV, Long, Map::Escape, &[0x5A], None, pair(0, 1)),
+    avx("vcvtps2pd", &MV, Long, Map::Escape, &[0x5A], None, pair(0, 1)),
+    avx("vcvtpd2ps", &VV, Word, Map::Escape, &[0x5A], None, pair(0, 1)),
+    avx("vcvtpd2ps", &MV, Word, Map::Escape, &[0x5A], None, pair(0, 1)),
+    avx("vcvtdq2pd", &VV, Single, Map::Escape, &[0xE6], None, pair(0, 1)),
+    avx("vcvtdq2pd", &MV, Single, Map::Escape, &[0xE6], None, pair(0, 1)),
+    avx("vcvttpd2dq", &VV, Word, Map::Escape, &[0xE6], None, pair(0, 1)),
+    avx("vcvttpd2dq", &MV, Word, Map::Escape, &[0xE6], None, pair(0, 1)),
+    avx("vcvtpd2dq", &VV, Double, Map::Escape, &[0xE6], None, pair(0, 1)),
+    avx("vcvtpd2dq", &MV, Double, Map::Escape, &[0xE6], None, pair(0, 1)),
+    avx("vmovshdup", &VV, Single, Map::Escape, &[0x16], None, pair(0, 1)),
+    avx("vmovshdup", &MV, Single, Map::Escape, &[0x16], None, pair(0, 1)),
+    avx("vmovsldup", &VV, Single, Map::Escape, &[0x12], None, pair(0, 1)),
+    avx("vmovsldup", &MV, Single, Map::Escape, &[0x12], None, pair(0, 1)),
+    avx("vmovddup", &VV, Double, Map::Escape, &[0x12], None, pair(0, 1)),
+    avx("vmovddup", &MV, Double, Map::Escape, &[0x12], None, pair(0, 1)),
+    avx("vtestps", &VV, Word, Map::Escape38, &[0x0E], None, pair(0, 1)),
+    avx("vtestps", &MV, Word, Map::Escape38, &[0x0E], None, pair(0, 1)),
+    avx("vtestpd", &VV, Word, Map::Escape38, &[0x0F], None, pair(0, 1)),
+    avx("vtestpd", &MV, Word, Map::Escape38, &[0x0F], None, pair(0, 1)),
+    // The sign bits to a general purpose register.
+    avx("vmovmskps", &VR, Long, Map::Escape, &[0x50], None, pair(0, 1)),
+    avx("vmovmskpd", &VR, Word, Map::Escape, &[0x50], None, pair(0, 1)),
+    // The masked load and store, whose mask is the middle argument in both directions.
+    avx("vmaskmovps", &MVV, Word, Map::Escape38, &[0x2C], Some(1), pair(0, 2)),
+    avx("vmaskmovpd", &MVV, Word, Map::Escape38, &[0x2D], Some(1), pair(0, 2)),
+    avx("vmaskmovps", &VVM, Word, Map::Escape38, &[0x2E], Some(1), pair(2, 0)),
+    avx("vmaskmovpd", &VVM, Word, Map::Escape38, &[0x2F], Some(1), pair(2, 0)),
+    // The stores that go around the cache.
+    avx("vmovntps", &VM, Long, Map::Escape, &[0x2B], None, pair(1, 0)),
+    avx("vmovntpd", &VM, Word, Map::Escape, &[0x2B], None, pair(1, 0)),
     evex(
         "vpslld",
         &IVV,
@@ -7102,6 +7242,65 @@ mod tests {
         assert_eq!(hex("vorpd", &[y(1), y(2), y(3)]), "c5 ed 56 d9");
         assert_eq!(hex("vandpd", &[x(1), x(2), x(3)]), "c5 e9 54 d9");
         assert_eq!(hex("vandnps", &[y(1), y(2), y(3)]), "c5 ec 55 d9");
+    }
+
+    /// The instructions that <avxintrin.h> writes in its inline assembly, each against the bytes
+    /// gas writes for it.
+    #[test]
+    fn the_avx_float_rows_are_the_bytes_gas_writes() {
+        assert_eq!(hex("vaddps", &[y(1), y(2), y(3)]), "c5 ec 58 d9");
+        assert_eq!(hex("vaddpd", &[at(RAX, 0), y(2), y(3)]), "c5 ed 58 18");
+        assert_eq!(hex("vsubps", &[y(1), y(2), y(3)]), "c5 ec 5c d9");
+        assert_eq!(hex("vsubpd", &[y(9), y(2), y(3)]), "c4 c1 6d 5c d9");
+        assert_eq!(hex("vmulpd", &[x(1), x(2), x(3)]), "c5 e9 59 d9");
+        assert_eq!(hex("vdivps", &[y(1), y(2), y(3)]), "c5 ec 5e d9");
+        assert_eq!(hex("vminpd", &[y(1), y(2), y(3)]), "c5 ed 5d d9");
+        assert_eq!(hex("vmaxps", &[y(1), y(2), y(3)]), "c5 ec 5f d9");
+        assert_eq!(hex("vaddsubps", &[y(1), y(2), y(3)]), "c5 ef d0 d9");
+        assert_eq!(hex("vhaddpd", &[y(1), y(2), y(3)]), "c5 ed 7c d9");
+        assert_eq!(hex("vhsubps", &[y(1), y(2), y(3)]), "c5 ef 7d d9");
+        assert_eq!(hex("vunpcklps", &[y(1), y(2), y(3)]), "c5 ec 14 d9");
+        assert_eq!(hex("vunpckhpd", &[y(1), y(2), y(3)]), "c5 ed 15 d9");
+        assert_eq!(hex("vpermilps", &[y(1), y(2), y(3)]), "c4 e2 6d 0c d9");
+        assert_eq!(hex("vpermilpd", &[x(1), x(2), x(3)]), "c4 e2 69 0d d9");
+        assert_eq!(hex("vpermilps", &[Value::Imm(0x1b), y(1), y(3)]), "c4 e3 7d 04 d9 1b");
+        assert_eq!(hex("vpermilpd", &[Value::Imm(5), x(1), x(3)]), "c4 e3 79 05 d9 05");
+        assert_eq!(hex("vcmpps", &[Value::Imm(0x1e), y(1), y(2), y(3)]), "c5 ec c2 d9 1e");
+        assert_eq!(hex("vcmppd", &[Value::Imm(4), y(1), y(2), y(3)]), "c5 ed c2 d9 04");
+        assert_eq!(hex("vcmpss", &[Value::Imm(1), x(1), x(2), x(3)]), "c5 ea c2 d9 01");
+        assert_eq!(hex("vcmpsd", &[Value::Imm(0x11), x(1), x(2), x(3)]), "c5 eb c2 d9 11");
+        assert_eq!(hex("vshufps", &[Value::Imm(0x4e), y(1), y(2), y(3)]), "c5 ec c6 d9 4e");
+        assert_eq!(hex("vshufpd", &[Value::Imm(5), y(1), y(2), y(3)]), "c5 ed c6 d9 05");
+        assert_eq!(hex("vdpps", &[Value::Imm(0xf1), y(1), y(2), y(3)]), "c4 e3 6d 40 d9 f1");
+        assert_eq!(hex("vblendvps", &[y(4), y(1), y(2), y(3)]), "c4 e3 6d 4a d9 40");
+        assert_eq!(hex("vblendvpd", &[x(4), x(1), x(2), x(3)]), "c4 e3 69 4b d9 40");
+        assert_eq!(hex("vsqrtps", &[y(1), y(3)]), "c5 fc 51 d9");
+        assert_eq!(hex("vsqrtpd", &[y(1), y(3)]), "c5 fd 51 d9");
+        assert_eq!(hex("vrsqrtps", &[y(1), y(3)]), "c5 fc 52 d9");
+        assert_eq!(hex("vrcpps", &[y(1), y(3)]), "c5 fc 53 d9");
+        assert_eq!(hex("vroundps", &[Value::Imm(9), y(1), y(3)]), "c4 e3 7d 08 d9 09");
+        assert_eq!(hex("vroundpd", &[Value::Imm(10), y(1), y(3)]), "c4 e3 7d 09 d9 0a");
+        assert_eq!(hex("vcvtdq2ps", &[y(1), y(3)]), "c5 fc 5b d9");
+        assert_eq!(hex("vcvtps2dq", &[y(1), y(3)]), "c5 fd 5b d9");
+        assert_eq!(hex("vcvttps2dq", &[y(1), y(3)]), "c5 fe 5b d9");
+        assert_eq!(hex("vcvtps2pd", &[x(1), y(3)]), "c5 fc 5a d9");
+        assert_eq!(hex("vcvtpd2ps", &[y(1), x(3)]), "c5 fd 5a d9");
+        assert_eq!(hex("vcvtdq2pd", &[x(1), y(3)]), "c5 fe e6 d9");
+        assert_eq!(hex("vcvttpd2dq", &[y(1), x(3)]), "c5 fd e6 d9");
+        assert_eq!(hex("vcvtpd2dq", &[y(1), x(3)]), "c5 ff e6 d9");
+        assert_eq!(hex("vmovshdup", &[y(1), y(3)]), "c5 fe 16 d9");
+        assert_eq!(hex("vmovsldup", &[y(1), y(3)]), "c5 fe 12 d9");
+        assert_eq!(hex("vmovddup", &[y(1), y(3)]), "c5 ff 12 d9");
+        assert_eq!(hex("vtestps", &[y(1), y(3)]), "c4 e2 7d 0e d9");
+        assert_eq!(hex("vtestpd", &[x(1), x(3)]), "c4 e2 79 0f d9");
+        assert_eq!(hex("vmovmskps", &[y(1), long(RAX)]), "c5 fc 50 c1");
+        assert_eq!(hex("vmovmskpd", &[y(9), long(RCX)]), "c4 c1 7d 50 c9");
+        assert_eq!(hex("vmaskmovps", &[at(RAX, 0), y(1), y(3)]), "c4 e2 75 2c 18");
+        assert_eq!(hex("vmaskmovpd", &[at(RAX, 0), x(1), x(3)]), "c4 e2 71 2d 18");
+        assert_eq!(hex("vmaskmovps", &[y(3), y(1), at(RAX, 0)]), "c4 e2 75 2e 18");
+        assert_eq!(hex("vmaskmovpd", &[y(3), y(1), at(RAX, 0)]), "c4 e2 75 2f 18");
+        assert_eq!(hex("vmovntps", &[y(1), at(RAX, 0)]), "c5 fc 2b 08");
+        assert_eq!(hex("vmovntpd", &[y(1), at(RAX, 0)]), "c5 fd 2b 08");
     }
 
     /// lib/raid6/recov_avx512.c moves whole `zmm` registers with the floating point moves, which

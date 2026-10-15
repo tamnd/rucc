@@ -3893,6 +3893,61 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// libsodium's configure asks for AVX with the pragma and `_mm256_zeroall`, and its code calls
+    /// the arithmetic, the comparisons and the moves from functions built for it. Each one is the
+    /// instruction, inlined at every level, and a function not built for AVX is refused the call.
+    #[test]
+    fn the_shipped_avxintrin_passes_the_libsodium_probe_under_avx() {
+        let source = concat!(
+            "#pragma GCC target(\"avx\")\n",
+            "#include <immintrin.h>\n",
+            "void probe(void) { _mm256_zeroall(); }\n",
+            "int f(__m256 a, __m256 b, __m256d c, __m256d d, __m128i e, __m256i g, float *p) {\n",
+            "  __m256 s = _mm256_add_ps(a, b);\n",
+            "  __m256 m = _mm256_cmp_ps(s, b, _CMP_GT_OQ);\n",
+            "  __m256d t = _mm256_blendv_pd(c, d, _mm256_cvtepi32_pd(e));\n",
+            "  _mm256_maskstore_ps(p, _mm256_castps_si256(m), _mm256_sqrt_ps(s));\n",
+            "  _mm256_storeu_pd((double *)p, _mm256_round_pd(t, _MM_FROUND_TO_ZERO));\n",
+            "  return _mm256_movemask_ps(m) + _mm256_testz_si256(g, g);\n",
+            "}\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = freestanding();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let mut choices = rucc_target::Choices::new();
+            choices.read("avx").expect("gcc knows avx");
+            opts.isa = choices.over(opts.isa);
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            for step in [
+                "vzeroall",
+                "vaddps",
+                "vcmpps $30",
+                "vblendvpd",
+                "vcvtdq2pd",
+                "vmaskmovps",
+                "vsqrtps",
+                "vroundpd $3",
+                "vmovmskps",
+                "vptest",
+                "vzeroupper",
+            ] {
+                assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
+            }
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
+        }
+        let result = run(
+            &freestanding(),
+            "#include <immintrin.h>\n__m256 f(__m256 x) { return _mm256_sqrt_ps(x); }\n",
+        );
+        let said = result.messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_mm256_sqrt_ps': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
     /// A function carrying the attribute is built for the instruction whatever the unit is, which
     /// is how PostgreSQL writes its checksum: no flag, the attribute on the one function, and the
     /// step inlined into it as one instruction. PostgreSQL's probe writes the attribute only when

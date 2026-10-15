@@ -19,7 +19,7 @@
 //! a name gcc knows is not one this compiler may refuse. Knowing a name is not the same as
 //! providing what it stands for, and [`Feature::honoured`] is the line between the two: only the
 //! honoured ones can be turned on from the command line and only they get a macro, since a macro is
-//! a promise that the intrinsics behind it exist and for AVX they do not yet.
+//! a promise that the intrinsics behind it exist and for AVX2 they do not yet.
 //!
 //! Turning one extension on turns on the ones it is built over, so `sse4.2` brings `sse4.1` and
 //! everything under it. Turning one off turns off everything built over it, so `-mno-sse3` takes
@@ -109,7 +109,7 @@ pub static FEATURES: &[Row] = &[
     named("xsaveopt", &["xsave"]),
     named("xsavec", &["xsave"]),
     named("xsaves", &["xsave"]),
-    named("avx", &["sse4.2", "xsave"]),
+    yes("avx", &["sse4.2", "xsave"]),
     named("avx2", &["avx"]),
     named("fma", &["avx"]),
     named("f16c", &["avx"]),
@@ -247,15 +247,15 @@ impl Feature {
     ///
     /// The SSE line up to 4.2, the population count, the CRC-32C step, `xsave`, the shadow stack
     /// instructions of `shstk`, the AES steps of `aes`, the carryless multiplication of `pclmul`,
-    /// and the three the baseline already has. For those the headers have the intrinsics and the
-    /// assembler has the instructions. For every other name gcc knows, a program can say it and
+    /// AVX, and the three the baseline already has. For those the headers have the intrinsics and
+    /// the assembler has the instructions. For every other name gcc knows, a program can say it and
     /// have it remembered, which is what an attribute on a function built for a processor chosen at
     /// run time needs, but the command line may not turn it on for a whole unit and no macro claims
     /// it.
     ///
     /// The AVX-512 names and `vpclmulqdq` have the few intrinsics PostgreSQL calls, from functions
-    /// that carry the attribute. They are still not honoured, because each is built over AVX and
-    /// AVX2, which have no intrinsics here at all, and `__AVX512F__` would promise hundreds more.
+    /// that carry the attribute. They are still not honoured, because each is built over AVX2,
+    /// which has no intrinsics here yet, and `__AVX512F__` would promise hundreds more.
     #[must_use]
     pub fn honoured(self) -> bool {
         self.row().honoured
@@ -954,7 +954,7 @@ mod tests {
         got.sort();
         let want = said(&[
             "FXSR", "MMX", "SSE", "SSE2", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "POPCNT", "CRC32",
-            "XSAVE",
+            "XSAVE", "AVX",
         ]);
         assert_eq!(got, want);
         let v3 = Isa::level("x86-64-v3").unwrap();
