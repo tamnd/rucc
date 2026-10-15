@@ -5,8 +5,8 @@
 //!
 //! # What is carried
 //!
-//! Four blobs in the format of [`crate::blob`], one per library that has code in it on a current
-//! glibc: `libc`, `libm`, `librt` and `ld`, which is the loader. Each holds the eight architectures in [`ARCHITECTURES`], packed
+//! Five blobs in the format of [`crate::blob`], one per library that has code in it on a current
+//! glibc: `libc`, `libm`, `librt`, `ld`, which is the loader, and `libresolv`. Each holds the eight architectures in [`ARCHITECTURES`], packed
 //! from the `abilist` files of the newest glibc `tamnd/rucc-cross` pins, and since an `abilist` says
 //! which release added every name, the newest one describes every older release too. They are
 //! compiled into the binary, which is what makes a stub something the compiler writes rather than
@@ -20,7 +20,7 @@
 //!
 //! [`stubs`] is every file a glibc link line wants from this crate for one target: `libc.so`,
 //! `libm.so` and `librt.so` out of the blobs, cut at the release the target asked for, the loader,
-//! and the empty compatibility libraries of [`crate::compat()`]. The file names are what `-l` opens
+//! `libresolv.so`, and the empty compatibility libraries of [`crate::compat()`]. The file names are what `-l` opens
 //! and the `SONAME`s inside them are what the loader will be asked for, which differ, and
 //! [`Library::file`] and [`Library::soname`] are the two columns.
 //!
@@ -43,6 +43,7 @@
 //! for a name it does not have. `glibc/moved.txt` gives, for each such definition, the release it
 //! moved in and the library it was in before, and [`moved`] gives it back to that library. So a
 //! target below 2.34 gets real stubs for the four libraries, with the definitions they had then.
+//! The resolver functions that moved into `libc` in 2.34 go back to `libresolv` in the same way.
 //! `bin/glibc-compat moved` in `tamnd/rucc-cross` makes the list from the same Debian libraries as
 //! `glibc/compat.txt`. That is tamnd/rucc#3666.
 //!
@@ -88,7 +89,8 @@ pub struct Library {
     blob: &'static [u8],
 }
 
-/// The four libraries, in the order a link line would name them.
+/// The five libraries. The first four are in the order a link line would name them, and `libresolv`
+/// is last because only a program that asks for it with `-lresolv` gets it.
 pub const LIBRARIES: &[Library] = &[
     Library {
         name: "libc",
@@ -109,6 +111,12 @@ pub const LIBRARIES: &[Library] = &[
         blob: include_bytes!("../glibc/librt.blob"),
     },
     Library { name: "ld", file: "ld.so", soname: None, blob: include_bytes!("../glibc/ld.blob") },
+    Library {
+        name: "libresolv",
+        file: "libresolv.so",
+        soname: Some("libresolv.so.2"),
+        blob: include_bytes!("../glibc/libresolv.blob"),
+    },
 ];
 
 /// The names glibc keeps only for old programs, with the release each one stopped being a default.
@@ -344,7 +352,7 @@ pub fn moved(arch: &str, minor: u32, sets: &mut [(&str, Vec<Symbol>)]) -> usize 
 
 /// Every library's definitions on `arch` at glibc 2.`minor`, by [`Library::name`].
 ///
-/// The four libraries of [`LIBRARIES`] come first, in their order. Before 2.34 the four libraries
+/// The libraries of [`LIBRARIES`] come first, in their order. Before 2.34 the four libraries
 /// that glibc then emptied into `libc` come after them, with what [`moved`] gave back. Each name has
 /// its default from the highest node, or from [`default_nodes`] for the few names where glibc keeps
 /// an older one. Then [`compat_only`] takes the default away where glibc keeps the name only for old
@@ -569,12 +577,6 @@ mod tests {
             || GLIBC.iter().any(|(file, _)| file.strip_suffix(".so") == Some(name))
     }
 
-    /// A library `bin/glibc-compat` measures. It reads libresolv too, and this module writes no stub
-    /// of libresolv yet, so a definition that moved out of it is only dropped.
-    fn measured(name: &str) -> bool {
-        known(name) || name == "libresolv"
-    }
-
     /// Every node of `name` in `library`, lowest first, and whether it is the default.
     fn nodes(sets: &[(&str, Vec<Symbol>)], library: &str, name: &str) -> Vec<(String, bool)> {
         let mut out: Vec<(String, bool)> = sets
@@ -637,7 +639,7 @@ mod tests {
             let fields: Vec<&str> = line.split_whitespace().collect();
             assert!(fields.len() >= 4, "{line}");
             assert!(known(fields[0]), "{line}");
-            assert!(fields[2] == "-" || measured(fields[2]), "{line}");
+            assert!(fields[2] == "-" || known(fields[2]), "{line}");
             assert!(release(fields[3]), "{line}");
             for other in &fields[4..] {
                 let (arch, since) = other.split_once('=').expect("arch=release");
@@ -703,7 +705,7 @@ mod tests {
         for line in COMPAT.lines().filter(|line| !line.starts_with('#')) {
             let fields: Vec<&str> = line.split_whitespace().collect();
             assert!(fields.len() >= 3, "{line}");
-            assert!(measured(fields[0]), "{line}");
+            assert!(known(fields[0]), "{line}");
             assert!(release(fields[2]), "{line}");
             for other in &fields[3..] {
                 let (arch, since) = other.split_once('=').expect("arch=release");
@@ -725,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn a_glibc_target_gets_four_real_stubs_and_the_empty_four() {
+    fn a_glibc_target_gets_five_real_stubs_and_the_empty_four() {
         let files = stubs(target("x86_64-linux-gnu"), 39).expect("x86_64 writes");
         let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
         assert_eq!(
@@ -736,6 +738,7 @@ mod tests {
                 "librt.so",
                 "ld-linux-x86-64.so.2",
                 "ld.so",
+                "libresolv.so",
                 "libpthread.so",
                 "libdl.so",
                 "libutil.so",
@@ -758,6 +761,26 @@ mod tests {
         };
         assert!(size(&old, "libpthread.so") > size(&new, "libpthread.so"));
         assert!(size(&old, "libdl.so") > size(&new, "libdl.so"));
+    }
+
+    /// `res_query` and `ns_initparse` are in libresolv at every release. In 2.34 the x86 `res_query`
+    /// and the `__dn_expand` family moved into libc, so before 2.34 libresolv has them and libc does
+    /// not. tamnd/rucc#3676.
+    #[test]
+    fn the_resolver_is_in_libresolv_before_glibc_2_34() {
+        let old = exports("x86", 28).expect("x86");
+        assert_eq!(nodes(&old, "libc", "__dn_expand"), at(&[]));
+        assert_eq!(nodes(&old, "libresolv", "__dn_expand"), at(&[("GLIBC_2.2", true)]));
+        assert!(!nodes(&old, "libresolv", "ns_initparse").is_empty());
+        assert!(!nodes(&old, "libresolv", "res_query").is_empty());
+        assert!(nodes(&old, "libc", "res_query").is_empty());
+        let new = exports("x86", 39).expect("x86");
+        assert!(!nodes(&new, "libc", "__dn_expand").is_empty());
+        assert!(!nodes(&new, "libresolv", "ns_initparse").is_empty());
+        for arch in ARCHITECTURES {
+            let sets = exports(arch, 39).expect("every architecture");
+            assert!(!nodes(&sets, "libresolv", "ns_initparse").is_empty(), "{arch}");
+        }
     }
 
     /// The stack protector's guard is a variable in the loader on four ports and a field of the
