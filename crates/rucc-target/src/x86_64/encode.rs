@@ -4909,20 +4909,6 @@ static ENCODINGS: &[Encoding] = &[
         vex: Some(Vex { map: Map::Escape, vvvv: None, long: true }),
         ..avx("vzeroall", &NO_ARGS, Long, Map::Escape, &[0x77], None, NO_MODRM)
     },
-    // BMI2's rotate that leaves the flags alone, and BMI's and-not, both VEX encoded.
-    avx("rorxl", &IRR, Double, Map::Escape3A, &[0xF0], None, pair(1, 2)),
-    avx("rorxl", &IMR, Double, Map::Escape3A, &[0xF0], None, pair(1, 2)),
-    avx("rorxq", &IRR, DoubleQuad, Map::Escape3A, &[0xF0], None, pair(1, 2)),
-    avx("rorxq", &IMR, DoubleQuad, Map::Escape3A, &[0xF0], None, pair(1, 2)),
-    avx("andnl", &RRR, Long, Map::Escape38, &[0xF2], Some(1), pair(0, 2)),
-    avx("andnl", &MRR, Long, Map::Escape38, &[0xF2], Some(1), pair(0, 2)),
-    avx("andnq", &RRR, Quad, Map::Escape38, &[0xF2], Some(1), pair(0, 2)),
-    avx("andnq", &MRR, Quad, Map::Escape38, &[0xF2], Some(1), pair(0, 2)),
-    // BMI2's clear of the bits above an index, which is the first argument and goes in `vvvv`.
-    avx("bzhil", &RRR, Long, Map::Escape38, &[0xF5], Some(0), pair(1, 2)),
-    avx("bzhil", &RMR, Long, Map::Escape38, &[0xF5], Some(0), pair(1, 2)),
-    avx("bzhiq", &RRR, Quad, Map::Escape38, &[0xF5], Some(0), pair(1, 2)),
-    avx("bzhiq", &RMR, Quad, Map::Escape38, &[0xF5], Some(0), pair(1, 2)),
 ];
 
 /// The rows only thirty two bit mode has, which are looked at in front of the shared table there
