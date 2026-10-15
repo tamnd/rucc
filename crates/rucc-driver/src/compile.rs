@@ -3948,6 +3948,72 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// libsodium's configure asks for AVX2 with the pragma, `_mm256_permutevar8x32_ps` and
+    /// `_mm256_broadcastsi128_si256`, and its code calls the integer arithmetic, the shuffles and
+    /// the shifts from functions built for it. Each one is the instruction, inlined at every level,
+    /// and a function not built for AVX2 is refused the call.
+    #[test]
+    fn the_shipped_avx2intrin_passes_the_libsodium_probe_under_avx2() {
+        let source = concat!(
+            "#pragma GCC target(\"avx2\")\n",
+            "#include <immintrin.h>\n",
+            "int probe(void) {\n",
+            "  __m256 x = _mm256_set1_ps(3.14f);\n",
+            "  __m256 y = _mm256_permutevar8x32_ps(x, _mm256_set1_epi32(42));\n",
+            "  __m256i z = _mm256_broadcastsi128_si256(_mm_setzero_si128());\n",
+            "  return _mm256_movemask_ps(_mm256_cmp_ps(x, y, _CMP_NEQ_OQ)) + _mm256_testz_si256(z, z);\n",
+            "}\n",
+            "int f(__m256i a, __m256i b, int *p) {\n",
+            "  __m256i s = _mm256_add_epi32(a, b);\n",
+            "  __m256i m = _mm256_cmpgt_epi8(s, b);\n",
+            "  __m256i t = _mm256_shuffle_epi8(_mm256_permutevar8x32_epi32(s, b), m);\n",
+            "  t = _mm256_sllv_epi32(_mm256_srli_epi32(t, 3), b);\n",
+            "  t = _mm256_blendv_epi8(t, _mm256_maskload_epi32(p, m), m);\n",
+            "  t = _mm256_alignr_epi8(_mm256_permute4x64_epi64(t, 0x4e), _mm256_mullo_epi16(t, a), 4);\n",
+            "  return _mm256_movemask_epi8(t);\n",
+            "}\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = freestanding();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let mut choices = rucc_target::Choices::new();
+            choices.read("avx2").expect("gcc knows avx2");
+            opts.isa = choices.over(opts.isa);
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            for step in [
+                "vpermps",
+                "vcmpps $12",
+                "vpaddd",
+                "vpcmpgtb",
+                "vpermd",
+                "vpshufb",
+                "vpsrld",
+                "vpsllvd",
+                "vpmaskmovd",
+                "vpblendvb",
+                "vpermq $78",
+                "vpmullw",
+                "vpalignr $4",
+                "vpmovmskb",
+                "vzeroupper",
+            ] {
+                assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
+            }
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
+        }
+        let result = run(
+            &freestanding(),
+            "#include <immintrin.h>\n__m256i f(__m256i x) { return _mm256_abs_epi8(x); }\n",
+        );
+        let said = result.messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_mm256_abs_epi8': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
     /// A function carrying the attribute is built for the instruction whatever the unit is, which
     /// is how PostgreSQL writes its checksum: no flag, the attribute on the one function, and the
     /// step inlined into it as one instruction. PostgreSQL's probe writes the attribute only when
