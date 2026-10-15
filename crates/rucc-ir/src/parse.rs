@@ -706,6 +706,10 @@ impl<'a, 'n> Parser<'a, 'n> {
             signature.convention = Convention::Stdcall;
         } else if self.eat("fastcall") {
             signature.convention = Convention::Fastcall;
+        } else if self.eat("no_callee_saved_registers") {
+            signature.convention = Convention::NoCalleeSaved;
+        } else if self.eat("preserve_none") {
+            signature.convention = Convention::PreserveNone;
         } else if self.eat("regparm(") {
             let Some(registers) = (0..=3u8).find(|registers| self.eat(&registers.to_string()))
             else {

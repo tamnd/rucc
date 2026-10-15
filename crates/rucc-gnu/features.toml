@@ -684,6 +684,26 @@ tests = ["rucc::a_function_that_saves_every_register_puts_back_what_it_writes", 
 notes = "x86-64 only, as with gcc, and refused with E0753 on every other target rather than ignored. The function saves every general purpose register it writes, the ones a callee may usually write included, except the one its value comes back in, and a call in it saves all of them since the callee may write any. No tail call is made out of one. The vector registers and the x87 stack are not saved, which is gcc's answer too: a function of this kind that would use one is refused with E0786 unless `-mgeneral-regs-only` or a `target` attribute took them away."
 
 [[feature]]
+name = "no_callee_saved_registers"
+kind = "attribute"
+gcc_version = "14.1"
+status = "implemented"
+answer = "error"
+targets = ["x86-64-elf"]
+tests = ["rucc::a_function_that_keeps_nothing_pushes_nothing_it_writes", "rucc::a_caller_of_one_that_keeps_nothing_gets_its_values_back", "rucc::what_gcc_says_of_the_unsaved_conventions_is_said_in_its_words", "rucc::the_unsaved_conventions_are_there_on_x86_64_elf_alone"]
+notes = "A calling convention of the function type on x86-64 ELF, as gcc 16 builds it: SysV arguments, with the function free to write every general purpose register but the stack and frame pointers, so it pushes none of `rbx` and `r12` to `r15`, and a call to it keeps what the caller keeps in them the way a call keeps what is in `rax`. Kept through a typedef and beside the star of a pointer, so a declaration each way is `conflicting types` and a pointer of one assigned to a pointer of the other is an incompatible pointer. A variadic definition is built. With `preserve_none` or `no_caller_saved_registers` it is refused in gcc's words, E0740, and with an argument with E0865. Not built: with `ms_abi`, which gcc passes the Windows way and still keeps nothing, refused with E0519, and on 32-bit x86, Windows and macOS, refused with E0753 where gcc builds it on the first two."
+
+[[feature]]
+name = "preserve_none"
+kind = "attribute"
+gcc_version = "15.1"
+status = "implemented"
+answer = "error"
+targets = ["x86-64-elf"]
+tests = ["rucc::a_preserve_none_call_puts_the_integers_in_r12_first", "rucc::an_unsaved_convention_beside_ms_abi_is_refused", "rucc::a_caller_of_one_that_keeps_nothing_gets_its_values_back", "rucc::what_gcc_says_of_the_unsaved_conventions_is_said_in_its_words", "rucc::the_unsaved_conventions_are_there_on_x86_64_elf_alone"]
+notes = "`no_callee_saved_registers` with the integer arguments in `r12`, `r13`, `r14`, `r15`, `rdi` and `rsi`, then on the stack, which is where gcc 16 puts them on x86-64 ELF. The vector arguments and the returns are SysV's, a structure is classified the SysV way over the new order, the address a large return comes back through is in `r12`, and a variadic definition saves `r12` to `rsi` in its register save area. Read, kept in the type and refused the same way as `no_callee_saved_registers`, and on the same targets."
+
+[[feature]]
 name = "target"
 kind = "attribute"
 gcc_version = "4.4"

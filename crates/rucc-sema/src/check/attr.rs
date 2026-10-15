@@ -105,6 +105,8 @@ const CONVENED: Spelled = Spelled::of(&[
     "indirect_return",
     "sseregparm",
     "callee_pop_aggregate_return",
+    "no_callee_saved_registers",
+    "preserve_none",
 ]);
 
 /// The format archetypes gcc 16 knows on every target, which is what `format(archetype, ...)` may
@@ -460,6 +462,10 @@ impl Checker<'_> {
             // [`Self::handler`].
             let elsewhere = matches!(row.name, "interrupt" | "no_caller_saved_registers")
                 && self.cx.target.tuple.arch().as_str() != "x86_64";
+            // gcc's two conventions that keep nothing are built for x86-64 ELF alone.
+            let elsewhere = elsewhere
+                || (matches!(row.name, "no_callee_saved_registers" | "preserve_none")
+                    && !row.is_on(here));
             if row.answer != Answer::Error
                 || (matches!(row.status, Status::Implemented | Status::Partial) && !elsewhere)
             {
@@ -1829,6 +1835,17 @@ impl Checker<'_> {
                 if flag == DeclFlags::INTERRUPT {
                     self.interrupt_signature(function, naked, attr.span);
                 }
+                // The function would have to give back every register to a caller that kept
+                // nothing, which gcc refuses in these words.
+                let other = match self.types.signature(function).convention {
+                    Convention::NoCalleeSaved => Some("no_callee_saved_registers"),
+                    Convention::PreserveNone => Some("preserve_none"),
+                    _ => None,
+                };
+                if let Some(other) = other.filter(|_| flag == DeclFlags::SAVES_ALL) {
+                    let what = format!("'{name}' and '{other}' attributes are not compatible");
+                    self.report(Diagnostic::error(what, attr.span).with_code("E0740"));
+                }
                 flags |= flag;
             }
         }
@@ -2875,6 +2892,9 @@ impl Checker<'_> {
         // A `regparm` count is kept apart until the list is read, since outside Windows it goes
         // with `stdcall` rather than against it, and `fastcall` refuses it whichever comes first.
         let mut regparm: Option<(u8, Span)> = None;
+        // The same for gcc's two that preserve nothing, which go with `sysv_abi` and not with
+        // each other.
+        let mut unsaved: Option<(Convention, String, Span)> = None;
         for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
@@ -2921,6 +2941,28 @@ impl Checker<'_> {
                     let Some(registers) = self.regparm_argument(&attr) else { continue };
                     regparm = Some((registers, attr.span));
                 }
+                // Refused with E0753 where they are not built, so there is nothing to say here.
+                "no_callee_saved_registers" | "preserve_none" => {
+                    let count = ast[attr.args].len();
+                    if count > 0 {
+                        let what =
+                            format!("wrong number of arguments specified for '{name}' attribute");
+                        let refused = Diagnostic::error(what, attr.span).with_code("E0865");
+                        self.report(refused.note(format!("expected 0, found {count}"), attr.span));
+                        continue;
+                    }
+                    let Some(convention) = Convention::asked(tuple, name) else { continue };
+                    match &unsaved {
+                        Some((_, first, _)) if *first != name => {
+                            let what = "'no_callee_saved_registers' and 'preserve_none' \
+                                        attributes are not compatible";
+                            let refused = Diagnostic::error(what.to_owned(), attr.span);
+                            self.report(refused.with_code("E0740"));
+                        }
+                        Some(_) => {}
+                        None => unsaved = Some((convention, name.to_owned(), attr.span)),
+                    }
+                }
                 "stdcall" | "cdecl" | "fastcall" | "thiscall" | "regparm" | "vectorcall"
                     if foreign_to_them =>
                 {
@@ -2931,6 +2973,21 @@ impl Checker<'_> {
                     self.report(dropped.note(note, attr.span));
                 }
                 _ => {}
+            }
+        }
+        // `sysv_abi` is the target's own wherever these are built, so it is no conflict. With
+        // `ms_abi` gcc passes the arguments the Windows way and still keeps nothing, which is a
+        // convention this compiler does not have, so it is refused rather than built as either.
+        if let Some((convention, name, span)) = unsaved {
+            match asked {
+                Some((Convention::Ms, ..)) => {
+                    let what = format!("'{name}' with 'ms_abi' is not supported yet");
+                    let note = "gcc passes the arguments as 'ms_abi' does and keeps no register \
+                                across the call, which is a convention of its own";
+                    let refused = Diagnostic::error(what, span).with_code("E0519");
+                    self.report(refused.note(note, span));
+                }
+                _ => return Some((convention, name, span)),
             }
         }
         let Some((registers, span)) = regparm else { return asked };
@@ -3038,7 +3095,10 @@ impl Checker<'_> {
         };
         let signature = self.types.signature(function);
         let Some(name) = signature.convention.attribute() else { return };
-        if !signature.variadic {
+        // The target's own list, read from the registers of the convention, which is gcc's too.
+        if !signature.variadic
+            || matches!(signature.convention, Convention::NoCalleeSaved | Convention::PreserveNone)
+        {
             return;
         }
         let what = format!(

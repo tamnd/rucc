@@ -1478,10 +1478,45 @@ static SSE_ORDER: [PhysReg; 16] = [
 pub static SYSV: CallRegs =
     CallRegs { conventions: Conventions(&SYSV_CONVENTIONS), ..SYSV_REGISTERS };
 
-/// The two conventions a function on an x86-64 platform other than Windows may have: its own, and
-/// the one `__attribute__((ms_abi))` asks for.
-static SYSV_CONVENTIONS: [(Convention, &CallRegs); 2] =
-    [(Convention::Target, &SYSV), (Convention::Ms, &MS_ON_SYSV)];
+/// The conventions a function on an x86-64 platform other than Windows may have: its own, the one
+/// `__attribute__((ms_abi))` asks for, and gcc's two that preserve nothing.
+static SYSV_CONVENTIONS: [(Convention, &CallRegs); 4] = [
+    (Convention::Target, &SYSV),
+    (Convention::Ms, &MS_ON_SYSV),
+    (Convention::NoCalleeSaved, &NO_CALLEE_SAVED_ON_SYSV),
+    (Convention::PreserveNone, &PRESERVE_NONE_ON_SYSV),
+];
+
+// The frame pointer, which is the one register besides the stack pointer a function of either of
+// gcc's two kinds gives back, and it is not one the allocator hands out anyway.
+static NO_CALLEE_SAVED: [PhysReg; 1] = [RBP];
+static PRESERVE_NONE_INT_ARGS: [PhysReg; 6] = [R12, R13, R14, R15, RDI, RSI];
+
+/// A function written `__attribute__((no_callee_saved_registers))`.
+///
+/// SysV in everything but what a call keeps, which is only the stack and the frame pointer: the
+/// function writes `rbx` and `r12` to `r15` without saving them, so a caller saves what it keeps
+/// in them, the way it saves what it keeps in `rax`. That is what gcc 16 builds. The vector
+/// registers are SysV's already, which keeps none of them.
+pub static NO_CALLEE_SAVED_ON_SYSV: CallRegs = CallRegs {
+    int_saved: &NO_CALLEE_SAVED,
+    conventions: Conventions(&SYSV_CONVENTIONS),
+    ..SYSV_REGISTERS
+};
+
+/// A function written `__attribute__((preserve_none))`.
+///
+/// `no_callee_saved_registers` with the integer arguments moved to the registers a caller of one
+/// does not keep anything in, `r12` to `r15` and then `rdi` and `rsi`, which is where gcc 16 puts
+/// them. Everything that follows from the first of them follows here too: the address a structure
+/// comes back through is in `r12`, and a variadic function saves `r12` up in the place of `rdi` in
+/// the register save area. The vector arguments and every return are SysV's.
+pub static PRESERVE_NONE_ON_SYSV: CallRegs = CallRegs {
+    int_args: &PRESERVE_NONE_INT_ARGS,
+    int_saved: &NO_CALLEE_SAVED,
+    conventions: Conventions(&SYSV_CONVENTIONS),
+    ..SYSV_REGISTERS
+};
 
 /// A function written `__attribute__((ms_abi))` on an x86-64 platform other than Windows.
 ///

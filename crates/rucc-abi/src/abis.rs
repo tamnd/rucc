@@ -719,6 +719,13 @@ pub enum Convention {
     /// in a unit `-mregparm=` gave another default to, which is where the kernel's `asmlinkage`
     /// uses it.
     Regparm(u8),
+    /// gcc's `no_callee_saved_registers` on x86-64 outside Windows: SysV's arguments, with the
+    /// callee free to write every general purpose register but the stack and frame pointers, so a
+    /// caller keeps whatever it needs across the call itself.
+    NoCalleeSaved,
+    /// gcc's `preserve_none` on x86-64 outside Windows: `no_callee_saved_registers` with the
+    /// integer arguments in `r12`, `r13`, `r14`, `r15`, `rdi` and `rsi`, in that order.
+    PreserveNone,
 }
 
 impl Convention {
@@ -736,6 +743,8 @@ impl Convention {
             Self::Regparm(1) => Some("regparm(1)"),
             Self::Regparm(2) => Some("regparm(2)"),
             Self::Regparm(_) => Some("regparm(3)"),
+            Self::NoCalleeSaved => Some("no_callee_saved_registers"),
+            Self::PreserveNone => Some("preserve_none"),
         }
     }
 
@@ -747,10 +756,15 @@ impl Convention {
     /// gcc knows neither name anywhere else. `stdcall`, `fastcall` and `cdecl` are answered on
     /// 32-bit x86, Linux as well as Windows, since gcc keeps both conventions on both. `cdecl` is
     /// the target's own on both, and under `-mregparm=` it keeps the registers, as gcc's does.
+    /// `no_callee_saved_registers` and `preserve_none` are answered on x86-64 ELF alone, the
+    /// one place they are built.
     #[must_use]
     pub fn asked(target: TargetTuple, name: &str) -> Option<Self> {
         let windows = target.os() == Os::Windows;
+        let elf = !windows && target.os() != Os::MacOs;
         match (target.arch(), name) {
+            (Arch::X86_64, "no_callee_saved_registers") if elf => Some(Self::NoCalleeSaved),
+            (Arch::X86_64, "preserve_none") if elf => Some(Self::PreserveNone),
             (Arch::X86_64, "ms_abi") if windows => Some(Self::Target),
             (Arch::X86_64, "ms_abi") => Some(Self::Ms),
             (Arch::X86_64, "sysv_abi") if windows => Some(Self::Sysv),
@@ -875,6 +889,9 @@ pub fn for_convention(
         (Convention::Target, _) => for_target(target),
         (Convention::Ms, Arch::X86_64) => Some(&WIN64),
         (Convention::Sysv, Arch::X86_64) => Some(&SYSV_AMD64),
+        // The same classification, over registers the target's tables give out in another order
+        // or keep fewer of, and the same count of each.
+        (Convention::NoCalleeSaved | Convention::PreserveNone, Arch::X86_64) => Some(&SYSV_AMD64),
         (Convention::Stdcall | Convention::Fastcall, Arch::X86) if target.os() == Os::Windows => {
             let msvc = target.env() == Env::Msvc;
             Some(match (convention, msvc) {
