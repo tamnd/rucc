@@ -32,6 +32,8 @@
  * baseline, and each is built for its extension, so a function that is not built for it cannot
  * call it. See `tamnd/rucc#2003` and `tamnd/rucc#2045`.
  *
+ * `<x86gprintrin.h>` is reached the same way and for the same reason. It holds the zero counts and
+ * the BMI1 and BMI2 names, and brings `<xsaveintrin.h>` and `<cetintrin.h>` too.
  * `<xsaveintrin.h>` is reached the same way and for the same reason, and holds `_xgetbv`.
  * `<cetintrin.h>` is too, and holds the shadow stack instructions that pcre2's JIT calls.
  * `<wmmintrin.h>` is too, and holds the AES steps and the carryless multiplication.
@@ -61,6 +63,7 @@
  * without that extension is refused the call the way gcc refuses it. */
 #include <smmintrin.h>
 
+#include <x86gprintrin.h>
 #include <xsaveintrin.h>
 #include <cetintrin.h>
 #include <wmmintrin.h>

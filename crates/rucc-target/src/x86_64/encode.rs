@@ -1545,6 +1545,58 @@ static ENCODINGS: &[Encoding] = &[
     third("mulxq", &RRR, DoubleQuad, Map::Escape38, &[0xF6], 1, pair(0, 2)),
     third("mulxl", &MRR, Double, Map::Escape38, &[0xF6], 1, pair(0, 2)),
     third("mulxq", &MRR, DoubleQuad, Map::Escape38, &[0xF6], 1, pair(0, 2)),
+    // The rest of BMI1 and BMI2 over general purpose registers, VEX encoded the same way as the
+    // shifts and the multiply above. `andn`, `pdep` and `pext` keep the middle argument in `vvvv`.
+    // `bextr` and `bzhi` keep the control there, and AT&T writes the control first. The prefix is
+    // what tells `bzhi`, `pdep` and `pext` apart, because all three are `F5`.
+    third("andnl", &RRR, Long, Map::Escape38, &[0xF2], 1, pair(0, 2)),
+    third("andnq", &RRR, Quad, Map::Escape38, &[0xF2], 1, pair(0, 2)),
+    third("andnl", &MRR, Long, Map::Escape38, &[0xF2], 1, pair(0, 2)),
+    third("andnq", &MRR, Quad, Map::Escape38, &[0xF2], 1, pair(0, 2)),
+    third("bextrl", &RRR, Long, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("bextrq", &RRR, Quad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("bextrl", &RMR, Long, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("bextrq", &RMR, Quad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("bzhil", &RRR, Long, Map::Escape38, &[0xF5], 0, pair(1, 2)),
+    third("bzhiq", &RRR, Quad, Map::Escape38, &[0xF5], 0, pair(1, 2)),
+    third("bzhil", &RMR, Long, Map::Escape38, &[0xF5], 0, pair(1, 2)),
+    third("bzhiq", &RMR, Quad, Map::Escape38, &[0xF5], 0, pair(1, 2)),
+    third("pdepl", &RRR, Double, Map::Escape38, &[0xF5], 1, pair(0, 2)),
+    third("pdepq", &RRR, DoubleQuad, Map::Escape38, &[0xF5], 1, pair(0, 2)),
+    third("pdepl", &MRR, Double, Map::Escape38, &[0xF5], 1, pair(0, 2)),
+    third("pdepq", &MRR, DoubleQuad, Map::Escape38, &[0xF5], 1, pair(0, 2)),
+    third("pextl", &RRR, Single, Map::Escape38, &[0xF5], 1, pair(0, 2)),
+    third("pextq", &RRR, SingleQuad, Map::Escape38, &[0xF5], 1, pair(0, 2)),
+    third("pextl", &MRR, Single, Map::Escape38, &[0xF5], 1, pair(0, 2)),
+    third("pextq", &MRR, SingleQuad, Map::Escape38, &[0xF5], 1, pair(0, 2)),
+    // The three that clear, isolate or mask the lowest set bit. They share `F3`, and the three
+    // bits beside the addressed argument say which one it is. The destination is in `vvvv`.
+    third("blsrl", &RR, Long, Map::Escape38, &[0xF3], 1, ext(0, 1)),
+    third("blsrq", &RR, Quad, Map::Escape38, &[0xF3], 1, ext(0, 1)),
+    third("blsrl", &MR, Long, Map::Escape38, &[0xF3], 1, ext(0, 1)),
+    third("blsrq", &MR, Quad, Map::Escape38, &[0xF3], 1, ext(0, 1)),
+    third("blsmskl", &RR, Long, Map::Escape38, &[0xF3], 1, ext(0, 2)),
+    third("blsmskq", &RR, Quad, Map::Escape38, &[0xF3], 1, ext(0, 2)),
+    third("blsmskl", &MR, Long, Map::Escape38, &[0xF3], 1, ext(0, 2)),
+    third("blsmskq", &MR, Quad, Map::Escape38, &[0xF3], 1, ext(0, 2)),
+    third("blsil", &RR, Long, Map::Escape38, &[0xF3], 1, ext(0, 3)),
+    third("blsiq", &RR, Quad, Map::Escape38, &[0xF3], 1, ext(0, 3)),
+    third("blsil", &MR, Long, Map::Escape38, &[0xF3], 1, ext(0, 3)),
+    third("blsiq", &MR, Quad, Map::Escape38, &[0xF3], 1, ext(0, 3)),
+    // The rotate of BMI2, which takes its count as an immediate, leaves the flags alone and has
+    // no `vvvv`. gcc writes it for a rotate by a constant when the unit is built for `bmi2`.
+    avx("rorxl", &IRR, Double, Map::Escape3A, &[0xF0], None, pair(1, 2)),
+    avx("rorxq", &IRR, DoubleQuad, Map::Escape3A, &[0xF0], None, pair(1, 2)),
+    avx("rorxl", &IMR, Double, Map::Escape3A, &[0xF0], None, pair(1, 2)),
+    avx("rorxq", &IMR, DoubleQuad, Map::Escape3A, &[0xF0], None, pair(1, 2)),
+    // The move that swaps the bytes on the way, which is `0F 38 F0` to load and `F1` to store.
+    // It is not VEX encoded. The `0xF2` prefix on the same opcodes makes them `crc32`.
+    bytes("movbew", &MR, Word, &[0x0F, 0x38, 0xF0], pair(0, 1), NO_IMM),
+    bytes("movbel", &MR, Long, &[0x0F, 0x38, 0xF0], pair(0, 1), NO_IMM),
+    bytes("movbeq", &MR, Quad, &[0x0F, 0x38, 0xF0], pair(0, 1), NO_IMM),
+    bytes("movbew", &RM, Word, &[0x0F, 0x38, 0xF1], pair(1, 0), NO_IMM),
+    bytes("movbel", &RM, Long, &[0x0F, 0x38, 0xF1], pair(1, 0), NO_IMM),
+    bytes("movbeq", &RM, Quad, &[0x0F, 0x38, 0xF1], pair(1, 0), NO_IMM),
     // The comparison, which is the eighth of the ones that share an opcode column and is written
     // the same way round as the subtraction it is.
     bytes("cmpb", &RR, Byte, &[0x38], pair(1, 0), NO_IMM),
@@ -7730,6 +7782,62 @@ mod tests {
             ("vbroadcastsd", vec![at(RAX, 0), y(3)], "c4 e2 7d 19 18"),
             ("vpsraw", vec![at(RAX, 0), y(2), y(3)], "c5 ed e1 18"),
             ("vpbroadcastw", vec![at(RAX, 0), y(3)], "c4 e2 7d 79 18"),
+        ];
+        for (mnemonic, args, want) in rows {
+            assert_eq!(hex(mnemonic, &args), want, "{mnemonic}");
+        }
+    }
+
+    /// The rest of BMI1 and BMI2, the rotate and `movbe`, with the bytes gas 2.42 writes for each.
+    #[test]
+    fn the_bit_manipulation_rows_are_the_bytes_gas_writes() {
+        let rows: Vec<(&str, Vec<Value>, &str)> = vec![
+            ("andnl", vec![long(RCX), long(RSI), long(RDI)], "c4 e2 48 f2 f9"),
+            ("andnq", vec![quad(RCX), quad(RSI), quad(RDI)], "c4 e2 c8 f2 f9"),
+            ("andnq", vec![quad(R9), quad(R10), quad(R11)], "c4 42 a8 f2 d9"),
+            ("andnl", vec![at(RBX, 0), long(R15), long(RAX)], "c4 e2 00 f2 03"),
+            ("andnq", vec![at(RSI, 8), quad(RAX), quad(RDX)], "c4 e2 f8 f2 56 08"),
+            ("bextrl", vec![long(RCX), long(RSI), long(RDI)], "c4 e2 70 f7 fe"),
+            ("bextrq", vec![quad(RCX), quad(RSI), quad(RDI)], "c4 e2 f0 f7 fe"),
+            ("bextrq", vec![quad(R15), quad(R8), quad(RAX)], "c4 c2 80 f7 c0"),
+            ("bextrl", vec![long(RAX), at(RBX, 0), long(RDX)], "c4 e2 78 f7 13"),
+            ("bextrq", vec![quad(RAX), at(RSI, 8), quad(R13)], "c4 62 f8 f7 6e 08"),
+            ("bzhil", vec![long(RCX), long(RSI), long(RDI)], "c4 e2 70 f5 fe"),
+            ("bzhiq", vec![quad(RCX), quad(RSI), quad(RDI)], "c4 e2 f0 f5 fe"),
+            ("bzhiq", vec![quad(R15), quad(R8), quad(RAX)], "c4 c2 80 f5 c0"),
+            ("bzhil", vec![long(RAX), at(RBX, 0), long(RDX)], "c4 e2 78 f5 13"),
+            ("pdepl", vec![long(RCX), long(RSI), long(RDI)], "c4 e2 4b f5 f9"),
+            ("pdepq", vec![quad(RCX), quad(RSI), quad(RDI)], "c4 e2 cb f5 f9"),
+            ("pdepq", vec![quad(R9), quad(R10), quad(R11)], "c4 42 ab f5 d9"),
+            ("pdepl", vec![at(RBX, 0), long(RAX), long(RDX)], "c4 e2 7b f5 13"),
+            ("pdepq", vec![at(RSI, 8), quad(RBX), quad(R13)], "c4 62 e3 f5 6e 08"),
+            ("pextl", vec![long(RCX), long(RSI), long(RDI)], "c4 e2 4a f5 f9"),
+            ("pextq", vec![quad(RCX), quad(RSI), quad(RDI)], "c4 e2 ca f5 f9"),
+            ("pextq", vec![quad(R9), quad(R10), quad(R11)], "c4 42 aa f5 d9"),
+            ("pextq", vec![at(RBX, 0), quad(RAX), quad(RDX)], "c4 e2 fa f5 13"),
+            ("blsrl", vec![long(RCX), long(RDI)], "c4 e2 40 f3 c9"),
+            ("blsrq", vec![quad(RCX), quad(RDI)], "c4 e2 c0 f3 c9"),
+            ("blsrq", vec![quad(R9), quad(R15)], "c4 c2 80 f3 c9"),
+            ("blsrl", vec![at(RBX, 0), long(RAX)], "c4 e2 78 f3 0b"),
+            ("blsmskl", vec![long(RCX), long(RDI)], "c4 e2 40 f3 d1"),
+            ("blsmskq", vec![quad(R9), quad(RDI)], "c4 c2 c0 f3 d1"),
+            ("blsmskq", vec![at(RSI, 8), quad(RAX)], "c4 e2 f8 f3 56 08"),
+            ("blsil", vec![long(RCX), long(RDI)], "c4 e2 40 f3 d9"),
+            ("blsiq", vec![quad(RCX), quad(R12)], "c4 e2 98 f3 d9"),
+            ("blsil", vec![at(RBX, 0), long(RAX)], "c4 e2 78 f3 1b"),
+            ("rorxl", vec![Value::Imm(7), long(RCX), long(RDI)], "c4 e3 7b f0 f9 07"),
+            ("rorxq", vec![Value::Imm(13), quad(RCX), quad(RDI)], "c4 e3 fb f0 f9 0d"),
+            ("rorxq", vec![Value::Imm(63), quad(R9), quad(R11)], "c4 43 fb f0 d9 3f"),
+            ("rorxl", vec![Value::Imm(1), at(RBX, 0), long(RAX)], "c4 e3 7b f0 03 01"),
+            ("rorxq", vec![Value::Imm(32), at(RSI, 8), quad(RDX)], "c4 e3 fb f0 56 08 20"),
+            ("movbew", vec![at(RBX, 0), word(RAX)], "66 0f 38 f0 03"),
+            ("movbel", vec![at(RBX, 0), long(RAX)], "0f 38 f0 03"),
+            ("movbeq", vec![at(RBX, 0), quad(RAX)], "48 0f 38 f0 03"),
+            ("movbeq", vec![at(RSI, 8), quad(R9)], "4c 0f 38 f0 4e 08"),
+            ("movbew", vec![word(RCX), at(RDI, 0)], "66 0f 38 f1 0f"),
+            ("movbel", vec![long(RCX), at(RDI, 0)], "0f 38 f1 0f"),
+            ("movbeq", vec![quad(RCX), at(RDI, 0)], "48 0f 38 f1 0f"),
+            ("movbeq", vec![quad(R10), at(R8, 16)], "4d 0f 38 f1 50 10"),
         ];
         for (mnemonic, args, want) in rows {
             assert_eq!(hex(mnemonic, &args), want, "{mnemonic}");
