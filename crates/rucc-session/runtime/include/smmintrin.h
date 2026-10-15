@@ -49,11 +49,11 @@
 /* The flag shape: both vectors loaded as the two shapes in `<pmmintrin.h>` load them, the
  * instruction run, and the one byte the `set` writes widened to the `int` gcc answers with. */
 #define __RUCC_SSE_FLAG2(__insn, __set, __answer, __x, __y)                                        \
-  __asm__("movdqu (%1), %%xmm0\n\tmovdqu (%2), %%xmm1\n\t" __insn                                  \
-          " %%xmm1, %%xmm0\n\t" __set " %0"                                                        \
-          : "=r"(__answer)                                                                         \
-          : "r"(&(__x)), "r"(&(__y))                                                              \
-          : "xmm0", "xmm1", "cc", "memory")
+  __asm__ __volatile__("movdqu (%1), %%xmm0\n\tmovdqu (%2), %%xmm1\n\t" __insn                     \
+                       " %%xmm1, %%xmm0\n\t" __set " %0"                                           \
+                       : "=r"(__answer)                                                            \
+                       : "r"(&(__x)), "r"(&(__y))                                                  \
+                       : "xmm0", "xmm1", "cc", "memory")
 
 /* # SSE4.1
  *
@@ -371,10 +371,10 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.1")))
 _mm_extract_ps(__m128 __X, const int __N)
 {
   int __R;
-  __asm__("movdqu (%1), %%xmm0\n\textractps %2, %%xmm0, %0"
-          : "=r"(__R)
-          : "r"(&__X), "i"(__N)
-          : "xmm0", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm0\n\textractps %2, %%xmm0, %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "i"(__N)
+                       : "xmm0", "memory");
   return __R;
 }
 
@@ -428,10 +428,10 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.1")))
 _mm_extract_epi8(__m128i __X, const int __N)
 {
   int __R;
-  __asm__("movdqu (%1), %%xmm0\n\tpextrb %2, %%xmm0, %0"
-          : "=r"(__R)
-          : "r"(&__X), "i"(__N)
-          : "xmm0", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm0\n\tpextrb %2, %%xmm0, %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "i"(__N)
+                       : "xmm0", "memory");
   return __R;
 }
 
@@ -439,10 +439,10 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.1")))
 _mm_extract_epi32(__m128i __X, const int __N)
 {
   int __R;
-  __asm__("movdqu (%1), %%xmm0\n\tpextrd %2, %%xmm0, %0"
-          : "=r"(__R)
-          : "r"(&__X), "i"(__N)
-          : "xmm0", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm0\n\tpextrd %2, %%xmm0, %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "i"(__N)
+                       : "xmm0", "memory");
   return __R;
 }
 
@@ -450,10 +450,10 @@ static __inline__ long long __attribute__((__always_inline__, __target__("sse4.1
 _mm_extract_epi64(__m128i __X, const int __N)
 {
   long long __R;
-  __asm__("movdqu (%1), %%xmm0\n\tpextrq %2, %%xmm0, %0"
-          : "=r"(__R)
-          : "r"(&__X), "i"(__N)
-          : "xmm0", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm0\n\tpextrq %2, %%xmm0, %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "i"(__N)
+                       : "xmm0", "memory");
   return __R;
 }
 
@@ -653,10 +653,10 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpistri(__m128i __X, __m128i __Y, const int __M)
 {
   int __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpistri %3, %%xmm2, %%xmm1"
-          : "=c"(__R)
-          : "r"(&__X), "r"(&__Y), "i"(__M)
-          : "xmm1", "xmm2", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpistri %3, %%xmm2, %%xmm1"
+                       : "=c"(__R)
+                       : "r"(&__X), "r"(&__Y), "i"(__M)
+                       : "xmm1", "xmm2", "cc", "memory");
   return __R;
 }
 
@@ -676,10 +676,10 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpestri(__m128i __X, int __LX, __m128i __Y, int __LY, const int __M)
 {
   int __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpestri %5, %%xmm2, %%xmm1"
-          : "=c"(__R)
-          : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
-          : "xmm1", "xmm2", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpestri %5, %%xmm2, %%xmm1"
+                       : "=c"(__R)
+                       : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
+                       : "xmm1", "xmm2", "cc", "memory");
   return __R;
 }
 
@@ -687,11 +687,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpistra(__m128i __X, __m128i __Y, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpistri %3, %%xmm2, %%xmm1\n\t"
-          "seta %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpistri %3, %%xmm2, %%xmm1\n\t"
+                       "seta %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -699,11 +700,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpistrc(__m128i __X, __m128i __Y, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpistri %3, %%xmm2, %%xmm1\n\t"
-          "setb %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpistri %3, %%xmm2, %%xmm1\n\t"
+                       "setb %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -711,11 +713,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpistro(__m128i __X, __m128i __Y, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpistri %3, %%xmm2, %%xmm1\n\t"
-          "seto %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpistri %3, %%xmm2, %%xmm1\n\t"
+                       "seto %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -723,11 +726,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpistrs(__m128i __X, __m128i __Y, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpistri %3, %%xmm2, %%xmm1\n\t"
-          "sets %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpistri %3, %%xmm2, %%xmm1\n\t"
+                       "sets %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -735,11 +739,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpistrz(__m128i __X, __m128i __Y, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpistri %3, %%xmm2, %%xmm1\n\t"
-          "sete %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpistri %3, %%xmm2, %%xmm1\n\t"
+                       "sete %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -747,11 +752,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpestra(__m128i __X, int __LX, __m128i __Y, int __LY, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpestri %5, %%xmm2, %%xmm1\n\t"
-          "seta %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpestri %5, %%xmm2, %%xmm1\n\t"
+                       "seta %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -759,11 +765,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpestrc(__m128i __X, int __LX, __m128i __Y, int __LY, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpestri %5, %%xmm2, %%xmm1\n\t"
-          "setb %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpestri %5, %%xmm2, %%xmm1\n\t"
+                       "setb %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -771,11 +778,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpestro(__m128i __X, int __LX, __m128i __Y, int __LY, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpestri %5, %%xmm2, %%xmm1\n\t"
-          "seto %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpestri %5, %%xmm2, %%xmm1\n\t"
+                       "seto %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -783,11 +791,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpestrs(__m128i __X, int __LX, __m128i __Y, int __LY, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpestri %5, %%xmm2, %%xmm1\n\t"
-          "sets %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpestri %5, %%xmm2, %%xmm1\n\t"
+                       "sets %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 
@@ -795,11 +804,12 @@ static __inline__ int __attribute__((__always_inline__, __target__("sse4.2")))
 _mm_cmpestrz(__m128i __X, int __LX, __m128i __Y, int __LY, const int __M)
 {
   unsigned char __R;
-  __asm__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\tpcmpestri %5, %%xmm2, %%xmm1\n\t"
-          "sete %0"
-          : "=r"(__R)
-          : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
-          : "xmm1", "xmm2", "rcx", "cc", "memory");
+  __asm__ __volatile__("movdqu (%1), %%xmm1\n\tmovdqu (%2), %%xmm2\n\t"
+                       "pcmpestri %5, %%xmm2, %%xmm1\n\t"
+                       "sete %0"
+                       : "=r"(__R)
+                       : "r"(&__X), "r"(&__Y), "a"(__LX), "d"(__LY), "i"(__M)
+                       : "xmm1", "xmm2", "rcx", "cc", "memory");
   return __R;
 }
 

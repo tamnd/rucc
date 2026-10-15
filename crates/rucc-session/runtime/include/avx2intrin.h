@@ -1222,10 +1222,10 @@ static __inline__ int __attribute__((__always_inline__, __target__("avx2")))
 _mm256_movemask_epi8(__m256i __A)
 {
   int __R;
-  __asm__("vmovdqu (%1), %%ymm0\n\tvpmovmskb %%ymm0, %0\n\tvzeroupper"
-          : "=r"(__R)
-          : "r"(&__A)
-          : "xmm0", "memory");
+  __asm__ __volatile__("vmovdqu (%1), %%ymm0\n\tvpmovmskb %%ymm0, %0\n\tvzeroupper"
+                       : "=r"(__R)
+                       : "r"(&__A)
+                       : "xmm0", "memory");
   return __R;
 }
 #endif
