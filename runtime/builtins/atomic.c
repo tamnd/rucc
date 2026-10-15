@@ -35,6 +35,19 @@
  * rather than something new here, and the way out of it is the ordinary one: one library on the
  * link line.
  *
+ * # Sixteen bytes on x86-64 without the lock
+ *
+ * x86-64 has `cmpxchg16b`. It is not in the baseline, but almost every x86-64 processor has it.
+ * libatomic asks cpuid for it once, and then does a sixteen byte access with it and with no lock.
+ * This does the same, for the sized routines and for the generic ones at sixteen bytes. It
+ * matters because gcc and rucc write the instruction inline for the `__sync` names under `-mcx16`.
+ * An object that one part of a program reaches inline and another part reaches through here must
+ * be reached the same way by both, and a lock that only one of them takes does nothing.
+ *
+ * The choice depends only on the processor and on the address, so every call about one object
+ * makes the same choice. An object that is not aligned to sixteen bytes takes the lock, because
+ * the instruction faults on it, and nothing writes the instruction inline for such an object.
+ *
  * # What the ordering argument does
  *
  * Nothing. Every one of the four takes one and none of them reads it. The lock is an acquire and
@@ -49,6 +62,14 @@
  * built freestanding and the header is not promised there.
  */
 typedef __UINTPTR_TYPE__ uptr;
+
+/* Unsigned because every operation below is over bits rather than over numbers: the six are
+ * addition, subtraction and the four bitwise ones, and the only one of those that reads a sign is
+ * a shift, which is not one of them. So the type is the one with no overflow to think about.
+ */
+#ifdef __SIZEOF_INT128__
+typedef unsigned __int128 u128;
+#endif
 
 /* How many locks there are, as the number of bits the hash keeps. Sixty four entries: small
  * enough that the table is one page of zeroed memory and large enough that two unrelated objects
@@ -145,6 +166,107 @@ static int same(const void *one, const void *two, size_t count) {
     return 1;
 }
 
+#if defined(__x86_64__) && defined(__SIZEOF_INT128__)
+#define PAIRED 1
+
+/* Whether the processor has `cmpxchg16b`, asked once. Zero is not asked yet, one is no and two is
+ * yes. Two threads that ask at the same time both run cpuid and both store the same answer.
+ */
+static int cx16;
+
+static int has_cx16(void) {
+    int known = __atomic_load_n(&cx16, __ATOMIC_RELAXED);
+    if (known == 0) {
+        unsigned int eax = 1;
+        unsigned int ebx;
+        unsigned int ecx = 0;
+        unsigned int edx;
+        __asm__("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+        known = (ecx >> 13) & 1 ? 2 : 1;
+        __atomic_store_n(&cx16, known, __ATOMIC_RELAXED);
+    }
+    return known == 2;
+}
+
+/* Whether an access to sixteen bytes at this address is the instruction rather than the lock. */
+static int paired(const volatile void *object) {
+    return ((uptr)object & 15) == 0 && has_cx16();
+}
+
+/* The instruction. It answers what was there, and it put `desired` there when that is `expected`.
+ * The `lock` prefix makes it a full barrier, so it meets every ordering.
+ */
+static u128 exchanged(volatile void *object, u128 expected, u128 desired) {
+    unsigned long long low = (unsigned long long)expected;
+    unsigned long long high = (unsigned long long)(expected >> 64);
+    __asm__ __volatile__("lock; cmpxchg16b %2"
+                         : "+a"(low), "+d"(high), "+m"(*(volatile u128 *)object)
+                         : "b"((unsigned long long)desired),
+                           "c"((unsigned long long)(desired >> 64))
+                         : "memory", "cc");
+    return (u128)high << 64 | low;
+}
+#endif
+
+#ifdef __SIZEOF_INT128__
+
+/* What a read modify write does with what was there and the operand. `SET` is the exchange and
+ * the store, which put the operand there whatever was there.
+ */
+enum step { SET, ADD, SUB, AND, OR, XOR, NAND };
+
+static u128 applied(enum step step, u128 was, u128 value) {
+    switch (step) {
+    case ADD:
+        return was + value;
+    case SUB:
+        return was - value;
+    case AND:
+        return was & value;
+    case OR:
+        return was | value;
+    case XOR:
+        return was ^ value;
+    case NAND:
+        return ~(was & value);
+    case SET:
+        break;
+    }
+    return value;
+}
+
+/* One read modify write at sixteen bytes, which answers what was there before.
+ *
+ * With the instruction, it is a loop around it. The first guess is zero rather than a read of the
+ * object, because there is no plain read of sixteen bytes in one go, and a wrong guess only costs
+ * one more turn of the loop, which then has what was really there.
+ */
+static u128 fetched(volatile void *object, enum step step, u128 value) {
+    u128 *at = (u128 *)object;
+    struct guard *guard;
+    u128 was;
+#ifdef PAIRED
+    if (paired(object)) {
+        was = 0;
+        for (;;) {
+            u128 seen = exchanged(object, was, applied(step, was, value));
+            if (seen == was) {
+                return was;
+            }
+            was = seen;
+        }
+    }
+#endif
+    guard = guard_for((const void *)object);
+    take(guard);
+    was = *at;
+    *at = applied(step, was, value);
+    drop(guard);
+    return was;
+}
+
+#endif
+
 /* The names are given by an assembler label rather than written as the function's own, because
  * __atomic_load and the other three are type generic builtins in both this compiler and gcc: a
  * declaration of one with a prototype is a declaration that disagrees with the builtin, and a
@@ -162,6 +284,13 @@ _Bool generic_compare_exchange(size_t size, void *object, void *expected, void *
 void generic_load(size_t size, void *object, void *into, int order) {
     struct guard *guard = guard_for(object);
     (void)order;
+#ifdef PAIRED
+    if (size == 16 && paired(object)) {
+        u128 was = exchanged(object, 0, 0);
+        copy(into, &was, 16);
+        return;
+    }
+#endif
     take(guard);
     copy(into, object, size);
     drop(guard);
@@ -170,6 +299,14 @@ void generic_load(size_t size, void *object, void *into, int order) {
 void generic_store(size_t size, void *object, void *value, int order) {
     struct guard *guard = guard_for(object);
     (void)order;
+#ifdef PAIRED
+    if (size == 16 && paired(object)) {
+        u128 put;
+        copy(&put, value, 16);
+        fetched(object, SET, put);
+        return;
+    }
+#endif
     take(guard);
     copy(object, value, size);
     drop(guard);
@@ -182,6 +319,16 @@ void generic_store(size_t size, void *object, void *value, int order) {
 void generic_exchange(size_t size, void *object, void *value, void *into, int order) {
     struct guard *guard = guard_for(object);
     (void)order;
+#ifdef PAIRED
+    if (size == 16 && paired(object)) {
+        u128 put;
+        u128 was;
+        copy(&put, value, 16);
+        was = fetched(object, SET, put);
+        copy(into, &was, 16);
+        return;
+    }
+#endif
     take(guard);
     copy(into, object, size);
     copy(object, value, size);
@@ -202,6 +349,23 @@ _Bool generic_compare_exchange(size_t size, void *object, void *expected, void *
     int matched;
     (void)success;
     (void)failure;
+#ifdef PAIRED
+    /* The bytes of the object are compared as one integer, which is the same as comparing them a
+     * byte at a time. */
+    if (size == 16 && paired(object)) {
+        u128 want;
+        u128 put;
+        u128 seen;
+        copy(&want, expected, 16);
+        copy(&put, desired, 16);
+        seen = exchanged(object, want, put);
+        if (seen == want) {
+            return 1;
+        }
+        copy(expected, &seen, 16);
+        return 0;
+    }
+#endif
     take(guard);
     matched = same(object, expected, size);
     if (matched) {
@@ -223,26 +387,26 @@ _Bool generic_compare_exchange(size_t size, void *object, void *expected, void *
  */
 #ifdef __SIZEOF_INT128__
 
-/* Unsigned because every operation below is over bits rather than over numbers: the six are
- * addition, subtraction and the four bitwise ones, and the only one of those that reads a sign is
- * a shift, which is not one of them. So the type is the one with no overflow to think about.
- */
-typedef unsigned __int128 u128;
-
 /* The object is reached through an ordinary pointer of the type rather than a byte at a time. It
  * is the width and the alignment of the type by construction, since nothing else is sixteen bytes
- * and atomic, so the access is what the machine does with two registers and the lock is what makes
- * the pair of them one access.
+ * and atomic, so the access is what the machine does with two registers, and the lock or the
+ * instruction is what makes the pair of them one access.
  *
  * The volatile on the parameters is libatomic's and it is dropped on the way in. A qualifier says
  * what the compiler may do between two accesses in one thread, which is a question about the
  * caller's code and not about these six lines, and what makes the access here indivisible is the
- * lock either way.
+ * lock or the instruction either way.
  */
 u128 __atomic_load_16(const volatile void *object, int order) {
-    struct guard *guard = guard_for((const void *)object);
+    struct guard *guard;
     u128 was;
     (void)order;
+#ifdef PAIRED
+    if (paired(object)) {
+        return exchanged((volatile void *)object, 0, 0);
+    }
+#endif
+    guard = guard_for((const void *)object);
     take(guard);
     was = *(const u128 *)object;
     drop(guard);
@@ -250,23 +414,13 @@ u128 __atomic_load_16(const volatile void *object, int order) {
 }
 
 void __atomic_store_16(volatile void *object, u128 value, int order) {
-    struct guard *guard = guard_for((const void *)object);
     (void)order;
-    take(guard);
-    *(u128 *)object = value;
-    drop(guard);
+    fetched(object, SET, value);
 }
 
 u128 __atomic_exchange_16(volatile void *object, u128 value, int order) {
-    struct guard *guard = guard_for((const void *)object);
-    u128 *at = (u128 *)object;
-    u128 was;
     (void)order;
-    take(guard);
-    was = *at;
-    *at = value;
-    drop(guard);
-    return was;
+    return fetched(object, SET, value);
 }
 
 /* The expected value arrives by pointer here as it does in the generic one, and for the same
@@ -283,7 +437,7 @@ u128 __atomic_exchange_16(volatile void *object, u128 value, int order) {
  */
 _Bool __atomic_compare_exchange_16(volatile void *object, void *expected, u128 desired, _Bool weak,
                                    int success, int failure) {
-    struct guard *guard = guard_for((const void *)object);
+    struct guard *guard;
     u128 *at = (u128 *)object;
     u128 *want = (u128 *)expected;
     u128 was;
@@ -291,6 +445,17 @@ _Bool __atomic_compare_exchange_16(volatile void *object, void *expected, u128 d
     (void)weak;
     (void)success;
     (void)failure;
+#ifdef PAIRED
+    if (paired(object)) {
+        was = exchanged(object, *want, desired);
+        matched = was == *want;
+        if (!matched) {
+            *want = was;
+        }
+        return matched != 0;
+    }
+#endif
+    guard = guard_for((const void *)object);
     take(guard);
     was = *at;
     matched = was == *want;
@@ -312,63 +477,28 @@ _Bool __atomic_compare_exchange_16(volatile void *object, void *expected, u128 d
  * working it out costs an instruction rather than a second trip through the lock.
  */
 u128 __atomic_fetch_add_16(volatile void *object, u128 value, int order) {
-    struct guard *guard = guard_for((const void *)object);
-    u128 *at = (u128 *)object;
-    u128 was;
     (void)order;
-    take(guard);
-    was = *at;
-    *at = was + value;
-    drop(guard);
-    return was;
+    return fetched(object, ADD, value);
 }
 
 u128 __atomic_fetch_sub_16(volatile void *object, u128 value, int order) {
-    struct guard *guard = guard_for((const void *)object);
-    u128 *at = (u128 *)object;
-    u128 was;
     (void)order;
-    take(guard);
-    was = *at;
-    *at = was - value;
-    drop(guard);
-    return was;
+    return fetched(object, SUB, value);
 }
 
 u128 __atomic_fetch_and_16(volatile void *object, u128 value, int order) {
-    struct guard *guard = guard_for((const void *)object);
-    u128 *at = (u128 *)object;
-    u128 was;
     (void)order;
-    take(guard);
-    was = *at;
-    *at = was & value;
-    drop(guard);
-    return was;
+    return fetched(object, AND, value);
 }
 
 u128 __atomic_fetch_or_16(volatile void *object, u128 value, int order) {
-    struct guard *guard = guard_for((const void *)object);
-    u128 *at = (u128 *)object;
-    u128 was;
     (void)order;
-    take(guard);
-    was = *at;
-    *at = was | value;
-    drop(guard);
-    return was;
+    return fetched(object, OR, value);
 }
 
 u128 __atomic_fetch_xor_16(volatile void *object, u128 value, int order) {
-    struct guard *guard = guard_for((const void *)object);
-    u128 *at = (u128 *)object;
-    u128 was;
     (void)order;
-    take(guard);
-    was = *at;
-    *at = was ^ value;
-    drop(guard);
-    return was;
+    return fetched(object, XOR, value);
 }
 
 /* The odd one out of the six, which is an and and then a complement rather than one operator.
@@ -376,15 +506,8 @@ u128 __atomic_fetch_xor_16(volatile void *object, u128 value, int order) {
  * it is in the family because the kernel uses it to clear a bit and answer what was there.
  */
 u128 __atomic_fetch_nand_16(volatile void *object, u128 value, int order) {
-    struct guard *guard = guard_for((const void *)object);
-    u128 *at = (u128 *)object;
-    u128 was;
     (void)order;
-    take(guard);
-    was = *at;
-    *at = ~(was & value);
-    drop(guard);
-    return was;
+    return fetched(object, NAND, value);
 }
 
 u128 __atomic_add_fetch_16(volatile void *object, u128 value, int order) {
