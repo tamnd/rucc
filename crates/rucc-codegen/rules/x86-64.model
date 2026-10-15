@@ -57,6 +57,10 @@
 (semantics (x64.mulsd_rr l r) (fp.mul l r))
 (semantics (x64.divss_rr l r) (fp.div l r))
 (semantics (x64.divsd_rr l r) (fp.div l r))
+;; The fused multiply add, with the answer over the first source. See the rules for why the 213
+;; form.
+(semantics (x64.vfmadd213ss_rr a b c) (fp.fma a b c))
+(semantics (x64.vfmadd213sd_rr a b c) (fp.fma a b c))
 ;; The integer vector arithmetic. `paddd` adds four lanes of thirty two bits and `paddq` two of
 ;; sixty four, each on its own with no carry between them, and the three bitwise ones do not
 ;; care where one lane ends because no bit of their answer reads another bit.

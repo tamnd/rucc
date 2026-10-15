@@ -859,11 +859,17 @@ pub fn compile_recording(
             count.on(isa) && (flags.cmov || !count.guarded) && (flags.vector || !count.vector)
         })
         .collect();
+    // The same for a fused multiply add, which is in a vector register on every machine that has
+    // one, so a function without the vector registers calls the library instead.
+    let fused = flags.vector
+        && machine.selector.fused.is_some_and(|name| {
+            rucc_target::Feature::named(name).is_some_and(|feature| isa.has(feature))
+        });
     // A value a landing pad reads from before the call goes through the frame, which is the one
     // way it reaches a block the unwinder starts. Before the lowerings, so that a load or a store
     // at a width the machine does not have is rewritten with the rest. See [`pads`].
     pads::spill(source, machine.conv.word);
-    let ran = lowering::group(source, names, machine.conv, switching, &counts, counting);
+    let ran = lowering::group(source, names, machine.conv, switching, &counts, fused, counting);
     // An `asm` input that may go in memory goes there when the statement has taken every register
     // it could go in. Only on x86, the one machine here that names an operand in the frame without a
     // register for its address. See [`expand::crowded`].
@@ -2587,6 +2593,43 @@ mod tests {
                 let text = built(opcode, width, has, Some(Isa::NONE));
                 assert!(!text.contains(inst), "nor in a function built for less: {text}");
             }
+        }
+    }
+
+    /// A fused multiply add is `vfmadd` where the processor has FMA3, whether the command line or
+    /// the function's own `target` attribute said so, and is a call to the library where it does
+    /// not.
+    #[test]
+    fn a_fused_multiply_add_is_one_instruction_where_the_processor_has_it() {
+        let built = |format: rucc_ir::Float, isa: Isa, target: Option<Isa>| {
+            let ty = Type::float(format);
+            let (mut names, mut source, block, args) = blank(&[ty, ty, ty]);
+            source.target = target;
+            let mut build = Builder::new(&mut source, block);
+            let args = build.func().push_values(&args);
+            let fused = build.value(ir::InstData { args, ..ir::InstData::new(Opcode::Fma) }, ty);
+            build.ret(&[fused]);
+            let machine = Machine::x86_64(&SYSV);
+            let flags = Flags { isa, ..Flags::default() };
+            let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+                .expect("a fused multiply add is an instruction or a call");
+            mir::print_func(&out, &names, &REGS)
+        };
+        let has = Isa::of(&["fma"]);
+        for (format, wanted) in [
+            (rucc_ir::Float::F32, "x64.vfmadd213ss_rr"),
+            (rucc_ir::Float::F64, "x64.vfmadd213sd_rr"),
+        ] {
+            let text = built(format, has, None);
+            assert!(text.contains(wanted), "{wanted} from the command line: {text}");
+            assert!(!text.contains("call"), "and no call: {text}");
+            let text = built(format, Isa::NONE, Some(has));
+            assert!(text.contains(wanted), "{wanted} from the attribute: {text}");
+            let text = built(format, Isa::NONE, None);
+            assert!(!text.contains("vfmadd"), "no vfmadd on a plain x86-64: {text}");
+            assert!(text.contains("fma"), "but the call: {text}");
+            let text = built(format, has, Some(Isa::NONE));
+            assert!(!text.contains("vfmadd"), "nor in a function built for less: {text}");
         }
     }
 

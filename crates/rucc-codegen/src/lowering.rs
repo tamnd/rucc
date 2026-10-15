@@ -321,8 +321,9 @@ impl Step {
     ///
     /// `switching` is the level's goal, the shape `-Zswitch=` forced, whether a jump table may
     /// be written at all and whether the machine has a conditional move, `counts` is the bit
-    /// counts the selector is left to answer, and what the `switch` lowering says it did goes
-    /// into `switched`.
+    /// counts the selector is left to answer, `fused` is whether it answers a fused multiply add,
+    /// and what the `switch` lowering says it did goes into `switched`.
+    #[allow(clippy::too_many_arguments)]
     fn run(
         self,
         func: &mut Func,
@@ -330,6 +331,7 @@ impl Step {
         conv: &CallRegs,
         switching: (Goal, Option<Force>, bool, bool),
         counts: &[CountInst],
+        fused: bool,
         switched: &mut Vec<Lowered>,
     ) -> bool {
         let (goal, force, tables, cmov) = switching;
@@ -350,7 +352,7 @@ impl Step {
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func, conv.byte_swaps),
             Self::Counts => expand::counts(func, counts),
-            Self::Maths => maths::calls(func, names, conv.abi),
+            Self::Maths => maths::calls(func, names, conv.abi, fused),
             Self::Quads => quad::calls(func, names, conv.abi),
             Self::Floats => expand::floats(func, conv.word),
             Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned, goal),
@@ -546,22 +548,27 @@ impl Lowerings {
 ///
 /// `counts` is the bit counts the selector has a rule for on the processor this function is built
 /// for, which [`expand::counts`] leaves alone. See [`crate::select::Selector::counts`].
+///
+/// `fused` is whether the selector has a rule for a fused multiply add and this function is built
+/// for the extension that has it, in which case [`maths::calls`] leaves one at `float` and
+/// `double` alone. See [`crate::select::Selector::fused`].
 pub fn group(
     func: &mut Func,
     names: &mut Interner,
     conv: &CallRegs,
     switching: (Goal, Option<Force>, bool, bool),
     counts: &[CountInst],
+    fused: bool,
     counting: bool,
 ) -> Ran {
     let mut ran = Ran::default();
     for &step in Step::GROUP {
         if !counting {
-            step.run(func, names, conv, switching, counts, &mut ran.switches);
+            step.run(func, names, conv, switching, counts, fused, &mut ran.switches);
             continue;
         }
         let (before, found) = tally(func, step);
-        let did = step.run(func, names, conv, switching, counts, &mut ran.switches);
+        let did = step.run(func, names, conv, switching, counts, fused, &mut ran.switches);
         let (after, left) = tally(func, step);
         ran.did.push(Did { step, found, left, before, after, untouched: !did });
     }
@@ -617,7 +624,7 @@ mod tests {
     }
 
     fn run(func: &mut Func, names: &mut Interner) -> Ran {
-        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true, true), &[], true)
+        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true, true), &[], false, true)
     }
 
     fn i32() -> Type {
@@ -717,6 +724,7 @@ mod tests {
             &aarch64::AAPCS64,
             (Goal::Speed, None, true, true),
             &[],
+            false,
             true,
         );
         let did = ran.of(Step::Bytes);
@@ -764,8 +772,25 @@ mod tests {
         });
         let counts = crate::select::x86_64::SELECTOR.counts;
         let switching = (Goal::Speed, None, true, true);
-        let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, counts, true);
+        let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, counts, false, true);
         assert_eq!((ran.of(Step::Counts).found, ran.of(Step::Counts).left), (1, 1));
+    }
+
+    /// The same for a fused multiply add, which is left for the selector when it has the rule and
+    /// the function is built for the extension, and is a call to the library when it is not.
+    #[test]
+    fn a_fused_multiply_add_survives_the_group_only_where_it_is_one_instruction() {
+        let f64 = Type::float(Float::F64);
+        for (fused, left) in [(true, 1), (false, 0)] {
+            let (mut names, mut func) = one(&[f64, f64, f64], &[f64], |build, args| {
+                let args = build.func().push_values(args);
+                let answer = build.value(InstData { args, ..InstData::new(Opcode::Fma) }, f64);
+                build.ret(&[answer]);
+            });
+            let switching = (Goal::Speed, None, true, true);
+            let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, &[], fused, true);
+            assert_eq!((ran.of(Step::Maths).found, ran.of(Step::Maths).left), (1, left));
+        }
     }
 
     /// `double n(double x) { return -x; }`, which is a float rather than an integer and so reaches
@@ -823,6 +848,7 @@ mod tests {
                     &aarch64::AAPCS64,
                     (Goal::Speed, None, true, true),
                     &[],
+                    false,
                     true,
                 )
             } else {
@@ -922,6 +948,7 @@ mod tests {
             (Goal::Speed, None, true, true),
             &[],
             false,
+            false,
         );
         assert!(quiet.did.is_empty(), "nothing was counted");
         assert_eq!(super::tally(&func, Step::Counts), (super::tally(&func, Step::Counts).0, 0));
@@ -929,8 +956,15 @@ mod tests {
         // The same function through the counting path comes out the same size, so what the flag
         // changes is what was written down and not what was done.
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let loud =
-            group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true, true), &[], true);
+        let loud = group(
+            &mut func,
+            &mut names,
+            &x86_64::SYSV,
+            (Goal::Speed, None, true, true),
+            &[],
+            false,
+            true,
+        );
         assert_eq!(loud.of(Step::Counts).left, 0);
         assert_eq!(
             loud.did.last().expect("thirteen of them").after,

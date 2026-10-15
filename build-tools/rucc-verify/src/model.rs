@@ -169,7 +169,8 @@ const LOGICAL: [&str; 4] = ["and", "or", "not", "ite"];
 /// Not in [`BUILTIN`] because SMT-LIB's float arithmetic takes a rounding mode as its first
 /// argument and a rule does not write one. The mode goes in here, once, rather than being a thing
 /// every rule repeats and any rule can get wrong.
-const FLOAT: [(&str, usize); 4] = [("fp.add", 2), ("fp.sub", 2), ("fp.mul", 2), ("fp.div", 2)];
+const FLOAT: [(&str, usize); 5] =
+    [("fp.add", 2), ("fp.sub", 2), ("fp.mul", 2), ("fp.div", 2), ("fp.fma", 3)];
 
 /// The heads that ask a question about floats, and how many arguments each takes.
 ///

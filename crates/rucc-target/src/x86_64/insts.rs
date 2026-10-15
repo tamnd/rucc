@@ -47,12 +47,13 @@ use Form::{
     ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi,
     CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, CmpXchgFlags,
     Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide,
-    Exchange, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec,
-    Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop,
-    RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble,
-    ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare,
-    StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap,
-    SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    Exchange, FusedVec, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm,
+    LoadVec, Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87,
+    Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl,
+    ShiftDouble, ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
+    StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore,
+    StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR,
+    UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -819,6 +820,10 @@ pub enum Form {
     /// reuses the first source here too, because `addsd` writes its answer over one of the two it
     /// was given, exactly as `addq` does.
     AluVec,
+    /// A fused multiply add, which is `vfmadd213ss` and `vfmadd213sd`. Three sources, and the
+    /// destination reuses the first of them, because the 213 form writes the answer over the
+    /// register that holds the first multiplicand.
+    FusedVec,
     /// The lanes of one vector register put in another in the order a constant says, which is
     /// `pshufd`. [`Form::MoveVec`]'s two operands and a byte beside them, and not two-address:
     /// the destination is written whole and the source is only read.
@@ -1241,6 +1246,13 @@ static TWO_ADDRESS_VEC: [OperandDesc; 3] = [
     OperandDesc::read(XMM),
     OperandDesc::read(XMM),
 ];
+// `TWO_ADDRESS_VEC` with one more source, which is the addend of a fused multiply add.
+static FUSED_VEC: [OperandDesc; 4] = [
+    OperandDesc::write(XMM).with(Constraint::Reuse(1)),
+    OperandDesc::read(XMM),
+    OperandDesc::read(XMM),
+    OperandDesc::read(XMM),
+];
 // A float comes back in `xmm0` on both of this machine's conventions, so the register is written
 // here for the reason `RET_VAL` gives, and the same test holds it against both of them.
 static RET_VAL_VEC: [OperandDesc; 1] = [OperandDesc::read(XMM).with(Constraint::Fixed(xmm(0)))];
@@ -1354,6 +1366,7 @@ impl Form {
             LoadVec => &LOAD_VEC,
             StoreVec => &STORE_VEC,
             AluVec => &TWO_ADDRESS_VEC,
+            FusedVec => &FUSED_VEC,
             ShuffleVec => &VEC_TO_VEC,
             ShiftVec => &SHIFT_VEC,
             RetValVec => &RET_VAL_VEC,
@@ -2531,6 +2544,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("mulsd_rr", AluVec),
     ("divss_rr", AluVec),
     ("divsd_rr", AluVec),
+    // The fused multiply add, which only a function built for `fma` is given. See
+    // `rucc_codegen::maths`.
+    ("vfmadd213ss_rr", FusedVec),
+    ("vfmadd213sd_rr", FusedVec),
     // The integer vectors, a whole register of lanes at a time. The moves are the unaligned ones,
     // and the arithmetic is two address the way the float arithmetic above is.
     ("movdqu_rm", LoadVec),
@@ -2759,7 +2776,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 829);
+        assert_eq!(described, 831);
     }
 
     #[test]

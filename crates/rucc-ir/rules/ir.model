@@ -111,6 +111,10 @@
 (semantics (fmul.f64 l r) (fp.mul l r))
 (semantics (fdiv.f32 l r) (fp.div l r))
 (semantics (fdiv.f64 l r) (fp.div l r))
+;; A fused multiply add is the product and the sum with one rounding at the end, which is what
+;; `fp.fma` means.
+(semantics (fma.f32 a b c) (fp.fma a b c))
+(semantics (fma.f64 a b c) (fp.fma a b c))
 
 ;; Division and remainder. The IR only ever carries a division whose divisor the language
 ;; says is not zero, so nothing here says what a division by zero means: on this machine it

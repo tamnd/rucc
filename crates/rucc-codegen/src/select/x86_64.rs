@@ -21,6 +21,7 @@ include!(concat!(env!("OUT_DIR"), "/x86-64.rs"));
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
     counts: rucc_target::x86_64::COUNTS,
+    fused: Some("fma"),
     shapes: &rucc_target::x86_64::MACHINE,
     address: rucc_target::x86_64::address,
     frame: &rucc_target::x86_64::FRAME,
@@ -1234,7 +1235,8 @@ mod tests {
                 );
             }
         }
-        for opcode in ["popcnt_32", "popcnt_64", "lzcnt_32", "lzcnt_64", "tzcnt_32", "tzcnt_64"] {
+        let gated = ["popcnt_32", "popcnt_64", "lzcnt_32", "lzcnt_64", "tzcnt_32", "tzcnt_64"];
+        for opcode in gated.into_iter().chain(["vfmadd213ss_rr", "vfmadd213sd_rr"]) {
             let name = format!("{PREFIX}{opcode}");
             assert!(written.contains(&name.as_str()), "no rule selects {opcode}");
         }
