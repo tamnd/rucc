@@ -43,17 +43,17 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 
 use Form::{
-    Align, AluCarry, AluCarryI, AluCarryRm, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
-    ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi,
-    CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, CmpXchgFlags,
-    Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide,
-    Exchange, FusedVec, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm,
-    LoadVec, Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87,
-    Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl,
-    ShiftDouble, ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
-    StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore,
-    StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR,
-    UnaryX87,
+    Align, AluCarry, AluCarryI, AluCarryRm, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal,
+    ArgValVec, ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet,
+    CmpSetMi, CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg,
+    CmpXchgFlags, Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo,
+    DivRem, DivWide, Exchange, FusedVec, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal,
+    Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch,
+    Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set,
+    ShiftCl, ShiftDouble, ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm,
+    StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep,
+    StrStore, StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM,
+    UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -2795,7 +2795,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 831);
+        assert_eq!(described, 839);
     }
 
     #[test]

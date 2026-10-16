@@ -3140,10 +3140,7 @@ mod tests {
         let bare = FOLDS.iter().filter(|fold| fold.from.starts_with("cmp_rr_")).count();
         assert_eq!(bare, 4, "a comparison that keeps no byte, at four widths");
         let arithmetic = FOLDS.len() - compares - bare;
-        assert_eq!(
-            arithmetic, 31,
-            "eight operations at four widths, less the eight bit multiply"
-        );
+        assert_eq!(arithmetic, 31, "eight operations at four widths, less the eight bit multiply");
         let swapped = FOLDS.iter().filter(|fold| fold.swapped.is_some()).count();
         assert_eq!(
             swapped, 63,

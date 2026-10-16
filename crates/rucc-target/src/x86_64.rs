@@ -2247,7 +2247,8 @@ mod tests {
         assert_eq!(entries, readers);
 
         for entry in &READERS {
-            if matches!(form(entry.name), Some(Form::AluCarry | Form::AluCarryI | Form::AluCarryRm)) {
+            if matches!(form(entry.name), Some(Form::AluCarry | Form::AluCarryI | Form::AluCarryRm))
+            {
                 assert_eq!(entry.reads, Reads::Carry, "{} reads a condition", entry.name);
                 continue;
             }
