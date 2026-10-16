@@ -28,6 +28,7 @@ int total(const int *of, int many) {
 /// A function the optimizer copies into its caller. It is static, so no body of its own is left,
 /// and it makes a call, which no pass can fold into the code around it. Every row on line 3 is
 /// then a row of the copy.
+#[cfg(target_os = "linux")]
 const INLINED: &str = "\
 int g(int);
 static int twice(int n) {
