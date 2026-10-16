@@ -253,6 +253,7 @@ impl Heap {
 /// With the heap's lock held throughout, so `f` must not allocate or free, and the arenas are walked
 /// in the order the table holds them rather than in address order. [`crate::leak`] is the caller and
 /// sorts what it is given.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 pub(crate) fn instances(mut f: impl FnMut(usize, usize)) {
     HEAP.locked(|arenas| {
         for arena in arenas.iter().flatten() {

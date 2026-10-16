@@ -353,6 +353,7 @@ fn a_structure_used_where_the_caller_left_it_is_placed_in_the_argument_area() {
 }
 
 /// A function that keeps one of its arguments past a call, so it has a prologue at every level.
+#[cfg(target_os = "linux")]
 const SAVED: &str = "\
 int other(int);
 int keep(int first, int second) {

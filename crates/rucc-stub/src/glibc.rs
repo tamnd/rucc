@@ -252,7 +252,7 @@ pub fn compat_only(library: &str, arch: &str, minor: u32, symbols: &mut [Symbol]
     changed
 }
 
-/// Makes the node that [`DEFAULTS`] gives the default of its name, where that is not the highest node.
+/// Makes the node that `DEFAULTS` gives the default of its name, where that is not the highest node.
 ///
 /// `library` is a [`Library::name`] and `arch` is one of [`ARCHITECTURES`]. The rule of [`describe`]
 /// has already made the highest node the default, so this runs after it. A name that has no
@@ -293,7 +293,7 @@ pub fn default_nodes(library: &str, arch: &str, symbols: &mut [Symbol]) -> usize
 /// from.
 ///
 /// `sets` holds a [`Library::name`] and the definitions of each library, cut at the release. A
-/// definition that [`MOVED`] says was not in its library yet goes out of that library, and into its
+/// definition that `MOVED` says was not in its library yet goes out of that library, and into its
 /// origin when the origin is in `sets`. The highest node of a name can change, so the caller runs the
 /// rule for the defaults again after this. Returns how many definitions went out.
 pub fn moved(arch: &str, minor: u32, sets: &mut [(&str, Vec<Symbol>)]) -> usize {

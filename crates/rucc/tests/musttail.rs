@@ -464,6 +464,7 @@ fn an_address_that_escaped_before_the_jump_is_warned_about_in_gcc_s_words() {
 /// new order each time: two `long`s swapped and three rotated, two structures of four words
 /// swapped after one of them was written to, and two `long double`s swapped. A loop that does the
 /// same to locals says what should come back.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 const SHUFFLED: &str = r"struct big { long a, b, c, d; };
 #define PARAMS long n, long a, long b, long c, long d, long e, long f, long g, long h, \
     struct big s, struct big t, long double x, long double y

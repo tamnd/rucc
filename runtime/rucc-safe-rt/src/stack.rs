@@ -47,7 +47,9 @@
 use core::cell::Cell;
 use core::ffi::c_void;
 
-use crate::init::{self, Init};
+#[cfg(target_os = "linux")]
+use crate::init;
+use crate::init::Init;
 use crate::tls::Slot;
 
 /// The thread's stack and its plane, or null before it began anything, or [`REFUSED`].
@@ -61,6 +63,7 @@ const REFUSED: *mut c_void = core::ptr::dangling_mut::<c_void>();
 ///
 /// A gibibyte, so that an unlimited stack size does not ask for an eighth of the address space. A
 /// frame deeper than that is a frame whose locals are not begun.
+#[cfg(target_os = "linux")]
 const DEEPEST: usize = 1 << 30;
 
 /// How many bytes in front of the shadow the description of it takes.
@@ -75,6 +78,7 @@ pub(crate) struct Stack {
     /// One past the highest.
     hi: usize,
     /// How long the mapping this sits at the front of is, for giving it back.
+    #[cfg(target_os = "linux")]
     len: usize,
     /// No byte below this has a bit set, as far as this thread knows.
     low: Cell<usize>,
