@@ -1385,6 +1385,10 @@ pub fn extent_back(addr: *const c_void, want: usize) -> usize {
 /// the access the loop with every check still in it refuses. Nothing for any other capability,
 /// which leaves the question to the planes as before.
 ///
+/// No room at all in a local whose block was left or whose frame returned. The liveness check is
+/// in the checked half only, so a split anywhere else runs accesses to a dead local with no check,
+/// and the program the loop with every check still in it refuses would run to the end at `-O2`.
+///
 /// # Safety
 ///
 /// `capability` is null or the address of a filled capability slot.
@@ -1397,6 +1401,11 @@ pub unsafe fn room(capability: *const Cap, addr: usize, back: bool) -> Option<us
     let held = unsafe { core::ptr::read(capability) };
     if !held.is_named() {
         return None;
+    }
+    // SAFETY: a named local's capability was made with its frame's witness, which is a word of a
+    // stack that is still mapped for as long as its thread runs.
+    if unsafe { crate::witness::gone(&held) } {
+        return Some(0);
     }
     let offset = (addr as u64).wrapping_sub(held.lo);
     if offset > held.ext {
@@ -3132,6 +3141,22 @@ mod tests {
             assert_eq!(room(&named, at(first, 4) as usize, true), Some(4));
             assert_eq!(room(&recovered, first as usize, false), None);
             assert_eq!(room(core::ptr::null(), first as usize, false), None);
+        }
+        // A local whose block was left has no room, so the whole loop runs checked and the
+        // liveness check in it refuses the first access.
+        let mut witness = 0_u64;
+        // SAFETY: the witness and the pair outlive every call below.
+        unsafe {
+            crate::witness::open(&raw mut witness);
+            let local = recover::local(first, 16, &raw const witness);
+            assert_eq!(room(&local, first as usize, false), Some(16));
+            crate::witness::shut(&raw mut witness);
+            assert_eq!(room(&local, first as usize, false), Some(0));
+            assert_eq!(room(&local, at(first, 16) as usize, true), Some(0));
+            crate::witness::reopen(&raw mut witness);
+            assert_eq!(room(&local, first as usize, false), Some(16));
+            crate::witness::close(&raw mut witness);
+            assert_eq!(room(&local, first as usize, false), Some(0));
         }
         let travelled = named.beside(at(first, 24) as u64);
         assert!(!travelled.is_named());
