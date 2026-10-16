@@ -488,10 +488,7 @@ mod tests {
         for each in [named, "puts"] {
             let symbol = names.intern(each);
             b.value(
-                InstData {
-                    extra: Extra::Symbol(symbol),
-                    ..InstData::new(Opcode::GlobalAddr)
-                },
+                InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::GlobalAddr) },
                 Type::PTR,
             );
         }
