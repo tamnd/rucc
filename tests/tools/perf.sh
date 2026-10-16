@@ -7,7 +7,9 @@
 #
 # CC is a whole command, such as "rucc". LUA is the directory of a Lua 5.4 release. GCC is gcc
 # unless the environment sets it. perf must be able to record user space, so
-# kernel.perf_event_paranoid must be 2 or less.
+# kernel.perf_event_paranoid must be 2 or less. A call graph perf cannot record on the machine is
+# skipped with a SKIP line, as dwarf is on the GitHub arm runner, where perf says the PMU cannot
+# sample with it.
 #
 # For each recording, the counts are: the samples, the samples whose stack reaches main, the
 # samples with an [unknown] frame, and the mean number of frames in a sample. The check fails when,
@@ -68,6 +70,10 @@ hundredths() {
 failed=0
 printf '%-5s %-6s %8s %11s %10s %12s\n' build graph samples "reach main" "[unknown]" "mean frames"
 for graph in fp dwarf; do
+    if ! perf record -q -e cpu-clock:u --call-graph="$graph" -o "$work/probe.data" -- true >/dev/null 2>"$work/probe.err"; then
+        echo "SKIP $graph: perf cannot record this call graph here: $(grep -v '^Error:$' "$work/probe.err" | head -1)"
+        continue
+    fi
     for build in gcc cc; do
         data="$work/$build-$graph.data"
         perf record -q -e cpu-clock:u --call-graph="$graph" -o "$data" -- "$work/$build/lua" "$here/perf.lua" >/dev/null
