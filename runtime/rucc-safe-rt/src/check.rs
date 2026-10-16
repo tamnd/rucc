@@ -1385,6 +1385,12 @@ pub fn extent_back(addr: *const c_void, want: usize) -> usize {
 /// the access the loop with every check still in it refuses. Nothing for any other capability,
 /// which leaves the question to the planes as before.
 ///
+/// No room at all for a local whose frame returned or whose block closed. The half with no check
+/// in it has no liveness check either, so splitting by the bounds alone let a loop write through a
+/// pointer to a buffer whose block had closed, which the build with every check refuses. That was
+/// `a-pointer-to-a-block-scope-local-followed-in-another-file-after-the-block` at `-O2`. The whole
+/// loop runs checked instead, and its first access is the one [`live`] refuses.
+///
 /// # Safety
 ///
 /// `capability` is null or the address of a filled capability slot.
@@ -1397,6 +1403,10 @@ pub unsafe fn room(capability: *const Cap, addr: usize, back: bool) -> Option<us
     let held = unsafe { core::ptr::read(capability) };
     if !held.is_named() {
         return None;
+    }
+    // SAFETY: as in `returned`, which asks the same question of the same capability.
+    if unsafe { crate::witness::gone(&held) } {
+        return Some(0);
     }
     let offset = (addr as u64).wrapping_sub(held.lo);
     if offset > held.ext {
@@ -3093,8 +3103,14 @@ mod tests {
         };
         assert!(!refused(|| held(first, &cap)));
         // SAFETY: as above.
+        assert_eq!(unsafe { room(&cap, first as usize, false) }, Some(16));
+        // SAFETY: as above.
         unsafe { crate::witness::close(&raw mut witness) };
         assert!(refused(|| held(first, &cap)));
+        // And a loop over it is not split into a half with no check in it, since that half would
+        // have no liveness check either.
+        // SAFETY: as above.
+        assert_eq!(unsafe { room(&cap, first as usize, false) }, Some(0));
         // A variable is never asked, and nor is a pointer nothing vouched for.
         let global = recover::object(first, 16, Class::Static);
         assert!(!refused(|| held(first, &global)));
