@@ -285,13 +285,6 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
     ),
     ("ctpop.i64", "the same", "tamnd/rucc#310"),
     ("cttz.i64", "the same", "tamnd/rucc#310"),
-    (
-        "fma.f32",
-        "a fused multiply add, which `maths::calls` makes a call to the library before selection \
-         on this machine",
-        "tamnd/rucc#3694",
-    ),
-    ("fma.f64", "the same", "tamnd/rucc#3694"),
 ];
 
 /// The names left for later in the rule file `table` is built from.

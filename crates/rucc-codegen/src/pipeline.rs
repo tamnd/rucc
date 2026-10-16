@@ -2657,6 +2657,41 @@ mod tests {
         }
     }
 
+    /// The same on i386, where the arithmetic is in the vector registers too.
+    #[test]
+    fn an_i386_fused_multiply_add_is_one_instruction_where_the_processor_has_it() {
+        let triple = "i686-unknown-linux-gnu".parse::<rucc_target::Triple>().expect("a triple");
+        let info = TargetInfo::new(triple);
+        let machine = Machine::for_target(&info).expect("i386 has a back end");
+        let built = |format: rucc_ir::Float, isa: Isa, target: Option<Isa>| {
+            let ty = Type::float(format);
+            let (mut names, mut source, block, args) = blank(&[ty, ty, ty]);
+            source.target = target;
+            let mut build = Builder::new(&mut source, block);
+            let args = build.func().push_values(&args);
+            let fused = build.value(ir::InstData { args, ..ir::InstData::new(Opcode::Fma) }, ty);
+            build.ret(&[fused]);
+            let flags = Flags { isa, ..Flags::default() };
+            let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+                .expect("a fused multiply add is an instruction or a call");
+            mir::print_func(&out, &names, &rucc_target::x86::REGS)
+        };
+        let has = Isa::of(&["fma"]).union(Isa::baseline());
+        for (format, wanted) in [
+            (rucc_ir::Float::F32, "x64.vfmadd213ss_rr"),
+            (rucc_ir::Float::F64, "x64.vfmadd213sd_rr"),
+        ] {
+            let text = built(format, has, None);
+            assert!(text.contains(wanted), "{wanted} from the command line: {text}");
+            assert!(!text.contains("call"), "and no call: {text}");
+            let text = built(format, Isa::baseline(), Some(has));
+            assert!(text.contains(wanted), "{wanted} from the attribute: {text}");
+            let text = built(format, Isa::baseline(), None);
+            assert!(!text.contains("vfmadd"), "no vfmadd on a plain i386: {text}");
+            assert!(text.contains("fma"), "but the call: {text}");
+        }
+    }
+
     /// A zero count on a plain x86-64 is the search instruction and a conditional move for the
     /// zero, which is what `palloc` asks for on every call, rather than the arithmetic.
     #[test]

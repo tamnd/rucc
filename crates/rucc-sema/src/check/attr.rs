@@ -2183,9 +2183,9 @@ impl Checker<'_> {
     /// every list the declaration has, and nothing when none of them has the attribute.
     ///
     /// Every string of every `target` attribute is one comma separated list to gcc, so on x86-64
-    /// they are read into one [`Target`] and applied over the unit's set once, at the end. A name
-    /// gcc does not know is refused in gcc's words, and a declaration with a refused string is
-    /// taken to be built for the unit, since gcc drops the attribute that carried it.
+    /// and i386 they are read into one [`Target`] and applied over the unit's set once, at the
+    /// end. A name gcc does not know is refused in gcc's words, and a declaration with a refused
+    /// string is taken to be built for the unit, since gcc drops the attribute that carried it.
     ///
     /// AArch64's strings are read with [`Isa::aarch64_target`], one after another over the
     /// unit's set, and what they say about the CRC32 extension is kept, which is what lets a
@@ -2194,7 +2194,7 @@ impl Checker<'_> {
     /// nothing here reads them.
     ///
     /// The `bool` beside the extensions is whether the function may use the x87 stack, which is
-    /// the unit's answer unless an x86-64 string said `80387`, `no-80387` or `general-regs-only`.
+    /// the unit's answer unless an x86 string said `80387`, `no-80387` or `general-regs-only`.
     /// See [`Target::x87`].
     pub(in crate::check) fn targeted(
         &mut self,
@@ -2203,7 +2203,7 @@ impl Checker<'_> {
         span: Span,
     ) -> Option<(Isa, bool)> {
         let x86 = match self.cx.target.tuple.arch().as_str() {
-            "x86_64" => true,
+            "x86_64" | "i686" => true,
             "aarch64" => false,
             _ => return None,
         };

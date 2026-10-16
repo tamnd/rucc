@@ -929,7 +929,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // decide that neither means anything. See `rucc_target::isa`.
     let mut isa = rucc_target::Choices::new();
     let mut isa_flag: Option<&str> = None;
-    let mut isa_on: Option<&str> = None;
     let mut march: Option<&str> = None;
     // What `-fexceptions` and `-fno-exceptions` last said, if either was written. It is kept apart
     // from the field because `-fnon-call-exceptions` turns exceptions on only when neither was,
@@ -2568,6 +2567,22 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-m80387" | "-mhard-float" if x86 => x87 = true,
             "-mno-fp-ret-in-387" if x86 => fp_ret_in_387 = false,
             "-mfp-ret-in-387" if x86 => fp_ret_in_387 = true,
+            // Where `float` and `double` arithmetic is done. Both x86 targets do it in the SSE
+            // registers here, which is gcc's default on x86-64 and what gcc does on i386 only with
+            // `-mfpmath=sse`, so that value is taken and changes nothing. The backend does no
+            // arithmetic on the x87 stack, so the values that ask for it are refused.
+            _ if x86 && arg.starts_with("-mfpmath=") => match &arg["-mfpmath=".len()..] {
+                "sse" => {}
+                "387" | "sse+387" | "387+sse" | "both" => {
+                    return Err(err(format!(
+                        "{arg}: this compiler does `float` and `double` arithmetic in the SSE \
+                         registers only"
+                    )));
+                }
+                value => {
+                    return Err(err(format!("bad value '{value}' for '-mfpmath=' switch")));
+                }
+            },
             // Nothing but the general purpose registers, which on x86-64 is the vector
             // extensions and the x87 stack all turned off at once, and on AArch64 is the FP and
             // SIMD registers. A function with a `float` in it is then refused, as gcc refuses it.
@@ -2957,9 +2972,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 isa.read(&arg["-m".len()..]).map_err(|_| err(format!("unknown option `{arg}`")))?;
                 isa_flag.get_or_insert(arg);
-                if on && !matches!(arg, "-msse" | "-msse2") {
-                    isa_on.get_or_insert(arg);
-                }
             }
             // Which processor in the family to build for. What it decides is the extensions of
             // the instruction set the unit may assume, which is the macros, on x86-64 and, for
@@ -3344,15 +3356,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         || last("-funsafe-math-optimizations", "-fno-unsafe-math-optimizations");
     link.daz_ftz = daz_ftz;
     // The extensions, now that the target is known. On x86-64 the processor supplies whatever no
-    // flag said. On AArch64 `-march=` alone says them, with its `+crc` and the rest, and nowhere
-    // else is there any to have. Off x86 a flag naming one of its extensions is gcc's unknown
-    // option too, so it is refused the same way it would have been had it not looked like an x86
-    // flag. On i386 every one of them is already off, which is what the kernel's `-mno-sse` and
-    // the rest ask for, and turning one on is refused, since there is no code here that uses it.
-    // `-msse` and `-msse2` are the exception, because they ask for what the i386 backend does
-    // anyway: it builds for the Pentium 4 and does `float` and `double` arithmetic in SSE2, and the
-    // macros say so (see `rucc_pp::predef`). The kernel turns both back on for its floating point
-    // units after `-mno-sse`, 69 of them in amdgpu's display code for i386 and `test_fpu_impl.c`.
+    // flag said. On i386 the processor is the Pentium 4, because the backend builds for it and
+    // does `float` and `double` arithmetic in SSE2 (see `rucc_pp::predef`), and the flags go over
+    // its extensions, which are the x86-64 baseline and `sahf`. The kernel's `-mno-sse` and the
+    // rest turn them off, and its floating point units turn `-msse` and `-msse2` back on, 69 of
+    // them in amdgpu's display code for i386 and `test_fpu_impl.c`. gcc gives `cx16` no macro under
+    // `-m32`, and `cmpxchg16b` is a 64 bit instruction, so it is taken and then dropped. On i386
+    // `-march=` decides only `cmov`, below. On AArch64 `-march=` alone says them,
+    // with its `+crc` and the rest, and nowhere else is there any to have. Off x86 a flag naming
+    // one of its extensions is gcc's unknown option too, so it is refused the same way it would
+    // have been had it not looked like an x86 flag.
     //
     // `-march=native` is the machine running the compiler, so it means something only when that
     // machine is the target's. Anywhere else gcc is a cross compiler, which has no way to ask the
@@ -3389,14 +3402,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         | rucc_target::Arch::Riscv64
         | rucc_target::Arch::X86
         | rucc_target::Arch::Wasm32 => {
-            if opts.target.arch == rucc_target::Arch::X86 {
-                if let Some(flag) = isa_on {
-                    return Err(err(format!(
-                        "{flag}: this compiler builds i386 code with no extensions to the \
-                         instruction set, so one can only be turned off"
-                    )));
-                }
-            } else if let Some(flag) = isa_flag {
+            if let Some(flag) = isa_flag.filter(|_| opts.target.arch != rucc_target::Arch::X86) {
                 return Err(err(format!("unknown option `{flag}`")));
             }
             opts.isa = match (opts.target.arch, march) {
@@ -3404,6 +3410,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     Some(modifiers) => native_aarch64().aarch64_modifiers(modifiers),
                     None => rucc_target::Isa::aarch64_march(name),
                 },
+                (rucc_target::Arch::X86, _) => isa
+                    .over(rucc_target::Isa::baseline().union(rucc_target::Isa::of(&["sahf"])))
+                    .minus(rucc_target::Isa::of(&["cx16"])),
                 _ => rucc_target::Isa::NONE,
             };
             // The processors gcc gives no `cmov`, which came with the Pentium Pro. A kernel built
@@ -10320,19 +10329,53 @@ mod tests {
         // `-mno-80387` is an x86 flag, and gcc for AArch64 does not know it.
         let said = refused(&[KERNEL_ARM64, "-mno-80387", "-c", "a.c"]);
         assert!(said.contains("unknown option"), "{said}");
-        // What the i386 kernel passes. Every extension is already off there, and the x87 stack
-        // is where every float is, so `-msoft-float` leaves a float nowhere to be.
+        // What the i386 kernel passes, which turns the Pentium 4's extensions off but the one
+        // that saves their state and `sahf`.
         let i386 = [KERNEL_X86, "-m32", "-fno-pic", "-msoft-float", "-mno-sse", "-mno-mmx"];
         let i386 = [&i386[..], &["-mno-sse2", "-mno-3dnow", "-mno-avx"]].concat();
         assert_eq!(files(&i386), (true, false));
+        let (opts, _) = compile(&[&i386[..], &["-c", "a.c"]].concat());
+        assert_eq!(opts.isa, rucc_target::Isa::of(&["fxsr", "sahf"]));
         // The flags the i386 kernel builds a floating point unit with, which ask for the SSE2 the
-        // backend does its arithmetic in and so are taken, and an extension after them that is not.
+        // backend does its arithmetic in.
         let fpu = [&i386[..], &["-msse", "-msse2", "-mhard-float"]].concat();
         assert_eq!(files(&fpu), (true, true));
         let (opts, _) = compile(&[&fpu[..], &["-c", "a.c"]].concat());
-        assert_eq!(opts.isa, rucc_target::Isa::NONE);
-        let said = refused(&[KERNEL_X86, "-m32", "-msse2", "-msse3", "-c", "a.c"]);
-        assert!(said.contains("-msse3: this compiler builds i386 code"), "{said}");
+        assert_eq!(opts.isa, rucc_target::Isa::of(&["sse", "sse2", "fxsr", "sahf"]));
+    }
+
+    /// tamnd/rucc#3694. An i386 unit is built for the Pentium 4 and the flags go over it, as gcc
+    /// does with `-march=pentium4`. Before, only `-msse` and `-msse2` were taken.
+    #[test]
+    fn an_i386_unit_takes_the_extension_flags() {
+        let isa = |more: &[&str]| {
+            let line = [&["--target=i686-linux-gnu", "-c", "a.c"], more].concat();
+            compile(&line).0.isa
+        };
+        let named = |name| rucc_target::Feature::named(name).expect("a feature");
+        let pentium4 = rucc_target::Isa::baseline().union(rucc_target::Isa::of(&["sahf"]));
+        assert_eq!(isa(&[]), pentium4);
+        assert!(isa(&["-mfma"]).has(named("fma")) && isa(&["-mfma"]).has(named("sse4.2")));
+        assert!(isa(&["-mavx2"]).has(named("avx")) && !isa(&["-mavx2"]).has(named("fma")));
+        assert!(isa(&["-msse3"]).has(named("sse3")) && isa(&["-mpopcnt"]).has(named("popcnt")));
+        assert!(!isa(&["-mfma", "-mno-avx"]).has(named("fma")));
+        // `-march=` still decides only `cmov` here.
+        assert_eq!(isa(&["-march=haswell"]), pentium4);
+        // gcc gives `cx16` no macro under `-m32`, and `cmpxchg16b` is a 64 bit instruction.
+        assert_eq!(isa(&["-mcx16"]), pentium4);
+        assert!(!isa(&["-mno-sahf"]).has(named("sahf")));
+        // An extension this compiler has no intrinsics for is refused as on x86-64.
+        let said = refused(&["--target=i686-linux-gnu", "-mavx512f", "-c", "a.c"]);
+        assert!(said.contains("no intrinsics for avx512f"), "{said}");
+        // `-mfpmath=sse` is what the backend does anyway, and the x87 stack is refused.
+        let (opts, _) = compile(&["--target=i686-linux-gnu", "-mfpmath=sse", "-mfma", "-c", "a.c"]);
+        assert!(opts.isa.has(named("fma")));
+        let said = refused(&["--target=i686-linux-gnu", "-mfpmath=387", "-c", "a.c"]);
+        assert!(said.contains("in the SSE registers only"), "{said}");
+        let said = refused(&["--target=i686-linux-gnu", "-mfpmath=bogus", "-c", "a.c"]);
+        assert!(said.contains("bad value 'bogus' for '-mfpmath=' switch"), "{said}");
+        let said = refused(&["--target=aarch64-linux-gnu", "-mfpmath=sse", "-c", "a.c"]);
+        assert!(said.contains("unknown option"), "{said}");
     }
 
     /// The canary moved to where a kernel keeps it, which is `%gs:40` up to 6.12 and a symbol read
