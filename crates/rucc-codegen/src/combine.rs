@@ -311,7 +311,7 @@
 
 use rucc_base::Interner;
 use rucc_base::hash::Map;
-use rucc_mir::{Amode, Flags, Func, Inst, Opcode, Operand, Reg};
+use rucc_mir::{Amode, Flags, Func, Inst, Opcode, Operand, Reg, Role};
 use rucc_target::{FlagInsts, MachineInsts};
 
 use crate::changes::{Changes, Plan, Reads};
@@ -356,7 +356,8 @@ pub struct Fold {
     /// instruction that reads memory reads it as the right hand side and there is no encoding
     /// that puts it on the left, so a load feeding the left hand side stays where it is. Also
     /// [`None`] for a comparison against a constant, which has one source rather than two and so
-    /// nothing to swap it with.
+    /// nothing to swap it with, and for a comparison that keeps no byte, which has no condition
+    /// in its name to turn over.
     ///
     /// The same name as `into` for an operation that commutes, since writing the two sources in
     /// either order computes the same answer and one instruction covers both.
@@ -382,6 +383,13 @@ pub struct Fold {
 /// And then the same forty against a constant, which name one instruction each. The constant is on
 /// the instruction and cannot be anywhere else, so the register the load filled is the left hand
 /// side and there is no other arrangement to offer.
+///
+/// And the four comparisons that keep no byte, which are in the middle with the arithmetic. The
+/// selector writes one for the low halves of a `long long` on i386, with the subtract with borrow
+/// for the high halves behind it, and the allocator often reloads the right hand side of it from a
+/// spill slot just in front. gcc reads that side out of memory. These name one instruction each,
+/// because what reads the condition state behind them is not something the row can see, so there
+/// is no condition to turn over when the load is on the left.
 pub static FOLDS: &[Fold] = &[
     Fold { from: "add_rr_8", into: "add_rm_8", load: "mov_rm_8", swapped: Some("add_rm_8") },
     Fold { from: "add_rr_16", into: "add_rm_16", load: "mov_rm_16", swapped: Some("add_rm_16") },
@@ -406,6 +414,10 @@ pub static FOLDS: &[Fold] = &[
     Fold { from: "imul_rr_16", into: "imul_rm_16", load: "mov_rm_16", swapped: Some("imul_rm_16") },
     Fold { from: "imul_rr_32", into: "imul_rm_32", load: "mov_rm_32", swapped: Some("imul_rm_32") },
     Fold { from: "imul_rr_64", into: "imul_rm_64", load: "mov_rm_64", swapped: Some("imul_rm_64") },
+    Fold { from: "cmp_rr_8", into: "cmp_rm_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "cmp_rr_16", into: "cmp_rm_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "cmp_rr_32", into: "cmp_rm_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "cmp_rr_64", into: "cmp_rm_64", load: "mov_rm_64", swapped: None },
     Fold {
         from: "cmp_set_e_8",
         into: "cmp_set_e_rm_8",
@@ -1601,6 +1613,15 @@ fn joined(
             };
             (vec![answer, kept], into)
         }
+        // A comparison that keeps no byte writes nothing at all, so both its operands are read and
+        // the memory can only take the right hand side. What reads the condition state behind it
+        // is not something this can see, so there is no condition to turn over and no left side.
+        [left, right] if left.role == Role::Use => {
+            if right.reg != carried.reg || left.reg == carried.reg {
+                return None;
+            }
+            (vec![left], fold.into)
+        }
         [answer, only] if only.reg == carried.reg => (vec![answer], fold.into),
         _ => return None,
     };
@@ -2746,6 +2767,43 @@ mod tests {
         assert_eq!(func[imm].0, 7, "and is the one that was written");
     }
 
+    /// A comparison that keeps no byte, which is the low halves of `a < b` for two `long long` on
+    /// i386 with the subtract with borrow behind it. Nothing is written, so the side it kept is the
+    /// first operand and the address comes straight after it.
+    #[test]
+    fn a_comparison_that_keeps_no_byte_takes_the_load_on_its_right() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let opcode = op(&mut names, "cmp_rr_64");
+        func.build(block, opcode).uses(other, GPR).uses(word, GPR).finish();
+
+        assert_eq!(combine(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.cmp_rm_64"]);
+        let inst = func.insts(block).next().expect("the comparison");
+        let mem = func[inst].mem.expect("it reads memory now");
+        assert_eq!(func[mem].disp, 16, "the load's displacement came with it");
+        assert_eq!(func[mem].base, Some(1), "and names the operand behind the side it kept");
+        assert_eq!(func[func[inst].operands][0].reg, other, "the side it kept");
+        assert_eq!(func[func[inst].operands][1].reg, base, "the address it took on");
+    }
+
+    /// The same comparison with the load on its left. What reads the condition state behind it can
+    /// be a subtract with borrow, which has no condition to turn over, so the load stays.
+    #[test]
+    fn a_comparison_that_keeps_no_byte_leaves_a_load_on_its_left() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let word = load(&mut func, &mut names, block, base);
+        let opcode = op(&mut names, "cmp_rr_64");
+        func.build(block, opcode).uses(word, GPR).uses(other, GPR).finish();
+
+        assert_eq!(combine(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["x64.mov_rm_64", "x64.cmp_rr_64"]);
+    }
+
     /// A load of that name and a test of what it read against that constant, behind a widening of
     /// the name given where there is one, which is `if (p->flags & k)` for a field that narrow.
     fn bit(read: &str, widen: Option<&str>, test: &str, k: i64) -> (Interner, Func) {
@@ -3032,10 +3090,12 @@ mod tests {
             compares, 80,
             "ten conditions at four widths, against a register and a constant"
         );
-        let arithmetic = FOLDS.len() - compares;
+        let bare = FOLDS.iter().filter(|fold| fold.from.starts_with("cmp_rr_")).count();
+        assert_eq!(bare, 4, "a comparison that keeps no byte, at four widths");
+        let arithmetic = FOLDS.len() - compares - bare;
         assert_eq!(arithmetic, 23, "six operations at four widths, less the eight bit multiply");
         let swapped = FOLDS.iter().filter(|fold| fold.swapped.is_some()).count();
-        assert_eq!(swapped, 59, "everything but the four subtractions and the constant compares");
+        assert_eq!(swapped, 59, "everything but the four subtractions and the comparisons with nothing to turn over");
     }
 
     /// What a comparison folded on its left hand side comes out as.

@@ -695,6 +695,13 @@ fn reloaded(
             }
             (vec![answer, kept], into)
         }
+        // A comparison that keeps no byte, which reads both its operands and writes nothing.
+        [left, right] if left.role == Role::Use => {
+            if !is(&right) || is(&left) {
+                return None;
+            }
+            (vec![left], fold.into)
+        }
         [answer, only] if is(&only) => (vec![answer], fold.into),
         _ => return None,
     };
@@ -1469,6 +1476,44 @@ mod tests {
         assert_eq!(reloads(&mut func, &moves, &mut names), 1);
         assert_eq!(func[cmp].opcode, op(&mut names, "cmp_set_g_rm_32"));
         assert_eq!(reads(&func, block, 0), vec![R13, RAX]);
+    }
+
+    /// The low halves of a `long long` comparison on i386, whose right hand side was spilled. The
+    /// comparison keeps no byte, so the side it kept is the first operand and the address follows.
+    #[test]
+    fn a_reload_on_the_right_of_a_comparison_that_keeps_no_byte_is_read_by_it() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        let opcode = op(&mut names, "cmp_rr_32");
+        let cmp = func
+            .build(block, opcode)
+            .uses(Reg::physical(R13), GPR)
+            .uses(Reg::physical(R10), GPR)
+            .finish();
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+
+        assert_eq!(reloads(&mut func, &moves, &mut names), 1);
+        assert_eq!(func.insts(block).collect::<Vec<_>>(), vec![cmp]);
+        assert_eq!(func[cmp].opcode, op(&mut names, "cmp_rm_32"));
+        assert_eq!(reads(&func, block, 0), vec![R13, RAX]);
+        let mem = func[func[cmp].mem.expect("an address")];
+        assert_eq!((mem.base, mem.disp), (Some(1), 40));
+    }
+
+    /// The same comparison with the reload on its left. A subtract with borrow can read what it
+    /// leaves, and that has no condition to turn over, so the reload stays.
+    #[test]
+    fn a_reload_on_the_left_of_a_comparison_that_keeps_no_byte_stays() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        let opcode = op(&mut names, "cmp_rr_32");
+        func.build(block, opcode).uses(Reg::physical(R10), GPR).uses(Reg::physical(R13), GPR).finish();
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+
+        assert_eq!(reloads(&mut func, &moves, &mut names), 0);
+        assert_eq!(left(&func, block), 2);
     }
 
     /// The register is read again further down, so the word has to arrive in it.
