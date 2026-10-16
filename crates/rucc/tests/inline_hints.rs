@@ -325,3 +325,34 @@ fn a_caller_the_first_pass_copied_everywhere_does_not_make_a_function_run_more_t
     let listing = asm("picked", &["-O2"], &source);
     assert_eq!(reaches(&listing, "main", "slow"), 3, "{listing}");
 }
+
+/// The kernel's `uncore_alloc_box`, a `static` function three callers reach. The body removed when
+/// every call is copied is the body as the later passes leave it, which is smaller than the body
+/// as lowered. Weighed as lowered, copying it everywhere looked like it made the program smaller,
+/// and all three callers took a copy where gcc keeps the one body and calls it.
+#[test]
+fn a_static_function_called_a_few_times_is_weighed_by_the_body_it_leaves_once_cleaned_up() {
+    let source = "struct box { int n, type, node, refs; int ev[4]; void *pmu; long cpu; };\n\
+        extern void *zalloc(unsigned long size, int node);\n\
+        extern void init_lock(void *lock);\n\
+        extern void init_timer(void *timer, long cpu);\n\
+        static struct box *alloc_box(int type, int node) {\n\
+            struct box *box = zalloc(sizeof(*box), node);\n\
+            if (!box) return 0;\n\
+            for (int i = 0; i < 4; i++) box->ev[i] = -1;\n\
+            init_lock(&box->refs);\n\
+            init_timer(&box->pmu, box->cpu);\n\
+            box->type = type;\n\
+            box->node = node;\n\
+            box->cpu = -1;\n\
+            box->n = type > 3 ? type * 2 : type + 1;\n\
+            return box;\n\
+        }\n\
+        struct box *one(int t) { return alloc_box(t, -1); }\n\
+        struct box *two(int t, int n) { return alloc_box(t + 1, n); }\n\
+        int three(int t) { struct box *b = alloc_box(t, 0); return b ? b->n : -1; }\n";
+    let listing = asm("cleaned", &["-O2"], source);
+    for caller in ["one", "two", "three"] {
+        assert_eq!(reaches(&listing, caller, "alloc_box"), 1, "{caller}:\n{listing}");
+    }
+}
