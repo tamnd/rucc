@@ -401,8 +401,12 @@ impl<'a> Checker<'a> {
     pub fn new(ast: &'a Ast, cx: Context<'a>) -> Checker<'a> {
         let mut checker = Checker {
             ast,
-            // A typed expression for each untyped one and a conversion for about every other.
-            tast: Tast::with_capacity(ast.counts().exprs * 3 / 2),
+            // A typed expression for each untyped one and a conversion for about every other, and a
+            // declaration for each untyped one and each parameter.
+            tast: Tast::with_capacity(
+                ast.counts().exprs * 3 / 2,
+                ast.counts().decls + ast.counts().params,
+            ),
             types: Types::new(),
             scopes: Scopes::new(),
             errors: Errors::new(cx.error_limit),

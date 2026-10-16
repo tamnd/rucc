@@ -301,13 +301,15 @@ impl Tast {
         Tast::default()
     }
 
-    /// An empty tree with room for this many expressions, for the same reason as the untyped
-    /// tree's `with_capacity`.
+    /// An empty tree with room for this many expressions and declarations, for the same reason
+    /// as the untyped tree's `with_capacity`.
     #[must_use]
-    pub fn with_capacity(exprs: usize) -> Tast {
+    pub fn with_capacity(exprs: usize, decls: usize) -> Tast {
         Tast {
             exprs: Vec::with_capacity(exprs),
             expr_spans: Vec::with_capacity(exprs),
+            decls: Vec::with_capacity(decls),
+            decl_spans: Vec::with_capacity(decls),
             ..Tast::default()
         }
     }

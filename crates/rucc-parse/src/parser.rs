@@ -138,8 +138,7 @@ impl<'a> Parser<'a> {
             tokens,
             scopes,
             errors: Errors::new(cx.error_limit),
-            // About one expression for every two tokens, which is what a list of numbers is.
-            ast: Ast::with_capacity(tokens.tokens.len() / 2),
+            ast: Ast::with_capacity(tokens.tokens.len()),
             cx,
             depth: 0,
             too_deep: false,
