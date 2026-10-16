@@ -864,7 +864,18 @@ pub fn call(
             // a call to the runtime below. What the byte count has to fit in is the immediate the
             // call passes it as, and an object that large is what is left of the old refusal. The
             // limit is the one for speed, since nothing this far down knows the goal.
-            let most = crate::expand::copies(Goal::Speed);
+            //
+            // Except on a convention with fewer than three argument registers, which is every
+            // i386 one. There the copy's own three words go on the stack, at the bottom of the
+            // outgoing area this call is being written into, over the arguments already stored
+            // there, so every copy is words however many there are. GCC makes no library call
+            // while it sets up a call's arguments either. 00204 of c-testsuite passed two large
+            // structures and printed garbage for the first.
+            let most = if conv.int_args.len() < 3 {
+                usize::MAX
+            } else {
+                crate::expand::copies(Goal::Speed)
+            };
             let plan = crate::expand::plan(u64::from(size), align, conv.word, most);
             let count = i32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
             as_bytes.push((reg, up, count, plan));
@@ -1264,9 +1275,9 @@ fn by_runtime(
         linked,
         forwarded: false,
     };
-    // Three pointer sized arguments and nothing coming back is a call every convention here has
-    // registers for, so the only way this could refuse is a convention with fewer than three
-    // argument registers, and there is no such convention.
+    // Three pointer sized arguments and nothing coming back is a call every convention that gets
+    // here has registers for, since one with fewer than three copies a word at a time instead, so
+    // there is nothing for this to refuse.
     call(out, block, &made, conv, insts, names)
         .expect("the runtime's copy passes three words and takes nothing back")
         .outgoing
@@ -1980,6 +1991,7 @@ mod tests {
         size: u64,
         align: u32,
         conv: &CallRegs,
+        insts: &Insts,
     ) -> (Interner, mir::Func, Result<Made, Refused>) {
         let mut names = Interner::new();
         let mut out = mir::Func::new(names.intern("f"));
@@ -2012,13 +2024,13 @@ mod tests {
             linked: None,
             forwarded: false,
         };
-        let made = call(&mut out, block, &what, conv, &X86_64, &mut names);
+        let made = call(&mut out, block, &what, conv, insts, &mut names);
         (names, out, made)
     }
 
     #[test]
     fn a_structure_passed_by_value_in_memory_is_copied_into_the_outgoing_area() {
-        let (names, func, made) = pass_bytes(1, 24, 8, &SYSV);
+        let (names, func, made) = pass_bytes(1, 24, 8, &SYSV, &X86_64);
         let made = made.expect("an object of three words is copied a word at a time");
 
         // The bytes travel and the address does not, so the copy is a load and a store for each
@@ -2036,7 +2048,7 @@ mod tests {
 
     #[test]
     fn the_integers_beside_it_still_travel_in_registers() {
-        let (_, func, _) = pass_bytes(1, 24, 8, &SYSV);
+        let (_, func, _) = pass_bytes(1, 24, 8, &SYSV, &X86_64);
 
         // An object in the argument area takes no argument register, so the integer behind it is
         // in the second one and not the third. Counting it as a register is the mistake that would
@@ -2048,7 +2060,7 @@ mod tests {
 
     #[test]
     fn an_object_wanting_more_alignment_than_a_word_gets_it() {
-        let (names, func, made) = pass_bytes(7, 24, 16, &SYSV);
+        let (names, func, made) = pass_bytes(7, 24, 16, &SYSV, &X86_64);
         let made = made.expect("an object of three words");
 
         // Six of the integers took the registers and the seventh is at the bottom of the area, so
@@ -2063,7 +2075,7 @@ mod tests {
 
     #[test]
     fn an_object_too_large_to_copy_a_word_at_a_time_is_copied_by_the_runtime() {
-        let (names, func, made) = pass_bytes(1, 4096, 8, &SYSV);
+        let (names, func, made) = pass_bytes(1, 4096, 8, &SYSV, &X86_64);
         let made = made.expect("an object the runtime copies");
 
         // Five hundred and twelve words is past what unrolling is worth, so the copy is the call
@@ -2081,8 +2093,23 @@ mod tests {
     }
 
     #[test]
+    fn an_object_passed_on_i386_is_copied_a_word_at_a_time_however_large_it_is() {
+        let (names, func, made) = pass_bytes(0, 4096, 4, &rucc_target::x86::SYSV, &X86);
+        let made = made.expect("an object copied a word at a time");
+
+        // A call to the runtime would put its three words at the bottom of the outgoing area,
+        // which is where the object goes, so the copy is a load and a store for each of its
+        // thousand and twenty four words and the one call is the call the object is passed to.
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(!text.contains("@memcpy"), "{text}");
+        assert_eq!(text.matches("x64.call").count(), 1, "{text}");
+        assert_eq!(text.matches("x64.mov_mr_32").count(), 1025, "the words and the int: {text}");
+        assert_eq!(made.outgoing, 4100);
+    }
+
+    #[test]
     fn an_object_too_large_to_count_the_bytes_of_is_reported_rather_than_passed() {
-        let (_, _, made) = pass_bytes(1, 1 << 31, 8, &SYSV);
+        let (_, _, made) = pass_bytes(1, 1 << 31, 8, &SYSV, &X86_64);
 
         // Two gigabytes is more than the immediate the byte count travels in holds, and a count
         // that does not fit is the whole of what is left to refuse. No program passes a structure
