@@ -78,6 +78,7 @@ pub(crate) struct Stack {
     /// One past the highest.
     hi: usize,
     /// How long the mapping this sits at the front of is, for giving it back.
+    #[cfg(target_os = "linux")]
     len: usize,
     /// No byte below this has a bit set, as far as this thread knows.
     low: Cell<usize>,
