@@ -19,6 +19,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Write the body of an object-like macro with no operators or parameters straight onto the rescan list rather than through two lists of its own, which takes 2.1% of the instructions off duk_replacements.c (184.9M to 181.1M) with every object the same as before (#3672).
 - Keep the token lists of the last function-like macro invocations to finish and hand them to the next, which takes 2.6% of the instructions off duk_replacements.c (181.1M to 176.4M) with every object the same as before (#3673).
 - Reserve the declaration, specifier, declarator, attribute and parameter tables of the tree, and the checker's declarations, from the token count rather than doubling them up from empty (#3698).
+- The inliner now weighs the body a `static` function leaves behind when every call to it is copied as that body after the later passes have cleaned it up, the same measure it holds each copy to. It used the body as lowered, which is larger, so a function with a few callers looked as if copying it everywhere made the program smaller. The kernel's `uncore_alloc_box` was copied into all three of its callers where gcc keeps it out of line. The X32 uncore.c drops from 3828 to 3771 instructions, md.c moves from 22971 to 22973, and sem.c, ohci-hcd.c, skbuff.c and alternative.c do not change (#3700).
 
 ### Fixed
 
