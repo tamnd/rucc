@@ -144,16 +144,28 @@ impl Ast {
         Ast::default()
     }
 
-    /// An empty tree with room for this many expressions.
+    /// An empty tree with room for what a unit of this many tokens usually holds.
     ///
     /// A guess made up front costs nothing where it is too large, since memory nobody writes to
     /// is never handed over, and saves copying the whole table each time it doubles where the
-    /// unit is a large one.
+    /// unit is a large one. About one expression for every two tokens is what a list of numbers
+    /// is. The declaration tables follow what duktape's headers hold, where every sixth token
+    /// or so starts a declarator and a set of specifiers.
     #[must_use]
-    pub fn with_capacity(exprs: usize) -> Ast {
+    pub fn with_capacity(tokens: usize) -> Ast {
+        let exprs = tokens / 2;
+        let decls = tokens / 16;
         Ast {
             exprs: Vec::with_capacity(exprs),
             expr_spans: Vec::with_capacity(exprs),
+            decls: Vec::with_capacity(decls),
+            decl_spans: Vec::with_capacity(decls),
+            init_declarators: Vec::with_capacity(decls),
+            specs: Vec::with_capacity(tokens / 6),
+            declarators: Vec::with_capacity(tokens / 6),
+            attrs: Vec::with_capacity(tokens / 8),
+            derived: Vec::with_capacity(tokens / 10),
+            params: Vec::with_capacity(tokens / 10),
             ..Ast::default()
         }
     }
@@ -238,7 +250,12 @@ impl Ast {
     /// `--emit=ast` header prints.
     #[must_use]
     pub fn counts(&self) -> Counts {
-        Counts { exprs: self.exprs.len(), stmts: self.stmts.len(), decls: self.decls.len() }
+        Counts {
+            exprs: self.exprs.len(),
+            stmts: self.stmts.len(),
+            decls: self.decls.len(),
+            params: self.params.len(),
+        }
     }
 
     /// Whether nothing has been parsed into this tree.
@@ -257,6 +274,8 @@ pub struct Counts {
     pub stmts: usize,
     /// Declarations.
     pub decls: usize,
+    /// Parameters, each of which the checker declares.
+    pub params: usize,
 }
 
 impl fmt::Debug for Ast {
@@ -463,7 +482,7 @@ mod tests {
         let ast = Ast::new();
         assert!(ast.is_empty());
         assert!(ast.top_level().is_empty());
-        assert_eq!(ast.counts(), Counts { exprs: 0, stmts: 0, decls: 0 });
+        assert_eq!(ast.counts(), Counts { exprs: 0, stmts: 0, decls: 0, params: 0 });
     }
 
     #[test]
