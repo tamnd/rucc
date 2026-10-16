@@ -1639,7 +1639,16 @@ mod tests {
                 if folded { [compare].into_iter().collect() } else { Set::default() };
             let scratch = (GPR, &[R10, R11][..]);
             let cleaned = super::clean(
-                &mut func, &moves, &MACHINE, &FRAME, &SYSV, true, scratch, &joined, &mut names,
+                &mut func,
+                &moves,
+                &MACHINE,
+                &FRAME,
+                &SYSV,
+                true,
+                scratch,
+                &joined,
+                &Set::default(),
+                &mut names,
             );
             assert_eq!(cleaned.gone, usize::from(folded), "folded: {folded}");
             assert_eq!(left(&func, next), if folded { 1 } else { 2 }, "folded: {folded}");
