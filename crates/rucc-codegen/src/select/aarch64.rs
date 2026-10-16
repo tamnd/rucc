@@ -341,7 +341,7 @@ mod tests {
         let k = terms.constant("iconst.i64", 0x5555_5555_5555_5555);
         let xor = terms.app("xor.i64", &[y, k]);
         assert_eq!(selects(&terms, xor), Some("a64.eor_ri_64"));
-        let k = terms.constant("iconst.i32", 0x8000_0000_u32.cast_signed().into());
+        let k = terms.constant("iconst.i32", i32::MIN.into());
         let or = terms.app("or.i32", &[x, k]);
         assert_eq!(selects(&terms, or), Some("a64.orr_ri_32"));
         for odd in [0, -1, 0x12345] {

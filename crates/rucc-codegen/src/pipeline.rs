@@ -2674,7 +2674,7 @@ mod tests {
             let flags = Flags { isa, ..Flags::default() };
             let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
                 .expect("a fused multiply add is an instruction or a call");
-            mir::print_func(&out, &names, &rucc_target::x86::REGS)
+            mir::print_func(&out, &names, &x86::REGS)
         };
         let has = Isa::of(&["fma"]).union(Isa::baseline());
         for (format, wanted) in [
