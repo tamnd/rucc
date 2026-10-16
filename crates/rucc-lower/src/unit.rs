@@ -755,11 +755,35 @@ impl Unit<'_> {
     /// run. A declaration of one of those names below the block then finds a definition already
     /// there and leaves it alone, which is the division the program wrote: the template says what
     /// the bytes are and the C declaration says what they are to be read as.
+    ///
+    /// On ELF a block this cannot read is kept as text, and the text goes into the listing ahead of
+    /// every global. A block that reads fine but sits in the same section as one that does not
+    /// would then be laid out after it, though the program wrote it before. The kernel's BTF sets
+    /// are that shape: each id is a block of its own, and the block that ends the set measures the
+    /// set as the distance from its start label to where the section has got to. So once one block
+    /// has to be text, every block is, and the assembler sees them in the order they were written.
     fn file_asms(&mut self) {
+        let mut blocks = Vec::new();
         for index in 0..self.tast.file_asms().len() {
             let asm = self.tast.file_asms()[index];
             let template = self.spelled(asm.template);
-            let read = match directives::assemble(&template, &mut *self.read) {
+            let read = directives::assemble(&template, &mut *self.read);
+            blocks.push((asm, template, read));
+        }
+        let elf = self.target.object_format == ObjectFormat::Elf;
+        let as_text = elf
+            && blocks.iter().any(|(_, _, read)| {
+                matches!(
+                    read,
+                    Err(directives::Failed::Unsupported(_) | directives::Failed::Instruction(_))
+                )
+            });
+        for (asm, template, read) in blocks {
+            if as_text && !matches!(read, Err(directives::Failed::Missing(..))) {
+                self.module.add_file_asm(template);
+                continue;
+            }
+            let read = match read {
                 Ok(read) => read,
                 // A directive this reader does not take, which on ELF is the assembler's to read
                 // for the same reason an instruction is. The listing is one stream for the whole
