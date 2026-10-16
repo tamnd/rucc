@@ -111,8 +111,10 @@ pub struct Descriptor {
 /// this point a discharged check is simply not there.
 ///
 /// Whether this runs at all is `-fsafety=`, and the driver decides it, for the reason
-/// [`crate::run`] gives.
-pub fn lower(module: &mut Module, names: &mut Interner) -> usize {
+/// [`crate::run`] gives. `fill` is whether the locals whose address leaves the function are filled
+/// with a pattern on the way in, which `crate::local` says the reason for and which the driver turns
+/// off when the program chose what its locals hold.
+pub fn lower(module: &mut Module, names: &mut Interner, fill: bool) -> usize {
     // `size_t`, taken from the module rather than written as sixty four, so that the argument is
     // the one the runtime's own declaration of the entry point has.
     let word = Type::int(module.datalayout.pointer_bits);
@@ -134,7 +136,7 @@ pub fn lower(module: &mut Module, names: &mut Interner) -> usize {
         if module[id].is_declaration() {
             continue;
         }
-        calls(&mut module[id], names, word, &numbers, &objects, &mut written);
+        calls(&mut module[id], names, word, &numbers, &objects, fill, &mut written);
         if addressed.contains(&module[id].name) {
             entered(&mut module[id], names, word, &mut written);
         }
@@ -152,11 +154,12 @@ fn calls(
     word: Type,
     numbers: &Map<Meta, u32>,
     objects: &crate::slot::Objects,
+    fill: bool,
     table: &mut Vec<Descriptor>,
 ) {
     // First, because which locals the stack plane is told about is read off the init checks, and
     // those are calls once the walk below has been.
-    crate::local::begin(func, names, word);
+    crate::local::begin(func, names, word, fill);
     let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     let pairs = pairs(func, &insts);
     let fused: Set<Inst> = pairs.values().copied().collect();
@@ -1466,7 +1469,7 @@ mod tests {
         // through an atomic and one established through a mutex are one table and one clock.
         let mut names = Interner::new();
         let mut module = ordering(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
@@ -1541,7 +1544,7 @@ mod tests {
         // address was taken checks the count on the way in. One descriptor each.
         let mut names = Interner::new();
         let mut module = pointed(&mut names, 2, false);
-        assert_eq!(lower(&mut module, &mut names), 2);
+        assert_eq!(lower(&mut module, &mut names, false), 2);
 
         let main = printed(&module, &names, "main");
         assert!(main.contains("call @__rucc_call_through(%"), "{main}");
@@ -1578,7 +1581,7 @@ mod tests {
             .expect("main calls through a pointer");
         let clear = main.create_inst(InstData::new(Opcode::CapClear), &[], main.span(call));
         main.insert_before(clear, call);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let main = printed(&module, &names, "main");
         let judged = main.find("__rucc_call_through").expect("the call was judged");
@@ -1591,7 +1594,7 @@ mod tests {
     fn a_variadic_call_says_it_passes_any_count() {
         let mut names = Interner::new();
         let mut module = pointed(&mut names, 1, true);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
         let main = printed(&module, &names, "main");
         assert!(main.contains("iconst.i64 65534"), "{main}");
     }
@@ -1620,7 +1623,7 @@ mod tests {
         // one clock for every fence in the program instead of a table keyed by one.
         let mut names = Interner::new();
         let mut module = barrier(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
@@ -1747,7 +1750,7 @@ mod tests {
         // reason a plane write has none: opening and closing a block decides nothing.
         let mut names = Interner::new();
         let mut module = promising(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 2);
+        assert_eq!(lower(&mut module, &mut names, false), 2);
 
         let id = module.funcs().next().expect("the module has one function");
         assert_eq!(
@@ -1786,7 +1789,7 @@ mod tests {
         // the reporter prints a different sentence for it.
         let mut names = Interner::new();
         let mut module = promising(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let rows: Vec<u8> = module
             .globals()
@@ -1823,7 +1826,7 @@ mod tests {
         // call here, and a type check's row and an init check's row say the same thing.
         let mut names = Interner::new();
         let mut module = asking_the_plane(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 3);
+        assert_eq!(lower(&mut module, &mut names, false), 3);
 
         // The printer writes an `i32` immediate as a signed number and the identifier is a hash
         // that uses the whole width, so what appears is the same bits read the other way round.
@@ -1955,7 +1958,7 @@ mod tests {
         // call carries can stand for both of them.
         let mut names = Interner::new();
         let mut module = asking_the_plane(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let rows: Vec<u8> = module
             .globals()
@@ -1980,7 +1983,7 @@ mod tests {
         // not.
         let mut names = Interner::new();
         let mut module = stored(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 2);
+        assert_eq!(lower(&mut module, &mut names, false), 2);
 
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
@@ -2003,7 +2006,7 @@ mod tests {
         // program reaches the call, so the runtime reads them for itself.
         let mut names = Interner::new();
         let mut module = racing(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
@@ -2023,7 +2026,7 @@ mod tests {
         // race, since the reporter takes the judgement out of the row it was handed.
         let mut names = Interner::new();
         let mut module = racing(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
@@ -2069,7 +2072,7 @@ mod tests {
         // per end of the copy, which are the accesses the plane writes are not.
         let mut names = Interner::new();
         let mut module = copied(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 4);
+        assert_eq!(lower(&mut module, &mut names, false), 4);
 
         let id = module.funcs().next().expect("the module has one function");
         assert_eq!(
@@ -2118,7 +2121,7 @@ mod tests {
     fn the_alignment_that_goes_through_is_the_one_the_access_may_assume() {
         let mut names = Interner::new();
         let mut module = unaligned(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 3);
+        assert_eq!(lower(&mut module, &mut names, false), 3);
 
         let id = module.funcs().next().expect("the module has one function");
         let printed = print_func(&module, &module[id], &names);
@@ -2136,7 +2139,7 @@ mod tests {
     fn every_check_becomes_a_call_carrying_the_descriptor_it_is_described_by() {
         let mut names = Interner::new();
         let mut module = checked(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 3);
+        assert_eq!(lower(&mut module, &mut names, false), 3);
 
         let id = module.funcs().next().expect("the module has one function");
         assert_eq!(
@@ -2166,7 +2169,7 @@ mod tests {
         // compilation that fails rather than a value nobody reads.
         let mut names = Interner::new();
         let mut module = checked(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let id = module.funcs().next().expect("the module has one function");
         let func = &module[id];
@@ -2182,7 +2185,7 @@ mod tests {
     fn what_it_produces_is_a_module_the_verifier_believes() {
         let mut names = Interner::new();
         let mut module = checked(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
 
         let id = module.funcs().next().expect("the module has one function");
         if let Err(errors) = verify_func(&module, &module[id], &names) {
@@ -2198,7 +2201,7 @@ mod tests {
         // assumed.
         let mut names = Interner::new();
         let mut module = checked(&mut names);
-        let rows = lower(&mut module, &mut names);
+        let rows = lower(&mut module, &mut names, false);
 
         let globals: Vec<_> = module.globals().collect();
         assert_eq!(globals.len(), rows);
@@ -2666,7 +2669,7 @@ mod tests {
         // there is nothing left for the back end to be handed.
         let mut names = Interner::new();
         let mut module = exempt(&mut names);
-        assert_eq!(lower(&mut module, &mut names), 0);
+        assert_eq!(lower(&mut module, &mut names, false), 0);
 
         let id = module.funcs().next().expect("the module has one function");
         assert_eq!(
@@ -2688,7 +2691,7 @@ mod tests {
         // declared regions has an empty section and gets none.
         let mut names = Interner::new();
         let mut module = exempt(&mut names);
-        lower(&mut module, &mut names);
+        lower(&mut module, &mut names, false);
         assert_eq!(module.globals().count(), 0);
     }
 
@@ -2698,7 +2701,7 @@ mod tests {
         // to say and did not say it.
         let mut names = Interner::new();
         let mut module = Module::new(names.intern("empty.c"), &target());
-        assert_eq!(lower(&mut module, &mut names), 0);
+        assert_eq!(lower(&mut module, &mut names, false), 0);
         assert_eq!(module.globals().count(), 0);
     }
 }
