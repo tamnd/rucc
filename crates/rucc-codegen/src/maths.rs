@@ -8,7 +8,7 @@
 //!
 //! The exceptions are a fused multiply add at `float` or `double` in a function built for `fma`
 //! on x86-64 and i386, which the selector writes as `vfmadd`, and the same on AArch64 in every
-//! function, which it writes as `fmadd`. See [`fuse`].
+//! function, which it writes as `fmadd`. See `fuse`.
 //!
 //! The C library rather than libgcc, because libgcc has neither routine. `fmod` and `fma` are in
 //! libm, and so are their `float` and `_Float128` neighbours, which is why a program that reaches
@@ -22,7 +22,7 @@
 //! it has no rule for refuses the function. This step is what makes that a call instead of a
 //! refusal, and it is what lets the coverage table stop listing both as a gap.
 //!
-//! The fused multiply add is also written here, by [`fuse`], from a call to `fma` or `fmaf` that
+//! The fused multiply add is also written here, by `fuse`, from a call to `fma` or `fmaf` that
 //! the front end marked as the library's, when the selector can answer it.
 //!
 //! # What is left alone
@@ -46,7 +46,7 @@ use crate::quad;
 /// When `fused` is true, the selector has a rule for a fused multiply add at `float` and `double`
 /// and the function is built for the extension that has it. Then a call to `fma` or `fmaf` that
 /// means the library's function becomes the instruction first, and the instruction at those two
-/// types stays for the selector. See [`fuse`].
+/// types stays for the selector. See `fuse`.
 ///
 /// The instructions are collected first, for the reason every pass in the group does it: a call
 /// that passes an argument by address writes instructions in front of the one it replaces, and the
