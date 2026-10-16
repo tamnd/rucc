@@ -618,7 +618,8 @@ fn an_x87_input_the_template_leaves_on_the_stack_is_popped_after_it() {
     let body = body(&asm("x87-left", source), "f");
     let push = body.find("fldt").unwrap_or_else(|| panic!("nothing was pushed:\n{body}"));
     let run = body.find("fxam").unwrap_or_else(|| panic!("the template is missing:\n{body}"));
-    let pop = body[run..].find("fstp %st(0)").unwrap_or_else(|| panic!("nothing was popped:\n{body}"));
+    let pop =
+        body[run..].find("fstp %st(0)").unwrap_or_else(|| panic!("nothing was popped:\n{body}"));
     assert!(push < run && pop > 0, "{body}");
 }
 
@@ -1249,6 +1250,33 @@ fn eight_early_outputs_and_two_pinned_inputs_fit_with_optimisation() {
         let (ok, _, said) = object("sodium-sub", &source, &[level]);
         assert!(ok, "{level}:\n{said}");
     }
+}
+
+#[test]
+fn blocks_at_file_scope_stay_in_the_order_written_when_one_is_kept_as_text() {
+    // The kernel's BTF sets. Each id is a block of its own that reads into a global, and the block
+    // that ends the set measures it from its start label to where the section has got to, which
+    // only the assembler can say. That block went into the listing ahead of the globals, so the
+    // set was measured before any of it was written and came out with a negative size.
+    let source = r#"asm(".pushsection .BTF_ids,\"a\"\n.local __BTF_ID__func__before\n"
+    ".type __BTF_ID__func__before, STT_OBJECT\n.size __BTF_ID__func__before, 4\n"
+    "__BTF_ID__func__before:\n.zero 4\n.popsection\n");
+asm(".pushsection .BTF_ids,\"a\"\n.local __BTF_ID__set__allow\n__BTF_ID__set__allow:\n"
+    ".zero 4\n.popsection\n");
+asm(".pushsection .BTF_ids,\"a\"\n.local __BTF_ID__func__one\n"
+    ".type __BTF_ID__func__one, STT_OBJECT\n.size __BTF_ID__func__one, 4\n"
+    "__BTF_ID__func__one:\n.zero 4\n.popsection\n");
+asm(".pushsection .BTF_ids,\"a\"\n"
+    ".size __BTF_ID__set__allow, .-__BTF_ID__set__allow\n.popsection\n");
+int f(int x) { return x + 1; }
+"#;
+    let (ok, _, said) = object("btf-set", source, &["-O2"]);
+    assert!(ok, "{said}");
+    let text = asm("btf-set", source);
+    let start = text.find("__BTF_ID__set__allow:").expect("the set starts");
+    let one = text.find("__BTF_ID__func__one:").expect("the id is written");
+    let end = text.find(".size __BTF_ID__set__allow").expect("the set ends");
+    assert!(start < one && one < end, "{text}");
 }
 
 #[test]
