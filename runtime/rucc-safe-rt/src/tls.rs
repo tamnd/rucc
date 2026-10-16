@@ -26,7 +26,9 @@
 //! than a frame does, from the instruction in front of a call through a pointer to the first one
 //! inside the function it reaches. [`crate::witness`] keeps a fifth, which is not a pointer at all
 //! but a count of the frames this thread has opened, and [`crate::stack`] a sixth, the plane over
-//! this thread's own stack.
+//! this thread's own stack. [`crate::member`] keeps two more, an address and a length that are not
+//! pointers to anything, which live from the instruction in front of a call to the wrapper it
+//! reaches.
 
 use core::ffi::c_void;
 #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
@@ -47,7 +49,7 @@ type Key = core::ffi::c_ulong;
 type Key = core::ffi::c_uint;
 
 /// How many words each thread's block holds, which is how many slots there can be.
-pub const WORDS: usize = 7;
+pub const WORDS: usize = 9;
 
 /// The word [`crate::frame`]'s slot keeps.
 pub const FRAMES: usize = 0;
@@ -66,6 +68,12 @@ pub const SERIAL: usize = 4;
 
 /// The word [`crate::stack`]'s slot keeps.
 pub const STACK: usize = 5;
+
+/// The word the address of [`crate::member`]'s note is kept in.
+pub const MEMBER: usize = 6;
+
+/// The word the length of [`crate::member`]'s note is kept in.
+pub const MEMBER_LENGTH: usize = 7;
 
 /// A pointer each thread has its own copy of.
 ///

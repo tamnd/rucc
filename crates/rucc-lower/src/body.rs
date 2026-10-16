@@ -6406,7 +6406,8 @@ impl<'u> Body<'_, 'u> {
         let closest = self.closest(kind, last, ty);
         if byte != 0 {
             if let Some(size) = closest {
-                self.measured(addr, size);
+                let array = is_array(self.types(), ty);
+                self.measured(addr, size, array);
             }
         }
         Place {
@@ -6443,12 +6444,13 @@ impl<'u> Body<'_, 'u> {
         u32::try_from(size).ok().filter(|&size| size != 0)
     }
 
-    /// Writes on the `ptr_add` that stepped to a member how long the member is.
-    fn measured(&mut self, addr: Value, size: u32) {
+    /// Writes on the `ptr_add` that stepped to a member how long the member is, and whether it is
+    /// an array, which is [`Extra::Array`]'s reason to be.
+    fn measured(&mut self, addr: Value, size: u32, array: bool) {
         if let Def::Result { inst, .. } = self.func[addr].def {
             let data = &mut self.func[inst];
             if data.opcode == Opcode::PtrAdd && data.extra == Extra::None {
-                data.extra = Extra::Member(size);
+                data.extra = if array { Extra::Array(size) } else { Extra::Member(size) };
             }
         }
     }
@@ -6459,11 +6461,13 @@ impl<'u> Body<'_, 'u> {
     fn taken(&mut self, place: Place, span: Span) -> Value {
         let addr = self.address_of(place, span);
         let Some(size) = place.first else { return addr };
+        let extra =
+            if is_array(self.types(), place.ty) { Extra::Array(size) } else { Extra::Member(size) };
         let address = self.address;
         let mut build = self.build(span);
         let zero = build.iconst(address, 0);
         let args = build.func().push_values(&[addr, zero]);
-        let data = InstData { args, extra: Extra::Member(size), ..InstData::new(Opcode::PtrAdd) };
+        let data = InstData { args, extra, ..InstData::new(Opcode::PtrAdd) };
         let moved = build.value(data, Type::PTR);
         if let Some(align) = self.alignment(addr) {
             self.aligns(moved, align);
@@ -10924,6 +10928,12 @@ impl<'u> Body<'_, 'u> {
         }
         let &[to, with, length] = values else { return None };
         let size = self.small_length(length)?;
+        // One that runs off the array member it was handed stays a call, the way gcc leaves it to
+        // `__memcpy_chk` under `_FORTIFY_SOURCE`, so that a safety build's wrapper judges it
+        // against the member. A correct program never gets here.
+        if self.overruns(to, size) || opcode != Opcode::Memset && self.overruns(with, size) {
+            return None;
+        }
         if size > 0 {
             let info = MemInfo {
                 size,
@@ -10947,6 +10957,19 @@ impl<'u> Body<'_, 'u> {
             build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(opcode) }, &[]);
         }
         Some(matches!(plan.ret.pass, Pass::Direct).then_some(to))
+    }
+
+    /// Whether `value` is the address of an array member shorter than `size` bytes, as
+    /// [`Self::measured`] and [`Self::taken`] mark one.
+    fn overruns(&self, value: Value, size: u64) -> bool {
+        let Def::Result { inst, .. } = self.func[value].def else { return false };
+        let data = &self.func[inst];
+        match data.extra {
+            Extra::Array(member) => {
+                data.opcode == Opcode::PtrAdd && member != 0 && u64::from(member) < size
+            }
+            _ => false,
+        }
     }
 
     /// A length that is a constant of at most [`SMALL`], looking through the widening an `int`

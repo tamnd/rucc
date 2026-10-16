@@ -598,6 +598,15 @@ pub enum Extra {
     /// its end, which leaves them to the whole object. A `ptr_add` carries this or nothing, and
     /// nothing after `rucc_opt::objsize` sees it.
     Member(u32),
+    /// The same as [`Extra::Member`] for a member that is an array.
+    ///
+    /// Every question `rucc_opt::objsize` asks reads the two alike. The difference is for
+    /// `rucc_safety::wrap`, which holds a call to an interposed function that is handed the
+    /// address of an array member to that member's length, the way the closest member questions
+    /// do, and leaves the address of a member of any other type to the whole object. A program
+    /// clears a run of members with `memset(&s->first, 0, ...)` on purpose, and copying past the end
+    /// of an array into the member after it is the bug `_FORTIFY_SOURCE` was written to catch.
+    Array(u32),
     /// Which lane, for `extractlane` and `insertlane`.
     Lane(u8),
     /// Which lanes in which order, for `shuffle`. See [`Shuffle`].
@@ -623,6 +632,16 @@ pub enum Extra {
 }
 
 impl Extra {
+    /// How long the member is whose address a `ptr_add` is, when it says, whether or not the
+    /// member is an array.
+    #[must_use]
+    pub const fn member(self) -> Option<u32> {
+        match self {
+            Self::Member(size) | Self::Array(size) => Some(size),
+            _ => None,
+        }
+    }
+
     /// Which shape this is, without the payload.
     ///
     /// The verifier compares this with [`Opcode::extra_kind`], because an instruction carrying
@@ -641,7 +660,7 @@ impl Extra {
             Self::Prefetch(_) => ExtraKind::Prefetch,
             Self::Depth(_) => ExtraKind::Depth,
             Self::Question(_) => ExtraKind::Question,
-            Self::Member(_) => ExtraKind::Member,
+            Self::Member(_) | Self::Array(_) => ExtraKind::Member,
             Self::Lane(_) => ExtraKind::Lane,
             Self::Shuffle(_) => ExtraKind::Shuffle,
             Self::Targets(_) => ExtraKind::Targets,

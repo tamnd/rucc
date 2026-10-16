@@ -215,6 +215,8 @@ pub mod layout;
 pub mod leak;
 #[cfg(unix)]
 pub mod mapping;
+#[cfg(unix)]
+pub mod member;
 pub mod plane;
 pub mod posture;
 #[cfg(unix)]

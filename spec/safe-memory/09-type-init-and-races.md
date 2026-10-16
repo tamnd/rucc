@@ -70,6 +70,8 @@ This is a genuinely better decomposition than the capability-narrowing designs a
 
 **Flexible array members** and the `T x[1]` idiom get the treatment document 03's table promises: a trailing array is unbounded within the allocation, so S4 does not fire on it, and S1 still does at the allocation edge.
 
+**A library call handed an array member** is the one place the member's own length is used by default. `memcpy(s.name, src, sizeof s)` stays inside the object and only leaves `name`, which is the S8 shape Juliet writes as `char_type_overrun_memcpy`, and it is what `_FORTIFY_SOURCE` already refuses with `__builtin_object_size(p, 1)` on the same call. So where a call to an interposed function is handed the address of an array member that is not the last one in its record, the call site first calls `__rucc_member(address, length)`, and the wrapper judges the argument at that address against those bytes. Where the frame names the object it is the object's capability narrowed to the member, and where it names nothing, which is most of the heap, it is a capability over the member alone. Only one call is judged that way and nothing else is narrowed, so `container_of` and ordinary accesses keep the whole object as above, a member that is not an array is left alone because `memset(&s->a, 0, ...)` over a run of members is an idiom, and a trailing array is still unbounded within the allocation.
+
 ## 9.5 Pointer races: the epoch plane
 
 Document 03's C1 through C4, and the section where we do something no existing tool does, cheaply, because the metadata is already being loaded.

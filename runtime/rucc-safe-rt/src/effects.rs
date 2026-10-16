@@ -88,7 +88,8 @@ use core::ffi::c_void;
 use crate::alloc;
 use crate::fail::Judgement;
 use crate::frame::Frame;
-use crate::layout::Cap;
+use crate::layout::{Cap, Class, Meta, perm};
+use crate::member;
 use crate::plane::{self, GRANULE};
 use crate::recover;
 
@@ -504,10 +505,30 @@ const fn same(a: &[u8], b: &[u8]) -> bool {
 /// is said to belong to is not dropped here the way [`Cap::beside`] drops one, because a wrapper
 /// knows how many bytes it is about to touch and [`touches`] can say more with those than the
 /// address can alone.
+///
+/// An argument at the address the call site's [`crate::member`] note is about is held to the
+/// member instead. Where the frame names the object the member is in, that is the same capability
+/// narrowed to the member, which keeps the version and the witness that say whether the object is
+/// still there. Where it names nothing, which is most of the heap, it is a capability over the
+/// member's bytes alone that no plane is asked about, so the member's end is the one thing it adds.
 #[doc(hidden)]
 #[must_use]
-pub fn given(frame: Option<&Frame>, at: usize) -> Cap {
-    frame.map_or(Cap::BOTTOM, |frame| frame.arg(at))
+pub fn given(frame: Option<&Frame>, at: usize, note: Option<member::Note>, addr: usize) -> Cap {
+    held(frame.map_or(Cap::BOTTOM, |frame| frame.arg(at)), note, addr)
+}
+
+/// What [`given`] makes of the frame's capability for an argument at `addr` and the call's note.
+fn held(cap: Cap, note: Option<member::Note>, addr: usize) -> Cap {
+    let Some(note) = note.filter(|note| note.addr == addr && note.len != 0) else { return cap };
+    let (addr, len) = (addr as u64, note.len as u64);
+    if cap.is_named() {
+        return if cap.covers(addr, len) { cap.narrowed(addr - cap.lo, len) } else { cap };
+    }
+    if cap.is_null() {
+        return cap;
+    }
+    let meta = Meta::new(Class::Static, perm::READ | perm::WRITE, 0).with_flags(Meta::NAMED);
+    Cap::new(addr, len, plane::FOREIGN, meta)
 }
 
 /// The length of a NUL terminated string, checked as it is discovered.
@@ -1030,8 +1051,9 @@ macro_rules! interpose {
                 pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret {
                     // Nothing here reads the frame the call site published, and it is taken
                     // anyway, since one left where it is would be believed by the next
-                    // instrumented function this thread enters.
+                    // instrumented function this thread enters. A member note is the same.
                     let _ = $crate::frame::take();
+                    let _ = $crate::member::take();
                     // SAFETY: this wrapper's contract is the one it calls, passed straight on.
                     unsafe { super::$name($($arg),*) }
                 }
@@ -1089,8 +1111,9 @@ macro_rules! interpose {
                 pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret {
                     // Nothing here reads the frame the call site published, and it is taken
                     // anyway, since one left where it is would be believed by the next
-                    // instrumented function this thread enters.
+                    // instrumented function this thread enters. A member note is the same.
                     let _ = $crate::frame::take();
+                    let _ = $crate::member::take();
                     // SAFETY: this wrapper's contract is the one it calls, passed straight on.
                     unsafe { super::$name($($arg),*) }
                 }
@@ -1126,8 +1149,8 @@ macro_rules! interpose {
                 const NAMES: &[&str] = &[$(stringify!($arg)),*];
                 const POINTERS: &[bool] = &[$(<$ty as $crate::effects::Passed>::POINTER),*];
                 // Taken here and not in the symbol the call site reaches, so that a test calling
-                // this can publish a frame and see it read.
-                let given = $crate::frame::take();
+                // this can publish a frame and see it read. The member note goes with it.
+                let given = ($crate::frame::take(), $crate::member::take());
                 $(
                     $crate::__judge!($kind, $name, given, $unit, $target, $($len),+);
                 )+
@@ -1405,10 +1428,15 @@ macro_rules! __judge {
 #[macro_export]
 macro_rules! __given {
     ($frame:ident, $arg:ident) => {
-        $crate::effects::given($frame.as_ref(), {
-            const AT: usize = $crate::effects::slot(NAMES, POINTERS, stringify!($arg));
-            AT
-        })
+        $crate::effects::given(
+            $frame.0.as_ref(),
+            {
+                const AT: usize = $crate::effects::slot(NAMES, POINTERS, stringify!($arg));
+                AT
+            },
+            $frame.1,
+            $arg.addr(),
+        )
     };
 }
 
@@ -1710,6 +1738,26 @@ mod tests {
         let cap = recover::object(at, 8, Class::Automatic);
         // SAFETY: there is a terminator inside the array.
         assert_eq!(unsafe { scan("t", at, cap) }, 7);
+    }
+
+    #[test]
+    fn an_argument_at_a_noted_member_is_held_to_the_member() {
+        let mut record = [0_u8; 32];
+        let at = record.as_mut_ptr().cast_const().cast::<c_void>();
+        let from = |offset: usize| at.cast::<u8>().wrapping_add(offset).cast::<c_void>();
+        let note = Some(member::Note { addr: at.addr(), len: 16 });
+        // A local the frame names, narrowed to its first sixteen bytes.
+        let cap = held(recover::object(at, 32, Class::Automatic), note, at.addr());
+        assert!(!refused(|| range("t", at, 16, cap)));
+        assert!(refused(|| range("t", at, 17, cap)));
+        // Storage the frame names nothing about gets the member's bytes alone.
+        let cap = held(Cap::BOTTOM, note, at.addr());
+        assert!(!refused(|| range("t", at, 16, cap)));
+        assert!(refused(|| range("t", at, 32, cap)));
+        // An argument somewhere else is not what the note is about.
+        let cap = held(Cap::BOTTOM, note, from(16).addr());
+        assert!(!refused(|| range("t", from(16), 16, cap)));
+        assert!(!refused(|| range("t", at, 32, held(Cap::BOTTOM, None, at.addr()))));
     }
 
     #[test]
