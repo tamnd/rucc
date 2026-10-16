@@ -7,8 +7,8 @@
 //! which is the call to the routine of that name.
 //!
 //! The exceptions are a fused multiply add at `float` or `double` in a function built for `fma`
-//! on x86-64, which the selector writes as `vfmadd`, and the same on AArch64 in every function,
-//! which it writes as `fmadd`. See [`fuse`].
+//! on x86-64 and i386, which the selector writes as `vfmadd`, and the same on AArch64 in every
+//! function, which it writes as `fmadd`. See [`fuse`].
 //!
 //! The C library rather than libgcc, because libgcc has neither routine. `fmod` and `fma` are in
 //! libm, and so are their `float` and `_Float128` neighbours, which is why a program that reaches

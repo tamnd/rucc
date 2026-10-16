@@ -620,8 +620,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             }
             // A fused multiply add is one instruction in a unit built for `fma`, so the same
             // macros as on AArch64. gcc defines them here and clang does not, so an Apple or an
-            // MSVC row leaves them out. gcc leaves them out under `-m32` too, which is the i386
-            // arm below.
+            // MSVC row leaves them out.
             let clang = triple.os == Os::Darwin || triple.env == Env::Msvc;
             if has("fma") && opts.vector && !clang {
                 for name in ["", "F", "F32", "F64", "F32x"] {
@@ -720,9 +719,26 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             for name in Isa::baseline().macros() {
                 d.flag(&name);
             }
+            // What the unit has over the x86-64 baseline, which is `__LAHF_SAHF__` for the Pentium
+            // 4 and `__SSE4_2__` and its relatives for the flags, as on x86-64. The four above stay
+            // defined when the kernel turns them off, which is what they did before any flag was
+            // honoured here.
+            for name in opts.isa.minus(Isa::baseline()).macros() {
+                d.flag(&name);
+            }
             d.flag("__SSE_MATH__");
             d.flag("__SSE2_MATH__");
             d.flag("__code_model_32__");
+            // gcc defines the fused multiply add macros under `-m32 -mfma` only with
+            // `-mfpmath=sse`, because its default does `double` arithmetic on the x87 stack. The
+            // backend here always does it in SSE and writes `vfmadd` in a unit built for `fma`, so
+            // the macros follow `fma` alone, as on x86-64.
+            let has = |name| Feature::named(name).is_some_and(|it| opts.isa.has(it));
+            if has("fma") && opts.vector && triple.env != Env::Msvc {
+                for name in ["", "F", "F32", "F64", "F32x"] {
+                    d.set(&format!("__FP_FAST_FMA{name}"), "1");
+                }
+            }
             if opts.gnu_extensions {
                 d.flag("i386");
             }
@@ -1141,13 +1157,14 @@ fn sizes(d: &mut Defs, target: &TargetInfo, isa: Isa) {
     // `aligned` with no argument gives is a separate number and is sixteen on every target,
     // clang for Apple included.
     //
-    // gcc for x86-64 counts the vector registers too, so the number is 32 under `-mavx` and 64
-    // under `-mavx512f`, and `aligned` with no argument still gives 16. clang keeps 16 whatever
-    // the flags say, so Apple and the MSVC targets keep 16 here as well.
+    // gcc for x86 counts the vector registers too, so the number is 32 under `-mavx` and 64
+    // under `-mavx512f`, and `aligned` with no argument still gives 16. That is true of `-m32` as
+    // well. clang keeps 16 whatever the flags say, so Apple and the MSVC targets keep 16 here.
     let has = |name| Feature::named(name).is_some_and(|it| isa.has(it));
     let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
     let msvc = target.tuple.env() == tuple::Env::Msvc;
-    let wide = target.tuple.arch() == tuple::Arch::X86_64 && !apple && !msvc;
+    let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);
+    let wide = x86 && !apple && !msvc;
     let biggest = match target.tuple.arch() {
         tuple::Arch::Aarch64 if apple => "8",
         _ if wide && has("avx512f") => "64",
@@ -2031,6 +2048,11 @@ mod tests {
         assert_eq!(biggest("x86_64-pc-windows-gnu", &["avx"]), "32");
         assert_eq!(biggest("x86_64-pc-windows-msvc", &["avx"]), "16");
         assert_eq!(biggest("x86_64-apple-darwin", &["avx"]), "16");
+        // gcc 16.2.0 says the same under `-m32`.
+        assert_eq!(biggest("i686-unknown-linux-gnu", &[]), "16");
+        assert_eq!(biggest("i686-unknown-linux-gnu", &["avx"]), "32");
+        assert_eq!(biggest("i686-unknown-linux-gnu", &["fma", "no-avx"]), "16");
+        assert_eq!(biggest("i686-pc-windows-msvc", &["avx"]), "16");
     }
 
     #[test]
@@ -2683,8 +2705,9 @@ mod tests {
 
     #[test]
     fn a_unit_built_for_fma_says_the_fused_multiply_add_is_fast_where_gcc_says_so() {
-        // gcc 16.2.0 with `-mfma` defines the five on x86-64 and none under `-m32`. clang 18
-        // defines none on any x86-64 row.
+        // gcc 16.2.0 with `-mfma` defines the five on x86-64, and under `-m32` with
+        // `-mfpmath=sse`, which is what i386 always is here. clang 18 defines none on any x86
+        // row.
         let built = |triple: &str, flag: &str| {
             let triple: Triple = triple.parse().expect("a triple");
             let mut choices = rucc_target::Choices::new();
@@ -2692,16 +2715,47 @@ mod tests {
             let opts = Predef { isa: choices.over(Isa::baseline()), ..Predef::new() };
             built_in(&TargetInfo::new(triple), &opts)
         };
-        for triple in ["x86_64-unknown-linux-gnu", "x86_64-w64-windows-gnu"] {
+        for triple in
+            ["x86_64-unknown-linux-gnu", "x86_64-w64-windows-gnu", "i686-unknown-linux-gnu"]
+        {
             let text = built(triple, "fma");
             for name in ["", "F", "F32", "F64", "F32x"] {
                 assert!(has(&text, &format!("#define __FP_FAST_FMA{name} 1")), "{triple} {name}");
             }
             assert!(!built(triple, "avx2").contains("__FP_FAST_FMA"), "{triple}");
         }
-        for triple in ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "i686-unknown-linux-gnu"] {
+        for triple in ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "i686-pc-windows-msvc"] {
             assert!(!built(triple, "fma").contains("__FP_FAST_FMA"), "{triple}");
         }
+    }
+
+    #[test]
+    fn an_i386_unit_defines_the_macros_of_the_extensions_the_flags_add() {
+        // gcc 16.2.0 with `-m32 -march=pentium4 -mfpmath=sse` and each flag. The baseline's four
+        // are defined whatever the flags say, as they were before.
+        let built = |flags: &[&str]| {
+            let triple: Triple = "i686-unknown-linux-gnu".parse().expect("a triple");
+            let mut choices = rucc_target::Choices::new();
+            for flag in flags {
+                choices.read(flag).expect("a name gcc knows");
+            }
+            let opts = Predef { isa: choices.over(Isa::baseline()), ..Predef::new() };
+            built_in(&TargetInfo::new(triple), &opts)
+        };
+        let fma = built(&["fma"]);
+        for name in ["AVX", "CRC32", "FMA", "POPCNT", "SSE3", "SSSE3", "SSE4_1", "SSE4_2", "XSAVE"]
+        {
+            assert!(has(&fma, &format!("#define __{name}__ 1")), "{name}");
+        }
+        assert!(!fma.contains("__AVX2__") && !fma.contains("__F16C__"));
+        let popcnt = built(&["popcnt"]);
+        assert!(has(&popcnt, "#define __POPCNT__ 1") && !popcnt.contains("__SSE3__"));
+        assert!(has(&built(&["sahf"]), "#define __LAHF_SAHF__ 1"));
+        let kernel = built(&["no-sse", "no-mmx", "no-sse2"]);
+        for name in ["MMX", "SSE", "SSE2", "FXSR"] {
+            assert!(has(&kernel, &format!("#define __{name}__ 1")), "{name}");
+        }
+        assert!(!kernel.contains("__SSE3__"));
     }
 
     #[test]

@@ -1009,6 +1009,18 @@
       (x64.divsd_rr x y)
       (spec (= (fp.div x y) (result))))
 
+;; The fused multiply add in a function built for `fma`, for the reasons the x86-64 rules give.
+;; The encoder writes the VEX form at thirty two bits too, because its wide bit is part of the
+;; opcode and names no sixty four bit register.
+
+(rule (lower (fma.f32 (value.f32 x) (value.f32 y) (value.f32 z)))
+      (x64.vfmadd213ss_rr x y z)
+      (spec (= (fp.fma x y z) (result))))
+
+(rule (lower (fma.f64 (value.f64 x) (value.f64 y) (value.f64 z)))
+      (x64.vfmadd213sd_rr x y z)
+      (spec (= (fp.fma x y z) (result))))
+
 (rule (lower (ret.f16 (value.f16 v)))
       (x64.ret_val_f16 v)
       (spec (= v (result))))

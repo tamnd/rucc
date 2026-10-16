@@ -4170,6 +4170,51 @@ mod tests {
         assert!(!result.text().contains("vfmadd"), "{}", result.text());
     }
 
+    /// The same on i386, where gcc 16.2.0 writes `vfmadd` only with `-mfpmath=sse` as well, since
+    /// its default does a `double` on the x87 stack. The backend here always does it in SSE.
+    #[test]
+    fn a_call_to_fma_is_one_instruction_on_i386_built_for_fma() {
+        let source = concat!(
+            "double fma(double, double, double);\n",
+            "double f(double x, double y, double z) { return fma(x, y, z); }\n",
+            "float g(float x, float y, float z) { return __builtin_fmaf(x, y, z); }\n",
+            "__attribute__((target(\"fma\")))\n",
+            "double h(double x, double y, double z) { return __builtin_fma(x, y, z); }\n",
+        );
+        // As on x86-64, and without the call that reads the address of the GOT.
+        let called = |text: &str| -> Vec<String> {
+            let calls = text.lines().filter_map(|line| {
+                let callee =
+                    line.strip_prefix("\tcall\t").or_else(|| line.strip_prefix("\tjmp\t"))?;
+                (!callee.starts_with('.') && !callee.starts_with("__x86.get_pc_thunk"))
+                    .then_some(callee)
+            });
+            calls.map(|callee| callee.split('@').next().unwrap_or(callee).to_owned()).collect()
+        };
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = options();
+            opts.target = "i686-linux-gnu".parse::<Triple>().unwrap();
+            opts.isa = rucc_target::Isa::baseline();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            assert_eq!(called(text), ["fma", "fmaf"], "at {level:?}:\n{text}");
+            assert_eq!(text.matches("vfmadd213sd").count(), 1, "at {level:?}:\n{text}");
+
+            let mut choices = rucc_target::Choices::new();
+            choices.read("fma").expect("gcc knows fma");
+            opts.isa = choices.over(opts.isa);
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            assert!(called(text).is_empty(), "at {level:?}:\n{text}");
+            assert_eq!(text.matches("vfmadd213sd").count(), 2, "at {level:?}:\n{text}");
+            assert_eq!(text.matches("vfmadd213ss").count(), 1, "at {level:?}:\n{text}");
+        }
+    }
+
     /// On AArch64 `fmadd` is in the base set, so `fma` and `fmaf` are one instruction in every
     /// function. gcc 16.2.0 writes the same from -O1 up, and `__FP_FAST_FMA` says so on every
     /// AArch64 target.
