@@ -152,7 +152,11 @@ impl Loops {
 
     /// What the forest says, with the loops named by their headers and every list in block order,
     /// so that two forests of one graph found in different orders compare equal.
-    #[cfg(debug_assertions)]
+    ///
+    /// A forest `merged` kept lists the blocks of a loop in the order they were found before the
+    /// merge, which need not be the order a build finds them in afterwards, and no question asked
+    /// of it turns on that order. So this, rather than `==`, is what asks whether a forest kept is
+    /// the one a build would give.
     pub(crate) fn summary(&self, cfg: &Cfg) -> impl PartialEq + std::fmt::Debug + use<> {
         let sorted = |mut blocks: Vec<Block>| {
             blocks.sort_unstable();

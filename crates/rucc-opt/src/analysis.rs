@@ -727,7 +727,8 @@ impl Analyses {
                 Analysis::Dominators => self.doms.get() == Some(&Dominators::new(&cfg)),
                 Analysis::PostDominators => self.post.get() == Some(&PostDominators::new(&cfg)),
                 Analysis::Loops => {
-                    self.loops.get() == Some(&Loops::new(&cfg, &Dominators::new(&cfg)))
+                    let fresh = Loops::new(&cfg, &Dominators::new(&cfg));
+                    self.loops.get().map(|loops| loops.summary(&cfg)) == Some(fresh.summary(&cfg))
                 }
                 Analysis::Frontiers => {
                     self.frontiers.get() == Some(&Frontiers::new(&cfg, &Dominators::new(&cfg)))
@@ -1057,6 +1058,26 @@ mod tests {
         assert_eq!(an.cfg(&func), &crate::Cfg::new(&func));
         assert!(!an.holds(Analysis::Dominators), "the tree was built on the old graph");
         assert!(!an.holds(Analysis::Loops), "the forest was built on the old graph");
+    }
+
+    #[test]
+    fn a_forest_kept_through_a_merge_is_not_called_stale_for_listing_its_blocks_differently() {
+        // A loop of three blocks whose latch is folded into the block above it. The forest kept
+        // through the merge still lists the loop's blocks in the order it found them, and a build
+        // now finds the new latch earlier. The same forest either way, and the check under
+        // -Zverify-each called it a lie, which is how gzread.c in zlib failed at -O2.
+        let mut func = graph(&[&[1], &[2], &[3], &[1, 4], &[]]);
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        let (head, into) = (Block::from_usize(2), Block::from_usize(3));
+        assert!(crate::simplify_cfg::merge_below(&mut func, &mut an, head, into));
+        assert!(an.holds(Analysis::Loops), "the forest was kept through the merge");
+        let keeps = an.unmoved(&func, Preserved::NONE);
+        assert!(
+            an.settle(&func, keeps, true).is_empty(),
+            "the forest kept is the one a build gives"
+        );
+        assert!(an.holds(Analysis::Loops));
     }
 
     #[test]
