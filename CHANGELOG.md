@@ -38,6 +38,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-Zverify-each` no longer reports E0652 for a loop forest short-circuit kept through a merge when the forest is right and only lists a loop's blocks in a different order than a fresh build would. zlib's gzread.c failed at `-O2` this way. The check now compares forests the order-free way the debug assertion already did (#3708).
 - A loop at `-O2` that writes through a pointer to a local whose block has closed is refused under `-fsafety` again. The loop was split where the object's bounds end, and the half with no check in it had no liveness check either, so the write went through. The runtime now gives such a loop no unchecked half (#3709).
 - A structure passed by value on i386 is copied into the outgoing area a word at a time, so a large one no longer has memcpy's own arguments written over the ones already stored. 00204 of c-testsuite printed garbage for the first of two large structures (#3710).
+- `tests/tools/perf.sh` skips a call graph that perf cannot record on the machine, with a line that gives perf's reason, rather than stopping with exit 255. The GitHub arm runner refuses `--call-graph=dwarf` this way (#3711).
 
 ## 0.30.8
 
