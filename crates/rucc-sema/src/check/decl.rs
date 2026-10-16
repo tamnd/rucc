@@ -469,6 +469,7 @@ impl Checker<'_> {
         self.no_reordered(&[specs.attrs], true);
         self.strict_flex_refused(&[specs.attrs], Some(name));
         self.ms_hooked(&[specs.attrs], true);
+        self.warn_unused_misplaced(&[specs.attrs], false);
         self.reset_kept(&[specs.attrs], None, span);
         self.assume_misplaced(&[specs.attrs], true, specs.span);
         self.musttail_misplaced(&[specs.attrs]);
@@ -1120,6 +1121,9 @@ impl Checker<'_> {
         if may!(carried, "ms_hook_prologue") {
             self.ms_hooked(&lists, kind == DeclKind::Function);
         }
+        if may!(carried, "warn_unused") {
+            self.warn_unused_misplaced(&lists, false);
+        }
         if may!(carried, "patchable_function_entry") {
             self.record_patchable(id, &lists, kind);
         }
@@ -1284,6 +1288,7 @@ impl Checker<'_> {
         self.no_reordered(&[specs.attrs, item.attrs], false);
         self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
         self.ms_hooked(&[specs.attrs, item.attrs], false);
+        self.warn_unused_misplaced(&[specs.attrs, item.attrs], false);
         self.reset_kept(&[specs.attrs, item.attrs], None, span);
         self.extern_access(&[specs.attrs, item.attrs], None, span);
         self.shared_section(&[specs.attrs, item.attrs], DeclKind::Type);

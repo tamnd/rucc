@@ -322,6 +322,7 @@ impl Checker<'_> {
             self.force_aligned(&[field.attrs, specs], decl.ty);
             self.no_reordered(&[field.attrs, specs], false);
             self.ms_hooked(&[field.attrs, specs], false);
+            self.warn_unused_misplaced(&[field.attrs, specs], false);
             self.reset_kept(&[field.attrs, specs], None, at);
             self.extern_access(&[field.attrs, specs], None, at);
             self.string_arg(&[field.attrs, specs], decl.ty);
@@ -372,6 +373,7 @@ impl Checker<'_> {
         if self.may_alias(attrs) {
             self.types.make_may_alias(id);
         }
+        self.warn_unused_misplaced(&[attrs], true);
         // Only a structure, since a union's one member is the only one there is to name, and gcc
         // refuses the attribute anywhere else, which is not this compiler's to repeat.
         if kind == RecordKind::Struct && self.designated_init(attrs) {
