@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.9
+
+This is a patch release. It fixes an i386 miscompile that the 6.1 kernel's `drm_mm` KUnit suite found: a store into a spill slot that shares its bytes with a temporary was taken out, and a value put away around two calls came back wrong. It adds gcc's `simd`, `no_callee_saved_registers`, `preserve_none` and `warn_unused` attributes, the AVX, AVX2, FMA, F16C, BMI, AES and PCLMUL intrinsic headers, and a `-lresolv` stub for glibc targets. The front end takes about a quarter fewer instructions on a large file. The releases of 0.30.7 and 0.30.8 did not publish their binaries, because the release gate failed on doc links in 0.30.7 and on a test in 0.30.8. 0.30.9 has both fixes.
+
 ### Added
 
 - `__attribute__((simd))` builds the SSE2 vector versions of a function as gcc 16 does on x86-64 ELF, under the vector function ABI names `_ZGVbN2v_h` and `_ZGVbM2v_h` that a loop gcc vectorized against glibc's `<bits/math-vector.h>` calls: each version takes its lanes in `xmm` registers, calls the function once a lane and, for `inbranch`, only where the mask is set. The flag is checked in gcc's words, a type with no lane is warned of as gcc warns of it, and the AVX, AVX2 and AVX-512 versions are not built yet.
