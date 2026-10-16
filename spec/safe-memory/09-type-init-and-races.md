@@ -36,6 +36,8 @@ MSan's problem, and MSan's deployment story is the cautionary tale: it requires 
 
 **Setting.** `meta_init` on every store, over the store's width. A `calloc`, a `memset`, and an allocator that zeroes set the whole range in one operation. A struct assignment sets the whole struct.
 
+**Locals the plane is not told about.** A local whose address leaves its function, handed to a library routine or stored into memory, is not begun in the plane, by the rule above, and a read of a byte of it nothing wrote is not asked about. What that byte holds is whatever the frame before left, and a zero there is where a string walk stops, so a copy that never wrote a buffer's terminator reads as a terminated string and the bounds check at the buffer's end is never reached. Those locals are filled with `0xfe` at the top of the function, the byte `-ftrivial-auto-var-init=pattern` uses, so the walk runs on to the end of the buffer and its capability refuses it there. A program that set `-ftrivial-auto-var-init` gets what it asked for instead, since the lowering has already written it.
+
 ### 9.2.1 The relationship to the parent's no-poison model
 
 The parent's document 07 section 7.7 row nine decides that an uninitialized read produces an unspecified but *stable* value rather than LLVM's `poison`. Document 04 section 4.7 already says this is load-bearing; here is why concretely.

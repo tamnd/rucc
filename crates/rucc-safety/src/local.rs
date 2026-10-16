@@ -98,18 +98,25 @@ pub(crate) fn begin(func: &mut Func, names: &mut Interner, word: Type, fill: boo
         .take_while(|&inst| inst != first)
         .filter_map(|inst| sized(func, inst))
         .collect();
+    // Every local of a known size in the entry block, which is more than `locals` once the front
+    // end has put a `cap_of` between two of them. The fill goes straight behind each, so it does not
+    // need the address to be there before anything else is.
+    let placed: Vec<(Inst, Value, u64, u32)> = func
+        .insts(entry)
+        .filter_map(|inst| sized(func, inst).map(|(base, size, align)| (inst, base, size, align)))
+        .collect();
     let grown: Vec<(Inst, Value, Value)> =
         insts.iter().filter_map(|&inst| grown(func, inst, word)).collect();
-    let bases: Vec<Value> = locals
+    let bases: Vec<Value> = placed
         .iter()
-        .map(|&(base, _, _)| base)
+        .map(|&(_, base, _, _)| base)
         .chain(grown.iter().map(|&(_, base, _)| base))
         .collect();
     let (wanted, gone) = wanted(func, &insts, &bases);
     if fill {
-        for &(base, size, align) in &locals {
+        for &(at, base, size, align) in &placed {
             if gone.contains(&base) {
-                filled(func, first, base, size, align);
+                filled(func, at, base, size, align);
             }
         }
     }
@@ -164,9 +171,8 @@ pub(crate) fn begin(func: &mut Func, names: &mut Interner, word: Type, fill: boo
     }
 }
 
-/// A fill of the `size` bytes at `base` with [`PATTERN`], in front of `first`.
-fn filled(func: &mut Func, first: Inst, base: Value, size: u64, align: u32) {
-    let byte = crate::lower::konst(func, first, Imm::int(PATTERN, Type::int(8)), Type::int(8));
+/// A fill of the `size` bytes at `base` with [`PATTERN`], straight behind the `alloca` at `at`.
+fn filled(func: &mut Func, at: Inst, base: Value, size: u64, align: u32) {
     let info = MemInfo {
         size,
         align,
@@ -176,10 +182,12 @@ fn filled(func: &mut Func, first: Inst, base: Value, size: u64, align: u32) {
         restrict: Restrict::NONE,
     };
     let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { extra, ..InstData::new(Opcode::Memset) };
+    let made = func.create_inst(data, &[], func.span(at));
+    func.insert_after(made, at);
+    let byte = crate::lower::konst(func, made, Imm::int(PATTERN, Type::int(8)), Type::int(8));
     let args = func.push_values(&[base, byte]);
-    let data = InstData { args, extra, ..InstData::new(Opcode::Memset) };
-    let made = func.create_inst(data, &[], func.span(first));
-    func.insert_before(made, first);
+    func[made].args = args;
 }
 
 /// The ends of what an `alloca` took: everything below the pointer each `stackrestore` puts back,
@@ -355,19 +363,21 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
             .collect()
     }
 
-    /// A local handed to a call, which is the one whose last byte nobody wrote in the test.
+    /// A local handed to a call and one kept here, with a `cap_of` between the two the way the front
+    /// end writes them.
     const HANDED: &str = r#"
 func @show(ptr), linkage(external);
 
 func @f() -> i32, linkage(external) {
 block0:
-    %0 = alloca, size 100, align 16
-    %1 = alloca, size 4, align 4
-    %2 = iconst.i32 3
-    store %2 -> %1, align 4
-    call @show(%0) : (ptr)
-    %3 = load.i32 %1, align 4
-    return %3
+    %0 = alloca, size 4, align 4
+    %1 = cap_of %0
+    %2 = alloca, size 100, align 16
+    %3 = iconst.i32 3
+    store %3 -> %0, align 4
+    call @show(%2) : (ptr)
+    %4 = load.i32 %0, align 4
+    return %4
 }
 "#;
 

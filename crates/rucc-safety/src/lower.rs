@@ -2245,7 +2245,7 @@ mod tests {
         insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), false, &mut table);
         assert_eq!(table, [Descriptor { judgement: DERIVE, class: 0, size: 0 }]);
     }
 
@@ -2286,7 +2286,7 @@ mod tests {
         }
         b.ret(&[]);
         let (_, numbers) = planeless(&mut names);
-        calls(&mut func, &mut names, word, &numbers, &Default::default(), &mut Vec::new());
+        calls(&mut func, &mut names, word, &numbers, &Default::default(), false, &mut Vec::new());
         let call = func
             .blocks()
             .flat_map(|block| func.insts(block))
@@ -2357,7 +2357,7 @@ mod tests {
 
         let mut table = Vec::new();
         let numbers = planeless(&mut names).1;
-        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), false, &mut table);
         assert_eq!(table, [Descriptor { judgement: ACCESS, class: 0, size: 0 }]);
 
         let mut module = Module::new(names.intern("sweep.c"), &target());
@@ -2415,7 +2415,7 @@ mod tests {
         b.ret(&[]);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), false, &mut table);
         assert_eq!(table.len(), 1, "one row serves the pair");
 
         module.add_func(func);
@@ -2467,7 +2467,7 @@ mod tests {
         b.ret(&[]);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), false, &mut table);
         assert_eq!(table.len(), 2, "one row for the pair and one for the init check alone");
         assert!(table.iter().all(|row| row.size == 4), "{table:?}");
 
@@ -2524,7 +2524,7 @@ mod tests {
             b.ret(&[]);
 
             let mut table = Vec::new();
-            calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
+            calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), false, &mut table);
 
             module.add_func(func);
             let id = module.funcs().next().expect("the module has one function");
@@ -2564,7 +2564,7 @@ mod tests {
 
         let mut table = Vec::new();
         let numbers = planeless(&mut names).1;
-        calls(&mut func, &mut names, Type::int(32), &numbers, &Default::default(), &mut table);
+        calls(&mut func, &mut names, Type::int(32), &numbers, &Default::default(), false, &mut table);
         let opcodes: Vec<Opcode> = func
             .blocks()
             .flat_map(|block| func.insts(block))
@@ -2602,7 +2602,7 @@ mod tests {
 
         let mut table = Vec::new();
         let numbers = planeless(&mut names).1;
-        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), false, &mut table);
         assert!(table.is_empty(), "{table:?}");
 
         let mut module = Module::new(names.intern("cover.c"), &target());
@@ -2631,7 +2631,7 @@ mod tests {
 
         let mut table = Vec::new();
         let numbers = planeless(&mut names).1;
-        calls(&mut func, &mut names, Type::int(32), &numbers, &Default::default(), &mut table);
+        calls(&mut func, &mut names, Type::int(32), &numbers, &Default::default(), false, &mut table);
         let opcodes: Vec<Opcode> = func
             .blocks()
             .flat_map(|block| func.insts(block))
