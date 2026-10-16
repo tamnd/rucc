@@ -2567,6 +2567,37 @@ impl Checker<'_> {
         }
     }
 
+    /// What gcc says about `warn_unused` in the lists of one declaration or of one type, which is
+    /// where it may be written: on a type it is kept and on anything else it is dropped with its
+    /// warning. `typed` is whether the lists are a type's, the ones a structure, a union or an
+    /// enumeration is written with. A declaration's are not, whatever it declares, so a typedef
+    /// and a variable of a marked structure's type both have the warning, as in gcc 16. An
+    /// argument is refused with `E0866` either way.
+    ///
+    /// In C the attribute does nothing else. What it asks of gcc is the warning about a variable
+    /// that is never used, for a type C++ would leave out of that warning, and in C no type is.
+    pub(in crate::check) fn warn_unused_misplaced(&mut self, lists: &[AttrList], typed: bool) {
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                    || self.gnu_name(&attr) != "warn_unused"
+                {
+                    continue;
+                }
+                let count = ast[attr.args].len();
+                if count > 0 {
+                    let what = "wrong number of arguments specified for 'warn_unused' attribute";
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0866");
+                    self.report(refused.note(format!("expected 0, found {count}"), attr.span));
+                } else if !typed {
+                    let what = "'warn_unused' attribute ignored";
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                }
+            }
+        }
+    }
+
     /// What gcc says about `ms_hook_prologue` in the lists of one declaration, which is whether a
     /// function is what it is written on: an argument is refused in gcc's words, and on anything
     /// else, a pointer to a function and a typedef of a function type included, the attribute is

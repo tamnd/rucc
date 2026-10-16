@@ -1001,6 +1001,14 @@ tests = ["rucc::a_member_s_own_level_takes_the_place_of_the_command_line_s", "ru
 notes = "The level a trailing array member is measured at by `__builtin_object_size` and `__builtin_dynamic_object_size` through a pointer, in place of the one `-fstrict-flex-arrays` set, stricter or looser: zero takes any trailing array as one the program may allocate more of, one takes `[0]`, `[1]` and `[]`, two takes `[0]` and `[]`, and three takes only `[]`, as gcc 13 measures them. On a variable, a function, a typedef or a parameter, on a member that is not an array, with a level outside 0 to 3 or an argument that is not an integer constant, and with other than one argument, it is refused with gcc's errors and `E0833`. Under a persona older than gcc 13 it is a name gcc has never heard of. A member with no name is not read."
 
 [[feature]]
+name = "warn_unused"
+kind = "attribute"
+gcc_version = "4.8"
+status = "implemented"
+tests = ["rucc::a_type_marked_warn_unused_is_taken_without_a_word", "rucc::warn_unused_anywhere_but_a_type_is_ignored_in_gcc_s_words", "rucc::warn_unused_given_an_argument_is_refused_wherever_it_is"]
+notes = "Taken without a word on a structure, a union or an enumeration, after the closing brace as well as after the keyword, and on a pointer type, and there for `__builtin_has_attribute` to find on a record. On a typedef, a variable, a function, a parameter or a member it is ignored with gcc's warning, as in gcc 16, and an argument is refused with `E0866`. In C it does nothing else: what it asks of gcc is the unused variable warning for a type C++ would leave out of it, and C leaves none out."
+
+[[feature]]
 name = "ms_hook_prologue"
 kind = "attribute"
 gcc_version = "4.5"

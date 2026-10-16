@@ -780,6 +780,7 @@ impl Checker<'_> {
         }
         self.read_deprecated_tag(ty, attrs, span);
         self.read_flag_enum(id, attrs);
+        self.warn_unused_misplaced(&[attrs], true);
         self.btf_decl_tag_on_type(attrs);
         self.btf_tagged_enum(id, attrs);
         match again {
@@ -1247,6 +1248,7 @@ impl Checker<'_> {
                 self.no_reordered(&[ast[specs].attrs, param.attrs], false);
                 self.strict_flex_refused(&[ast[specs].attrs, param.attrs], declarator.name);
                 self.ms_hooked(&[ast[specs].attrs, param.attrs], false);
+                self.warn_unused_misplaced(&[ast[specs].attrs, param.attrs], false);
                 self.reset_kept(&[ast[specs].attrs, param.attrs], None, span);
                 self.extern_access(&[ast[specs].attrs, param.attrs], None, span);
                 self.shared_section(&[ast[specs].attrs, param.attrs], DeclKind::Type);
