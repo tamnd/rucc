@@ -1529,6 +1529,7 @@ pub fn compile_recording(
         pointer,
         (int, held),
         &joined,
+        &share.crowded(),
         names,
     );
     // After the cleanup, which is what takes out the reads, and before the reloads below fold one

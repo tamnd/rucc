@@ -45,10 +45,16 @@
 //! about it, which is what makes removing a read of one safe when removing a read of a variable is
 //! not.
 //!
-//! A slot can end up sharing its bytes with a local, which [`crate::slots`] arranges, and that does
-//! not change the argument. Two things share a run of the frame only where they are never both
-//! wanted, and a slot between a spill and the read back of it is wanted the whole way, so a store
-//! to the local it shares with cannot fall in that stretch.
+//! A slot can end up sharing its bytes with a local or with another slot, which [`crate::slots`]
+//! arranges, and that changes the argument for one kind of move. Two things share a run of the
+//! frame only where they are never both wanted, and a slot between a spill and the read back of it
+//! is wanted the whole way, so a read back is still safe to take out. A store is not. A value kept
+//! in a register and put away around each call is stored before every call and read back after
+//! it, and its slot is wanted at those moves and not between them. Between two calls the other
+//! thing in the cell can write the bytes, and the store before the second call is then the only
+//! thing that puts the value back. So a store into a slot that shares its bytes always stays.
+//! drm_test_mm_frag in the 6.1 kernel on i386 read a temporary back as a saved value after the
+//! store in front of its second call was taken out.
 //!
 //! # Why after the whole allocator rather than inside it
 //!
@@ -184,6 +190,11 @@ pub struct Cleaned {
 /// `joined` is the comparisons the layout folds into their branch, whose byte is never written and
 /// so leaves the register it is part of holding what it held. See [`crate::layout::joined`].
 ///
+/// `crowded` is the slots whose bytes something else shares, from [`crate::slots::Slots::crowded`].
+/// A store into one of them stays even where the slot is known to hold the word, because what is
+/// known is what the slot's own moves put there, and a write by the other thing in its cell is not
+/// one of them.
+///
 /// # Panics
 ///
 /// Panics on a move of a class the target did not say how to move, which is the same frame
@@ -199,6 +210,7 @@ pub fn clean(
     framed: bool,
     scratch: (RegClass, &[PhysReg]),
     joined: &Set<Inst>,
+    crowded: &Set<u32>,
     names: &mut Interner,
 ) -> Cleaned {
     let blocks: Vec<Block> = func.blocks().collect();
@@ -227,7 +239,8 @@ pub fn clean(
             // One of the allocator's own moves, which is the only kind of instruction this edits
             // and the only kind it learns anything from.
             if let Some(edit) = moves.at(inst) {
-                if holds.same(edit.class, edit.mov.to, edit.mov.from) {
+                let shared = matches!(edit.mov.to, Place::Slot(slot) if crowded.contains(&slot));
+                if !shared && holds.same(edit.class, edit.mov.to, edit.mov.from) {
                     gone.push(inst);
                     cleaned.gone += 1;
                     continue;
@@ -842,6 +855,23 @@ mod tests {
             true,
             (GPR, &[R10, R11]),
             &Set::default(),
+            &Set::default(),
+            names,
+        )
+    }
+
+    /// The pass with those slots sharing their bytes with something else.
+    fn crowded(func: &mut Func, moves: &Moves, names: &mut Interner, slots: &[u32]) -> Cleaned {
+        super::clean(
+            func,
+            moves,
+            &MACHINE,
+            &FRAME,
+            &SYSV,
+            true,
+            (GPR, &[R10, R11]),
+            &Set::default(),
+            &slots.iter().copied().collect(),
             names,
         )
     }
@@ -962,6 +992,47 @@ mod tests {
         assert_eq!(gone(&mut func, &moves, &mut names), 1);
         assert_eq!(left(&func, block), 1, "the spill went too, or the reload stayed");
         assert_eq!(func.insts(block).next(), Some(spill));
+    }
+
+    /// A value put away around a call and read back after it, then stored again in front of the
+    /// next call. The slot still holds the word, so the second store writes what is there.
+    fn put_away_twice(names: &mut Interner, func: &mut Func, block: Block) -> (Moves, Inst) {
+        let call = op(names, "call");
+        let mut moves = Moves::default();
+        let first = store(func, names, block, RBX, 16);
+        moves.record(first, out(block, 0, RBX));
+        func.build(block, call).uses(Reg::physical(RAX), GPR).finish();
+        let back_in = load(func, names, block, RBX, 16);
+        moves.record(back_in, back(block, 0, RBX));
+        let other = store(func, names, block, R11, 16);
+        moves.record(other, out(block, 1, R11));
+        let second = store(func, names, block, RBX, 16);
+        moves.record(second, out(block, 0, RBX));
+        func.build(block, call).uses(Reg::physical(RAX), GPR).finish();
+        (moves, second)
+    }
+
+    /// The second store of [`put_away_twice`] goes where the slot has its bytes to itself.
+    #[test]
+    fn a_store_of_the_word_a_slot_holds_goes() {
+        let (mut names, mut func, block) = empty();
+        let (moves, second) = put_away_twice(&mut names, &mut func, block);
+
+        assert_eq!(gone(&mut func, &moves, &mut names), 1);
+        assert!(func.insts(block).all(|inst| inst != second));
+    }
+
+    /// The same store where slot 1 shares the bytes of slot 0. The store into slot 1 between the
+    /// two calls wrote over the saved value, so the second store is what puts it back and it stays.
+    /// drm_test_mm_frag in the 6.1 kernel on i386 read the temporary after the second call.
+    #[test]
+    fn a_store_into_a_slot_that_shares_its_bytes_stays() {
+        let (mut names, mut func, block) = empty();
+        let (moves, second) = put_away_twice(&mut names, &mut func, block);
+
+        assert_eq!(crowded(&mut func, &moves, &mut names, &[0, 1]), Cleaned::default());
+        assert!(func.insts(block).any(|inst| inst == second));
+        assert_eq!(left(&func, block), 6);
     }
 
     /// The spill of that pair once its reload has gone, since nothing reads the slot after that.

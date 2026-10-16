@@ -267,6 +267,26 @@ impl Slots {
         self.shared.get(local)?.as_deref()
     }
 
+    /// The spill slots whose cell holds something else too, a local or another slot.
+    ///
+    /// The bytes of one of these are its own only where the slot is wanted, and a slot only moves
+    /// touch is wanted at the moves and not between them. So what the slot held at one move is not
+    /// known to be there at the next, and [`crate::copies::clean`] asks this before it takes out a
+    /// store as one of a word the slot still holds.
+    #[must_use]
+    pub fn crowded(&self) -> Set<u32> {
+        let mut count = vec![0_usize; self.cells.len()];
+        for &cell in self.locals.iter().chain(&self.slots) {
+            count[cell] += 1;
+        }
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|&(_, &cell)| count[cell] > 1)
+            .filter_map(|(slot, _)| u32::try_from(slot).ok())
+            .collect()
+    }
+
     /// How many cells were saved by sharing, which is how many things went in beside something
     /// else.
     ///
