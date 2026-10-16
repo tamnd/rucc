@@ -40,10 +40,22 @@
 //! those bytes. So a `setjmp` gets `__rucc_local_landed()` behind it, which forgets everything below
 //! the frame it is called from. It runs on both returns, and on the first one there is nothing below
 //! to forget.
+//!
+//! # The locals that are let go of
+//!
+//! A local whose address goes somewhere this pass cannot see is not begun, and what is read out of
+//! it before anything wrote it is whatever the frame before left on those bytes. That is very often
+//! a zero, and a zero is the one value a string routine stops at. A buffer copied into with one byte
+//! too few, so that its last byte is never written, then reads as a terminated string and the walk
+//! never reaches the end of the buffer where the capability would refuse it. So when `fill` is
+//! asked for, each of those locals is filled with `0xfe` at the top of the function, the byte
+//! `-ftrivial-auto-var-init=pattern` uses, and an unterminated string in one runs to the end of it.
+//! The driver does not ask for it when the program chose what its locals hold, since that choice
+//! has already been written out by the lowering and a kernel that asked for zero is owed zero.
 
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{Extra, Func, Imm, Inst, InstData, Opcode, Type, Value};
+use rucc_ir::{Extra, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Restrict, Type, Value};
 
 /// The runtime entry that says a local's bytes have not been written yet.
 const BEGIN: &str = "__rucc_local_begin";
@@ -57,11 +69,15 @@ const LANDED: &str = "__rucc_local_landed";
 /// The runtime entry that says every byte below an address on the stack is gone.
 const LEFT: &str = "__rucc_local_left";
 
-/// Puts the begins, the ends and the landings into `func`.
+/// The byte a local that is let go of is filled with, which is the one the lowering uses for
+/// `-ftrivial-auto-var-init=pattern`.
+const PATTERN: i128 = 0xfe;
+
+/// Puts the begins, the ends and the landings into `func`, and the fills when `fill` says to.
 ///
 /// Called before the checks are lowered, because which locals are wanted is read off the
 /// `check_init` instructions and those are calls once the lowering has run.
-pub(crate) fn begin(func: &mut Func, names: &mut Interner, word: Type) {
+pub(crate) fn begin(func: &mut Func, names: &mut Interner, word: Type, fill: bool) {
     let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for &inst in &insts {
         if func[inst].opcode != Opcode::SetjmpMarker {
@@ -77,19 +93,33 @@ pub(crate) fn begin(func: &mut Func, names: &mut Interner, word: Type) {
     let Some(first) = func.insts(entry).find(|&inst| func[inst].opcode != Opcode::Alloca) else {
         return;
     };
-    let locals: Vec<(Value, u64)> = func
+    let locals: Vec<(Value, u64, u32)> = func
         .insts(entry)
         .take_while(|&inst| inst != first)
         .filter_map(|inst| sized(func, inst))
         .collect();
+    // Every local of a known size in the entry block, which is more than `locals` once the front
+    // end has put a `cap_of` between two of them. The fill goes straight behind each, so it does not
+    // need the address to be there before anything else is.
+    let placed: Vec<(Inst, Value, u64, u32)> = func
+        .insts(entry)
+        .filter_map(|inst| sized(func, inst).map(|(base, size, align)| (inst, base, size, align)))
+        .collect();
     let grown: Vec<(Inst, Value, Value)> =
         insts.iter().filter_map(|&inst| grown(func, inst, word)).collect();
-    let bases: Vec<Value> = locals
+    let bases: Vec<Value> = placed
         .iter()
-        .map(|&(base, _)| base)
+        .map(|&(_, base, _, _)| base)
         .chain(grown.iter().map(|&(_, base, _)| base))
         .collect();
-    let wanted = wanted(func, &insts, &bases);
+    let (wanted, gone) = wanted(func, &insts, &bases);
+    if fill {
+        for &(at, base, size, align) in &placed {
+            if gone.contains(&base) {
+                filled(func, at, base, size, align);
+            }
+        }
+    }
     if wanted.is_empty() {
         return;
     }
@@ -98,7 +128,7 @@ pub(crate) fn begin(func: &mut Func, names: &mut Interner, word: Type) {
         .filter_map(|block| func.terminator(block))
         .filter(|&end| matches!(func[end].opcode, Opcode::Return | Opcode::TailCall))
         .collect();
-    for (base, size) in locals {
+    for (base, size, _) in locals {
         if !wanted.contains(&base) {
             continue;
         }
@@ -141,6 +171,25 @@ pub(crate) fn begin(func: &mut Func, names: &mut Interner, word: Type) {
     }
 }
 
+/// A fill of the `size` bytes at `base` with [`PATTERN`], straight behind the `alloca` at `at`.
+fn filled(func: &mut Func, at: Inst, base: Value, size: u64, align: u32) {
+    let info = MemInfo {
+        size,
+        align,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    };
+    let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { extra, ..InstData::new(Opcode::Memset) };
+    let made = func.create_inst(data, &[], func.span(at));
+    func.insert_after(made, at);
+    let byte = crate::lower::konst(func, made, Imm::int(PATTERN, Type::int(8)), Type::int(8));
+    let args = func.push_values(&[base, byte]);
+    func[made].args = args;
+}
+
 /// The ends of what an `alloca` took: everything below the pointer each `stackrestore` puts back,
 /// behind it, and everything below the frame in front of each return.
 fn given_back(func: &mut Func, names: &mut Interner, insts: &[Inst], ends: &[Inst]) {
@@ -165,16 +214,16 @@ fn given_back(func: &mut Func, names: &mut Interner, insts: &[Inst], ends: &[Ins
     }
 }
 
-/// The address and size of a local of a size known here, or nothing for anything else.
+/// The address, size and alignment of a local of a size known here, or nothing for anything else.
 ///
 /// A variable length array is an `alloca` with an operand, and [`grown`] is the one for that.
-fn sized(func: &Func, inst: Inst) -> Option<(Value, u64)> {
+fn sized(func: &Func, inst: Inst) -> Option<(Value, u64, u32)> {
     let data = &func[inst];
     let Extra::Mem(mem) = data.extra else { return None };
     if data.opcode != Opcode::Alloca || !func[data.args].is_empty() || func[mem].size == 0 {
         return None;
     }
-    Some((data.results().next()?, func[mem].size))
+    Some((data.results().next()?, func[mem].size, func[mem].align))
 }
 
 /// An `alloca` with an operand, which is `__builtin_alloca` or a variable length array: where it is,
@@ -191,8 +240,9 @@ fn grown(func: &Func, inst: Inst, word: Type) -> Option<(Inst, Value, Value)> {
     Some((inst, data.results().next()?, size))
 }
 
-/// Which of `locals` a `check_init` reads through and nothing lets go of.
-fn wanted(func: &Func, insts: &[Inst], locals: &[Value]) -> Set<Value> {
+/// Which of `locals` a `check_init` reads through and nothing lets go of, and which of them
+/// something lets go of.
+fn wanted(func: &Func, insts: &[Inst], locals: &[Value]) -> (Set<Value>, Set<Value>) {
     // Every value that is one of the locals or an address inside one, mapped to the local. A
     // block parameter is one of them when something passed to it is, which is how a pointer
     // stepped round a loop looks once the optimizer has had it, and a parameter that is also
@@ -244,7 +294,7 @@ fn wanted(func: &Func, insts: &[Inst], locals: &[Value]) -> Set<Value> {
         }
     }
     asked.retain(|local| !gone.contains(local));
-    asked
+    (asked, gone)
 }
 
 /// Whether an address in operand `index` of an `opcode` stays where this pass can see it.
@@ -274,17 +324,22 @@ target triple = "x86_64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 "#;
 
-    /// The calls the pass put into the one function in `body`, in the order they come.
-    fn calls(body: &str) -> Vec<String> {
+    /// The one function in `body` once the pass has been over it, with the names it was read with.
+    fn run(body: &str, fill: bool) -> (Func, Interner) {
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
         let id = module.funcs().find(|&id| !module[id].is_declaration()).expect("one function");
-        begin(&mut module[id], &mut names, Type::int(64));
+        begin(&mut module[id], &mut names, Type::int(64), fill);
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
-        let func = &module[id];
+        (module[id].clone(), names)
+    }
+
+    /// The calls the pass put into the one function in `body`, in the order they come.
+    fn calls(body: &str) -> Vec<String> {
+        let (func, names) = run(body, false);
         func.blocks()
             .flat_map(|block| func.insts(block))
             .filter_map(|inst| match func[inst].extra {
@@ -292,6 +347,71 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
                 _ => None,
             })
             .collect()
+    }
+
+    /// How many bytes each fill the pass put into the one function in `body` covers, when it was
+    /// asked to fill.
+    fn fills(body: &str) -> Vec<u64> {
+        let (func, _) = run(body, true);
+        func.blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Memset)
+            .filter_map(|inst| match func[inst].extra {
+                Extra::Mem(mem) => Some(func[mem].size),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A local handed to a call and one kept here, with a `cap_of` between the two the way the front
+    /// end writes them.
+    const HANDED: &str = r#"
+func @show(ptr), linkage(external);
+
+func @f() -> i32, linkage(external) {
+block0:
+    %0 = alloca, size 4, align 4
+    %1 = cap_of %0
+    %2 = alloca, size 100, align 16
+    %3 = iconst.i32 3
+    store %3 -> %0, align 4
+    call @show(%2) : (ptr)
+    %4 = load.i32 %0, align 4
+    return %4
+}
+"#;
+
+    #[test]
+    fn a_local_handed_to_a_call_is_filled_and_one_kept_here_is_not() {
+        assert_eq!(fills(HANDED), [100]);
+    }
+
+    #[test]
+    fn nothing_is_filled_when_the_program_chose_what_its_locals_hold() {
+        let (func, _) = run(HANDED, false);
+        let memsets = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Memset)
+            .count();
+        assert_eq!(memsets, 0);
+    }
+
+    #[test]
+    fn a_local_that_is_begun_is_not_filled() {
+        let got = fills(
+            r#"
+func @f() -> i32, linkage(external) {
+block0:
+    %0 = alloca, size 4, align 4
+    %1 = cap_of %0
+    check_init %1, %0, size 4, align 4
+    %2 = load.i32 %0, align 4
+    return %2
+}
+"#,
+        );
+        assert!(got.is_empty(), "{got:?}");
     }
 
     #[test]

@@ -1577,7 +1577,11 @@ fn generate(
         // the pass both, and the census in `--emit=safety-summary` reads the same rule, so the
         // buckets it prints describe the code that was actually built.
         rucc_safety::handover::arrange(module, names);
-        rucc_safety::lower(module, names);
+        // The locals whose address leaves a function are filled with a pattern on the way in, so
+        // that a string nobody terminated runs to the end of its buffer rather than stopping at a
+        // zero the frame before left there. Not when the program said what its locals hold, since
+        // the lowering has already written that and a kernel that asked for zero is owed zero.
+        rucc_safety::lower(module, names, opts.auto_var_init.is_none());
         if let Err(errors) = rucc_ir::verify(module, names) {
             return Err(errors
                 .iter()
