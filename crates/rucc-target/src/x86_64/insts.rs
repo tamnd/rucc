@@ -43,7 +43,7 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 
 use Form::{
-    Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
+    Align, AluCarry, AluCarryI, AluCarryRm, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
     ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi,
     CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, CmpXchgFlags,
     Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide,
@@ -111,6 +111,14 @@ pub enum Form {
     /// these names rather than typed out, so an instruction that reads it has to be findable by
     /// its form.
     AluCarryI,
+    /// The same instruction as [`Form::AluCarry`] reading its second source out of memory.
+    ///
+    /// `adcl 12(%eax), %ebx`, which is what gcc writes for the high halves of a `long long` sum on
+    /// i386 when one of them is in memory. It is [`Form::AluRm`] with the condition state read the
+    /// way [`Form::AluCarry`] reads it, and a form of its own for the reason that one is. No rule
+    /// produces one: `rucc_codegen::combine` and the reload fold write it out of an
+    /// [`Form::AluCarry`] and the load in front of it.
+    AluCarryRm,
     /// The same instruction as [`Form::AluRr`] reading its second source out of memory.
     ///
     /// One operand vector shorter than [`Form::AluRr`] and one addressing mode longer, which is
@@ -1311,7 +1319,7 @@ impl Form {
         match self {
             LoadImm => &LOAD_IMM,
             AluRr | AluCarry | ShiftDouble => &TWO_ADDRESS_RR,
-            AluRi | AluCarryI | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
+            AluRi | AluCarryI | AluRm | AluCarryRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
             SwapHalves => &SWAP_HALVES,
             Exchange => &EXCHANGE,
             ShiftCl => &SHIFT_CL,
@@ -1414,6 +1422,7 @@ impl Form {
             self,
             Lea | Load
                 | AluRm
+                | AluCarryRm
                 | AluMr
                 | AluMi
                 | UnaryM
@@ -1462,6 +1471,7 @@ impl Form {
         matches!(
             self,
             Load | AluRm
+                | AluCarryRm
                 | AluMr
                 | AluMi
                 | UnaryM
@@ -1600,6 +1610,15 @@ pub static INSTS: &[(&str, Form)] = &[
     ("sbb_ri_16", AluCarryI),
     ("sbb_ri_32", AluCarryI),
     ("sbb_ri_64", AluCarryI),
+    // The same pair reading the second source out of memory, which only the load folds write.
+    ("adc_rm_8", AluCarryRm),
+    ("adc_rm_16", AluCarryRm),
+    ("adc_rm_32", AluCarryRm),
+    ("adc_rm_64", AluCarryRm),
+    ("sbb_rm_8", AluCarryRm),
+    ("sbb_rm_16", AluCarryRm),
+    ("sbb_rm_32", AluCarryRm),
+    ("sbb_rm_64", AluCarryRm),
     ("and_rr_8", AluRr),
     ("and_rr_16", AluRr),
     ("and_rr_32", AluRr),

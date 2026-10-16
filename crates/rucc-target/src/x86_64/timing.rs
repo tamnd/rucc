@@ -140,7 +140,7 @@ fn plain(form: Form) -> Timing {
         // The same arithmetic reading its second source out of memory. The load is the whole of
         // the extra cost and the unit it needs is the address unit, because that is what is scarce
         // about it: the arithmetic behind the load is one cycle on a unit there are four of.
-        AluRm => (1 + LOAD, Unit::Load),
+        AluRm | AluCarryRm => (1 + LOAD, Unit::Load),
         // The same arithmetic with the answer left in memory, which is a load and the arithmetic
         // and a store. The store is the scarce part, the way the load is the scarce part above,
         // and the latency is not a number anything waits on for the reason a store's is not:

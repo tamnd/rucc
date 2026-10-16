@@ -1508,7 +1508,10 @@ mod tests {
         let (mut names, mut func, block) = empty();
         let reload = load(&mut func, &mut names, block, R10, 40);
         let opcode = op(&mut names, "cmp_rr_32");
-        func.build(block, opcode).uses(Reg::physical(R10), GPR).uses(Reg::physical(R13), GPR).finish();
+        func.build(block, opcode)
+            .uses(Reg::physical(R10), GPR)
+            .uses(Reg::physical(R13), GPR)
+            .finish();
         let mut moves = Moves::default();
         moves.record(reload, back(block, 0, R10));
 

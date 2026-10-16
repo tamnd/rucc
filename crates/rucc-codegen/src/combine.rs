@@ -390,6 +390,10 @@ pub struct Fold {
 /// spill slot just in front. gcc reads that side out of memory. These name one instruction each,
 /// because what reads the condition state behind them is not something the row can see, so there
 /// is no condition to turn over when the load is on the left.
+///
+/// And the add with carry and the subtract with borrow behind them, which are the high halves of a
+/// `long long` sum and difference on i386. The carry they read is not touched by the load, so the
+/// load can come into them the way it comes into an addition.
 pub static FOLDS: &[Fold] = &[
     Fold { from: "add_rr_8", into: "add_rm_8", load: "mov_rm_8", swapped: Some("add_rm_8") },
     Fold { from: "add_rr_16", into: "add_rm_16", load: "mov_rm_16", swapped: Some("add_rm_16") },
@@ -418,6 +422,14 @@ pub static FOLDS: &[Fold] = &[
     Fold { from: "cmp_rr_16", into: "cmp_rm_16", load: "mov_rm_16", swapped: None },
     Fold { from: "cmp_rr_32", into: "cmp_rm_32", load: "mov_rm_32", swapped: None },
     Fold { from: "cmp_rr_64", into: "cmp_rm_64", load: "mov_rm_64", swapped: None },
+    Fold { from: "adc_rr_8", into: "adc_rm_8", load: "mov_rm_8", swapped: Some("adc_rm_8") },
+    Fold { from: "adc_rr_16", into: "adc_rm_16", load: "mov_rm_16", swapped: Some("adc_rm_16") },
+    Fold { from: "adc_rr_32", into: "adc_rm_32", load: "mov_rm_32", swapped: Some("adc_rm_32") },
+    Fold { from: "adc_rr_64", into: "adc_rm_64", load: "mov_rm_64", swapped: Some("adc_rm_64") },
+    Fold { from: "sbb_rr_8", into: "sbb_rm_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "sbb_rr_16", into: "sbb_rm_16", load: "mov_rm_16", swapped: None },
+    Fold { from: "sbb_rr_32", into: "sbb_rm_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "sbb_rr_64", into: "sbb_rm_64", load: "mov_rm_64", swapped: None },
     Fold {
         from: "cmp_set_e_8",
         into: "cmp_set_e_rm_8",
@@ -2442,6 +2454,41 @@ mod tests {
         assert_eq!(func[func[inst].operands][1].reg, other);
     }
 
+    /// The high halves of a `long long` sum on i386, which is `adcl 12(%eax), %ebx` in gcc. The
+    /// load does not touch the carry the add with carry reads, so it comes in the way it comes into
+    /// an addition, on either side.
+    #[test]
+    fn a_load_read_once_by_an_add_with_carry_becomes_its_memory_operand() {
+        for right in [true, false] {
+            let (mut names, mut func, block) = empty();
+            let base = func.new_vreg(GPR);
+            let other = func.new_vreg(GPR);
+            let word = load(&mut func, &mut names, block, base);
+            let (first, second) = if right { (other, word) } else { (word, other) };
+            alu(&mut func, &mut names, block, "adc_rr_64", first, second);
+
+            assert_eq!(combine(&mut func, &mut names), 1);
+            assert_eq!(shape(&func, &names, block), ["x64.adc_rm_64"]);
+            let inst = func.insts(block).next().expect("the add with carry");
+            assert_eq!(func[func[inst].operands][1].reg, other, "the source it kept");
+        }
+    }
+
+    /// The subtract with borrow takes the load on its right only, the way a subtraction does.
+    #[test]
+    fn a_load_read_once_by_a_subtract_with_borrow_folds_on_its_right_only() {
+        for (right, folded) in [(true, 1), (false, 0)] {
+            let (mut names, mut func, block) = empty();
+            let base = func.new_vreg(GPR);
+            let other = func.new_vreg(GPR);
+            let word = load(&mut func, &mut names, block, base);
+            let (first, second) = if right { (other, word) } else { (word, other) };
+            alu(&mut func, &mut names, block, "sbb_rr_64", first, second);
+
+            assert_eq!(combine(&mut func, &mut names), folded);
+        }
+    }
+
     /// A subtraction with the load on the left, which is the one place the swap above would change
     /// the answer.
     #[test]
@@ -3093,9 +3140,15 @@ mod tests {
         let bare = FOLDS.iter().filter(|fold| fold.from.starts_with("cmp_rr_")).count();
         assert_eq!(bare, 4, "a comparison that keeps no byte, at four widths");
         let arithmetic = FOLDS.len() - compares - bare;
-        assert_eq!(arithmetic, 23, "six operations at four widths, less the eight bit multiply");
+        assert_eq!(
+            arithmetic, 31,
+            "eight operations at four widths, less the eight bit multiply"
+        );
         let swapped = FOLDS.iter().filter(|fold| fold.swapped.is_some()).count();
-        assert_eq!(swapped, 59, "everything but the four subtractions and the comparisons with nothing to turn over");
+        assert_eq!(
+            swapped, 63,
+            "everything but the eight subtractions and the comparisons with nothing to turn over"
+        );
     }
 
     /// What a comparison folded on its left hand side comes out as.

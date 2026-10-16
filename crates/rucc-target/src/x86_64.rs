@@ -1104,10 +1104,11 @@ static COMPARES: [Compare; 100] = [
 /// right and both of theirs do.
 ///
 /// The add with carry and the subtract with borrow are first, in the order the description next
-/// door lists them, and they are the eight rows here that carry no condition in their names. What
+/// door lists them, and they are the twenty four rows here that carry no condition in their names:
+/// both of them at four widths, against a register, a constant and memory. What
 /// they read is [`Reads::Carry`], which is the group nothing in [`ZEROING`] is good for, so they
 /// can only stop the pass and never point it at the wrong bits.
-static READERS: [Reader; 248] = [
+static READERS: [Reader; 256] = [
     Reader { name: "adc_rr_8", reads: Reads::Carry },
     Reader { name: "adc_rr_16", reads: Reads::Carry },
     Reader { name: "adc_rr_32", reads: Reads::Carry },
@@ -1124,6 +1125,14 @@ static READERS: [Reader; 248] = [
     Reader { name: "sbb_ri_16", reads: Reads::Carry },
     Reader { name: "sbb_ri_32", reads: Reads::Carry },
     Reader { name: "sbb_ri_64", reads: Reads::Carry },
+    Reader { name: "adc_rm_8", reads: Reads::Carry },
+    Reader { name: "adc_rm_16", reads: Reads::Carry },
+    Reader { name: "adc_rm_32", reads: Reads::Carry },
+    Reader { name: "adc_rm_64", reads: Reads::Carry },
+    Reader { name: "sbb_rm_8", reads: Reads::Carry },
+    Reader { name: "sbb_rm_16", reads: Reads::Carry },
+    Reader { name: "sbb_rm_32", reads: Reads::Carry },
+    Reader { name: "sbb_rm_64", reads: Reads::Carry },
     Reader { name: "cmp_set_e_8", reads: Reads::Zero },
     Reader { name: "cmp_set_e_16", reads: Reads::Zero },
     Reader { name: "cmp_set_e_32", reads: Reads::Zero },
@@ -2211,7 +2220,7 @@ mod tests {
     /// the pass decided to keep instead, so the list is again taken from the descriptions. That
     /// each entry names the right part is checked against the condition in the opcode's own name,
     /// which is two hundred and ten rows that cannot be hand checked and three groups that can.
-    /// The eight with no condition in their names are the add with carry and the subtract with
+    /// The twenty four with no condition in their names are the add with carry and the subtract with
     /// borrow, which have a group of their own and are checked by their form instead.
     #[test]
     fn every_condition_says_which_part_of_the_state_it_is_about() {
@@ -2222,6 +2231,7 @@ mod tests {
                     shape,
                     Form::AluCarry
                         | Form::AluCarryI
+                        | Form::AluCarryRm
                         | Form::CmpSet
                         | Form::CmpSetRi
                         | Form::CmpSetRm
@@ -2237,7 +2247,7 @@ mod tests {
         assert_eq!(entries, readers);
 
         for entry in &READERS {
-            if matches!(form(entry.name), Some(Form::AluCarry | Form::AluCarryI)) {
+            if matches!(form(entry.name), Some(Form::AluCarry | Form::AluCarryI | Form::AluCarryRm)) {
                 assert_eq!(entry.reads, Reads::Carry, "{} reads a condition", entry.name);
                 continue;
             }
