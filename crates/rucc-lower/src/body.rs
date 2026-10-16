@@ -10928,6 +10928,12 @@ impl<'u> Body<'_, 'u> {
         }
         let &[to, with, length] = values else { return None };
         let size = self.small_length(length)?;
+        // One that runs off the array member it was handed stays a call, the way gcc leaves it to
+        // `__memcpy_chk` under `_FORTIFY_SOURCE`, so that a safety build's wrapper judges it
+        // against the member. A correct program never gets here.
+        if self.overruns(to, size) || opcode != Opcode::Memset && self.overruns(with, size) {
+            return None;
+        }
         if size > 0 {
             let info = MemInfo {
                 size,
@@ -10951,6 +10957,19 @@ impl<'u> Body<'_, 'u> {
             build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(opcode) }, &[]);
         }
         Some(matches!(plan.ret.pass, Pass::Direct).then_some(to))
+    }
+
+    /// Whether `value` is the address of an array member shorter than `size` bytes, as
+    /// [`Self::measured`] and [`Self::taken`] mark one.
+    fn overruns(&self, value: Value, size: u64) -> bool {
+        let Def::Result { inst, .. } = self.func[value].def else { return false };
+        let data = &self.func[inst];
+        match data.extra {
+            Extra::Array(member) => {
+                data.opcode == Opcode::PtrAdd && member != 0 && u64::from(member) < size
+            }
+            _ => false,
+        }
     }
 
     /// A length that is a constant of at most [`SMALL`], looking through the widening an `int`
