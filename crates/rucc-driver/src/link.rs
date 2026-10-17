@@ -3065,7 +3065,9 @@ mod tests {
         let gcc = root.join("lib/gcc/x86_64-pc-linux-gnu/16.1.0");
         assert_eq!(find_in_search(&opts, linux(), "libgcc.a"), Some(gcc.join("libgcc.a")));
         let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
-        assert!(args.contains(&format!("-L{}", gcc.display())), "{args:?}");
+        // As a path, since on Windows the version is joined to the rest with a `\`.
+        let named = |arg: &String| arg.strip_prefix("-L").is_some_and(|dir| Path::new(dir) == gcc);
+        assert!(args.iter().any(named), "{args:?}");
         fs::remove_dir_all(&root).expect("clean up");
     }
 

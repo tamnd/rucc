@@ -233,18 +233,16 @@ mod tests {
         let command = Command::parse(&args, |path| path == Path::new("/s/lib/libm.a")).unwrap();
         assert_eq!(command.output, Path::new("a.wasm"));
         assert_eq!(command.options.name.as_deref(), Some("a.wasm"));
-        let inputs: Vec<_> = command.inputs.iter().map(|p| p.to_str().unwrap()).collect();
-        assert_eq!(
-            inputs,
-            [
-                "/s/lib/crt1-command.o",
-                "a.o",
-                "/s/lib/libm.a",
-                "/s/lib/libsetjmp.a",
-                "/s/lib/libc.a",
-                "/r/librucc_builtins.a"
-            ]
-        );
+        // As paths, since on Windows the library found in a `-L` directory is joined with a `\`.
+        let want = [
+            "/s/lib/crt1-command.o",
+            "a.o",
+            "/s/lib/libm.a",
+            "/s/lib/libsetjmp.a",
+            "/s/lib/libc.a",
+            "/r/librucc_builtins.a",
+        ];
+        assert_eq!(command.inputs, want.map(PathBuf::from));
         assert_eq!(
             command.options,
             Options { name: Some("a.wasm".to_owned()), ..Options::default() }

@@ -474,6 +474,12 @@ int main(void) {
 }
 ";
 
+/// The levels each check is first run at on the host, where every operator is a lane at a time.
+/// None on Windows, where the host is x86_64-windows-gnu and nothing links without a sysroot the
+/// test job does not fetch. This is decided when the test is compiled, as in assembler_input.rs, so
+/// it cannot stop asserting on a Linux or macOS host without anybody noticing.
+const ON_THE_HOST: &[&str] = if cfg!(windows) { &[] } else { &["-O0", "-O2"] };
+
 fn on_path(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|dir| dir.join(program)).find(|file| file.is_file())
@@ -574,7 +580,7 @@ fn the_elementwise_builtins_have_the_value_of_each_lane() {
     std::fs::write(dir.join("check.c"), SATURATE).unwrap();
     let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
     // On the host first, where each builtin is a lane at a time.
-    for level in ["-O0", "-O2"] {
+    for &level in ON_THE_HOST {
         run(&rucc, &[level, "check.c", "-o", "check"], &dir);
         let status = Command::new(dir.join("check")).status().unwrap();
         assert!(status.success(), "{level}: {status}");
@@ -717,7 +723,7 @@ fn convertvector_casts_each_lane() {
     std::fs::write(dir.join("check.c"), CONVERTED).unwrap();
     let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
     // On the host first, where each conversion is a lane at a time.
-    for level in ["-O0", "-O2"] {
+    for &level in ON_THE_HOST {
         run(&rucc, &[level, "check.c", "-o", "check"], &dir);
         let status = Command::new(dir.join("check")).status().unwrap();
         assert!(status.success(), "{level}: {status}");
@@ -866,7 +872,7 @@ fn shufflevector_picks_each_lane() {
     std::fs::write(dir.join("check.c"), SHUFFLED).unwrap();
     let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
     // On the host first, where each shuffle is a lane at a time.
-    for level in ["-O0", "-O2"] {
+    for &level in ON_THE_HOST {
         run(&rucc, &[level, "check.c", "-o", "check"], &dir);
         let status = Command::new(dir.join("check")).status().unwrap();
         assert!(status.success(), "{level}: {status}");
@@ -989,7 +995,7 @@ fn a_conversion_of_a_half_casts_each_lane() {
     std::fs::write(dir.join("check.c"), HALVED).unwrap();
     let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
     // On the host first, where each conversion is a lane at a time.
-    for level in ["-O0", "-O2"] {
+    for &level in ON_THE_HOST {
         run(&rucc, &[level, "check.c", "-o", "check"], &dir);
         let status = Command::new(dir.join("check")).status().unwrap();
         assert!(status.success(), "{level}: {status}");
@@ -1113,7 +1119,7 @@ fn an_extmul_multiplies_each_lane() {
     std::fs::write(dir.join("check.c"), EXTMULED).unwrap();
     let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
     // On the host first, where each multiply is a lane at a time.
-    for level in ["-O0", "-O2"] {
+    for &level in ON_THE_HOST {
         run(&rucc, &[level, "check.c", "-o", "check"], &dir);
         let status = Command::new(dir.join("check")).status().unwrap();
         assert!(status.success(), "{level}: {status}");
@@ -1224,7 +1230,7 @@ fn a_vector_shift_by_a_scalar_shifts_each_lane() {
     std::fs::write(dir.join("check.c"), SHIFTED).unwrap();
     let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
     // On the host first, where each shift is a lane at a time.
-    for level in ["-O0", "-O2"] {
+    for &level in ON_THE_HOST {
         run(&rucc, &[level, "check.c", "-o", "check"], &dir);
         let status = Command::new(dir.join("check")).status().unwrap();
         assert!(status.success(), "{level}: {status}");
