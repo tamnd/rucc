@@ -49,6 +49,9 @@ pub struct Coverage {
     /// built for the same version the headers were told about. The kernel's `gcc_4_7.c` picks its
     /// own copy of the layout by `__GNUC__`.
     pub gnuc: (u32, u32),
+    /// The last character of the version word: `*` for a release, and whatever the libgcov the
+    /// link takes was built with otherwise, such as `e` for a build of GCC's trunk.
+    pub phase: u8,
     /// The section the pointer to the constructor goes in, or `None` where the format has none.
     pub ctor: Option<String>,
     /// The section the pointer to the destructor goes in. Where this is `None` and the constructor
@@ -60,12 +63,13 @@ impl Coverage {
     /// The version word in the record and at the top of the `.gcda` file.
     ///
     /// Four characters, from `gcc/gcov-iov.cc`: the major version in tens as a letter from `A`
-    /// and in units as a digit, the minor version as a digit, and `*` for a release.
+    /// and in units as a digit, the minor version as a digit, and the phase.
     #[must_use]
     pub fn version(&self) -> u32 {
         let (major, minor) = self.gnuc;
         let letters = [b'A' as u32 + major / 10, b'0' as u32 + major % 10, b'0' as u32 + minor];
-        letters.iter().fold(0, |word, &letter| (word << 8) | (letter & 0xff)) << 8 | u32::from(b'*')
+        letters.iter().fold(0, |word, &letter| (word << 8) | (letter & 0xff)) << 8
+            | u32::from(self.phase)
     }
 
     /// How many merge functions the record holds, one per kind of counter the version knows.
@@ -814,6 +818,7 @@ mod tests {
             counts: "a.gcda".to_owned(),
             count: true,
             gnuc: (major, minor),
+            phase: b'*',
             ctor: None,
             dtor: None,
         }
@@ -825,6 +830,9 @@ mod tests {
         assert_eq!(claiming(13, 2).version().to_be_bytes(), *b"B32*");
         assert_eq!(claiming(16, 0).version().to_be_bytes(), *b"B60*");
         assert_eq!(claiming(9, 4).version().to_be_bytes(), *b"A94*");
+        // A snapshot keeps the phase its libgcov was built with.
+        let snapshot = Coverage { phase: b' ', ..claiming(16, 0) };
+        assert_eq!(snapshot.version().to_be_bytes(), *b"B60 ");
     }
 
     #[test]
