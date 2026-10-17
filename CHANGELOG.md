@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.9
+
+This is a patch release. Under `-fsafety` rucc now refuses wide string copies that overrun, a pointer to a block's local read back after the block has closed, a copy into the front member of a struct that is longer than the member, and a string printed from a local one byte short of its terminator, which takes in more of Juliet's CWE-121, CWE-122, CWE-126 and CWE-457 cases. The glibc stubs link `-lresolv`, keep the old default versions on x86 and s390x, and no longer hand a new link the names glibc keeps only for old programs, so a program pinned to a glibc before 2.34 that uses threads loads there. `--coverage` writes its counts with a snapshot GCC's libgcov, such as Ubuntu's `gcc-16`. On i386 a large structure passed by value is copied a word at a time and a value put away around two calls keeps its second store. The preprocessor and the checker take about a quarter of the instructions off duk_replacements.c. `__attribute__((simd))`, `no_callee_saved_registers`, `preserve_none` and `warn_unused` are built as gcc 16 builds them. The release runs of 0.30.7 and 0.30.8 stopped in the tag check and published no binaries, 0.30.8 on an inline assembly test that has since been fixed, so 0.30.9 is the first release with binaries since 0.30.6.
+
 ### Added
 
 - `__attribute__((simd))` builds the SSE2 vector versions of a function as gcc 16 does on x86-64 ELF, under the vector function ABI names `_ZGVbN2v_h` and `_ZGVbM2v_h` that a loop gcc vectorized against glibc's `<bits/math-vector.h>` calls: each version takes its lanes in `xmm` registers, calls the function once a lane and, for `inbranch`, only where the mask is set. The flag is checked in gcc's words, a type with no lane is warned of as gcc warns of it, and the AVX, AVX2 and AVX-512 versions are not built yet.
