@@ -1036,10 +1036,12 @@ fn coverage(opts: &Options, target: &TargetInfo, counts: &str) -> rucc_opt::cove
         rucc_target::ObjectFormat::MachO => (Some("__DATA,__mod_init_func,mod_init_funcs"), None),
         rucc_target::ObjectFormat::Wasm => (None, None),
     };
+    let (major, minor, phase) = opts.gcov.unwrap_or((opts.gnuc.major, opts.gnuc.minor, b'*'));
     rucc_opt::coverage::Coverage {
         counts: counts.to_owned(),
         count: opts.profile_data.arcs,
-        gnuc: opts.gcov.unwrap_or((opts.gnuc.major, opts.gnuc.minor)),
+        gnuc: (major, minor),
+        phase,
         ctor: ctor.map(str::to_owned),
         dtor: dtor.map(str::to_owned),
     }
