@@ -40,6 +40,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A structure passed by value on i386 is copied into the outgoing area a word at a time, so a large one no longer has memcpy's own arguments written over the ones already stored. 00204 of c-testsuite printed garbage for the first of two large structures (#3710).
 - `tests/tools/perf.sh` skips a call graph that perf cannot record on the machine, with a line that gives perf's reason, rather than stopping with exit 255. The GitHub arm runner refuses `--call-graph=dwarf` this way (#3711).
 - Three tests that failed only on a Windows host hold there: two compared paths as strings and missed one joined with a `\`, and six lane checks in `wasm_simd_lanes` linked for a host that has no sysroot in the test job (#3712).
+- A program built with `--coverage` against a snapshot GCC's `libgcov.a`, such as Ubuntu's `gcc-16` package, writes its counts. rucc took the release from the library's version word but always ended the word in `*`, the mark of a release, and libgcov refused a record whose phase did not match its own (#3713).
 
 ## 0.30.8
 
