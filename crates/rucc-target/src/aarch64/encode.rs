@@ -34,6 +34,7 @@ use std::fmt;
 use crate::aarch64::system::PSTATE;
 
 mod atomic;
+mod mte;
 mod neon;
 
 /// How much of a general purpose register an instruction reads or writes.
@@ -983,6 +984,9 @@ impl At<'_> {
             return Ok((word, None));
         }
         if let Some(word) = self.sve(values)? {
+            return Ok((word, None));
+        }
+        if let Some(word) = self.mte(values)? {
             return Ok((word, None));
         }
         let word = match m {
@@ -2712,6 +2716,31 @@ mod tests {
         for text in ["add v0.1q, v1.1q, v2.1q", "cpyfp [x3], [x5]!, x7!", "setp [x3]!, w5!, x7"] {
             let line = read(text).expect("a line");
             assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+        }
+    }
+
+    /// GNU as refuses each of these, and each is a shape the memory tagging instructions do not
+    /// have: an offset that is not a whole number of granules, a thirty two bit register, an
+    /// offset on a block access, the zero register where the stack pointer is meant and the other
+    /// way round, and a tag offset past four bits.
+    #[test]
+    fn the_memory_tagging_instructions_refuse_what_gnu_as_refuses() {
+        for text in [
+            "stg x0, [x1, #8]",
+            "stg w0, [x1]",
+            "stgm x0, [x0, #16]",
+            "ldg x0, [x0], #16",
+            "stg xzr, [x0]",
+            "stgm sp, [x0]",
+            "irg w0, w1",
+            "addg x0, x1, #8, #1",
+            "addg x0, x1, #16, #16",
+            "gmi sp, x1, x2",
+            "stgp x0, x1, [x2, #8]",
+        ] {
+            let refused =
+                read(text).map_or(true, |line| encode(&line.mnemonic, &line.values).is_err());
+            assert!(refused, "{text}");
         }
     }
 
