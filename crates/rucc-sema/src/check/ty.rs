@@ -773,8 +773,8 @@ impl Checker<'_> {
         self.built.defined.insert(ty);
         // `packed` on an enumeration is `-fshort-enums` for that one type, which is how the
         // kernel keeps `enum rw_hint` to a byte.
-        let short = self.packing(attrs).packed;
-        self.enum_body(id, list, underlying, short, again.is_some(), span);
+        let stored = tag::Stored { short: self.packing(attrs).packed, mode: self.enum_mode(attrs) };
+        self.enum_body(id, list, underlying, stored, again.is_some(), span);
         if let Some((asked, _)) = self.warn_alignment(&[attrs]) {
             self.types.make_enum_checked(id, asked);
         }
