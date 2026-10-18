@@ -642,3 +642,34 @@ b8bfc020	ldapr w0, [x1]
 f8bfc3e2	ldapr x2, [sp]
 38bfc083	ldaprb w3, [x4]
 78bfc0c5	ldaprh w5, [x6]
+9adf1020	irg x0, x1
+9ac213e0	irg x0, sp, x2
+9ac3103f	irg sp, x1, x3
+9ac21420	gmi x0, x1, x2
+9ac417e3	gmi x3, sp, x4
+91810c20	addg x0, x1, #16, #3
+91bf3fff	addg sp, sp, #1008, #15
+d18200c5	subg x5, x6, #32, #0
+9ac20020	subp x0, x1, x2
+bac203e0	subps x0, sp, x2
+bac2003f	cmpp x1, x2
+d9200820	stg x0, [x1]
+d9201820	stg x0, [x1, #16]
+d9300820	stg x0, [x1, #-4096]
+d92ff820	stg x0, [x1, #4080]
+d9202c20	stg x0, [x1, #32]!
+d9201420	stg x0, [x1], #16
+d9200bff	stg sp, [sp]
+d9601400	stzg x0, [x0], #16
+d97ffc62	stzg x2, [x3, #-16]!
+d9a02820	st2g x0, [x1, #32]
+d9ffe420	stz2g x0, [x1], #-32
+d9600000	ldg x0, [x0]
+d97ff041	ldg x1, [x2, #-16]
+d9a0001f	stgm xzr, [x0]
+d9a003e3	stgm x3, [sp]
+d9200041	stzgm x1, [x2]
+d9e000a4	ldgm x4, [x5]
+69000440	stgp x0, x1, [x2]
+69a00440	stgp x0, x1, [x2, #-1024]!
+689f93e3	stgp x3, x4, [sp], #1008
