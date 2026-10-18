@@ -143,6 +143,10 @@ pub fn badness(call: &Call) -> f64 {
 /// how often it runs for each time the caller does and `caller` how long the caller takes, the
 /// call included. The copy takes the call out of the caller, which is how
 /// `compute_inlined_call_time` at `gcc/ipa-inline.cc:790` counts it.
+///
+/// The frequency is held under [`INLINE_FREQUENCY_CLAMP`] but not raised to one, as gcc does not
+/// raise it. A call on a branch the caller takes half the time saves half as much of what the
+/// caller takes, and counted as once a run it let calls over the limit in that gcc leaves alone.
 #[must_use]
 pub fn big_speedup(
     callee: f64,
@@ -152,7 +156,7 @@ pub fn big_speedup(
     caller: f64,
     percent: u32,
 ) -> bool {
-    let frequency = frequency.clamp(1.0, most_frequent());
+    let frequency = if frequency > 0.0 { frequency.min(most_frequent()) } else { 1.0 / 2048.0 };
     let before = callee * frequency + caller;
     let after = ((specialized - call) * frequency + caller).max(1.0 / 256.0);
     (before - after) * 100.0 > before * f64::from(percent)
@@ -270,5 +274,13 @@ mod tests {
         assert!(big_speedup(40.0, 10.0, 3.0, 1.0, 10.0, 30));
         // The same in a caller that takes a thousand saves too little of it.
         assert!(!big_speedup(40.0, 10.0, 3.0, 1.0, 1000.0, 30));
+    }
+
+    #[test]
+    fn a_call_run_less_often_than_its_caller_saves_less_of_it() {
+        // Once a run, the copy saves nearly half of what the call and the caller take.
+        assert!(big_speedup(40.0, 10.0, 3.0, 1.0, 30.0, 30));
+        // A quarter of the time, a fifth.
+        assert!(!big_speedup(40.0, 10.0, 3.0, 0.25, 30.0, 30));
     }
 }
