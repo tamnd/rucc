@@ -55,11 +55,21 @@ use rucc_session::Std;
 use rucc_types::{
     ArrayLen, EnumId, Enumerator, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError,
     RecordError, RecordId, RecordKind, RecordLayout, RecordOptions, Spelled, TypeId, TypeKind,
-    compatible, integer_info, is_complete, is_function, is_integer, is_void, layout, layout_record,
+    compatible, int_width, integer_info, is_complete, is_function, is_integer, is_void, layout,
+    layout_record,
 };
 
 use super::{MEMBER, Subject};
 use crate::check::Checker;
+
+/// What the attributes on an enumeration's definition say about how it is stored.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Stored {
+    /// `packed`, which asks for the narrowest type the values fit, as `-fshort-enums` does.
+    pub(super) short: bool,
+    /// A `mode`, as its width in bits and where it was written, which asks for that width.
+    pub(super) mode: Option<(u32, Span)>,
+}
 use crate::decl::StorageDuration;
 use crate::scope::{Binding, Tag, TagKind};
 
@@ -845,7 +855,7 @@ impl Checker<'_> {
         id: EnumId,
         list: ast::EnumeratorList,
         fixed: Option<TypeId>,
-        short: bool,
+        stored: Stored,
         again: bool,
         span: Span,
     ) {
@@ -917,7 +927,10 @@ impl Checker<'_> {
 
         let underlying = match fixed {
             Some(ty) => ty,
-            None => self.enum_underlying(&values, short),
+            None => match stored.mode.and_then(|(bits, at)| self.enum_moded(&values, bits, at)) {
+                Some(ty) => ty,
+                None => self.enum_underlying(&values, stored.short),
+            },
         };
         // The list goes into the table as well as into the scope. The scope answers what one name
         // means and is what the rest of the checker asks, and the table answers what the whole
@@ -1100,6 +1113,37 @@ impl Checker<'_> {
             }
         }
         chosen
+    }
+
+    /// The integer a `mode` on the definition stores the enumeration in, which is the one of that
+    /// width with the signedness the values ask for, as gcc's `finish_enum` picks it.
+    ///
+    /// Values that do not fit are refused in gcc's words, and the enumeration is then laid out as
+    /// if the attribute were not there.
+    fn enum_moded(
+        &mut self,
+        values: &[(Symbol, i128, Span)],
+        bits: u32,
+        at: Span,
+    ) -> Option<TypeId> {
+        let low = values.iter().map(|&(_, value, _)| value).min().unwrap_or(0);
+        let high = values.iter().map(|&(_, value, _)| value).max().unwrap_or(0);
+        let target = self.cx.target;
+        // `char` is skipped for the reason `mode_of` skips it: gcc's one byte answer is `signed
+        // char` or `unsigned char`.
+        let kind = IntKind::ALL.into_iter().find(|&kind| {
+            kind != IntKind::Char
+                && int_width(kind, target) == bits
+                && kind.is_signed(target.char_is_signed) == (low < 0)
+        })?;
+        let ty = self.types.int(kind);
+        let (least, greatest) = self.enum_bounds(Some(ty));
+        if low < least || high > greatest {
+            let what = "specified mode too small for enumerated values".to_string();
+            self.report(Diagnostic::error(what, at).with_code("E0698"));
+            return None;
+        }
+        Some(ty)
     }
 
     /// The values an enumerator may take, which is the underlying type's range where the

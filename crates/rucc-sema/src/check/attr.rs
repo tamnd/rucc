@@ -3176,6 +3176,44 @@ impl Checker<'_> {
         self.report(Diagnostic::warning(what, span).with_code("E0703"));
     }
 
+    /// How many bits wide a `mode` written on an enumeration's definition asks for it to be, and
+    /// where it was written.
+    ///
+    /// gcc reads it in `finish_enum`: the enumeration is stored in the integer of that width, with
+    /// the signedness its values call for, rather than in `int`. The kernel's netfs trace headers
+    /// write `__mode(byte)` on every enumeration a trace record keeps, so with `int` each of those
+    /// records is laid out differently from gcc's. Written twice the last one wins, as in
+    /// [`Self::moded`].
+    pub(in crate::check) fn enum_mode(&mut self, attrs: AttrList) -> Option<(u32, Span)> {
+        let ast = self.ast;
+        let target = self.cx.target;
+        let mut found = None;
+        for &attr in &ast[attrs] {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            if self.gnu_name(&attr) != "mode" {
+                continue;
+            }
+            let [AttrArg::Ident(named)] = ast[attr.args] else {
+                continue;
+            };
+            let name = rucc_gnu::unarmour(self.text(named)).to_string();
+            match named_mode(&name, target) {
+                Some(Mode::Int(bits)) => found = Some((bits, attr.span)),
+                Some(_) => {
+                    let what = format!("cannot use mode '{name}' for enumerated types");
+                    self.report(Diagnostic::error(what, attr.span).with_code("E0698"));
+                }
+                None => {
+                    let what = format!("unknown machine mode '{name}'");
+                    self.report(Diagnostic::error(what, attr.span).with_code("E0698"));
+                }
+            }
+        }
+        found
+    }
+
     /// The type a `mode` in an attribute list asks for, and the type as written where there is no
     /// such attribute in it.
     ///
