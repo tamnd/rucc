@@ -48,8 +48,8 @@ use rucc_gnu::{Answer, Kind, Status};
 use rucc_lex::Encoding;
 use rucc_target::{BitFieldStyle, Convention, Isa, ObjectFormat, Target, TargetInfo};
 use rucc_types::{
-    FloatKind, FunctionId, FunctionType, IntKind, TypeId, TypeKind, float_format, int_width,
-    integer_info, is_arithmetic, is_complex, is_function, is_real_floating, layout,
+    FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, TypeId, TypeKind, float_format,
+    int_width, integer_info, is_arithmetic, is_complex, is_function, is_real_floating, layout,
 };
 
 use crate::check::Checker;
@@ -111,6 +111,7 @@ const CONVENED: Spelled = Spelled::of(&[
     "callee_pop_aggregate_return",
     "no_callee_saved_registers",
     "preserve_none",
+    "noreturn",
 ]);
 
 /// The format archetypes gcc 16 knows on every target, which is what `format(archetype, ...)` may
@@ -2400,7 +2401,32 @@ impl Checker<'_> {
             None => ty,
         };
         let ty = self.sse_registers(ty, attrs, false);
-        self.popping(ty, attrs, false)
+        let ty = self.popping(ty, attrs, false);
+        self.never_returning(ty, attrs)
+    }
+
+    /// The type gcc gives a pointer to a function declared with `noreturn`, which points at the
+    /// function made `volatile`.
+    ///
+    /// A function's own declaration keeps the claim on the declaration. A pointer has nowhere else
+    /// to keep it, so gcc qualifies the function pointed at, the way a function that never returned
+    /// was written before the attribute existed, and its debug information describes a pointer to
+    /// a `volatile` function. The kernel's `efi_boot_services` declares `exit` that way and its BTF
+    /// says so. One level down and no further, as for a convention, and anything else is left as
+    /// written.
+    fn never_returning(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
+        if !self.never_returns(attrs) {
+            return ty;
+        }
+        let canonical = self.types.canonical(ty);
+        let TypeKind::Pointer(pointee) = self.types.kind(canonical) else { return ty };
+        if !is_function(&self.types, pointee) {
+            return ty;
+        }
+        let quals = self.types.quals(canonical);
+        let pointee = self.types.qualified(pointee, Qualifiers::VOLATILE);
+        let pointer = self.types.pointer(pointee);
+        self.types.qualified(pointer, quals)
     }
 
     /// The type a pointer's attributes make of what it points at, which is where
@@ -2438,7 +2464,13 @@ impl Checker<'_> {
             }
         }
         let pointee = self.sse_registers(pointee, attrs, true);
-        self.popping(pointee, attrs, true)
+        let pointee = self.popping(pointee, attrs, true);
+        // `void (*__noreturn enter)(u64)`, read as [`Self::never_returning`] reads it after the
+        // declarator.
+        if self.never_returns(attrs) && is_function(&self.types, pointee) {
+            return self.types.qualified(pointee, Qualifiers::VOLATILE);
+        }
+        pointee
     }
 
     /// Where an attribute list says `nocf_check`, after refusing each one written with arguments

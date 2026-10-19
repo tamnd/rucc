@@ -29,6 +29,7 @@ const DW_TAG_TYPEDEF: u64 = 0x16;
 const DW_TAG_UNION: u64 = 0x17;
 const DW_TAG_UNSPECIFIED_PARAMETERS: u64 = 0x18;
 const DW_TAG_VARIABLE: u64 = 0x34;
+const DW_TAG_VOLATILE: u64 = 0x35;
 const DW_TAG_SUBRANGE: u64 = 0x21;
 const DW_TAG_SUBPROGRAM: u64 = 0x2e;
 const DW_TAG_BASE: u64 = 0x24;
@@ -516,6 +517,34 @@ void g(named n, union tagged t) { (void)n; (void)t; }
         .expect("the union itself is described");
     assert_eq!((whole.name.as_deref(), whole.children.len()), (Some("tagged"), 2));
     assert!(named(&all, DW_TAG_STRUCTURE, "folio").is_none(), "nothing names a folio");
+}
+
+/// `noreturn` on a pointer to a function, before the type or beside the star, is a pointer to a
+/// `volatile` function, which is how gcc describes it and so how the kernel's BTF has the `exit`
+/// of `efi_boot_services`. A pointer declared without it points at the function as written.
+#[test]
+fn a_pointer_to_a_function_declared_noreturn_points_at_a_volatile_function() {
+    let source = "\
+struct ops {
+\tint __attribute__((noreturn)) (*exit)(int);
+\tvoid (*__attribute__((noreturn)) enter)(long);
+\tvoid (*plain)(int);
+};
+struct ops o;
+void __attribute__((noreturn)) (*gp)(void);
+";
+    let all = entries(&build("noreturn", source));
+    let pointee = |entry: &Entry| {
+        let pointer = at(&all, entry.ty.expect("a member has a type"));
+        assert_eq!(pointer.tag, DW_TAG_POINTER);
+        at(&all, pointer.ty.expect("the pointer points at something")).tag
+    };
+    let ops = named(&all, DW_TAG_STRUCTURE, "ops").expect("the structure is described");
+    let members: Vec<_> = ops.children.iter().map(|&index| &all[index]).collect();
+    let tags: Vec<_> = members.iter().map(|member| pointee(member)).collect();
+    assert_eq!(tags, [DW_TAG_VOLATILE, DW_TAG_VOLATILE, DW_TAG_SUBROUTINE]);
+    let gp = named(&all, DW_TAG_VARIABLE, "gp").expect("the variable is described");
+    assert_eq!(pointee(gp), DW_TAG_VOLATILE);
 }
 
 /// A type a function or a variable uses is described with it even where no signature, member or
