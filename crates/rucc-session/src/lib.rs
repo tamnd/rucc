@@ -923,6 +923,13 @@ impl PrefixMap {
         self.entries.is_empty()
     }
 
+    /// The rewrites, in the order the command line gave them, for a reader that applies them
+    /// itself.
+    #[must_use]
+    pub fn entries(&self) -> &[(String, String)] {
+        &self.entries
+    }
+
     /// Adds a rewrite, which is what one flag on the command line is.
     pub fn push(&mut self, old: impl Into<String>, new: impl Into<String>) {
         self.entries.push((old.into(), new.into()));

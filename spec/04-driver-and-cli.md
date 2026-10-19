@@ -286,7 +286,7 @@ The driver constructs the link line with the right startup files, the right defa
 - `-I<dir>` and `-I <dir>` are taken and change nothing, because the assembler reads no file but its input and refuses `.include` and `.incbin`. When it reads them, this is where they will look.
 - `-march=<arch>`, on AArch64, for an `armv8` or `armv9` architecture name with any `+` modifiers after it. The kernel passes `armv8.4-a` or `armv8.5-a` so that the assembler takes instructions the compiler is not allowed to generate, and ours takes every instruction it can encode whatever architecture is named, which gives the same result for any file gas would accept. What it cannot do is narrow, so gas's x86 processor names are refused.
 
-`-g`, `-gdwarf-<n>` and `--gdwarf-<n>` are refused, because they ask for a line table for a file of assembly and the assembler writes no debug information for one. Anything else is refused.
+`-g`, `-gdwarf-<n>` and `--gdwarf-<n>` are refused. The assembler writes the line table and the unit gas writes for a file of assembly when the compiler's own `-g` asks for them, which is how gcc hands `-g` on, and not under these spellings. Anything else is refused.
 
 The version in the banner is a claim of its own, beside `-fgnuc-version=` in section 4.5, and it is set with `-fgnu-as-version=`, which takes the same `2`, `2.44` or `2.44.1` shapes. Kconfig compares it against the binutils release a feature needs, and a build that claims an old GCC for an old kernel will usually claim that era's binutils too, which is why the two are separate. The default is 2.46, the binutils release that was current when GCC 16 came out, since GCC 16 is the release we claim by default.
 

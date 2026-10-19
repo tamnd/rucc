@@ -98,6 +98,9 @@ struct Param {
 struct Collecting {
     what: Body,
     body: Vec<String>,
+    /// The file and line each statement of the body was written on, which is where a row made
+    /// for it under `-g` says it is each time a repetition reads it. See [`Reader::place`].
+    places: Vec<(usize, u64)>,
     /// How many of the same kind have been opened inside it and not yet closed, which is what
     /// lets a macro define another one or a `.rept` hold another.
     nest: usize,
@@ -210,6 +213,7 @@ impl Reader {
         let Parts { labels, word, rest } = parts(text);
         // `.rep` is another spelling of `.rept`, which the kernel's kuser32.S uses.
         let word = if word.eq_ignore_ascii_case(".rep") { ".rept" } else { word };
+        let place = self.place;
         if let Some(collecting) = &mut self.macros.collecting {
             if collecting.what.opens(word) {
                 collecting.nest += 1;
@@ -221,6 +225,7 @@ impl Reader {
                 collecting.nest -= 1;
             }
             collecting.body.push(text.to_owned());
+            collecting.places.push(place);
             return Ok(());
         }
         // A label in front of a conditional is where the line is, and is defined when the line is
@@ -331,12 +336,24 @@ impl Reader {
 
     /// Start collecting a body.
     fn open(&mut self, what: Body) {
-        self.macros.collecting =
-            Some(Collecting { what, body: Vec::new(), nest: 0, line: self.line });
+        self.macros.collecting = Some(Collecting {
+            what,
+            body: Vec::new(),
+            places: Vec::new(),
+            nest: 0,
+            line: self.line,
+        });
     }
 
     /// A body whose end has been reached, kept or read as its kind says.
     fn collected(&mut self, done: Collecting) -> Result<(), Trouble> {
+        let place = self.place;
+        let read = self.read_body(done);
+        self.place = place;
+        read
+    }
+
+    fn read_body(&mut self, done: Collecting) -> Result<(), Trouble> {
         match done.what {
             Body::Macro { name, params } => {
                 let key = name.to_ascii_lowercase();
@@ -347,7 +364,8 @@ impl Reader {
             }
             Body::Rept(count) => {
                 for _ in 0..count {
-                    for line in &done.body {
+                    for (line, &place) in done.body.iter().zip(&done.places) {
+                        self.place = place;
                         self.feed(line)?;
                         if self.macros.exiting {
                             return Ok(());
@@ -360,8 +378,9 @@ impl Reader {
                 let values = if values.is_empty() { vec![String::new()] } else { values };
                 for value in values {
                     let names = [(name.clone(), value)];
-                    for line in &done.body {
+                    for (line, &place) in done.body.iter().zip(&done.places) {
                         let line = self.substitute(line, &names, None);
+                        self.place = place;
                         self.feed(&line)?;
                         if self.macros.exiting {
                             return Ok(());
