@@ -387,6 +387,7 @@ fn placed(
     let mut assignment = Assignment::empty(count);
     let mut lost = vec![0u32; count];
     let mut sent = Vec::new();
+    let mut stacked = Vec::new();
     while let Some((_, Reverse(number))) = queue.pop() {
         let Some(value) = values[number] else { continue };
         if forced.contains(&value.reg) {
@@ -467,7 +468,7 @@ fn placed(
                     state.take(last, at);
                     state.saves[index(last.reg)] = insts;
                 }
-                None => assignment.spill(last.reg, last.class),
+                None => stacked.push(last),
             }
         }
         if state.work > state.budget {
@@ -488,7 +489,15 @@ fn placed(
                 state.take(value, at);
                 state.saves[index(value.reg)] = insts;
             }
-            None => assignment.spill(value.reg, value.class),
+            None => stacked.push(value),
+        }
+    }
+    // What is still going to the stack is offered a register the values in its way can all move
+    // out of, the most expensive to keep on the stack first. See [`State::recolored`].
+    stacked.sort_by_key(|value| Reverse(costs[index(value.reg)]));
+    for value in stacked {
+        if state.recolored(value, env.order(value.class)).is_none() {
+            assignment.spill(value.reg, value.class);
         }
     }
     if state.work > state.budget {
@@ -825,6 +834,70 @@ impl<'a> State<'a, '_> {
             self.saves[other].clear();
         }
         clashes
+    }
+
+    /// Puts `value` in a register by moving the values in its way there to registers that are free
+    /// for them, and says which, or `None` where no register can be had that way.
+    ///
+    /// Eviction weighs a value by its cost over its length, so a value wanted all through a loop
+    /// loses its register to a short one read a few times, though the short one would have fitted
+    /// in another register as well. Once it has lost it [`ROUNDS`] times it goes to the stack, and
+    /// the register the short one could have moved to sits empty. That was `box` in a loop over
+    /// the events of a perf box on i386: read in every turn and kept on the stack, with `ebx` free
+    /// across the whole loop.
+    ///
+    /// Only a value with nothing tied to where it is moves: one put away around a call, or whose
+    /// answer was written over its second source, stays where it is.
+    fn recolored(&mut self, value: Value<'_>, order: &[PhysReg]) -> Option<PhysReg> {
+        let number = index(value.reg);
+        for &at in order {
+            if self.work > self.budget {
+                return None;
+            }
+            if self.insists(value, at, Want::Allowed) {
+                continue;
+            }
+            let clashes = self.clashes(value, at);
+            let fixed =
+                |other: &usize| self.commuted[*other].is_some() || !self.saves[*other].is_empty();
+            if clashes.len() > 2 || clashes.iter().any(fixed) {
+                continue;
+            }
+            let slot = self.slot(value.class, at);
+            self.remove(slot, &clashes);
+            for &other in &clashes {
+                self.at[other] = None;
+            }
+            self.take(value, at);
+            let mut moved = Vec::new();
+            for &other in &clashes {
+                let Some(held) = self.values[other] else { break };
+                let to = order
+                    .iter()
+                    .copied()
+                    .find(|&to| to != at && self.free(held, to, Want::Allowed));
+                let Some(to) = to else { break };
+                self.take(held, to);
+                moved.push((other, to));
+            }
+            if moved.len() == clashes.len() {
+                return Some(at);
+            }
+            for (other, to) in moved {
+                let slot = self.slot(value.class, to);
+                self.remove(slot, &[other]);
+                self.at[other] = None;
+            }
+            let slot = self.slot(value.class, at);
+            self.remove(slot, &[number]);
+            self.at[number] = None;
+            for &other in &clashes {
+                if let Some(held) = self.values[other] {
+                    self.take(held, at);
+                }
+            }
+        }
+        None
     }
 
     /// The register that is cheapest for `value` to be put away in around every instruction that
