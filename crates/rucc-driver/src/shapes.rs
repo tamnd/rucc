@@ -96,6 +96,9 @@ pub(crate) struct Meaning {
     /// hands over the objects it actually laid out and each of them is looked up here. A `static`
     /// nothing reads is not among them and so is never asked for.
     pub objects: Map<String, Held>,
+    /// The names in [`Meaning::objects`] the unit defines as `static`, in the order they were
+    /// declared, which gcc describes whether or not the back end kept them.
+    pub statics: Vec<String>,
     /// What is known about each function and variable the unit declares without defining and the
     /// code it emits names, by the name it will have in the object file, in the order of the
     /// declarations.
@@ -292,6 +295,8 @@ pub(crate) fn collect(
     }
     let mut funcs = Map::default();
     let mut objects = Map::default();
+    let mut statics = Vec::new();
+    let mut listed = Set::default();
     let mut owners = Vec::new();
     for &id in tast.top_level() {
         let decl = &tast[id];
@@ -332,6 +337,11 @@ pub(crate) fn collect(
                     uses: Vec::new(),
                 };
                 owners.push((id, symbol.clone()));
+                let defines =
+                    decl.linkage == Linkage::Internal && decl.state != Definition::Declared;
+                if defines && listed.insert(symbol.clone()) {
+                    statics.push(symbol.clone());
+                }
                 objects.insert(symbol, held);
             }
             _ => {}
@@ -445,6 +455,7 @@ pub(crate) fn collect(
         type_tags,
         funcs,
         objects,
+        statics,
         declared,
         reached,
         locals,

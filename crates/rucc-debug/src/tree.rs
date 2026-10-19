@@ -916,6 +916,9 @@ fn held_at(
     }
     came_from(dwarf, at, &global.name, global.decl, files)?;
     points(dwarf, at, global.ty, ids)?;
+    if global.dropped {
+        return Ok(at);
+    }
     let mut expr = gimli::write::Expression::new();
     expr.op_addr(gimli::write::Address::Symbol { symbol, addend: 0 });
     dwarf.unit.get_mut(at).set(gimli::DW_AT_location, AttributeValue::Exprloc(expr));
@@ -1821,6 +1824,7 @@ mod tests {
             external: true,
             tags: Vec::new(),
             uses: Vec::new(),
+            dropped: false,
         }];
         let info = write(&unit).expect("sections");
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");

@@ -590,3 +590,33 @@ void f(void) { free_percpu(v.p); }
     let free = named(&all, DW_TAG_SUBPROGRAM, "free_percpu").expect("free_percpu is declared");
     assert_eq!(free.children.len(), 1, "it takes the pointer");
 }
+
+/// A `static` the back end dropped because nothing reads it still has an entry, with its type and
+/// no location, as gcc writes it. That is how `exitcall_t` gets into a module with a `module_exit`,
+/// from the pointer the macro puts in `.exitcall.exit` and marks unused. A `static` that is only
+/// declared, a local and a name another unit defines get no such entry.
+#[test]
+fn a_static_nothing_reads_is_still_described() {
+    let source = "\
+struct quiet { int a; };
+struct local_only { int a; };
+typedef void (*exit_t)(void);
+static void bye(void) {}
+static exit_t on_exit __attribute__((unused)) = bye;
+static struct quiet hushed;
+static const int seven = 7;
+extern struct quiet elsewhere;
+static inline int never(void) { static struct local_only kept; return kept.a; }
+int f(void) { return seven; }
+";
+    let all = entries(&build("dropped-static", source));
+    for name in ["on_exit", "hushed", "seven"] {
+        let one = named(&all, DW_TAG_VARIABLE, name).expect("the static is described");
+        assert!(!one.declaration, "{name}");
+    }
+    assert!(named(&all, DW_TAG_TYPEDEF, "exit_t").is_some(), "the type of on_exit");
+    assert!(named(&all, DW_TAG_STRUCTURE, "quiet").is_some(), "the type of hushed");
+    assert!(named(&all, DW_TAG_VARIABLE, "elsewhere").is_none());
+    assert!(named(&all, DW_TAG_VARIABLE, "kept").is_none());
+    assert!(named(&all, DW_TAG_STRUCTURE, "local_only").is_none());
+}
