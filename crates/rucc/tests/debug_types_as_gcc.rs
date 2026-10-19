@@ -314,6 +314,40 @@ fn an_array_of_arrays_is_one_entry() {
     assert_eq!(element.name.as_deref(), Some("int"));
 }
 
+/// An array of a typedef name for an array is one entry too, as gcc writes it, and the name is
+/// described only where something names it directly.
+#[test]
+fn an_array_of_a_typedef_name_for_an_array_is_one_entry() {
+    let source = "\
+typedef int *row[4];
+typedef row grid[2];
+row m[3];
+grid g;
+struct s { row r[5]; } v;
+int f(void) { return 0; }
+";
+    let all = entries(&build("rows", source));
+    let ranges = |name: &str| {
+        let variable = named(&all, DW_TAG_VARIABLE, name).expect("the variable is described");
+        let mut array = at(&all, variable.ty.expect("a variable has a type"));
+        if array.tag == DW_TAG_TYPEDEF {
+            array = at(&all, array.ty.expect("a typedef has a type"));
+        }
+        assert_eq!(array.tag, DW_TAG_ARRAY, "{name}");
+        let element = at(&all, array.ty.expect("an element type"));
+        assert_ne!(element.tag, DW_TAG_TYPEDEF, "{name}: the element is not row");
+        let ranges = array.children.iter().filter(|&&child| all[child].tag == DW_TAG_SUBRANGE);
+        ranges.count()
+    };
+    assert_eq!((ranges("m"), ranges("g")), (2, 2));
+    let r = named(&all, DW_TAG_MEMBER, "r").expect("r is described");
+    let array = at(&all, r.ty.expect("a member has a type"));
+    let ranges = array.children.iter().filter(|&&child| all[child].tag == DW_TAG_SUBRANGE);
+    assert_eq!((array.tag, ranges.count()), (DW_TAG_ARRAY, 2));
+    assert!(named(&all, DW_TAG_TYPEDEF, "row").is_none(), "nothing names row directly");
+    assert!(named(&all, DW_TAG_TYPEDEF, "grid").is_some());
+}
+
 /// A file with variables and no code still describes them, as gcc does: the kernel has tables of
 /// structures in files like that, and their types reach the BTF only through these entries.
 #[test]

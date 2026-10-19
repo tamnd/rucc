@@ -242,8 +242,8 @@ fn wanted(
             Shape::Pointer { to, .. } => work.extend(*to),
             Shape::Array { of, .. } => {
                 let mut of = *of;
-                while let Some(Shape::Array { of: inner, .. }) = shapes.get(of) {
-                    of = *inner;
+                while let Some((inner, _)) = array_under(shapes, of) {
+                    of = inner;
                 }
                 work.push(of);
             }
@@ -1079,7 +1079,9 @@ fn counted(dwarf: &mut gimli::write::DwarfUnit, at: UnitEntryId, value: &Constan
 /// the innermost holds, which is how gcc writes `int m[3][4]`. pahole reads that as an array of
 /// twelve, BTF having no way to say two dimensions, and reads an array of arrays as two arrays, so
 /// the kernel's BTF has a different type for every such member unless both compilers write the
-/// same thing. An array under a typedef name is not looked through, since gcc does not either.
+/// same thing. An array of a typedef name for an array is looked through as well, since gcc does
+/// too: `kmem_buckets kmalloc_caches[3]` is an array of three by fourteen pointers, and nothing
+/// names `kmem_buckets`. A typedef name for an array that is the type itself is kept.
 fn elements(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
@@ -1090,9 +1092,9 @@ fn elements(
 ) -> Result<(), Error> {
     let mut counts = vec![count];
     let mut of = of;
-    while let Some(Shape::Array { of: inner, count }) = shapes.get(of) {
-        counts.push(*count);
-        of = *inner;
+    while let Some((inner, count)) = array_under(shapes, of) {
+        counts.push(count);
+        of = inner;
     }
     points(dwarf, at, Some(of), ids)?;
     for count in counts {
@@ -1103,6 +1105,18 @@ fn elements(
         }
     }
     Ok(())
+}
+
+/// The element and the length of the array type `at` is, looking through typedef names, and
+/// nothing when it is not an array.
+fn array_under(shapes: &[Shape], mut at: usize) -> Option<(usize, Option<u64>)> {
+    loop {
+        match shapes.get(at)? {
+            Shape::Array { of, count } => return Some((*of, *count)),
+            Shape::Alias { of: Some(of), .. } => at = *of,
+            _ => return None,
+        }
+    }
 }
 
 /// A `DW_AT_type` naming another entry, and nothing at all for `void`.
