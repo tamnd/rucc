@@ -56,8 +56,10 @@ use rucc_mir::{Block, Constraint, Func, Inst, Param, Reg};
 use rucc_target::RegClass;
 
 use crate::assign::{Assignment, Env, Place};
-use crate::legalize::{self, Spare, place};
+use crate::legalize::{self, Idle, Spare, place};
+use crate::live::Live;
 use crate::moves::{self, Move};
+use crate::order::Order;
 
 /// One move the places did not already make true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +102,13 @@ pub enum At {
 /// The section above says what the borrowing is, and the slot is asked for here rather than planned
 /// before allocation because most functions never want one.
 #[must_use]
-pub fn rewrite(func: &mut Func, assignment: &mut Assignment, env: &Env) -> Vec<Edit> {
+pub fn rewrite(
+    func: &mut Func,
+    assignment: &mut Assignment,
+    env: &Env,
+    order: &Order,
+    live: &Live,
+) -> Vec<Edit> {
     let blocks: Vec<Block> = func.blocks().collect();
     assert!(
         func.entry().is_none_or(|entry| func[entry].params.is_empty()),
@@ -113,9 +121,10 @@ pub fn rewrite(func: &mut Func, assignment: &mut Assignment, env: &Env) -> Vec<E
     // instruction needs the function and the walk over the blocks would be borrowing it.
     let insts: Vec<Inst> = blocks.iter().flat_map(|&block| func.insts(block)).collect();
     let saves = saves(func, assignment);
+    let idle = Idle::of(func, assignment, order, live);
     for inst in insts {
         let saved = saves.get(&inst).map_or(&[][..], Vec::as_slice);
-        instruction(func, assignment, env, &mut spare, inst, saved, &mut edits);
+        edits.extend(instruction(func, assignment, env, &mut spare, &idle, inst, saved));
     }
 
     let preds = preds(func, &blocks);
@@ -150,27 +159,29 @@ fn saves(func: &Func, assignment: &Assignment) -> Map<Inst, Vec<(Move<Place>, Re
     saves
 }
 
-/// Rewrites one instruction's operands, and files what has to happen either side of it.
+/// Rewrites one instruction's operands, and hands back what has to happen either side of it.
 fn instruction(
     func: &mut Func,
     assignment: &mut Assignment,
     env: &Env,
     spare: &mut Spare,
+    idle: &Idle<'_>,
     inst: Inst,
     saved: &[(Move<Place>, RegClass)],
-    edits: &mut Vec<Edit>,
-) {
-    let legal = legalize::instruction(func, assignment, env, spare, inst);
+) -> Vec<Edit> {
+    let legal = legalize::instruction(func, assignment, env, spare, idle, inst);
     let list = func[inst].operands;
     func[list].copy_from_slice(&legal.operands);
     let before = saved.iter().copied().chain(legal.before);
-    edits.extend(before.map(|(mov, class)| Edit { at: At::Before(inst), mov, class }));
+    let mut edits: Vec<Edit> =
+        before.map(|(mov, class)| Edit { at: At::Before(inst), mov, class }).collect();
     let back = saved.iter().map(|&(store, class)| (Move::new(store.from, store.to), class));
     edits.extend(legal.after.into_iter().chain(back).map(|(mov, class)| Edit {
         at: At::After(inst),
         mov,
         class,
     }));
+    edits
 }
 
 /// Moves what has to happen behind the last instruction of a block that leaves several ways to the
@@ -309,11 +320,12 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
 /// want a second. One is an instruction that wants two at once, which [`legalize`] would answer by
 /// borrowing a register and putting what was in it away around the instruction. That is two memory
 /// accesses where the class that holds two back has a register free, so it counts as not fitting.
+/// A register nothing is kept in there is borrowed with nothing put away, and that fits.
 /// The other is an edge passing a spilled value to a spilled parameter while the one register is
 /// keeping a value of a cycle.
 #[must_use]
-pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
-    fits_on_edges(func, assignment, env) && !borrows(func, assignment, env)
+pub fn fits(func: &Func, assignment: &Assignment, env: &Env, order: &Order, live: &Live) -> bool {
+    fits_on_edges(func, assignment, env) && !borrows(func, assignment, env, order, live)
 }
 
 /// Whether the rewrite can write an assignment down with no more than the scratch registers `env`
@@ -326,12 +338,18 @@ pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
 /// that borrowed left its reload behind the template. The layout then found a block with two arms
 /// that did not end in its branch.
 #[must_use]
-pub fn fits_borrowing(func: &Func, assignment: &Assignment, env: &Env) -> bool {
+pub fn fits_borrowing(
+    func: &Func,
+    assignment: &Assignment,
+    env: &Env,
+    order: &Order,
+    live: &Live,
+) -> bool {
     if !fits_on_edges(func, assignment, env) {
         return false;
     }
     let mut ends = false;
-    borrowers(func, assignment, env, |block, inst| {
+    borrowers(func, assignment, env, order, live, |block, inst| {
         ends = func[block].succs.len() > 1 && func.terminator(block) == Some(inst);
         !ends
     });
@@ -398,9 +416,9 @@ fn busy(order: &[Move<Option<Place>>], index: usize, cycle: Option<Place>) -> bo
 }
 
 /// Whether some instruction would borrow a register of a class that holds only one back.
-fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
+fn borrows(func: &Func, assignment: &Assignment, env: &Env, order: &Order, live: &Live) -> bool {
     let mut any = false;
-    borrowers(func, assignment, env, |_, _| {
+    borrowers(func, assignment, env, order, live, |_, _| {
         any = true;
         false
     });
@@ -415,9 +433,15 @@ fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
 /// other answer, leaves four for everything else, and `uncore_pmu_event_add` put thirteen values
 /// on the stack that way against seven.
 #[must_use]
-pub fn borrowing(func: &Func, assignment: &Assignment, env: &Env) -> u128 {
+pub fn borrowing(
+    func: &Func,
+    assignment: &Assignment,
+    env: &Env,
+    order: &Order,
+    live: &Live,
+) -> u128 {
     let mut total = 0;
-    borrowers(func, assignment, env, |block, _| {
+    borrowers(func, assignment, env, order, live, |block, _| {
         total += 2 * u128::from(func[block].weight.raw().max(1));
         true
     });
@@ -436,6 +460,8 @@ fn borrowers(
     func: &Func,
     assignment: &Assignment,
     env: &Env,
+    order: &Order,
+    live: &Live,
     mut each: impl FnMut(Block, Inst) -> bool,
 ) {
     let short = |class: RegClass| env.scratch(class).len() == 1;
@@ -443,6 +469,7 @@ fn borrowers(
         return;
     }
     let mut copy: Option<Assignment> = None;
+    let mut idle: Option<Idle<'_>> = None;
     for block in func.blocks() {
         for inst in func.insts(block) {
             let operands = &func[func[inst].operands];
@@ -462,7 +489,10 @@ fn borrowers(
             // Borrowing takes a slot off the assignment, and every instruction that borrows shares
             // it, so one copy serves every instruction asked about.
             let copy = copy.get_or_insert_with(|| assignment.clone());
-            if legalize::probe(func, copy, env, &mut Spare::default(), inst) && !each(block, inst) {
+            let idle = idle.get_or_insert_with(|| Idle::of(func, assignment, order, live));
+            if legalize::probe(func, copy, env, &mut Spare::default(), idle, inst)
+                && !each(block, inst)
+            {
                 return;
             }
         }
@@ -519,7 +549,7 @@ mod tests {
         let order = Order::of(func);
         let live = Live::of(func, &order);
         let mut assignment = assign(func, &order, &live, env);
-        rewrite(func, &mut assignment, env)
+        rewrite(func, &mut assignment, env, &order, &live)
             .into_iter()
             .map(|edit| {
                 let at = match edit.at {
@@ -983,7 +1013,7 @@ mod tests {
         let one = Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
-        assert!(fits(&func, &assign(&func, &order, &live, &one), &one));
+        assert!(fits(&func, &assign(&func, &order, &live, &one), &one, &order, &live));
         assert_eq!(
             run(&mut func, &one),
             [
@@ -1016,8 +1046,8 @@ mod tests {
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
         let one = Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
-        assert!(!fits(&func, &assign(&func, &order, &live, &one), &one));
-        assert!(fits(&func, &assign(&func, &order, &live, &narrow(1)), &narrow(1)));
+        assert!(!fits(&func, &assign(&func, &order, &live, &one), &one, &order, &live));
+        assert!(fits(&func, &assign(&func, &order, &live, &narrow(1)), &narrow(1), &order, &live));
     }
 
     /// Three values read and none written wants a third register, which is tamnd/rucc#913.
@@ -1032,18 +1062,21 @@ mod tests {
     /// The third register is borrowed rather than held back, and the borrowing is what this is
     /// really about: it takes a register the allocator gave to a value that is live right across
     /// the instruction, which is safe because that value is put in a slot in front of the
-    /// instruction and brought back behind it.
+    /// instruction and brought back behind it. Both registers keep a value across it here, since
+    /// one that kept nothing would be borrowed with nothing put away.
     #[test]
     fn an_instruction_reading_three_spilled_values_borrows_a_register_for_the_third() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
         let opcode = Opcode::new(names.intern("x64.nop"));
         let block = func.create_block();
-        let keeper = func.new_vreg(GPR);
+        let keepers = [(); 2].map(|()| func.new_vreg(GPR));
         let base = func.new_vreg(GPR);
         let index = func.new_vreg(GPR);
         let value = func.new_vreg(GPR);
-        func.build(block, opcode).def(keeper, GPR).finish();
+        for keeper in keepers {
+            func.build(block, opcode).def(keeper, GPR).finish();
+        }
         for reg in [base, index, value] {
             func.build(block, opcode)
                 .operand(Operand::write(reg, GPR).with(Constraint::Stack))
@@ -1051,19 +1084,19 @@ mod tests {
         }
         let store =
             func.build(block, opcode).uses(base, GPR).uses(index, GPR).uses(value, GPR).finish();
-        func.build(block, opcode).uses(keeper, GPR).finish();
+        func.build(block, opcode).uses(keepers[0], GPR).uses(keepers[1], GPR).finish();
 
         assert_eq!(
             run(&mut func, &narrow(2)),
             [
-                "after 1: slot0 = rdx",
-                "after 2: slot1 = rdx",
-                "after 3: slot2 = rdx",
-                "before 4: slot3 = rax",
-                "before 4: rdx = slot0",
-                "before 4: rsi = slot1",
-                "before 4: rax = slot2",
-                "after 4: rax = slot3",
+                "after 2: slot0 = rdx",
+                "after 3: slot1 = rdx",
+                "after 4: slot2 = rdx",
+                "before 5: slot3 = rax",
+                "before 5: rdx = slot0",
+                "before 5: rsi = slot1",
+                "before 5: rax = slot2",
+                "after 5: rax = slot3",
             ]
         );
         assert_eq!(operands(&func, store), ["rdx", "rsi", "rax"]);

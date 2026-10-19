@@ -80,7 +80,9 @@ use rucc_mir::{Constraint, Func, Inst, Operand, Reg, Role};
 use rucc_target::{PhysReg, RegClass};
 
 use crate::assign::{Assignment, Env, Place};
+use crate::live::Live;
 use crate::moves::Move;
+use crate::order::{Order, Point};
 
 /// What one instruction becomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,9 +113,10 @@ pub fn instruction(
     assignment: &mut Assignment,
     env: &Env,
     spare: &mut Spare,
+    idle: &Idle<'_>,
     inst: Inst,
 ) -> Legal {
-    legalize(func, assignment, env, spare, inst, false)
+    legalize(func, assignment, env, spare, idle, inst, false)
 }
 
 /// Whether [`instruction`] would borrow a register at `inst`, which is whether it takes a slot for
@@ -129,9 +132,10 @@ pub(crate) fn probe(
     assignment: &mut Assignment,
     env: &Env,
     spare: &mut Spare,
+    idle: &Idle<'_>,
     inst: Inst,
 ) -> bool {
-    let _ = legalize(func, assignment, env, spare, inst, true);
+    let _ = legalize(func, assignment, env, spare, idle, inst, true);
     spare.iter().any(|slots| !slots.is_empty())
 }
 
@@ -141,6 +145,7 @@ fn legalize(
     assignment: &mut Assignment,
     env: &Env,
     spare: &mut Spare,
+    idle: &Idle<'_>,
     inst: Inst,
     probing: bool,
 ) -> Legal {
@@ -180,7 +185,7 @@ fn legalize(
             claimed.named(operand, at);
         }
     }
-    let mut scratch = Scratch::new(env, assignment, spare, claimed);
+    let mut scratch = Scratch::new(env, assignment, spare, claimed, (idle, inst));
     scratch.probing = probing;
 
     // The operands already in a register go first, so every move that reads a register the
@@ -529,6 +534,9 @@ struct Scratch<'a> {
     restores: Moves,
     /// Whether this is [`probe`], which is told that a class with nothing to borrow borrowed.
     probing: bool,
+    /// What is kept in each register between instructions, and the instruction this is, which
+    /// says which registers can be borrowed with nothing put away.
+    idle: (&'a Idle<'a>, Inst),
 }
 
 impl<'a> Scratch<'a> {
@@ -538,6 +546,7 @@ impl<'a> Scratch<'a> {
         assignment: &'a mut Assignment,
         spare: &'a mut Spare,
         claimed: Claimed,
+        idle: (&'a Idle<'a>, Inst),
     ) -> Self {
         Self {
             env,
@@ -548,6 +557,7 @@ impl<'a> Scratch<'a> {
             saves: Vec::new(),
             restores: Vec::new(),
             probing: false,
+            idle,
         }
     }
 
@@ -564,13 +574,18 @@ impl<'a> Scratch<'a> {
     /// way round on x86-64.
     ///
     /// The register is any of the class the instruction has not claimed for itself. A register the
-    /// allocator gave a value that is live right across the instruction is as good as an idle one,
-    /// which is the whole point of putting the contents away first.
+    /// allocator gave a value that is live right across the instruction will do, which is the whole
+    /// point of putting the contents away first.
     ///
     /// When every register is claimed, one an input only passes through on its way to the fixed
     /// register it asked for will do. That is i386 inline assembly naming `esi` and `edi`, which are
     /// the two held back, and `eax` and `ecx`, with a fifth operand left that can be anywhere:
     /// `strncat` in arch/x86/lib/string_32.c is one.
+    ///
+    /// A register no value is kept in across the instruction comes before those too, and nothing
+    /// is put away for it either. Whatever it holds is not read again before something writes it.
+    /// On i386 that was most of what borrowing cost: `cmpl 8(%ecx), %ebx` with both on the stack
+    /// put `ecx` in a slot and took it back out when nothing was in `ecx` at all.
     ///
     /// A register an answer is only moved into behind the instruction comes before all of those,
     /// because nothing is live in it while the instruction runs and so nothing is put away. The
@@ -590,6 +605,13 @@ impl<'a> Scratch<'a> {
         let index = usize::from(class.number());
         let order = self.env.order(class);
         if let Some(&at) = order.iter().find(|&&reg| self.claimed.only_lands(class, reg)) {
+            self.claimed.taken(class, at);
+            return at;
+        }
+        let (idle, inst) = self.idle;
+        let unused =
+            |reg: PhysReg| !self.claimed.names(class, reg) && !idle.holds(class, reg, inst);
+        if let Some(&at) = order.iter().find(|&&reg| unused(reg)) {
             self.claimed.taken(class, at);
             return at;
         }
@@ -629,6 +651,79 @@ impl<'a> Scratch<'a> {
     /// The moves either side of the instruction, once every register has been handed out.
     fn finish(self) -> (Moves, Moves) {
         (self.saves, self.restores)
+    }
+}
+
+/// Where every value the assignment put in a register is kept there, arranged to say which
+/// registers hold nothing at an instruction.
+///
+/// A physical register an operand names outright is only named for the length of that instruction,
+/// which `crate::assign::blocked` counts on as well, so between instructions what is in a register
+/// is a value the assignment put there and nothing else. The pieces of those values are kept by
+/// register and ordered by where they start, with the furthest any of the ones so far reaches, so
+/// asking whether one covers an instruction is one binary search.
+#[derive(Debug, Clone)]
+pub struct Idle<'a> {
+    order: &'a Order,
+    /// By class number and then by register number.
+    lanes: Vec<Vec<Lane>>,
+}
+
+/// The pieces kept in one register.
+#[derive(Debug, Clone, Default)]
+struct Lane {
+    /// Where each piece starts, in order.
+    starts: Vec<Point>,
+    /// The furthest point that piece or any in front of it reaches.
+    reach: Vec<Point>,
+}
+
+impl<'a> Idle<'a> {
+    /// Reads where everything went off an assignment of the function laid out by `order`.
+    #[must_use]
+    pub fn of(func: &Func, assignment: &Assignment, order: &'a Order, live: &Live) -> Self {
+        let mut pieces: Vec<Vec<Vec<(Point, Point)>>> = Vec::new();
+        for (reg, place) in assignment.placed() {
+            let (Place::Reg(at), Some(class), Some(area)) =
+                (place, func.class_of(reg), live.area(reg))
+            else {
+                continue;
+            };
+            let (class, at) = (usize::from(class.number()), usize::from(at.number()));
+            if pieces.len() <= class {
+                pieces.resize_with(class + 1, Vec::new);
+            }
+            if pieces[class].len() <= at {
+                pieces[class].resize_with(at + 1, Vec::new);
+            }
+            pieces[class][at].extend(area.pieces().map(|range| (range.start, range.end)));
+        }
+        let lane = |mut pieces: Vec<(Point, Point)>| {
+            pieces.sort_unstable();
+            let mut furthest = 0;
+            let reach = pieces
+                .iter()
+                .map(|&(_, end)| {
+                    furthest = furthest.max(end);
+                    furthest
+                })
+                .collect();
+            Lane { starts: pieces.into_iter().map(|(start, _)| start).collect(), reach }
+        };
+        let lanes = pieces.into_iter().map(|lanes| lanes.into_iter().map(lane).collect()).collect();
+        Self { order, lanes }
+    }
+
+    /// Whether some value is kept in the register anywhere from where the instruction reads to
+    /// where it writes.
+    fn holds(&self, class: RegClass, at: PhysReg, inst: Inst) -> bool {
+        let lane = self
+            .lanes
+            .get(usize::from(class.number()))
+            .and_then(|lanes| lanes.get(usize::from(at.number())));
+        let Some(lane) = lane else { return false };
+        let ahead = lane.starts.partition_point(|&start| start <= self.order.late(inst));
+        ahead > 0 && lane.reach[ahead - 1] >= self.order.early(inst)
     }
 }
 
@@ -699,7 +794,10 @@ mod tests {
     }
 
     fn legal(func: &Func, assignment: &mut Assignment, inst: Inst) -> Legal {
-        instruction(func, assignment, &env(), &mut Spare::new(), inst)
+        let order = Order::of(func);
+        let live = Live::of(func, &order);
+        let idle = Idle::of(func, assignment, &order, &live);
+        instruction(func, assignment, &env(), &mut Spare::new(), &idle, inst)
     }
 
     fn regs(legal: &Legal) -> Vec<PhysReg> {
@@ -834,10 +932,18 @@ mod tests {
     #[test]
     fn a_third_value_on_the_stack_borrows_a_register_and_gives_it_back() {
         let (mut func, opcode, block) = func();
+        // Both registers handed out keep a value from in front of the instruction to behind it.
+        let kept: Vec<Reg> = (0..2).map(|_| func.new_vreg(GPR)).collect();
+        for &value in &kept {
+            func.build(block, opcode).def(value, GPR).finish();
+        }
         let values: Vec<Reg> = (0..3).map(|_| func.new_vreg(GPR)).collect();
         let build = func.build(block, opcode);
         let inst = values.iter().fold(build, |build, &value| build.uses(value, GPR)).finish();
+        func.build(block, opcode).uses(kept[0], GPR).uses(kept[1], GPR).finish();
         let mut assignment = Assignment::empty(func.vregs());
+        assignment.put(kept[0], Place::Reg(RAX));
+        assignment.put(kept[1], Place::Reg(RCX));
         for &value in &values {
             let slot = assignment.take_slot(GPR);
             assignment.put(value, Place::Slot(slot));
@@ -851,6 +957,29 @@ mod tests {
         assert_eq!(legal.before[0], (Move::new(spare, Place::Reg(borrowed)), GPR));
         assert_eq!(legal.after.last(), Some(&(Move::new(Place::Reg(borrowed), spare), GPR)));
         assert_eq!(assignment.spilled(), 4);
+    }
+
+    #[test]
+    fn a_register_holding_nothing_is_borrowed_with_nothing_put_away() {
+        let (mut func, opcode, block) = func();
+        let values: Vec<Reg> = (0..3).map(|_| func.new_vreg(GPR)).collect();
+        for &value in &values {
+            func.build(block, opcode).def(value, GPR).finish();
+        }
+        let build = func.build(block, opcode);
+        let inst = values.iter().fold(build, |build, &value| build.uses(value, GPR)).finish();
+        let mut assignment = Assignment::empty(func.vregs());
+        for &value in &values {
+            let slot = assignment.take_slot(GPR);
+            assignment.put(value, Place::Slot(slot));
+        }
+
+        let legal = legal(&func, &mut assignment, inst);
+        assert_eq!(regs(&legal)[2], RAX);
+        // Three loads in front, one into each register, and no slot taken for the one borrowed.
+        assert_eq!(legal.before.len(), 3);
+        assert!(legal.after.is_empty());
+        assert_eq!(assignment.spilled(), 3);
     }
 
     #[test]

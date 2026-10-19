@@ -202,12 +202,12 @@ pub fn run_first<'a>(
         // Turned round before the question, since which operand an answer is written over is part
         // of how many scratch registers an instruction wants, and back again when the answer is no.
         commute(func, &assignment);
-        if rewrite::fits(func, &assignment, wide) {
+        if rewrite::fits(func, &assignment, wide, &order, &live) {
             return (write(func, assignment, wide, order, live, called, verify), wide);
         }
-        if rewrite::fits_borrowing(func, &assignment, wide) {
+        if rewrite::fits_borrowing(func, &assignment, wide, &order, &live) {
             let cost = backtrack::cost(func, &order, &assignment)
-                + rewrite::borrowing(func, &assignment, wide);
+                + rewrite::borrowing(func, &assignment, wide, &order, &live);
             if borrowing.as_ref().is_none_or(|kept| cost < kept.cost) {
                 let (func, order, live) = (func.clone(), order.clone(), live.clone());
                 let assignment = assignment.clone();
@@ -331,7 +331,7 @@ fn write(
     // What the rewrite is about to lose, taken while it is still there. Only in a build that is
     // going to read it, since the snapshot is a copy of every operand list in the function.
     let shape = checking.then(|| trace::shape(func));
-    let edits = rewrite::rewrite(func, &mut assignment, env);
+    let edits = rewrite::rewrite(func, &mut assignment, env, &order, &live);
     if let Some(shape) = shape {
         let faults = trace::trace(func, &shape, &assignment, &edits);
         assert!(faults.is_empty(), "in '{called}': {}", trace::report(&faults));
