@@ -21,11 +21,11 @@
 //!
 //! # What cannot be described yet
 //!
-//! Three kinds, and each of them needs something [`Shape`] has no field for: `_BitInt(N)` wants a
-//! base type with a bit size on it, a GNU vector wants `DW_AT_GNU_vector`, and `_Complex` over an
-//! integer half has no DWARF encoding that means it. A function whose signature mentions one of
-//! them, at any depth, gets no entry at all rather than an entry that says something else, which
-//! is the rule the `tree.rs` module documentation in `rucc-debug` is about.
+//! Two kinds, and each of them needs something [`Shape`] has no field for: `_BitInt(N)` wants a
+//! base type with a bit size on it, and `_Complex` over an integer half has no DWARF encoding that
+//! means it. A function whose signature mentions one of them, at any depth, gets no entry at all
+//! rather than an entry that says something else, which is the rule the `tree.rs` module
+//! documentation in `rucc-debug` is about.
 //!
 //! A record is the one thing that bends rather than breaking. A member whose type cannot be
 //! described is left out of the member list and everything else about the record stays, so its size
@@ -73,7 +73,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_debug::{Bits, Constant, Encoding, Member, Param, Qualifier, Shape, Sig};
 use rucc_diag::{SourceMap, Span};
 use rucc_sema::{DeclId, DeclKind, Definition, Linkage, Stmt, StmtId, StorageDuration, Tast, Used};
-use rucc_target::TargetInfo;
+use rucc_target::{TargetInfo, TypeName};
 use rucc_types::{
     ArrayLen, FunctionId, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type, TypeId,
     TypeKind, Types,
@@ -884,7 +884,7 @@ impl Walk<'_> {
     /// happens when the checker had its say after the name was read: `name a[] = {1, 2}` with
     /// `name` an array of unknown length is an array of two, and the name does not stand for it.
     fn over(&mut self, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
-        if !self.written.contains(&(name, of)) {
+        if !self.written.contains(&(name, of)) && !self.builtin_vector(name, of) {
             return self.told(id);
         }
         self.walked(self.types.get(id), id, name, of)
@@ -997,6 +997,21 @@ impl Walk<'_> {
                 return at;
             }
         }
+        // A vector the target names is one entry with the name on it, which is how gcc writes
+        // `__Uint8x16_t`, and `typedef __Uint8x16_t uint8x16_t;` in `arm_neon.h` is a typedef
+        // over that entry rather than over a typedef over it.
+        if self.builtin_vector(name, of) {
+            let at = self.told(of).map(|at| {
+                let mut shape = self.out[at].clone();
+                if let Shape::Vector { name: named, .. } = &mut shape {
+                    *named = Some(self.spelled(name));
+                }
+                self.out.push(shape);
+                self.out.len() - 1
+            });
+            self.aliases.insert((name, of), at);
+            return at;
+        }
         let written = self.types.alias_prototypes().get(&name).cloned().unwrap_or_default();
         let under = self.within(written, |walk| walk.under(name, of));
         let at = under.map(|of| {
@@ -1108,8 +1123,13 @@ impl Walk<'_> {
         match kind {
             // `void` on its own is not an entry, and every caller that can accept it has been
             // through `told_or_void`, so arriving here means something wanted a type and there is
-            // none. The other two are the kinds nothing here can spell yet.
-            TypeKind::Void | TypeKind::BitInt { .. } | TypeKind::Vector { .. } => None,
+            // none. `_BitInt` is the kind nothing here can spell yet.
+            TypeKind::Void | TypeKind::BitInt { .. } => None,
+            // One `vector_size` built has no name of its own. The target's builtin ones do, and
+            // `Walk::alias` writes those.
+            TypeKind::Vector { elem, len } => {
+                Some(Shape::Vector { name: None, of: self.told(elem)?, count: u64::from(len) })
+            }
             TypeKind::Bool => {
                 Some(Shape::Base { name: "_Bool".to_owned(), encoding: Encoding::Boolean, size: 1 })
             }
@@ -1310,6 +1330,19 @@ impl Walk<'_> {
     /// A name, as the program wrote it.
     fn spelled(&self, name: Symbol) -> String {
         self.names.resolve(name).to_owned()
+    }
+
+    /// Whether a name is one of the vectors the target declares before the file starts, still
+    /// standing for that vector.
+    fn builtin_vector(&self, name: Symbol, of: TypeId) -> bool {
+        if !matches!(self.types.kind(of), TypeKind::Vector { .. }) {
+            return false;
+        }
+        let spelled = self.names.resolve(name);
+        let vector = |&(builtin, shape): &(&str, TypeName)| {
+            builtin == spelled && matches!(shape, TypeName::Vector(..))
+        };
+        self.target.type_names().iter().any(vector)
     }
 }
 

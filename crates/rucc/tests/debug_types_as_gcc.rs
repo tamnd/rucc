@@ -44,6 +44,8 @@ struct Entry {
     name: Option<String>,
     ty: Option<u64>,
     declaration: bool,
+    vector: bool,
+    bound: Option<u64>,
     children: Vec<usize>,
 }
 
@@ -194,6 +196,8 @@ fn entries(object: &[u8]) -> Vec<Entry> {
                 }
                 (0x49, _, Some(to)) => entry.ty = Some(to),
                 (0x3c, _, _) => entry.declaration = true,
+                (0x2107, _, _) => entry.vector = true,
+                (0x2f, _, Some(last)) => entry.bound = Some(last),
                 _ => {}
             }
         }
@@ -545,6 +549,50 @@ void __attribute__((noreturn)) (*gp)(void);
     assert_eq!(tags, [DW_TAG_VOLATILE, DW_TAG_VOLATILE, DW_TAG_SUBROUTINE]);
     let gp = named(&all, DW_TAG_VARIABLE, "gp").expect("the variable is described");
     assert_eq!(pointee(gp), DW_TAG_VOLATILE);
+}
+
+/// A GNU vector is an array with `DW_AT_GNU_vector` on it and one subrange for its lanes. One the
+/// target names carries the name, which is how gcc writes `__Uint8x16_t`, and `uint8x16_t` is a
+/// typedef over it. An array of vectors is an array over the vector rather than one array of two
+/// dimensions, and an array of a vector is not a vector.
+#[test]
+fn a_gnu_vector_is_an_array_marked_as_a_vector_and_named_where_the_target_names_it() {
+    let source = "\
+#include <arm_neon.h>
+typedef uint8x16_t unative_t;
+typedef int v4si __attribute__((vector_size(16)));
+unative_t g;
+v4si h;
+uint8x16_t m[4];
+";
+    let all = entries(&build("vector", source));
+    let typed = |name: &str| {
+        let entry = named(&all, DW_TAG_VARIABLE, name).expect("the variable is described");
+        at(&all, entry.ty.expect("the variable has a type"))
+    };
+    let under = |entry: &Entry| at(&all, entry.ty.expect("the entry has a type"));
+    let bounds = |entry: &Entry| -> Vec<_> {
+        entry.children.iter().map(|&index| (all[index].tag, all[index].bound)).collect()
+    };
+    let unative = typed("g");
+    assert_eq!(unative.name.as_deref(), Some("unative_t"));
+    let uint8x16 = under(unative);
+    assert_eq!((uint8x16.tag, uint8x16.name.as_deref()), (DW_TAG_TYPEDEF, Some("uint8x16_t")));
+    let builtin = under(uint8x16);
+    assert_eq!((builtin.tag, builtin.name.as_deref()), (DW_TAG_ARRAY, Some("__Uint8x16_t")));
+    assert!(builtin.vector, "the builtin vector is marked as one");
+    assert_eq!(bounds(builtin), [(DW_TAG_SUBRANGE, Some(15))]);
+    assert_eq!(under(builtin).name.as_deref(), Some("unsigned char"));
+    let v4si = under(typed("h"));
+    assert_eq!((v4si.tag, v4si.name.as_deref()), (DW_TAG_ARRAY, None));
+    assert!(v4si.vector, "a vector_size vector is marked as one");
+    assert_eq!(bounds(v4si), [(DW_TAG_SUBRANGE, Some(3))]);
+    assert_eq!(under(v4si).name.as_deref(), Some("int"));
+    let rows = typed("m");
+    assert_eq!(rows.tag, DW_TAG_ARRAY);
+    assert!(!rows.vector, "an array of vectors is not a vector");
+    assert_eq!(bounds(rows), [(DW_TAG_SUBRANGE, Some(3))]);
+    assert_eq!(under(rows).name.as_deref(), Some("uint8x16_t"));
 }
 
 /// A type a function or a variable uses is described with it even where no signature, member or

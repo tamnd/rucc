@@ -135,6 +135,20 @@ pub enum Shape {
         /// How many of them there are.
         count: Option<u64>,
     },
+    /// A GNU vector, which DWARF writes as an array with `DW_AT_GNU_vector` on it.
+    ///
+    /// It is kept apart from [`Shape::Array`] because an array of vectors is not an array of two
+    /// dimensions: gcc writes `uint8x16_t m[4]` as an array of four over the vector, and pahole
+    /// would read one entry with two subranges as an array of sixty four bytes.
+    Vector {
+        /// The name the target gives it, which gcc writes on the entry for its builtin vectors,
+        /// and nothing for one `vector_size` built.
+        name: Option<String>,
+        /// Which of the unit's [`types`](crate::Unit::types) the lanes are.
+        of: usize,
+        /// How many lanes there are.
+        count: u64,
+    },
     /// A `struct` or a `union`, whose members are [`None`] when it is incomplete.
     Record {
         /// Whether it is a `union` rather than a `struct`.

@@ -247,6 +247,7 @@ fn wanted(
                 }
                 work.push(of);
             }
+            Shape::Vector { of, .. } => work.push(*of),
             Shape::Record { members, .. } => {
                 work.extend(members.iter().flatten().map(|member| member.ty));
             }
@@ -275,7 +276,7 @@ fn tag(shape: &Shape) -> gimli::DwTag {
     match shape {
         Shape::Base { .. } => gimli::DW_TAG_base_type,
         Shape::Pointer { .. } => gimli::DW_TAG_pointer_type,
-        Shape::Array { .. } => gimli::DW_TAG_array_type,
+        Shape::Array { .. } | Shape::Vector { .. } => gimli::DW_TAG_array_type,
         Shape::Record { union: false, .. } => gimli::DW_TAG_structure_type,
         Shape::Record { union: true, .. } => gimli::DW_TAG_union_type,
         Shape::Enumeration { .. } => gimli::DW_TAG_enumeration_type,
@@ -310,6 +311,19 @@ fn fill<'a>(
             points(dwarf, at, *to, ids)?;
         }
         Shape::Array { of, count } => elements(dwarf, at, *of, *count, ids, shapes)?,
+        // No byte size, which gcc leaves for a reader to work out from the lanes.
+        Shape::Vector { name, of, count } => {
+            if let Some(name) = name {
+                title(dwarf, at, name);
+            }
+            flag(dwarf, at, gimli::DW_AT_GNU_vector);
+            points(dwarf, at, Some(*of), ids)?;
+            let child = dwarf.unit.add(at, gimli::DW_TAG_subrange_type);
+            if *count > 0 {
+                let last = AttributeValue::Udata(count - 1);
+                dwarf.unit.get_mut(child).set(gimli::DW_AT_upper_bound, last);
+            }
+        }
         Shape::Record { name, size, members, .. } => {
             if let Some(name) = name {
                 title(dwarf, at, name);
