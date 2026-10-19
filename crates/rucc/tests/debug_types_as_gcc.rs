@@ -466,6 +466,54 @@ int va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int r = __
     assert_eq!(at(&all, list.ty.expect("the list has a type")).tag, DW_TAG_STRUCTURE);
 }
 
+/// An enumerator used outside a function keeps its enumeration with the next file-scope variable
+/// the unit defines, past an `extern` declaration and a function with locals between them, as gcc
+/// does. A `static` nothing reads takes it and keeps nothing.
+#[test]
+fn what_was_used_outside_a_function_waits_for_the_next_variable_the_unit_defines() {
+    let source = "\
+enum hooks { H_IN, H_COUNT };
+struct table { int x[H_COUNT]; };
+extern int elsewhere;
+static inline int unused(void) { int local = 0; static int counted; return local + counted++; }
+int kept;
+enum lost { L_A, L_COUNT };
+struct other { int y[L_COUNT]; };
+static int unread;
+int f(void) { return kept; }
+";
+    let all = entries(&build("waiting-uses", source));
+    assert!(named(&all, DW_TAG_ENUMERATION, "hooks").is_some());
+    assert!(named(&all, DW_TAG_ENUMERATION, "lost").is_none());
+}
+
+/// A `static inline` the code calls is described even where every copy of it folded away, with
+/// what it takes and gives back and the enumerators it uses, as gcc does. One nothing calls is
+/// not.
+#[test]
+fn an_inline_function_folded_away_is_still_described() {
+    let source = "\
+enum kind { K_A, K_B };
+enum mode { M_X, M_Y };
+enum unseen { U_A };
+struct only_param { int a; };
+static inline enum kind kind_of(int flags, struct only_param *p) { return flags & 1 ? K_A : K_B; }
+static inline int moded(int x) { return x == M_Y; }
+static inline int unused_inline(enum unseen u) { return u; }
+int f(void) { return kind_of(2, 0) + moded(0); }
+";
+    let all = entries(&build("folded-inline", source));
+    for name in ["kind_of", "moded"] {
+        let one = named(&all, DW_TAG_SUBPROGRAM, name).expect("the inline is described");
+        assert!(!one.declaration, "{name}");
+    }
+    assert!(named(&all, DW_TAG_ENUMERATION, "kind").is_some(), "what kind_of gives back");
+    assert!(named(&all, DW_TAG_STRUCTURE, "only_param").is_some(), "what kind_of takes");
+    assert!(named(&all, DW_TAG_ENUMERATION, "mode").is_some(), "what moded uses");
+    assert!(named(&all, DW_TAG_SUBPROGRAM, "unused_inline").is_none());
+    assert!(named(&all, DW_TAG_ENUMERATION, "unseen").is_none());
+}
+
 /// A function or variable another unit defines has an entry that says what it is wherever the code
 /// the object holds names it, a call in a `static inline` that is called and an address in the data
 /// among them, and a call the optimizer folded away as well. None where only an uncalled `static

@@ -2286,6 +2286,7 @@ fn describe(
     // `__stack_chk_fail`, has none. A name the unit went on to define is described as a definition
     // above, or was not emitted and has no business being declared either.
     let meaning = &origin.meaning;
+    let emitted: Set<&str> = text.funcs.iter().map(|extent| extent.name.as_str()).collect();
     let defined: Set<&str> = text
         .funcs
         .iter()
@@ -2293,6 +2294,13 @@ fn describe(
         .chain(data.objects.iter().map(|object| object.name.as_str()))
         .chain(meaning.funcs.keys().map(String::as_str))
         .collect();
+    // And the functions of this unit the same references reach that have no code of their own
+    // here, each as the function a copy would be a copy of, for the same reason.
+    for name in &meaning.reached {
+        if let Some(known) = meaning.funcs.get(name).filter(|_| !emitted.contains(name.as_str())) {
+            copying.origin(known.body, meaning, &mut files, &rewrite);
+        }
+    }
     let mut declared = Vec::new();
     for (name, held) in &meaning.declared {
         let Some(ty) = held.ty else { continue };

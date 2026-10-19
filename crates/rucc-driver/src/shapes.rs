@@ -106,6 +106,13 @@ pub(crate) struct Meaning {
     /// define is among them as well, since a reference reads the declaration in scope, and is left
     /// out where the object is described.
     pub declared: Vec<(String, Held)>,
+    /// The functions in [`Meaning::funcs`] the same references reach, by name.
+    ///
+    /// gcc writes an entry for each of these before it optimizes anything, so a `static inline`
+    /// whose every call was inlined and then folded away still has one, with the types it takes,
+    /// gives back and uses. `kmalloc_type` is one, and the only way `enum kmalloc_cache_type` gets
+    /// into most of the kernel's files.
+    pub reached: Vec<String>,
     /// The strings of the `btf_type_tag`s on each entry in [`Meaning::types`] that has any, in
     /// the order gcc chains them.
     pub type_tags: Vec<(usize, Vec<Vec<u8>>)>,
@@ -394,8 +401,15 @@ pub(crate) fn collect(
         rucc_lower::referred(tast, types, target, names).into_iter().collect();
     referred.sort_unstable();
     let mut declared: Vec<(String, Held)> = Vec::new();
+    let mut reached: Vec<String> = Vec::new();
     for id in referred {
         let decl = &tast[id];
+        if decl.kind == DeclKind::Function {
+            let symbol = symbol(tast, names, id).filter(|symbol| funcs.contains_key(symbol));
+            if let Some(symbol) = symbol.filter(|symbol| !reached.contains(symbol)) {
+                reached.push(symbol);
+            }
+        }
         let wanted = match decl.kind {
             DeclKind::Function => true,
             DeclKind::Object => decl.duration == StorageDuration::Static,
@@ -426,7 +440,16 @@ pub(crate) fn collect(
     // difference in it.
     let mut type_tags: Vec<(usize, Vec<Vec<u8>>)> = walk.type_tags.into_iter().collect();
     type_tags.sort_by_key(|&(at, _)| at);
-    Meaning { types: walk.out, type_tags, funcs, objects, declared, locals, scopes: nests.out }
+    Meaning {
+        types: walk.out,
+        type_tags,
+        funcs,
+        objects,
+        declared,
+        reached,
+        locals,
+        scopes: nests.out,
+    }
 }
 
 /// Which `{ ... }` each local in the unit was declared in.
