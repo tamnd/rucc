@@ -152,6 +152,15 @@ pub(crate) struct Lines {
     /// Whether the file used slot zero of the file table, which only DWARF 5 has and which makes
     /// gas write a version five table. Version three otherwise, gas's default.
     five: bool,
+    /// The version `-gdwarf-4` or `-gdwarf-5` asked for, which is the version of the table gas
+    /// writes under `-g` whatever the file says.
+    pub(crate) version: Option<u16>,
+    /// How many bytes the shortest instruction is, which every move of the address is counted
+    /// in: four on AArch64 and one on x86. Zero is one.
+    pub(crate) unit: u64,
+    /// The directory the assembler runs in as the table names it, which is the one `-g` was given
+    /// after `-fdebug-prefix-map` has rewritten it. `None` asks the system.
+    pub(crate) home: Option<Vec<u8>>,
     files: Vec<Option<File>>,
     dirs: Vec<Option<Vec<u8>>>,
     pub(crate) current: Loc,
@@ -318,6 +327,79 @@ impl Lines {
         d
     }
 
+    /// The slot a file of assembly read under `-g` gets for one of the files its lines came from,
+    /// found or added. gas's `get_filenum`: the directory goes in a slot of its own even when it is
+    /// the one the assembler runs in, and slot zero is never used.
+    fn allocate(&mut self, path: &[u8]) -> u64 {
+        let base = path.iter().rposition(|&byte| byte == b'/').map_or(0, |at| at + 1);
+        let dir = if base == 0 { 0 } else { self.directory(path, None, base - 1, false) };
+        let name = &path[base..];
+        let found = self.files.iter().enumerate().skip(1).find(|(_, file)| {
+            file.as_ref().is_some_and(|file| file.dir == dir && file.name == name)
+        });
+        if let Some((slot, _)) = found {
+            return slot as u64;
+        }
+        let slot = self.files.len().max(1);
+        self.files.resize(slot + 1, None);
+        self.files[slot] = Some(File { name: name.to_vec(), dir, md5: [0; 16] });
+        slot as u64
+    }
+
+    /// Every row made from the source lines, which names its file by where it is in `names`, given
+    /// the slot of the file table that file gets instead.
+    ///
+    /// gas gives the slots out as it writes the table and not as it makes the rows, so a file is
+    /// numbered by the first row that names it in the order the table lists them, section by
+    /// section. A header whose only row is in a section whose first row came early gets a lower
+    /// number than one used before it in a section whose first row came late.
+    pub(crate) fn number(&mut self, names: &[Vec<u8>]) {
+        let order: Vec<usize> = self
+            .sections()
+            .iter()
+            .flat_map(|(_, rows)| rows.iter().map(|row| row.loc.file as usize))
+            .collect();
+        let mut slots = Map::default();
+        for name in order {
+            slots.entry(name).or_insert_with(|| self.allocate(&names[name]));
+        }
+        for row in self.rows.values_mut().flatten() {
+            row.loc.file = slots[&(row.loc.file as usize)];
+        }
+    }
+
+    /// Every row made so far thrown away, which is what gas does with the ones it made from the
+    /// source lines once the file turns out to say `.file` or `.loc` itself.
+    pub(crate) fn purge(&mut self) {
+        self.rows.clear();
+        self.order.clear();
+    }
+
+    /// The sections that have rows, in the order the table lists them.
+    pub(crate) fn parts(&self) -> Vec<usize> {
+        self.sections().into_iter().map(|(part, _)| part).collect()
+    }
+
+    /// The name of the first file in the table with its directory in front, which is what gas
+    /// calls the whole unit when it writes the rest of the debug information itself.
+    pub(crate) fn first(&self) -> Vec<u8> {
+        let zero = if self.version() >= 5 { self.files.first().cloned().flatten() } else { None };
+        let Some(file) = zero.or_else(|| self.files.get(1).cloned().flatten()) else {
+            return Vec::new();
+        };
+        let mut name = Vec::new();
+        if let Some(dir) = self.dirs.get(file.dir).cloned().flatten().filter(|_| file.dir != 0) {
+            name.extend_from_slice(&dir);
+            name.push(b'/');
+        }
+        name.extend_from_slice(&file.name);
+        name
+    }
+
+    fn version(&self) -> u16 {
+        self.version.unwrap_or(if self.five { 5 } else { 3 })
+    }
+
     /// Where the next row goes, if one is due: the `.loc` before it is made a row here and its
     /// view worked out. The name the `.loc` gave the view comes back with the number, for the
     /// reader to set.
@@ -413,7 +495,8 @@ impl Lines {
     /// by where they ended up, in the order gas keeps them, which is the order the first row of
     /// each was made in, and how long each section is.
     pub(crate) fn table(&self, address: u8, size: impl Fn(usize) -> u64) -> Result<Table, String> {
-        let version: u16 = if self.five { 5 } else { 3 };
+        let version = self.version();
+        let unit = self.unit.max(1);
         let mut table = Table::default();
         let out = &mut table.bytes;
         out.extend_from_slice(&[0; 4]);
@@ -424,7 +507,7 @@ impl Lines {
         let length_at = out.len();
         out.extend_from_slice(&[0; 4]);
         let header = out.len();
-        out.push(1);
+        out.push(unit as u8);
         if version >= 4 {
             out.push(1);
         }
@@ -442,8 +525,17 @@ impl Lines {
         let length = u32::try_from(out.len() - header).map_err(|_| "a line table too long")?;
         out[length_at..length_at + 4].copy_from_slice(&length.to_le_bytes());
 
-        // The sections in the order their first rows were made, with the rows of a subsection
-        // after those of the section, which is where joining them on put them.
+        for (part, rows) in self.sections() {
+            self.program(&mut table, &rows, address, size(part), unit);
+        }
+        let length = u32::try_from(table.bytes.len() - 4).map_err(|_| "a line table too long")?;
+        table.bytes[..4].copy_from_slice(&length.to_le_bytes());
+        Ok(table)
+    }
+
+    /// The sections in the order their first rows were made, each with its rows by address, the
+    /// rows of a subsection after those of the section, which is where joining them on put them.
+    fn sections(&self) -> Vec<(usize, Vec<&Row>)> {
         let mut sections: Vec<(usize, Vec<&Row>)> = Vec::new();
         for home in &self.order {
             let rows = &self.rows[home];
@@ -453,13 +545,10 @@ impl Lines {
                 None => sections.push((part, rows.iter().collect())),
             }
         }
-        for (part, rows) in &mut sections {
+        for (_, rows) in &mut sections {
             rows.sort_by_key(|row| row.at);
-            self.program(&mut table, rows, address, size(*part));
         }
-        let length = u32::try_from(table.bytes.len() - 4).map_err(|_| "a line table too long")?;
-        table.bytes[..4].copy_from_slice(&length.to_le_bytes());
-        Ok(table)
+        sections
     }
 
     /// The directory and file tables of a version five header, whose names are offsets into
@@ -472,7 +561,8 @@ impl Lines {
         uleb(out, LINE_STRP);
         uleb(out, if dirs == 0 && files > 0 { 1 } else { dirs } as u64);
         if dirs > 0 || files > 0 {
-            let first = self.dirs.first().cloned().flatten().unwrap_or_else(pwd);
+            let first = self.dirs.first().cloned().flatten();
+            let first = first.or_else(|| self.home.clone()).unwrap_or_else(pwd);
             string(table, &first);
         }
         for dir in self.dirs.iter().skip(1) {
@@ -542,8 +632,9 @@ impl Lines {
         Ok(())
     }
 
-    /// One section's rows, from the first address to the end of the section.
-    fn program(&self, table: &mut Table, rows: &[&Row], address: u8, size: u64) {
+    /// One section's rows, from the first address to the end of the section, with the address
+    /// moved in steps of `unit` bytes.
+    fn program(&self, table: &mut Table, rows: &[&Row], address: u8, size: u64, unit: u64) {
         let mut file = 1;
         let mut line = 1i64;
         let mut column = 0;
@@ -592,7 +683,7 @@ impl Lines {
             let delta = loc.line as i64 - line;
             match before {
                 Some(last) if !(loc.reset && self.set_again(last, row)) => {
-                    advance(out, Some(delta), row.at - last.at);
+                    advance(out, Some(delta), (row.at - last.at) / unit);
                 }
                 _ => {
                     out.push(0);
@@ -606,7 +697,7 @@ impl Lines {
             before = Some(row);
         }
         if let Some(last) = before {
-            advance(&mut table.bytes, None, size.saturating_sub(last.at));
+            advance(&mut table.bytes, None, size.saturating_sub(last.at) / unit);
         }
     }
 

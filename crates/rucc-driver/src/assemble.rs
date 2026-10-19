@@ -76,7 +76,17 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         keep_slots: opts.asm_keep_slots,
         before_2_42: opts.gnu_as < rucc_session::GasVersion { major: 2, minor: 42, patch: 0 },
     };
-    let read = rucc_asm::read_with(&text, target.tuple.arch(), target.object_format, flags);
+    // Under `-g` gas writes a line table for the file and a unit naming its functions, which is
+    // where the BTF of a function written in assembly comes from.
+    let debug = opts.debug_info.then(|| rucc_asm::DebugInfo {
+        version: opts.dwarf_version,
+        name: name.to_owned(),
+        dir: opts.working_dir.clone().unwrap_or_default(),
+        producer: format!("GNU AS {}", opts.gnu_as),
+        remap: opts.prefix_map.debug.entries().to_vec(),
+    });
+    let arch = target.tuple.arch();
+    let read = rucc_asm::read_with_debug(&text, arch, target.object_format, flags, debug.as_ref());
     let assembled = match read {
         Ok(assembled) => assembled,
         Err(trouble) => {

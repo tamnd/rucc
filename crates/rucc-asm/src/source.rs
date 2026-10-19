@@ -50,6 +50,7 @@ use crate::instruction::Sort as Reach;
 use crate::lines::{self, Lines};
 use crate::unwind::{Named, Prologue, Seh};
 
+mod debug;
 mod macros;
 
 /// A file this could not read, and where in it.
@@ -134,6 +135,40 @@ pub fn read_with(
     format: ObjectFormat,
     flags: Flags,
 ) -> Result<Assembled, Trouble> {
+    read_with_debug(text, arch, format, flags, None)
+}
+
+/// What `-g` asks of the assembler for a file of assembly, which is the debug information gas
+/// makes up for a file that has none of its own: a line table from the source lines, and a unit
+/// that names the file and each function in it. See the private `debug` module.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DebugInfo {
+    /// The version of DWARF, 4 or 5.
+    pub version: u8,
+    /// The name of the file as the command line gave it, which is where the lines are until a
+    /// marker the preprocessor left says otherwise.
+    pub name: String,
+    /// The directory the compiler runs in, which the unit names as the one it was compiled in.
+    pub dir: String,
+    /// What `DW_AT_producer` says, which is `GNU AS` and the version of gas this stands in for.
+    pub producer: String,
+    /// What `-fdebug-prefix-map=` asked for, in the order the command line gave it. The last one
+    /// that matches is the one used, as in gas.
+    pub remap: Vec<(String, String)>,
+}
+
+/// The same, with the debug information `-g` asks for when `debug` is given.
+///
+/// # Errors
+///
+/// As [`read_with`].
+pub fn read_with_debug(
+    text: &str,
+    arch: Arch,
+    format: ObjectFormat,
+    flags: Flags,
+    debug: Option<&DebugInfo>,
+) -> Result<Assembled, Trouble> {
     // Every branch starts out in its two byte form and the file is read again with the ones that
     // did not reach written long, until none is left over. A branch made long never goes back, so
     // each pass has more long ones than the last and there are only so many branches, which is how
@@ -179,6 +214,8 @@ pub fn read_with(
             fatal_warnings: flags.fatal_warnings,
             noexecstack: flags.noexecstack,
             before_2_42: flags.before_2_42,
+            debug: debug.cloned(),
+            generating: debug.is_some(),
             ..Reader::default()
         };
         reader.run(text)?;
@@ -615,6 +652,24 @@ struct Reader {
     /// What `.file` with a number and `.loc` said, for the line table. See [`crate::lines`].
     lines: Lines,
     line: usize,
+    /// What `-g` asked for. See [`debug`].
+    debug: Option<DebugInfo>,
+    /// Whether rows are being made from the source lines, which is so under `-g` until the file
+    /// says `.file` with a number or `.loc` itself.
+    generating: bool,
+    /// Every file the lines came from, by its name after the prefix map, which a row made from a
+    /// source line names by where it is in here.
+    sources: Vec<Vec<u8>>,
+    /// The file and line the statement being read was written on, as the markers the preprocessor
+    /// left say. The expansion of a macro is all on the line that called it.
+    place: (usize, u64),
+    /// The file and line the next line of the text is on.
+    next: (usize, u64),
+    /// Where the last row made from a source line was, since gas makes one row for a line however
+    /// many instructions it holds.
+    last_place: Option<(usize, u64)>,
+    /// The sections `-g` added to, once the line table has made them. See [`debug`].
+    made: Option<debug::Made>,
 }
 
 impl Reader {
@@ -636,9 +691,14 @@ impl Reader {
             }
             self.go(0);
         }
+        self.lines.unit = if self.aarch64 { 4 } else { 1 };
+        self.start_debug();
         let mut commenting = false;
         for (index, raw) in text.lines().enumerate() {
             self.line = index + 1;
+            if self.debug.is_some() {
+                self.position(raw);
+            }
             let line = self.strip(raw, &mut commenting)?;
             self.feed(&line)?;
         }
@@ -1297,6 +1357,7 @@ impl Reader {
         }
         let part = self.here;
         let at = self.at();
+        self.generated();
         self.row()?;
         self.put(&written.bytes)?;
         let end = at + written.bytes.len() as u64;
@@ -1398,6 +1459,8 @@ impl Reader {
         let encoded = aarch64::encode(&line.mnemonic, &line.values)
             .map_err(|why| self.bad(&why.to_string()))?;
         let (part, at) = (self.here, self.at());
+        self.generated();
+        self.row()?;
         self.put(&encoded.word.to_le_bytes())?;
         let (Some(field), Some(name)) = (encoded.fixup, line.symbol) else {
             return Ok(());
@@ -2085,7 +2148,11 @@ impl Reader {
             "ltorg" | "pool" if self.aarch64 => self.literal_pool()?,
             // An instruction written as its number, which is how the arm64 kernel writes one the
             // assembler may not know.
-            "inst" if self.aarch64 => self.data(&args, 4)?,
+            "inst" if self.aarch64 => {
+                self.generated();
+                self.row()?;
+                self.data(&args, 4)?;
+            }
             "byte" => self.data(&args, 1)?,
             // `.word` is two bytes on x86-64 and four on AArch64, where a word is an instruction.
             "word" if self.aarch64 => self.data(&args, 4)?,
@@ -3848,6 +3915,7 @@ impl Reader {
         self.resolve_sizes()?;
         self.copy_attributes();
         self.versions()?;
+        self.debug_sections()?;
         let grow = self.too_far()?;
         let first_round = self.first_round_counted.get();
         if !grow.is_empty() || !held || first_round {
@@ -3949,6 +4017,7 @@ impl Reader {
     /// `.file 1 "dir" "name" md5 0x...`, which puts a file in the line table. The directory and the
     /// sum may each be left out.
     fn numbered_file(&mut self, rest: &str) -> Result<(), Trouble> {
+        self.stop_generating();
         let words = words(rest).map_err(|why| self.bad(&why))?;
         let Some((first, words)) = words.split_first() else {
             return Err(self.bad(".file with nothing after it"));
@@ -3985,6 +4054,7 @@ impl Reader {
     /// `.loc file line [column] [what else]`, which says the instructions from here on came from
     /// that line, until the next `.loc`.
     fn loc(&mut self, rest: &str) -> Result<(), Trouble> {
+        self.stop_generating();
         // A `.loc` that no instruction came after is a row where the next one starts.
         self.row()?;
         let words = words(rest).map_err(|why| self.bad(&why))?;
@@ -4078,13 +4148,17 @@ impl Reader {
     ///
     /// gas writes it when the file has a `.debug_info` with something in it, which is gcc's under
     /// `-g`, and leaves `.debug_line` alone when the file wrote one itself and said no `.loc`. Both
-    /// at once is a mistake gas refuses. Only for x86 ELF, which is all gcc's output this reads is.
+    /// at once is a mistake gas refuses. Only for x86 ELF, which is all gcc's output this reads is,
+    /// and for a file of assembly read under `-g`, which has no `.debug_info` and gets the rest of
+    /// the debug information made up for it as well. See [`debug`].
     fn line_table(&mut self) -> Result<(), Trouble> {
-        if !self.elf() || self.aarch64 {
+        if !self.elf() {
             return Ok(());
         }
         let size = |name: &str| self.named.get(name).map_or(0, |&at| self.parts[at].size);
-        if size(".debug_info") == 0 {
+        let info = size(".debug_info") != 0;
+        let made = self.debug.is_some() && !info && self.lines.any_rows();
+        if !made && (self.aarch64 || !info) {
             return Ok(());
         }
         if size(".debug_line") != 0 {
@@ -4093,11 +4167,20 @@ impl Reader {
             }
             return Ok(());
         }
+        if self.generating {
+            self.lines.number(&self.sources);
+        }
+        let here = self.here;
+        if made {
+            // Before `.debug_line_str`, which is the order gas makes the two in when neither was
+            // in the file.
+            self.section(".debug_line", Shape { bits: true, ..Shape::default() });
+            self.go(here);
+        }
         let address = if self.i386 { 4 } else { 8 };
         let parts = &self.parts;
         let table =
             self.lines.table(address, |part| parts[part].size).map_err(|why| self.bad(&why))?;
-        let here = self.here;
         let mut strings = 0;
         if !table.strings.is_empty() {
             let shape = Shape { bits: true, merge: 1, strings: true, ..Shape::default() };
@@ -4108,6 +4191,9 @@ impl Reader {
         self.section(".debug_line", Shape { bits: true, ..Shape::default() });
         let (part, start) = (self.here, self.at());
         self.put(&table.bytes)?;
+        if made {
+            self.make_debug_sections(part, start);
+        }
         let text = self.named.get(".debug_line_str").copied();
         for (n, hole) in table.holes.iter().enumerate() {
             let (to, offset) = match hole.to {

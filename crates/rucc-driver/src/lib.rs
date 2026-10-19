@@ -5444,12 +5444,13 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
                 }
             }
             // Line tables for a file of assembly, which gas writes from the source lines when the
-            // file has no `.loc` of its own. This assembler writes no debug information for a file
-            // of assembly at all, so the option is refused rather than taken and not done.
+            // file has no `.loc` of its own. This assembler writes them when the driver's own `-g`
+            // asks, which is how gcc hands it on, and this spelling is refused rather than taken
+            // and not done.
             _ if word.starts_with("-gdwarf") || word.starts_with("--gdwarf") || word == "-g" => {
                 return Err(refuse(
-                    "the assembler inside this compiler writes no debug information for a file of \
-                     assembly, so it cannot write the line table this asks for",
+                    "the assembler inside this compiler writes debug information for a file of \
+                     assembly under the compiler's own -g, and not under this option",
                 ));
             }
             _ => {

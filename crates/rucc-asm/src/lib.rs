@@ -61,7 +61,7 @@ pub use crate::att::{mark, mark_end, print, print_marked};
 pub use crate::bytes::{Assembled, Row, assemble, assemble_in};
 pub use crate::data::{Globals, Piece, Variable, aliases, globals};
 pub use crate::format::Directives;
-pub use crate::source::{Flags, Trouble, read, read_as, read_with};
+pub use crate::source::{DebugInfo, Flags, Trouble, read, read_as, read_with, read_with_debug};
 
 use std::fmt;
 
