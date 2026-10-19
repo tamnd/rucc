@@ -902,3 +902,29 @@ extern int vb[NB];
     assert!(named(&all, DW_TAG_ENUMERATION, "ea").is_some());
     assert!(named(&all, DW_TAG_ENUMERATION, "eb").is_none());
 }
+
+/// A statement that does nothing is no reference, since gcc throws it away before it looks at
+/// what the body names. So `(void)var` declares nothing and brings in no type, which is how the
+/// kernel's lock checker reads `RCU`. A read kept in a local, a `volatile` read and the value of
+/// a statement expression are references as usual.
+#[test]
+fn a_statement_that_does_nothing_declares_nothing() {
+    let source = "\
+struct only_voided { int x; };
+extern const struct only_voided *voided;
+extern int plain, read_into, held, in_value;
+extern volatile int touched;
+struct with { int x; };
+extern struct with member_of;
+void a(void) { do { (void)(voided); } while (0); plain; (void)member_of.x; }
+int b(void) { int x = read_into; (void)x; (void)touched; return ({ held; in_value; }); }
+";
+    let all = entries(&build("does-nothing", source));
+    for name in ["read_into", "touched", "in_value"] {
+        assert!(named(&all, DW_TAG_VARIABLE, name).is_some(), "{name} is declared");
+    }
+    for name in ["voided", "plain", "member_of", "held"] {
+        assert!(named(&all, DW_TAG_VARIABLE, name).is_none(), "{name} is not");
+    }
+    assert!(named(&all, DW_TAG_STRUCTURE, "only_voided").is_none());
+}
