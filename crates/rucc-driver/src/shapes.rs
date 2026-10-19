@@ -96,8 +96,9 @@ pub(crate) struct Meaning {
     /// hands over the objects it actually laid out and each of them is looked up here. A `static`
     /// nothing reads is not among them and so is never asked for.
     pub objects: Map<String, Held>,
-    /// The names in [`Meaning::objects`] the unit defines as `static`, in the order they were
-    /// declared, which gcc describes whether or not the back end kept them.
+    /// The names in [`Meaning::objects`] the unit defines as `static`, and its global register
+    /// variables, in the order they were declared, which gcc describes whether or not the back end
+    /// kept them. A global register variable never has an object of its own.
     pub statics: Vec<String>,
     /// What is known about each function and variable the unit declares without defining and the
     /// code it emits names, by the name it will have in the object file, in the order of the
@@ -242,6 +243,8 @@ pub(crate) struct Held {
     /// The entries in [`Meaning::types`] that were used outside any function just before it was
     /// declared, which gcc describes wherever it describes the variable.
     pub uses: Vec<usize>,
+    /// The register a global register variable is kept in, as the program named it.
+    pub register: Option<String>,
 }
 
 /// The types, the signatures and the file-scope variables of everything this unit defines.
@@ -328,17 +331,28 @@ pub(crate) fn collect(
             // hold one, and neither is a `Tentative` definition of a name another unit defines,
             // which the linker resolves to somebody else's address.
             DeclKind::Object if decl.duration == StorageDuration::Static => {
+                // gcc gives a global register variable public linkage, which it says in the
+                // entry, though no other unit can name it.
+                let register = decl.register.map(|written| {
+                    let name: String = tast[written]
+                        .elements
+                        .iter()
+                        .filter_map(|&unit| char::from_u32(unit))
+                        .collect();
+                    name.trim_start_matches('%').to_owned()
+                });
                 let held = Held {
                     file: at.name.to_owned(),
                     line: at.line,
                     ty: walk.declared(id, decl.ty).map(|ty| walk.readonly(ty)),
-                    external,
+                    external: external || register.is_some(),
                     tags: tast.btf_decl_tags(id).to_vec(),
                     uses: Vec::new(),
+                    register,
                 };
                 owners.push((id, symbol.clone()));
-                let defines =
-                    decl.linkage == Linkage::Internal && decl.state != Definition::Declared;
+                let defines = (decl.linkage == Linkage::Internal || held.register.is_some())
+                    && decl.state != Definition::Declared;
                 if defines && listed.insert(symbol.clone()) {
                     statics.push(symbol.clone());
                 }
@@ -442,6 +456,7 @@ pub(crate) fn collect(
             external: decl.linkage == Linkage::External,
             tags: Vec::new(),
             uses: Vec::new(),
+            register: None,
         };
         declared.push((symbol, held));
     }
