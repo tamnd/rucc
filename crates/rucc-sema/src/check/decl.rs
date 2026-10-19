@@ -1387,7 +1387,7 @@ impl Checker<'_> {
                 },
                 // `typedef __builtin_va_list __gnuc_va_list;`, which <stdarg.h> writes.
                 ast::TypeSpec::VaList => {
-                    let over = self.cx.names.find("__builtin_va_list");
+                    let over = self.va_list_name();
                     over.map(|over| (over, self.va_list_type()))
                 }
                 _ => None,

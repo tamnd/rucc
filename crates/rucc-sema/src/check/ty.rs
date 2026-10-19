@@ -196,7 +196,7 @@ impl Checker<'_> {
         let name = match self.ast[specs].ty {
             TypeSpec::Typedef(name) => name,
             TypeSpec::VaList => {
-                let name = self.cx.names.find("__builtin_va_list")?;
+                let name = self.va_list_name()?;
                 return Some((name, self.va_list_type()));
             }
             _ => return None,
@@ -551,12 +551,24 @@ impl Checker<'_> {
             }
         };
         self.built.va_list = Some(ty);
-        // And a typedef name beside the table, which is what gcc describes a list as. The keyword
-        // table interned the word before anything was read.
-        if let Some(name) = self.cx.names.find("__builtin_va_list") {
+        // And a typedef name beside the table, which is what gcc describes a list as.
+        if let Some(name) = self.va_list_name() {
             self.types.alias(name, ty, None);
         }
         ty
+    }
+
+    /// The typedef name gcc describes `__builtin_va_list` as, and nothing where it describes none.
+    ///
+    /// gcc's builtin typedef only names a type that has no name of its own. The AAPCS64 list is
+    /// `struct __va_list`, so a `va_list` there is described as a typedef of the structure, and a
+    /// `typedef __builtin_va_list` in between would be a type name only rucc's BTF has. The
+    /// keyword table interned the word before anything was read.
+    pub(in crate::check) fn va_list_name(&self) -> Option<Symbol> {
+        if self.cx.target.va_list == Some(VaList::Aapcs) {
+            return None;
+        }
+        self.cx.names.find("__builtin_va_list")
     }
 
     /// A complete record the compiler builds itself, with a tag and ordinary members.
