@@ -1222,14 +1222,18 @@ impl Checker<'_> {
         }
         if kind == DeclKind::Object {
             // gcc keeps the type of every local of a function it keeps, including one the code
-            // never reads and one in a block that is never reached, and with it whatever was used
-            // outside a function since the variable before this one.
+            // never reads and one in a block that is never reached. What was used outside a
+            // function since the variable before this one goes with the next file-scope variable
+            // the unit defines, so a local, `static` or not, and an `extern` declaration leave it
+            // for later. Given to an unused `static inline` with a local in it, it was lost.
             let owner = self.defining.unwrap_or(id);
             if self.defining.is_some() {
                 self.tast.record_use(owner, Used::Decl(id));
             }
-            for used in std::mem::take(&mut self.pending_uses) {
-                self.tast.record_use(owner, used);
+            if self.defining.is_none() && self.tast[id].state != Definition::Declared {
+                for used in std::mem::take(&mut self.pending_uses) {
+                    self.tast.record_use(owner, used);
+                }
             }
         }
         Some(id)
