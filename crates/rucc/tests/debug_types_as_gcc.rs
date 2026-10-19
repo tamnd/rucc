@@ -426,6 +426,33 @@ int h(poll_table *poll_table) { return poll_table->x; }
     assert_eq!((pointee.tag, pointee.name.as_deref()), (DW_TAG_TYPEDEF, Some("poll_table")));
 }
 
+/// A declaration after a function's definition says how the function is described, the way gcc
+/// takes the last one, and `typeof` of the function writes its return type the way the first
+/// declaration did. `EXPORT_SYMBOL` is such a declaration, which is why the kernel's
+/// `bit_waitqueue` returns what its prototype says rather than what its definition says.
+#[test]
+fn a_function_declared_again_after_its_definition_is_described_as_the_last_declaration_says() {
+    let source = "\
+typedef unsigned int __u32;
+typedef __u32 u32;
+typedef unsigned int x32;
+__u32 f(int a);
+u32 f(int b) { return b; }
+extern typeof(f) f;
+__u32 g(int a);
+x32 g(int b) { return b; }
+u32 g(int c);
+";
+    let all = entries(&build("redeclared", source));
+    let returns = |name: &str| {
+        let function = named(&all, DW_TAG_SUBPROGRAM, name).expect("it is described");
+        let ty = at(&all, function.ty.expect("it returns a value"));
+        (ty.tag, ty.name.clone())
+    };
+    assert_eq!(returns("f"), (DW_TAG_TYPEDEF, Some("__u32".to_owned())));
+    assert_eq!(returns("g"), (DW_TAG_TYPEDEF, Some("u32".to_owned())));
+}
+
 /// A type a function or a variable uses is described with it even where no signature, member or
 /// variable has that type, which is gcc's rule and so what the kernel's BTF has: the enumeration of
 /// an enumerator, a type cast to or made a compound literal of, a local nothing reads, and the

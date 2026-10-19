@@ -496,12 +496,12 @@ impl Tast {
         self.spellings.push((decl, name, of));
     }
 
-    /// Records the typedef name a function's definition wrote its return type with, or that it
-    /// wrote none.
+    /// Records the typedef name a function's latest file-scope declaration wrote its return type
+    /// with, or that it wrote none.
     ///
-    /// gcc describes a function as its definition writes it, so `u32 f(int);` followed by
-    /// `unsigned int f(int b) { ... }` returns `unsigned int` in the debug information, and the
-    /// definition counts over whatever a declaration above it said.
+    /// gcc describes a function as its last declaration writes it, so `u32 f(int);` followed by
+    /// `unsigned int f(int b) { ... }` returns `unsigned int` in the debug information, and a
+    /// declaration after the definition counts over the definition.
     pub fn record_defined_spelling(&mut self, decl: DeclId, spelled: Option<(Symbol, TypeId)>) {
         self.defined.insert(decl, spelled);
     }
