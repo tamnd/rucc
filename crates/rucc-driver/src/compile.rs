@@ -2279,14 +2279,21 @@ fn describe(
             tags: held.tags.clone(),
             uses: held.uses.clone(),
             dropped: false,
+            register: None,
         });
     }
     // And the `static` ones the back end dropped, which gcc describes anyway, with no location.
     // What was used outside a function just before one was declared went with it, and gcc loses
-    // those types the same way, so they are left off.
+    // those types the same way, so they are left off. A global register variable is in its
+    // register rather than dropped, and gcc keeps the types used before it, which is how the
+    // kernel's `enum node_states` gets into an arm64 unit that only names `node_states`.
     let laid: Set<&str> = data.objects.iter().map(|object| object.name.as_str()).collect();
     for name in origin.meaning.statics.iter().filter(|name| !laid.contains(name.as_str())) {
         let Some(held) = origin.meaning.objects.get(name) else { continue };
+        let register = held.register.as_deref().and_then(|name| {
+            let (class, reg) = target.regs.reg_named(name)?;
+            target.call_regs?.dwarf(class, reg)
+        });
         globals.push(rucc_debug::Global {
             name: name.clone(),
             ty: held.ty,
@@ -2294,10 +2301,11 @@ fn describe(
                 file: interned(&mut files, rewrite(&held.file)),
                 line: held.line,
             }),
-            external: false,
+            external: held.external,
             tags: held.tags.clone(),
-            uses: Vec::new(),
-            dropped: true,
+            uses: if held.register.is_some() { held.uses.clone() } else { Vec::new() },
+            dropped: register.is_none(),
+            register,
         });
     }
     // And the functions and variables the C code names that another unit defines. gcc writes these
@@ -2577,6 +2585,7 @@ fn describe_wasm(
             tags: held.tags.clone(),
             uses: held.uses.clone(),
             dropped: false,
+            register: None,
         });
     }
     let unit = rucc_debug::Unit {

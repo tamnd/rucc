@@ -683,3 +683,23 @@ int g(const char *f, ...) { va_list ap; __builtin_va_start(ap, f); int r = vf(f,
     let under = at(&all, list.ty.expect("va_list has a type"));
     assert_eq!((under.tag, under.name.as_deref()), (DW_TAG_TYPEDEF, Some("__builtin_va_list")));
 }
+
+/// A global register variable is described, and the types used outside a function before it go
+/// with it, as they would with any variable the unit defines. The arm64 kernel declares
+/// `current_stack_pointer` that way after `node_states[NR_NODE_STATES]`, and gcc describes
+/// `enum node_states` because of it. An enumeration used after the last variable is lost, as gcc
+/// loses it.
+#[test]
+fn a_global_register_variable_takes_the_types_used_before_it() {
+    let source = "\
+enum ea { A0, NA };
+extern int va[NA];
+register unsigned long csp asm (\"sp\");
+enum eb { B0, NB };
+extern int vb[NB];
+";
+    let all = entries(&build("register", source));
+    assert!(named(&all, DW_TAG_VARIABLE, "csp").is_some());
+    assert!(named(&all, DW_TAG_ENUMERATION, "ea").is_some());
+    assert!(named(&all, DW_TAG_ENUMERATION, "eb").is_none());
+}

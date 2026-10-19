@@ -268,6 +268,10 @@ pub struct Global {
     /// entry for one, with its name and its type and no location, so its type is described as
     /// well. In the kernel that is how `exitcall_t` gets into every module with a `module_exit`.
     pub dropped: bool,
+    /// The DWARF number of the register it is kept in for the whole program, for a global
+    /// register variable such as the kernel's `current_stack_pointer`. It has no symbol, and gcc
+    /// says where it is with the register instead of an address.
+    pub register: Option<u16>,
 }
 
 /// A function or a variable the unit refers to and another unit defines.

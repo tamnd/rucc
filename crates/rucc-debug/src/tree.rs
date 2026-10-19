@@ -916,11 +916,12 @@ fn held_at(
     }
     came_from(dwarf, at, &global.name, global.decl, files)?;
     points(dwarf, at, global.ty, ids)?;
-    if global.dropped {
-        return Ok(at);
-    }
     let mut expr = gimli::write::Expression::new();
-    expr.op_addr(gimli::write::Address::Symbol { symbol, addend: 0 });
+    match global.register {
+        Some(number) => expr.op_reg(gimli::Register(number)),
+        None if global.dropped => return Ok(at),
+        None => expr.op_addr(gimli::write::Address::Symbol { symbol, addend: 0 }),
+    }
     dwarf.unit.get_mut(at).set(gimli::DW_AT_location, AttributeValue::Exprloc(expr));
     Ok(at)
 }
@@ -1825,6 +1826,7 @@ mod tests {
             tags: Vec::new(),
             uses: Vec::new(),
             dropped: false,
+            register: None,
         }];
         let info = write(&unit).expect("sections");
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
@@ -1853,6 +1855,25 @@ mod tests {
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
         assert!(held.relocs.iter().any(|reloc| reloc.symbol == "opaque"));
         assert!(named(&info).contains(&"opaque".to_owned()));
+    }
+
+    /// A global register variable is where its register is, `DW_OP_reg31` for the stack pointer on
+    /// AArch64, and has no address for the linker to fill in, as gcc writes it.
+    #[test]
+    fn a_global_register_variable_is_located_by_its_register() {
+        let mut unit = one();
+        unit.globals = vec![Global {
+            name: "csp".to_owned(),
+            ty: Some(0),
+            external: true,
+            register: Some(31),
+            ..Global::default()
+        }];
+        let info = write(&unit).expect("sections");
+        let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        assert!(!held.relocs.iter().any(|reloc| reloc.symbol == "csp"));
+        assert!(holds(&info, ".debug_info", &[1, gimli::DW_OP_reg31.0]));
+        assert!(named(&info).contains(&"csp".to_owned()));
     }
 
     /// An enumeration carries its enumerators, which is what lets a debugger print the name.
