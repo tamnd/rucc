@@ -344,7 +344,7 @@ impl Step {
                 expand::orderings(func, conv.word, conv.total_store_order);
                 locked::ordered(func, names, conv);
             }
-            Self::Overflows => expand::overflows(func),
+            Self::Overflows => expand::overflows(func, conv.word * 8),
             Self::Decimals => decimal::calls(func, names, conv.abi),
             Self::HalfFloats => half::calls(func, names, conv.abi),
             Self::Halves => return wide::halves(func, names, conv),

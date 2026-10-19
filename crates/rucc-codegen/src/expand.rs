@@ -1022,7 +1022,10 @@ fn counted(func: &mut Func, inst: Inst) {
 /// Because the instruction goes away rather than becoming another one, the values the rest of the
 /// function read have to be pointed at what replaced them. That is what `substitute` below does,
 /// once, after every instruction has been rewritten.
-pub fn overflows(func: &mut Func) {
+///
+/// `register` is how many bits a register holds, which decides how a multiply finds the high half
+/// of its product. See [`product_high`].
+pub fn overflows(func: &mut Func, register: u32) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     let mut forward = Map::default();
     for inst in found {
@@ -1035,7 +1038,7 @@ pub fn overflows(func: &mut Func) {
             Opcode::SMulOverflow => Checked::Mul(true),
             _ => continue,
         };
-        overflowed(func, inst, checked, &mut forward);
+        overflowed(func, inst, checked, register, &mut forward);
     }
     if !forward.is_empty() {
         substitute(func, &forward);
@@ -1069,7 +1072,13 @@ enum Checked {
 /// For an unsigned multiply the product fits exactly when the high half is zero, and for a signed
 /// one it fits exactly when the high half is the sign extension of the low half, which is the low
 /// half shifted right arithmetically by every bit but one.
-fn overflowed(func: &mut Func, inst: Inst, checked: Checked, forward: &mut Map<Value, Value>) {
+fn overflowed(
+    func: &mut Func,
+    inst: Inst,
+    checked: Checked,
+    register: u32,
+    forward: &mut Map<Value, Value>,
+) {
     let ty = produced(func, inst);
     let [a, b] = func[func[inst].args] else { return };
     if !checkable(ty) {
@@ -1102,7 +1111,7 @@ fn overflowed(func: &mut Func, inst: Inst, checked: Checked, forward: &mut Map<V
         }
         Checked::Mul(signed) => {
             let value = ahead(func, inst, Opcode::Mul, &[a, b], ty);
-            let high = high_half(func, inst, a, b, signed, ty);
+            let high = product_high(func, inst, a, b, signed, ty, register);
             let bit = if signed {
                 let sign = ahead_const(func, inst, Imm::int(i128::from(ty.bits() - 1), ty), ty);
                 let wanted = ahead(func, inst, Opcode::AShr, &[value, sign], ty);
@@ -1120,6 +1129,44 @@ fn overflowed(func: &mut Func, inst: Inst, checked: Checked, forward: &mut Map<V
         forward.insert(flag, bit);
     }
     func.remove_inst(inst);
+}
+
+/// The high half of a checked multiply's product, in the cheapest shape the machine has for it.
+///
+/// At the width of a register it is `umulh` or `smulh`, which every machine here has a rule for at
+/// that width: one `mull` on i386, one `mulq` on x86-64 and one `umulh` on AArch64. Below it the
+/// operands are widened to twice the width, multiplied there and the top shifted down, which is
+/// four instructions. Only above a register, the `long long` on i386 and the `__int128`, is it the
+/// long multiplication of [`high_half`].
+///
+/// The kernel checks every size it allocates with `check_mul_overflow`, behind `array_size`,
+/// `struct_size` and `kcalloc`, and the long multiplication made each of those some thirty
+/// instructions where gcc writes a `mul` and a `jo`.
+fn product_high(
+    func: &mut Func,
+    inst: Inst,
+    a: Value,
+    b: Value,
+    signed: bool,
+    ty: Type,
+    register: u32,
+) -> Value {
+    let width = ty.bits();
+    if width == register {
+        let opcode = if signed { Opcode::SMulHigh } else { Opcode::UMulHigh };
+        return ahead(func, inst, opcode, &[a, b], ty);
+    }
+    if width * 2 > register {
+        return high_half(func, inst, a, b, signed, ty);
+    }
+    let wide = Type::int(width * 2);
+    let widen = if signed { Opcode::SExt } else { Opcode::ZExt };
+    let a = ahead(func, inst, widen, &[a], wide);
+    let b = ahead(func, inst, widen, &[b], wide);
+    let product = ahead(func, inst, Opcode::Mul, &[a, b], wide);
+    let shift = ahead_const(func, inst, Imm::int(i128::from(width), wide), wide);
+    let top = ahead(func, inst, Opcode::LShr, &[product, shift], wide);
+    ahead(func, inst, Opcode::Trunc, &[top], ty)
 }
 
 /// The high half of the product of two values, at the width they are.
@@ -3487,7 +3534,7 @@ mod tests {
     #[test]
     fn a_checked_unsigned_add_becomes_an_add_and_one_comparison() {
         let (mut names, mut func) = checking(Opcode::UAddOverflow, 32);
-        overflows(&mut func);
+        overflows(&mut func, 32);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("uadd_overflow"), "the instruction is gone: {text}");
@@ -3501,7 +3548,7 @@ mod tests {
     #[test]
     fn a_checked_signed_add_becomes_an_add_and_the_sign_bit_of_two_exclusive_ors() {
         let (mut names, mut func) = checking(Opcode::SAddOverflow, 32);
-        overflows(&mut func);
+        overflows(&mut func, 32);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("sadd_overflow"), "the instruction is gone: {text}");
@@ -3516,7 +3563,7 @@ mod tests {
     #[test]
     fn a_checked_unsigned_subtract_compares_the_operands_and_not_the_answer() {
         let (mut names, mut func) = checking(Opcode::USubOverflow, 64);
-        overflows(&mut func);
+        overflows(&mut func, 32);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("usub_overflow"), "the instruction is gone: {text}");
@@ -3533,7 +3580,7 @@ mod tests {
     #[test]
     fn a_checked_multiply_becomes_a_multiply_and_the_high_half_of_the_product() {
         let (mut names, mut func) = checking(Opcode::UMulOverflow, 64);
-        overflows(&mut func);
+        overflows(&mut func, 32);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("umul_overflow"), "the instruction is gone: {text}");
@@ -3549,7 +3596,7 @@ mod tests {
     #[test]
     fn a_checked_signed_multiply_corrects_the_high_half_for_each_negative_operand() {
         let (mut names, mut func) = checking(Opcode::SMulOverflow, 64);
-        overflows(&mut func);
+        overflows(&mut func, 32);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("smul_overflow"), "the instruction is gone: {text}");
@@ -3568,7 +3615,7 @@ mod tests {
     #[test]
     fn both_results_are_substituted_into_whoever_was_reading_them() {
         let (mut names, mut func) = checking(Opcode::SAddOverflow, 32);
-        overflows(&mut func);
+        overflows(&mut func, 32);
 
         // The whole of it, because what this is checking is that nothing is left pointing at the
         // two values the removed instruction used to define. The return names the add and the
@@ -3604,14 +3651,45 @@ mod tests {
             Opcode::SMulOverflow,
         ];
         for op in all {
-            for width in [8u32, 16, 32, 64, 128] {
+            for (width, register) in
+                [8u32, 16, 32, 64, 128].into_iter().flat_map(|w| [(w, 32), (w, 64)])
+            {
                 let (mut names, mut func) = checking(op, width);
-                overflows(&mut func);
+                overflows(&mut func, register);
                 let module = Module::new(names.intern("c.c"), &target());
                 rucc_ir::verify_func(&module, &func, &names)
-                    .unwrap_or_else(|e| panic!("{op:?} at {width}: {e:?}"));
+                    .unwrap_or_else(|e| panic!("{op:?} at {width} on {register}: {e:?}"));
             }
         }
+    }
+
+    /// At the width of a register the high half is the one instruction every machine here has a
+    /// rule for, and the four multiplies of the halves are not written at all.
+    #[test]
+    fn a_checked_multiply_at_the_width_of_a_register_takes_the_high_half_in_one() {
+        for (op, high) in [(Opcode::UMulOverflow, "umulh"), (Opcode::SMulOverflow, "smulh")] {
+            for width in [32, 64] {
+                let (mut names, mut func) = checking(op, width);
+                overflows(&mut func, width);
+                let text = printed(&func, &mut names);
+                assert_eq!(text.matches(&format!(" = {high} ")).count(), 1, "{text}");
+                assert_eq!(text.matches(" mul ").count(), 1, "the answer alone: {text}");
+            }
+        }
+    }
+
+    /// Below the width of a register the operands are widened and multiplied once, and the high
+    /// half is the top of that product.
+    #[test]
+    fn a_checked_multiply_below_a_register_multiplies_once_at_twice_the_width() {
+        let (mut names, mut func) = checking(Opcode::UMulOverflow, 32);
+        overflows(&mut func, 64);
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches("zext.i64").count(), 2, "both operands widened: {text}");
+        assert_eq!(text.matches(" mul ").count(), 2, "the answer and the wide product: {text}");
+        assert!(text.contains("iconst.i64 32"), "its top shifted down: {text}");
+        assert!(text.contains("trunc.i32"), "and narrowed: {text}");
+        assert!(!text.contains("umulh"), "{text}");
     }
 
     /// A width the arithmetic is not written for is left as the instruction it was, for the same
@@ -3620,7 +3698,7 @@ mod tests {
     #[test]
     fn a_width_the_split_is_not_written_for_is_left_alone() {
         let (mut names, mut func) = checking(Opcode::UMulOverflow, 24);
-        overflows(&mut func);
+        overflows(&mut func, 32);
         assert!(printed(&func, &mut names).contains("umul_overflow"), "left as it was");
     }
 
@@ -3633,7 +3711,7 @@ mod tests {
     #[test]
     fn a_check_at_the_width_no_register_holds_is_rewritten_here() {
         let (mut names, mut func) = checking(Opcode::UAddOverflow, 128);
-        overflows(&mut func);
+        overflows(&mut func, 32);
         let text = printed(&func, &mut names);
         assert!(!text.contains("uadd_overflow"), "the check is gone: {text}");
         assert!(text.contains(" = add "), "into the arithmetic it is: {text}");
@@ -3647,7 +3725,7 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        overflows(&mut func);
+        overflows(&mut func, 32);
         assert_eq!(printed(&func, &mut names), before);
     }
 
