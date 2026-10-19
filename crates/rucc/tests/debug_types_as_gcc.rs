@@ -22,6 +22,7 @@ const DW_TAG_ARRAY: u64 = 0x01;
 const DW_TAG_ENUMERATION: u64 = 0x04;
 const DW_TAG_FORMAL_PARAMETER: u64 = 0x05;
 const DW_TAG_MEMBER: u64 = 0x0d;
+const DW_TAG_POINTER: u64 = 0x0f;
 const DW_TAG_STRUCTURE: u64 = 0x13;
 const DW_TAG_SUBROUTINE: u64 = 0x15;
 const DW_TAG_TYPEDEF: u64 = 0x16;
@@ -45,11 +46,16 @@ struct Entry {
 
 /// The object `source` compiles to with `-g -O2`.
 fn build(what: &str, source: &str) -> Vec<u8> {
+    build_for(TARGET, what, source)
+}
+
+/// The same, for another target.
+fn build_for(target: &str, what: &str, source: &str) -> Vec<u8> {
     let dir: PathBuf = std::env::temp_dir().join(format!("rucc-dg-{}-{what}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
-        .args([TARGET, "-std=gnu11", "-g", "-O2", "-c", "-o"])
+        .args([target, "-std=gnu11", "-g", "-O2", "-c", "-o"])
         .arg(dir.join("one.o"))
         .arg(dir.join("one.c"))
         .output()
@@ -423,4 +429,22 @@ int va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int r = __
     assert_eq!(at(&all, cast.ty.expect("in_cast_t has a type")).tag, DW_TAG_STRUCTURE);
     let list = named(&all, DW_TAG_TYPEDEF, "__builtin_va_list").expect("the list's name is there");
     assert_eq!(at(&all, list.ty.expect("the list has a type")).tag, DW_TAG_STRUCTURE);
+}
+
+/// A pointer into an address space is described as the pointer it is. The kernel's `void __percpu *`
+/// is `void __seg_gs *` on x86, and a member of that type used to have no entry at all, which left a
+/// hole in the record pahole reads.
+#[test]
+fn a_pointer_into_an_address_space_is_described() {
+    let source = "\
+struct s { void __seg_gs *p; const void __seg_gs *c; int __seg_gs *q; } v;
+int f(void) { return 0; }
+";
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "space", source));
+    let record = named(&all, DW_TAG_STRUCTURE, "s").expect("s is described");
+    let members: Vec<_> = record.children.iter().map(|&child| all[child].name.clone()).collect();
+    assert_eq!(members, [Some("p".to_owned()), Some("c".to_owned()), Some("q".to_owned())]);
+    let p = named(&all, DW_TAG_MEMBER, "p").expect("p is a member");
+    let pointer = at(&all, p.ty.expect("p has a type"));
+    assert_eq!((pointer.tag, pointer.ty), (DW_TAG_POINTER, None), "a pointer to void");
 }
