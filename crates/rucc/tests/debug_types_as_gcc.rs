@@ -314,7 +314,39 @@ fn a_file_of_only_variables_still_describes_them() {
         "struct op { int code; const char *name; };\nconst struct op ops[2] = { { 1, \"a\" } };\n";
     let all = entries(&build("data", source));
     let ops = named(&all, DW_TAG_VARIABLE, "ops").expect("ops is described");
-    let array = at(&all, ops.ty.expect("ops has a type"));
+    let readonly = at(&all, ops.ty.expect("ops has a type"));
+    assert_eq!(readonly.tag, DW_TAG_CONST);
+    let array = at(&all, readonly.ty.expect("the const has a type"));
     assert_eq!(array.tag, DW_TAG_ARRAY);
     assert!(named(&all, DW_TAG_STRUCTURE, "op").is_some());
+}
+
+/// `const char name[16]` as a member is a const over the array of const char, since gcc writes the
+/// member as read-only on top of its elements. A pointer to such an array and the entry of a typedef
+/// name for one stay bare, and a member written with the name has the const over the name.
+#[test]
+fn an_array_of_const_elements_is_const_itself_where_it_is_declared() {
+    let source = "\
+typedef const char name_t[8];
+struct s { const char a[4]; const char *h[2]; const char (*p)[4]; name_t n; } v;
+int f(void) { return 0; }
+";
+    let all = entries(&build("readonly", source));
+    let member = |name: &str| {
+        let member = named(&all, DW_TAG_MEMBER, name).expect("the member is described");
+        at(&all, member.ty.expect("a member has a type"))
+    };
+    let a = member("a");
+    assert_eq!(a.tag, DW_TAG_CONST);
+    let array = at(&all, a.ty.expect("the const has a type"));
+    assert_eq!(array.tag, DW_TAG_ARRAY);
+    assert_eq!(at(&all, array.ty.expect("an element type")).tag, DW_TAG_CONST);
+    assert_eq!(member("h").tag, DW_TAG_ARRAY, "the elements are not const, what they point at is");
+    let pointer = member("p");
+    assert_eq!(at(&all, pointer.ty.expect("a pointer has a type")).tag, DW_TAG_ARRAY);
+    let n = member("n");
+    assert_eq!(n.tag, DW_TAG_CONST);
+    let name = at(&all, n.ty.expect("the const has a type"));
+    assert_eq!((name.tag, name.name.as_deref()), (DW_TAG_TYPEDEF, Some("name_t")));
+    assert_eq!(at(&all, name.ty.expect("name_t has a type")).tag, DW_TAG_ARRAY);
 }

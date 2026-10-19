@@ -242,6 +242,7 @@ pub(crate) fn collect(
         context: Vec::new(),
         variants: Map::default(),
         rebuilt: Map::default(),
+        readonly: Map::default(),
         type_tags: Map::default(),
         members: types
             .member_spellings()
@@ -292,7 +293,7 @@ pub(crate) fn collect(
                 let held = Held {
                     file: at.name.to_owned(),
                     line: at.line,
-                    ty: walk.declared(id, decl.ty),
+                    ty: walk.declared(id, decl.ty).map(|ty| walk.readonly(ty)),
                     external,
                     tags: tast.btf_decl_tags(id).to_vec(),
                 };
@@ -509,6 +510,9 @@ struct Walk<'a> {
     /// The copy of each entry that points at a tagged entry in place of what it pointed at, by
     /// the entry and what the copy points at.
     rebuilt: Map<(usize, usize), usize>,
+    /// The entry for each array a declaration names with its elements' qualifiers over it, by the
+    /// entry for the array. See [`Walk::readonly`].
+    readonly: Map<usize, usize>,
     /// The strings of the `btf_type_tag`s on each entry that has any.
     type_tags: Map<usize, Vec<Vec<u8>>>,
 }
@@ -572,6 +576,59 @@ impl Walk<'_> {
         })?;
         let tast = self.tast;
         Some(self.tagged(at, tast.btf_type_tags(id), 0))
+    }
+
+    /// A declaration's entry with the `const` and `volatile` of its elements over it too, where
+    /// the declaration is an array.
+    ///
+    /// For a record member and a file-scope object. A local is written without, as gcc writes it.
+    ///
+    /// C puts the qualifiers of `const char name[16]` on the elements and none on the array, and
+    /// gcc writes the object as read-only besides, so its member or variable points at a const
+    /// over the array: `const [16]const char` in the kernel's BTF, for `kunit_suite.name` and
+    /// every other such member. That is the declaration's doing and not the type's, so an inner
+    /// dimension, a pointer's target and a typedef name's own entry stay as they were, and a use of
+    /// `name_t` for `typedef const char name_t[8]` gets the const over the name. `restrict` and
+    /// `_Atomic` are left on the elements, as gcc leaves them.
+    fn readonly(&mut self, at: usize) -> usize {
+        if let Some(&made) = self.readonly.get(&at) {
+            return made;
+        }
+        let mut has = Qualifiers::NONE;
+        let mut under = at;
+        while let Shape::Qualified { which, of: Some(of) } = self.out[under] {
+            has = has.with(qualifiers(which));
+            under = of;
+        }
+        while let Shape::Alias { of: Some(of), .. } = self.out[under] {
+            under = of;
+        }
+        if !matches!(self.out[under], Shape::Array { .. }) {
+            return at;
+        }
+        let mut wants = Qualifiers::NONE;
+        loop {
+            match self.out[under] {
+                Shape::Array { of, .. } | Shape::Alias { of: Some(of), .. } => under = of,
+                Shape::Qualified { which, of: Some(of) } => {
+                    wants = wants.with(qualifiers(which));
+                    under = of;
+                }
+                _ => break,
+            }
+        }
+        // Volatile outside const, the order gcc writes the two in over an array.
+        let mut made = at;
+        for (mask, which) in
+            [(Qualifiers::CONST, Qualifier::Const), (Qualifiers::VOLATILE, Qualifier::Volatile)]
+        {
+            if wants.has(mask) && !has.has(mask) {
+                self.out.push(Shape::Qualified { which, of: Some(made) });
+                made = self.out.len() - 1;
+            }
+        }
+        self.readonly.insert(at, made);
+        made
     }
 
     /// Which entry a type is once the `btf_type_tag`s on its levels are on it, the type's own
@@ -1075,6 +1132,7 @@ impl Walk<'_> {
                 Some(member) => self.tagged(ty, tast.member_type_tags(record, member), 0),
                 None => ty,
             };
+            let ty = self.readonly(ty);
             let bits = match field.bits {
                 Some(width) => match u64::try_from(field.bit_offset()) {
                     Ok(start) => Some(Bits { at: start, width: u64::from(width) }),
@@ -1101,6 +1159,17 @@ impl Walk<'_> {
     /// A name, as the program wrote it.
     fn spelled(&self, name: Symbol) -> String {
         self.names.resolve(name).to_owned()
+    }
+}
+
+/// The qualifier an entry spells as the checker's set of them, with nothing for `_Atomic`, which
+/// [`Walk::readonly`] has no use for.
+fn qualifiers(which: Qualifier) -> Qualifiers {
+    match which {
+        Qualifier::Const => Qualifiers::CONST,
+        Qualifier::Volatile => Qualifiers::VOLATILE,
+        Qualifier::Restrict => Qualifiers::RESTRICT,
+        Qualifier::Atomic => Qualifiers::NONE,
     }
 }
 
