@@ -67,6 +67,7 @@ use crate::lowering::{self, Lowerings};
 use crate::pads;
 use crate::pairs;
 use crate::pressure::{Cost, Pressure};
+use crate::scaled;
 use crate::schedule;
 use crate::select::{self, Selector};
 use crate::shorten;
@@ -878,6 +879,13 @@ pub fn compile_recording(
         expand::crowded(source, names, machine.conv, &X86_SCRATCH);
     } else if std::ptr::eq(machine.shapes, &x86_64::MACHINE) {
         expand::crowded(source, names, machine.conv, &SCRATCH);
+    }
+    // A shift a later block reads as a scaled index too, written again there so that every
+    // address can take it. Only on x86, the machine whose addresses have room for the scale. See
+    // [`scaled`].
+    if std::ptr::eq(machine.shapes, &x86::MACHINE) || std::ptr::eq(machine.shapes, &x86_64::MACHINE)
+    {
+        scaled::indexes(source, machine.conv.word);
     }
     if !ran.switches.is_empty() {
         let called = names.resolve(source.name).to_owned();

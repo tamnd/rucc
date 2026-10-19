@@ -195,6 +195,7 @@ pub mod pipeline;
 pub mod pressure;
 pub mod quad;
 pub mod retry;
+pub mod scaled;
 pub mod schedule;
 pub mod select;
 pub mod shorten;
