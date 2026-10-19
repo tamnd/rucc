@@ -982,6 +982,21 @@ impl Walk<'_> {
             self.aliases.insert((name, of), at);
             return at;
         }
+        // A union `transparent_union` was written after the name of, which gcc describes with no
+        // members. See `Types::hollow_alias`.
+        if let TypeKind::Record(record) = self.types.kind(of) {
+            if self.types.is_hollow(name) {
+                let tag = self.types.record_info(record).tag.map(|tag| self.spelled(tag));
+                let size = self.size(of);
+                let members = Some(Vec::new());
+                self.out.push(Shape::Record { union: true, name: tag, size, members });
+                let hollow = self.out.len() - 1;
+                self.out.push(Shape::Alias { name: self.spelled(name), of: Some(hollow) });
+                let at = Some(self.out.len() - 1);
+                self.aliases.insert((name, of), at);
+                return at;
+            }
+        }
         let written = self.types.alias_prototypes().get(&name).cloned().unwrap_or_default();
         let under = self.within(written, |walk| walk.under(name, of));
         let at = under.map(|of| {
