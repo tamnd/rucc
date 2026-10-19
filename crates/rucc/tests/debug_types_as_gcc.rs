@@ -26,6 +26,7 @@ const DW_TAG_POINTER: u64 = 0x0f;
 const DW_TAG_STRUCTURE: u64 = 0x13;
 const DW_TAG_SUBROUTINE: u64 = 0x15;
 const DW_TAG_TYPEDEF: u64 = 0x16;
+const DW_TAG_UNSPECIFIED_PARAMETERS: u64 = 0x18;
 const DW_TAG_VARIABLE: u64 = 0x34;
 const DW_TAG_SUBRANGE: u64 = 0x21;
 const DW_TAG_SUBPROGRAM: u64 = 0x2e;
@@ -431,6 +432,62 @@ int va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int r = __
     assert_eq!(at(&all, list.ty.expect("the list has a type")).tag, DW_TAG_STRUCTURE);
 }
 
+/// A function or variable another unit defines has an entry that says what it is wherever the code
+/// the object holds names it, a call in a `static inline` that is called and an address in the data
+/// among them, and a call the optimizer folded away as well. None where only an uncalled `static
+/// inline` does, or an arm a constant condition never takes. What it takes and returns are
+/// described with it, as with gcc, which puts their types in the kernel's BTF.
+#[test]
+fn a_function_or_variable_another_unit_defines_is_declared_where_referred_to() {
+    let source = "\
+typedef unsigned int u32;
+struct a1 { int a; }; struct a3 { int a; }; struct a4 { int a; };
+struct a5 { int a; }; struct a6 { int a; };
+void addr_taken(struct a1 *);
+void folded_away(void);
+void never_taken(void);
+void called_in_inline(struct a4 *);
+void called_in_dead_inline(struct a3 *);
+extern struct a5 ext_read;
+extern struct a6 ext_unread;
+long spelled(const u32 x, ...);
+static inline void inl(void *p) { called_in_inline(p); }
+static inline void dead(void *p) { called_in_dead_inline(p); }
+static inline void maybe(int x) { if (x) folded_away(); }
+void *fp = addr_taken;
+int f(void *p) { inl(p); spelled(1); maybe(0); if (sizeof(int) == 2) never_taken(); return ext_read.a; }
+";
+    let all = entries(&build("declared", source));
+    let declared = |tag: u64, name: &str| named(&all, tag, name).filter(|one| one.declaration);
+    let params = |which: &Entry| -> Vec<&Entry> {
+        which.children.iter().map(|&child| &all[child]).collect()
+    };
+    let taken = declared(DW_TAG_SUBPROGRAM, "addr_taken").expect("addr_taken is declared");
+    let [param] = params(taken)[..] else { panic!("{:?}", params(taken)) };
+    assert_eq!(param.tag, DW_TAG_FORMAL_PARAMETER);
+    let pointer = at(&all, param.ty.expect("the parameter has a type"));
+    assert_eq!(at(&all, pointer.ty.expect("a pointer to a1")).name.as_deref(), Some("a1"));
+    assert!(declared(DW_TAG_SUBPROGRAM, "called_in_inline").is_some());
+    assert!(named(&all, DW_TAG_STRUCTURE, "a4").is_some(), "what the inline's callee takes");
+    assert!(named(&all, DW_TAG_SUBPROGRAM, "called_in_dead_inline").is_none());
+    assert!(named(&all, DW_TAG_STRUCTURE, "a3").is_none(), "only the dead inline names a3");
+    assert!(declared(DW_TAG_SUBPROGRAM, "folded_away").is_some(), "the call is in the source");
+    assert!(named(&all, DW_TAG_SUBPROGRAM, "never_taken").is_none());
+    let read = declared(DW_TAG_VARIABLE, "ext_read").expect("ext_read is declared");
+    assert_eq!(at(&all, read.ty.expect("ext_read has a type")).name.as_deref(), Some("a5"));
+    assert!(named(&all, DW_TAG_VARIABLE, "ext_unread").is_none());
+    assert!(named(&all, DW_TAG_STRUCTURE, "a6").is_none());
+    let spelled = declared(DW_TAG_SUBPROGRAM, "spelled").expect("spelled is declared");
+    let returns = at(&all, spelled.ty.expect("spelled returns long"));
+    assert_eq!(returns.name.as_deref(), Some("long int"));
+    let [first, rest] = params(spelled)[..] else { panic!("{:?}", params(spelled)) };
+    let constant = at(&all, first.ty.expect("the parameter has a type"));
+    assert_eq!(constant.tag, DW_TAG_CONST);
+    let name = at(&all, constant.ty.expect("const over u32"));
+    assert_eq!((name.tag, name.name.as_deref()), (DW_TAG_TYPEDEF, Some("u32")));
+    assert_eq!(rest.tag, DW_TAG_UNSPECIFIED_PARAMETERS);
+}
+
 /// A pointer into an address space is described as the pointer it is. The kernel's `void __percpu *`
 /// is `void __seg_gs *` on x86, and a member of that type used to have no entry at all, which left a
 /// hole in the record pahole reads.
@@ -438,7 +495,8 @@ int va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int r = __
 fn a_pointer_into_an_address_space_is_described() {
     let source = "\
 struct s { void __seg_gs *p; const void __seg_gs *c; int __seg_gs *q; } v;
-int f(void) { return 0; }
+extern void free_percpu(void __seg_gs *);
+void f(void) { free_percpu(v.p); }
 ";
     let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "space", source));
     let record = named(&all, DW_TAG_STRUCTURE, "s").expect("s is described");
@@ -447,4 +505,6 @@ int f(void) { return 0; }
     let p = named(&all, DW_TAG_MEMBER, "p").expect("p is a member");
     let pointer = at(&all, p.ty.expect("p has a type"));
     assert_eq!((pointer.tag, pointer.ty), (DW_TAG_POINTER, None), "a pointer to void");
+    let free = named(&all, DW_TAG_SUBPROGRAM, "free_percpu").expect("free_percpu is declared");
+    assert_eq!(free.children.len(), 1, "it takes the pointer");
 }

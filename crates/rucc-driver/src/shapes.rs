@@ -72,7 +72,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_debug::{Bits, Constant, Encoding, Member, Param, Qualifier, Shape, Sig};
 use rucc_diag::{SourceMap, Span};
-use rucc_sema::{DeclId, DeclKind, Linkage, Stmt, StmtId, StorageDuration, Tast, Used};
+use rucc_sema::{DeclId, DeclKind, Definition, Linkage, Stmt, StmtId, StorageDuration, Tast, Used};
 use rucc_target::TargetInfo;
 use rucc_types::{
     ArrayLen, FunctionId, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type, TypeId,
@@ -96,6 +96,16 @@ pub(crate) struct Meaning {
     /// hands over the objects it actually laid out and each of them is looked up here. A `static`
     /// nothing reads is not among them and so is never asked for.
     pub objects: Map<String, Held>,
+    /// What is known about each function and variable the unit declares without defining and the
+    /// code it emits names, by the name it will have in the object file, in the order of the
+    /// declarations.
+    ///
+    /// The ones gcc writes a declaration for: a call or an address in a body or an initializer that
+    /// is kept, whether or not the optimizer later folds it away, and not one in an arm a constant
+    /// condition never takes or in a `static inline` nothing calls. A name the unit goes on to
+    /// define is among them as well, since a reference reads the declaration in scope, and is left
+    /// out where the object is described.
+    pub declared: Vec<(String, Held)>,
     /// The strings of the `btf_type_tag`s on each entry in [`Meaning::types`] that has any, in
     /// the order gcc chains them.
     pub type_tags: Vec<(usize, Vec<Vec<u8>>)>,
@@ -378,12 +388,45 @@ pub(crate) fn collect(
             held.uses.clone_from(used);
         }
     }
+    // And the functions and variables declared without a definition that something emitted
+    // names, last for the same reason. The place is the first declaration's.
+    let mut referred: Vec<DeclId> =
+        rucc_lower::referred(tast, types, target, names).into_iter().collect();
+    referred.sort_unstable();
+    let mut declared: Vec<(String, Held)> = Vec::new();
+    for id in referred {
+        let decl = &tast[id];
+        let wanted = match decl.kind {
+            DeclKind::Function => true,
+            DeclKind::Object => decl.duration == StorageDuration::Static,
+            _ => false,
+        };
+        if !wanted || decl.state != Definition::Declared || decl.alias.is_some() {
+            continue;
+        }
+        let Some(symbol) = symbol(tast, names, id) else { continue };
+        if symbol.starts_with("__builtin_") || declared.iter().any(|(name, _)| *name == symbol) {
+            continue;
+        }
+        let Some(at) = sources.presumed(tast.decl_span(id).lo) else { continue };
+        let ty = walk.declared(id, decl.ty);
+        let ty = if decl.kind == DeclKind::Object { ty.map(|ty| walk.readonly(ty)) } else { ty };
+        let held = Held {
+            file: at.name.to_owned(),
+            line: at.line,
+            ty,
+            external: decl.linkage == Linkage::External,
+            tags: Vec::new(),
+            uses: Vec::new(),
+        };
+        declared.push((symbol, held));
+    }
     // A typedef name nothing above was written with gets no entry, which is what gcc does. The
     // kernel's BTF is pahole's reading of this, and a name only one compiler describes is a
     // difference in it.
     let mut type_tags: Vec<(usize, Vec<Vec<u8>>)> = walk.type_tags.into_iter().collect();
     type_tags.sort_by_key(|&(at, _)| at);
-    Meaning { types: walk.out, type_tags, funcs, objects, locals, scopes: nests.out }
+    Meaning { types: walk.out, type_tags, funcs, objects, declared, locals, scopes: nests.out }
 }
 
 /// Which `{ ... }` each local in the unit was declared in.

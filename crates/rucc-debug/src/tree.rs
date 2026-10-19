@@ -50,8 +50,8 @@ use std::collections::HashMap;
 
 use crate::line::{Error, Function, Unit, Version};
 use crate::shape::{
-    Abstract, Constant, Encoding, Global, Held, Local, Member, Place, Qualifier, Reach, Shape, Sig,
-    Spot,
+    Abstract, Constant, Declared, Encoding, Global, Held, Local, Member, Place, Qualifier, Reach,
+    Shape, Sig, Spot,
 };
 
 use gimli::write::{AttributeValue, FileId, UnitEntryId};
@@ -129,7 +129,7 @@ pub(crate) fn describe(
     files: &[FileId],
 ) -> Result<(), Error> {
     let (shapes, funcs, globals, frames) = (&unit.types, &unit.funcs, &unit.globals, unit.frames);
-    let wanted = wanted(shapes, funcs, &unit.abstracts, globals, frames);
+    let wanted = wanted(shapes, funcs, &unit.abstracts, globals, &unit.declared, frames);
     let ids = kinds(dwarf, shapes, &wanted);
     let mut tagged = Tagged::new();
     for (shape, &id) in shapes.iter().zip(&ids) {
@@ -138,6 +138,15 @@ pub(crate) fn describe(
         }
     }
     let origins = abstracted(dwarf, &unit.abstracts, files, &ids)?;
+    // The names the unit refers to and does not define, before the functions, since a call names
+    // the entry of the function it calls.
+    let mut callees: Vec<(&str, UnitEntryId)> = Vec::new();
+    for one in &unit.declared {
+        let at = declaration(dwarf, one, files, &ids, shapes)?;
+        if matches!(shapes.get(one.ty), Some(Shape::Subroutine(_))) {
+            callees.push((one.name.as_str(), at));
+        }
+    }
     let mut made: Vec<(usize, UnitEntryId)> = Vec::with_capacity(funcs.len());
     for (index, func) in funcs.iter().enumerate() {
         let Some(sig) = &func.sig else { continue };
@@ -150,8 +159,8 @@ pub(crate) fn describe(
     // And the calls, once every function has its entry, since a call names the entry of the
     // function it calls and that can be further down. Only DWARF 5 has the tags.
     if unit.version == Version::Five {
-        let mut named: HashMap<&str, UnitEntryId> =
-            made.iter().map(|&(index, at)| (funcs[index].name.as_str(), at)).collect();
+        let mut named: HashMap<&str, UnitEntryId> = callees.into_iter().collect();
+        named.extend(made.iter().map(|&(index, at)| (funcs[index].name.as_str(), at)));
         for &(index, at) in &made {
             sites(dwarf, &funcs[index], at, index, &mut named)?;
         }
@@ -187,6 +196,7 @@ fn wanted(
     funcs: &[Function],
     abstracts: &[Abstract],
     globals: &[Global],
+    declared: &[Declared],
     frames: bool,
 ) -> Vec<bool> {
     let mut wanted = vec![false; shapes.len()];
@@ -214,6 +224,14 @@ fn wanted(
     }
     work.extend(globals.iter().filter_map(|global| global.ty));
     work.extend(globals.iter().flat_map(|global| &global.uses));
+    // A function's own type is not one of them, since its entry says what the type would and no
+    // entry names the type. What it takes and returns are.
+    for one in declared {
+        match shapes.get(one.ty) {
+            Some(Shape::Subroutine(sig)) => signature(sig, &mut work),
+            _ => work.push(one.ty),
+        }
+    }
     while let Some(at) = work.pop() {
         let Some(shape) = shapes.get(at) else { continue };
         if std::mem::replace(&mut wanted[at], true) {
@@ -904,6 +922,40 @@ fn held_at(
     Ok(at)
 }
 
+/// The entry for one name the unit refers to and another unit defines, which says what it is and
+/// that it is only declared here.
+///
+/// A function is a subprogram with a child for each parameter that says its type and nothing else,
+/// and a variable is a variable with a type and no location, both as gcc writes them.
+fn declaration(
+    dwarf: &mut gimli::write::DwarfUnit,
+    one: &Declared,
+    files: &[FileId],
+    ids: &[Option<UnitEntryId>],
+    shapes: &[Shape],
+) -> Result<UnitEntryId, Error> {
+    let root = dwarf.unit.root();
+    let sig = match shapes.get(one.ty) {
+        Some(Shape::Subroutine(sig)) => Some(sig),
+        _ => None,
+    };
+    let tag = if sig.is_some() { gimli::DW_TAG_subprogram } else { gimli::DW_TAG_variable };
+    let at = dwarf.unit.add(root, tag);
+    if one.external {
+        flag(dwarf, at, gimli::DW_AT_external);
+    }
+    title(dwarf, at, &one.name);
+    came_from(dwarf, at, &one.name, one.decl, files)?;
+    match sig {
+        Some(sig) => {
+            takes(dwarf, at, sig, ids, None, false)?;
+        }
+        None => points(dwarf, at, Some(one.ty), ids)?,
+    }
+    flag(dwarf, at, gimli::DW_AT_declaration);
+    Ok(at)
+}
+
 /// `DW_AT_decl_file` and `DW_AT_decl_line`, for whatever knows where it was written.
 ///
 /// # Errors
@@ -1151,6 +1203,7 @@ mod tests {
             }],
             abstracts: Vec::new(),
             globals: Vec::new(),
+            declared: Vec::new(),
             pointer: 8,
             frames: true,
             mach_o: false,
@@ -1275,6 +1328,28 @@ mod tests {
             ".debug_abbrev",
             &pair(gimli::DW_AT_call_value, gimli::DW_FORM_exprloc)
         ));
+    }
+
+    /// A function another unit defines that the unit refers to gets its declaration in DWARF 4
+    /// too, where there is no call to name it, with what it takes and returns.
+    #[test]
+    fn a_name_another_unit_defines_is_declared_in_either_version() {
+        let mut unit = calling("g");
+        unit.version = Version::Four;
+        let sig = Sig { returns: Some(0), params: Vec::new(), variadic: true, prototyped: true };
+        unit.types.push(Shape::Subroutine(sig));
+        unit.declared = vec![Declared {
+            name: "g".to_owned(),
+            ty: 1,
+            decl: Some(Place { file: 0, line: 1 }),
+            external: true,
+        }];
+        let info = write(&unit).expect("sections");
+        assert!(named(&info).contains(&"g".to_owned()), "no declaration of g");
+        let abbrev = ".debug_abbrev";
+        assert!(holds(&info, abbrev, &pair(gimli::DW_AT_declaration, gimli::DW_FORM_flag_present)));
+        let unspecified = gimli::DW_TAG_unspecified_parameters.0;
+        assert!(holds(&info, abbrev, &[u8::try_from(unspecified).expect("one byte"), 0]));
     }
 
     /// Whether a section holds these bytes, in this order, somewhere in it.

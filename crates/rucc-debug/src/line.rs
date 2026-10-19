@@ -52,7 +52,7 @@
 //! order the source did not have. One per function costs a `DW_LNE_set_address` and a relocation
 //! each and is correct under every combination of flags there is.
 
-use crate::shape::{Abstract, Call, Global, Inlined, Local, Place, Scope, Shape, Sig};
+use crate::shape::{Abstract, Call, Declared, Global, Inlined, Local, Place, Scope, Shape, Sig};
 use crate::tree;
 
 use rucc_object::{Chunk, Info, Reference, Reloc};
@@ -95,6 +95,9 @@ pub struct Unit {
     /// linker resolves, so an entry for it here would be an entry whose address is somebody
     /// else's, and a reader wanting the type of one reads the unit that has it.
     pub globals: Vec<Global>,
+    /// The functions and variables this unit refers to and another one defines, which get an
+    /// entry that says what they are and not where. See [`Declared`].
+    pub declared: Vec<Declared>,
     /// How many bytes an address is on this target.
     pub pointer: u8,
     /// Whether this build writes a call frame table, which is what a frame base is resolved
@@ -501,6 +504,7 @@ mod tests {
             }],
             abstracts: Vec::new(),
             globals: Vec::new(),
+            declared: Vec::new(),
             pointer: 8,
             frames: true,
             mach_o: false,

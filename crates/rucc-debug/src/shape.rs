@@ -266,6 +266,27 @@ pub struct Global {
     pub uses: Vec<usize>,
 }
 
+/// A function or a variable the unit refers to and another unit defines.
+///
+/// gcc writes an entry for every such name the code or the data refers to, which says what the
+/// name is and that it is only declared here, and a call site names it as the function called.
+/// What it is matters past the debugger: pahole writes every type the DWARF reaches into the
+/// kernel's BTF, and the types of the functions a unit calls and the variables it reads are among
+/// them. A name nothing emitted refers to gets no entry, and neither do its types.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Declared {
+    /// Its name, as the C program spelled it, which is the name the relocation asks for.
+    pub name: String,
+    /// Which of the unit's [`types`](crate::Unit::types) it is. A function type is a function,
+    /// whose entry is a subprogram with the parameters as children, as gcc writes it, and anything
+    /// else is a variable.
+    pub ty: usize,
+    /// Where it was first declared, and nothing when that is not known.
+    pub decl: Option<Place>,
+    /// Whether anything outside this unit can see it, which is the opposite of `static`.
+    pub external: bool,
+}
+
 /// One local the program declared.
 ///
 /// A parameter is not here even when it has a place. It is already a child of the subprogram, from
