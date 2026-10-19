@@ -49,7 +49,7 @@ use rucc_sema::{
     InitList, Linkage, Stmt, StmtId, StrId, Tast,
 };
 use rucc_target::TargetInfo;
-use rucc_types::Types;
+use rucc_types::{Qualifiers, Types};
 
 /// The declarations something in the file reaches, given the file.
 ///
@@ -78,6 +78,7 @@ fn walk(decide: Decide<'_>, pruned: bool) -> (Set<DeclId>, Set<DeclId>) {
         seen: Set::default(),
         named: Set::default(),
         work: Vec::new(),
+        valued: Set::default(),
     };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
@@ -217,6 +218,9 @@ struct Reach<'a> {
     /// What an expression in something reached names, which is what a use is.
     named: Set<DeclId>,
     work: Vec<DeclId>,
+    /// The statements a statement expression is worth the value of, which are not thrown away
+    /// for doing nothing because what they work out is the answer.
+    valued: Set<StmtId>,
 }
 
 impl Reach<'_> {
@@ -267,6 +271,13 @@ impl Reach<'_> {
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Return(None) => {}
+            // gcc throws away a statement that does nothing while it builds the body, before it
+            // asks what the body names, so `(void)var` is no reference to `var`. That is how the
+            // kernel's `lockdep_assert_in_rcu_read_lock()` reads `RCU`, an `extern` pointer to a
+            // structure that exists for the lock checker, and how `__ctx_lock_RCU` got into
+            // rucc's BTF and not gcc's.
+            Stmt::Expr(value) if self.pruned && !self.valued.contains(&id) && self.inert(value) => {
+            }
             Stmt::Expr(value) | Stmt::IndirectGoto(value) | Stmt::Return(Some(value)) => {
                 self.expr(value);
             }
@@ -380,7 +391,21 @@ impl Reach<'_> {
                 self.named.insert(decl);
                 self.mark(decl);
             }
-            ExprKind::StmtExpr(body) => self.stmt(body),
+            ExprKind::StmtExpr(body) => {
+                if let Stmt::Block(list) = self.tast[body] {
+                    let mut last = self.tast[list].last().copied();
+                    while let Some(stmt) = last {
+                        self.valued.insert(stmt);
+                        last = match self.tast[stmt] {
+                            Stmt::Case { body, .. }
+                            | Stmt::Default { body }
+                            | Stmt::Label { body, .. } => Some(body),
+                            _ => None,
+                        };
+                    }
+                }
+                self.stmt(body);
+            }
             // The right side of a chain its left side already ended is not lowered either.
             ExprKind::Binary { op: op @ (BinaryOp::LogAnd | BinaryOp::LogOr), lhs, rhs } => {
                 self.expr(lhs);
@@ -495,6 +520,37 @@ impl Reach<'_> {
             | Stmt::DoWhile { body, .. }
             | Stmt::For { body, .. }
             | Stmt::Switch { body, .. } => self.labelled(body),
+            _ => false,
+        }
+    }
+
+    /// Whether working out an expression does nothing but work it out, which for a statement is
+    /// what gcc throws away. No call, no store and no `volatile` read, and anything this does not
+    /// know is taken to do something, which only costs a declaration gcc would not have written.
+    fn inert(&self, id: ExprId) -> bool {
+        let types = self.decide.types;
+        if types.quals(types.canonical(self.tast[id].ty)).has(Qualifiers::VOLATILE) {
+            return false;
+        }
+        match self.tast[id].kind {
+            ExprKind::Const(_) | ExprKind::Str(_) | ExprKind::Decl(_) | ExprKind::LabelAddr(_) => {
+                true
+            }
+            ExprKind::Member { base, .. }
+            | ExprKind::Cast(base)
+            | ExprKind::Convert { operand: base, .. } => self.inert(base),
+            ExprKind::Unary { op, operand } => {
+                !matches!(
+                    op,
+                    UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec
+                ) && self.inert(operand)
+            }
+            ExprKind::Subscript { base: lhs, index: rhs }
+            | ExprKind::Binary { lhs, rhs, .. }
+            | ExprKind::Comma { lhs, rhs } => self.inert(lhs) && self.inert(rhs),
+            ExprKind::Cond { cond, then, otherwise } => {
+                self.inert(cond) && self.inert(then) && self.inert(otherwise)
+            }
             _ => false,
         }
     }
