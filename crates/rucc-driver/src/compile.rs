@@ -2256,6 +2256,7 @@ fn describe(
             tags: known.map(|known| known.tags.clone()).unwrap_or_default(),
             inlined,
             calls,
+            uses: known.map(|known| known.uses.clone()).unwrap_or_default(),
         });
     }
     // And the file-scope variables, from the objects the back end laid out rather than from the
@@ -2276,6 +2277,7 @@ fn describe(
             }),
             external: held.external,
             tags: held.tags.clone(),
+            uses: held.uses.clone(),
         });
     }
     let unit = rucc_debug::Unit {
@@ -2496,6 +2498,7 @@ fn describe_wasm(
             tags: known.map(|known| known.tags.clone()).unwrap_or_default(),
             inlined,
             calls: Vec::new(),
+            uses: known.map(|known| known.uses.clone()).unwrap_or_default(),
         });
     }
     let mut globals = Vec::new();
@@ -2513,6 +2516,7 @@ fn describe_wasm(
             }),
             external: held.external,
             tags: held.tags.clone(),
+            uses: held.uses.clone(),
         });
     }
     let unit = rucc_debug::Unit {
@@ -2900,6 +2904,7 @@ impl<'a> Copying<'a> {
                 }),
                 sig,
                 external: known.external,
+                uses: known.uses.clone(),
             });
             Some(self.abstracts.len() - 1)
         });

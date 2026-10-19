@@ -65,7 +65,7 @@ use crate::decl::{
 use crate::eval::{Eval, NotConstant};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::{Binding, Scopes};
-use crate::tast::{Const, Tast};
+use crate::tast::{Const, Tast, Used};
 
 mod advice;
 mod aggregate_return;
@@ -338,6 +338,9 @@ pub struct Checker<'a> {
     /// What a call in the body may inline depends on the extensions the function is built for,
     /// which a `target` attribute on it decides, and that is kept against the declaration.
     pub(in crate::check) defining: Option<DeclId>,
+    /// The types used outside any function since the last variable was declared, which the next
+    /// one to be declared takes. See [`Tast::record_use`].
+    pub(in crate::check) pending_uses: Vec<Used>,
     /// The attribute lists `__builtin_has_attribute` and `__builtin_counted_by_ref` read, which
     /// is in `check/annotate.rs` with both of them.
     pub(in crate::check) annotations: annotate::Annotations,
@@ -418,6 +421,7 @@ impl<'a> Checker<'a> {
             refused_sizes: 0,
             calling: None,
             defining: None,
+            pending_uses: Vec::new(),
             annotations: annotate::Annotations::default(),
             advice: advice::Advice::default(),
             unevaluated: 0,
@@ -610,6 +614,43 @@ impl<'a> Checker<'a> {
             },
             span,
         )
+    }
+
+    /// A type the code being checked uses, for the function it is in or, outside one, for the
+    /// next variable to be declared.
+    pub(in crate::check) fn use_type(&mut self, used: Used) {
+        match self.defining {
+            Some(function) => self.tast.record_use(function, used),
+            None => self.pending_uses.push(used),
+        }
+    }
+
+    /// The type a cast or a compound literal names, as a use.
+    ///
+    /// What gcc keeps is the type with the pointers and arrays the declarator wrote taken off, so
+    /// `(struct page *)p` keeps `struct page`. A typedef name stops that where it is reached, so
+    /// `(pte_t *)p` keeps `pte_t` and through it what it stands for. A function type with no name
+    /// is left alone, since gcc has no entry for one to keep.
+    pub(in crate::check) fn use_type_name(&mut self, name: rucc_ast::TypeNameId, ty: TypeId) {
+        let spelled = self.spelled_with(self.ast[name].specs);
+        let mut at = ty;
+        loop {
+            if let Some((name, of)) = spelled {
+                if self.types.unqualified(at) == self.types.unqualified(of) {
+                    self.use_type(Used::Spelled(name, of));
+                    return;
+                }
+            }
+            match self.types.kind(at) {
+                TypeKind::Pointer(inner) => at = inner,
+                TypeKind::Array { elem, .. } => at = elem,
+                _ => break,
+            }
+        }
+        let at = self.types.unqualified(at);
+        if !matches!(self.types.kind(at), TypeKind::Function(_) | TypeKind::Void) {
+            self.use_type(Used::Type(at));
+        }
     }
 
     /// The conversions, over this tree and these types.

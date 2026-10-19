@@ -59,7 +59,7 @@ use crate::decl::{
 use crate::eval;
 use crate::expr::ExprKind;
 use crate::scope::Binding;
-use crate::tast::{AllocSize, StrId};
+use crate::tast::{AllocSize, StrId, Used};
 
 /// What the layout engine takes from an attribute list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -3437,10 +3437,17 @@ impl Checker<'_> {
     ///
     /// The parser keeps a lone identifier as one rather than as an expression, since most of the
     /// attributes that take one name a thing outside the ordinary scope. The ones that take a
-    /// number take an enumerator as well, and gcc finds it the way an expression would.
-    pub(in crate::check) fn enumerator(&self, name: Symbol) -> Option<i128> {
+    /// number take an enumerator as well, and gcc finds it the way an expression would, which
+    /// makes it a use of the enumeration as well.
+    pub(in crate::check) fn enumerator(&mut self, name: Symbol) -> Option<i128> {
         match self.scopes.lookup(name)? {
-            Binding::Enumerator { value, .. } => Some(value),
+            Binding::Enumerator { value, enumeration, .. } => {
+                if let Some(enumeration) = enumeration {
+                    let enumeration = self.types.enumeration(enumeration);
+                    self.use_type(Used::Type(enumeration));
+                }
+                Some(value)
+            }
             Binding::Decl(_) | Binding::Typedef(_) => None,
         }
     }

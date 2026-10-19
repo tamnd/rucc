@@ -72,7 +72,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_debug::{Bits, Constant, Encoding, Member, Param, Qualifier, Shape, Sig};
 use rucc_diag::{SourceMap, Span};
-use rucc_sema::{DeclId, DeclKind, Linkage, Stmt, StmtId, StorageDuration, Tast};
+use rucc_sema::{DeclId, DeclKind, Linkage, Stmt, StmtId, StorageDuration, Tast, Used};
 use rucc_target::TargetInfo;
 use rucc_types::{
     ArrayLen, FunctionId, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type, TypeId,
@@ -174,6 +174,9 @@ pub(crate) struct Known {
     /// The source bytes of its body, brace to brace, which is what a copy of the body the inliner
     /// made says it is a copy of.
     pub body: Span,
+    /// The entries in [`Meaning::types`] it uses without its signature naming them, which gcc
+    /// describes wherever it describes the function. See `rucc_sema::Tast::record_use`.
+    pub uses: Vec<usize>,
 }
 
 /// What is known about one local the program declared.
@@ -216,6 +219,9 @@ pub(crate) struct Held {
     /// The strings of its `btf_decl_tag`s, over all its declarations, in the order gcc chains
     /// them.
     pub tags: Vec<Vec<u8>>,
+    /// The entries in [`Meaning::types`] that were used outside any function just before it was
+    /// declared, which gcc describes wherever it describes the variable.
+    pub uses: Vec<usize>,
 }
 
 /// The types, the signatures and the file-scope variables of everything this unit defines.
@@ -269,6 +275,7 @@ pub(crate) fn collect(
     }
     let mut funcs = Map::default();
     let mut objects = Map::default();
+    let mut owners = Vec::new();
     for &id in tast.top_level() {
         let decl = &tast[id];
         let Some(at) = sources.presumed(tast.decl_span(id).lo) else { continue };
@@ -287,7 +294,9 @@ pub(crate) fn collect(
                     external,
                     tags: tast.btf_decl_tags(id).to_vec(),
                     body: decl.body.map_or(Span::DUMMY, |body| tast.stmt_span(body)),
+                    uses: Vec::new(),
                 };
+                owners.push((id, symbol.clone()));
                 funcs.insert(symbol, known);
             }
             // A file-scope object, whether or not it has an initializer, because a `static` one
@@ -303,7 +312,9 @@ pub(crate) fn collect(
                     ty: walk.declared(id, decl.ty).map(|ty| walk.readonly(ty)),
                     external,
                     tags: tast.btf_decl_tags(id).to_vec(),
+                    uses: Vec::new(),
                 };
+                owners.push((id, symbol.clone()));
                 objects.insert(symbol, held);
             }
             _ => {}
@@ -345,6 +356,27 @@ pub(crate) fn collect(
         let tags = tast.btf_decl_tags(id).to_vec();
         let file = at.name.to_owned();
         locals.insert(raw, Named { name, file, line: at.line, ty, scope, tags });
+    }
+    // And what each function and variable uses besides, last so that the entries above keep the
+    // places they had before anything here was asked for.
+    let mut uses: Map<DeclId, Vec<usize>> = Map::default();
+    for &(owner, used) in tast.uses() {
+        let at = match used {
+            Used::Type(ty) => walk.told(ty),
+            Used::Spelled(name, of) => walk.alias(name, of),
+            Used::Decl(id) => walk.declared(id, tast[id].ty),
+        };
+        uses.entry(owner).or_default().extend(at);
+    }
+    for (id, symbol) in owners {
+        let Some(used) = uses.get_mut(&id) else { continue };
+        used.sort_unstable();
+        used.dedup();
+        if let Some(known) = funcs.get_mut(&symbol) {
+            known.uses.clone_from(used);
+        } else if let Some(held) = objects.get_mut(&symbol) {
+            held.uses.clone_from(used);
+        }
     }
     // A typedef name nothing above was written with gets no entry, which is what gcc does. The
     // kernel's BTF is pahole's reading of this, and a name only one compiler describes is a

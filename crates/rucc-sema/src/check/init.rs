@@ -336,7 +336,9 @@ impl<'a> Checker<'a> {
         init: ast::InitId,
         span: Span,
     ) -> ExprId {
+        let name = ty;
         let ty = self.type_name(ty);
+        self.use_type_name(name, ty);
         if is_function(&self.types, ty) {
             self.report(
                 Diagnostic::error("compound literal has function type", span).with_code("E0648"),

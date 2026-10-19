@@ -20,7 +20,7 @@
 //! the object file eventually refers to.
 
 use rucc_base::{ScopeMap, Symbol};
-use rucc_types::TypeId;
+use rucc_types::{EnumId, TypeId};
 
 use crate::decl::DeclId;
 
@@ -41,6 +41,11 @@ pub enum Binding {
         value: i128,
         /// The type the constant has, which is the enumeration in C23 and `int` before it.
         ty: TypeId,
+        /// The enumeration it belongs to, and nothing while its own list is still being read.
+        ///
+        /// Kept apart from `ty` because `ty` is `int` for most enumerators, and gcc's debug
+        /// information keeps the enumeration of every enumerator a function names.
+        enumeration: Option<EnumId>,
     },
 }
 

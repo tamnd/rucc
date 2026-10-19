@@ -951,7 +951,8 @@ impl Checker<'_> {
                 None if value >= int_low && value <= int_high => int,
                 None => underlying,
             };
-            self.scopes.declare(name, Binding::Enumerator { value, ty });
+            let enumeration = Some(id);
+            self.scopes.declare(name, Binding::Enumerator { value, ty, enumeration });
             self.read_deprecated_enumerator(name, value, ty, enumerator.attrs, span);
             self.read_unused_enumerator(id, name, enumerator.attrs);
         }
@@ -1075,7 +1076,7 @@ impl Checker<'_> {
             };
             self.report(Diagnostic::error(message, span).with_code("E0563"));
         }
-        self.scopes.declare(name, Binding::Enumerator { value, ty });
+        self.scopes.declare(name, Binding::Enumerator { value, ty, enumeration: None });
     }
 
     /// The type the enumerators are represented in, where the program did not say.
@@ -1332,7 +1333,7 @@ mod tests {
 
     /// The value and the type an enumerator was declared with.
     fn enumerator_binding(checker: &Checker<'_>, name: Symbol) -> (i128, String) {
-        let Some(Binding::Enumerator { value, ty }) = checker.scopes.lookup(name) else {
+        let Some(Binding::Enumerator { value, ty, .. }) = checker.scopes.lookup(name) else {
             panic!("an enumerator in scope");
         };
         (value, spelled(checker, ty))

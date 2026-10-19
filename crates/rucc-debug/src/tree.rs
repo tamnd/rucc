@@ -198,6 +198,7 @@ fn wanted(
     for func in funcs {
         let Some(sig) = &func.sig else { continue };
         signature(sig, &mut work);
+        work.extend(&func.uses);
         let frames = frames || func.frame_local.is_some();
         let said = func.locals.iter().filter(|local| sayable(&local.spot, frames));
         work.extend(said.filter_map(|local| local.ty));
@@ -209,8 +210,10 @@ fn wanted(
     }
     for one in abstracts {
         signature(&one.sig, &mut work);
+        work.extend(&one.uses);
     }
     work.extend(globals.iter().filter_map(|global| global.ty));
+    work.extend(globals.iter().flat_map(|global| &global.uses));
     while let Some(at) = work.pop() {
         let Some(shape) = shapes.get(at) else { continue };
         if std::mem::replace(&mut wanted[at], true) {
@@ -1144,6 +1147,7 @@ mod tests {
                 tags: Vec::new(),
                 inlined: Vec::new(),
                 calls: Vec::new(),
+                uses: Vec::new(),
             }],
             abstracts: Vec::new(),
             globals: Vec::new(),
@@ -1727,6 +1731,7 @@ mod tests {
             decl: Some(Place { file: 0, line: 1 }),
             external: true,
             tags: Vec::new(),
+            uses: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
@@ -1912,6 +1917,7 @@ mod tests {
             decl: Some(Place { file: 0, line: 1 }),
             sig,
             external: false,
+            uses: Vec::new(),
         }];
         let copy = |parent, line, over| Inlined {
             of: 0,

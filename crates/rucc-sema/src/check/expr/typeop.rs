@@ -156,6 +156,7 @@ impl Checker<'_> {
         // The type first, so that a mistake in it is reported even where the operand has one
         // too. The two are independent and a program with both wants to hear about both.
         let target = self.type_name(ty);
+        self.use_type_name(ty, target);
         let operand = self.expr(operand);
         let operand = self.value(operand);
         if self.is_poisoned(operand) {

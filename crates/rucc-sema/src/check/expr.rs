@@ -48,7 +48,7 @@ use crate::decl::{
 use crate::eval;
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::scope::Binding;
-use crate::tast::Const;
+use crate::tast::{Const, Used};
 
 mod typeop;
 
@@ -178,7 +178,11 @@ impl Checker<'_> {
             // An enumerator is a constant. The declaration it came from is not in the tree and
             // does not need to be: what the program can do with it is exactly what it can do
             // with the number, and every reader of the tree would otherwise have to look it up.
-            Some(Binding::Enumerator { value, ty }) => {
+            Some(Binding::Enumerator { value, ty, enumeration }) => {
+                if let Some(enumeration) = enumeration {
+                    let enumeration = self.types.enumeration(enumeration);
+                    self.use_type(Used::Type(enumeration));
+                }
                 self.heed_deprecated_enumerator(name, value, ty, span);
                 self.constant(Const::Int(value), ty, span)
             }
@@ -2927,7 +2931,7 @@ mod tests {
 
         let mut c = f.checker();
         let int = c.types.int(IntKind::Int);
-        c.scopes.declare(red, Binding::Enumerator { value: 3, ty: int });
+        c.scopes.declare(red, Binding::Enumerator { value: 3, ty: int, enumeration: None });
         let id = c.check_expr(use_red);
 
         assert_eq!(dump(&c, id), "const 3 : int\n");

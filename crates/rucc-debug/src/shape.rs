@@ -261,6 +261,9 @@ pub struct Global {
     /// The strings of the `btf_decl_tag`s on its declarations, the last written first, which is the order gcc
     /// chains them in.
     pub tags: Vec<Vec<u8>>,
+    /// The unit's [`types`](crate::Unit::types) used outside any function just before it was
+    /// declared, each described because it is, as gcc does.
+    pub uses: Vec<usize>,
 }
 
 /// One local the program declared.
@@ -328,6 +331,10 @@ pub struct Abstract {
     pub sig: Sig,
     /// Whether anything outside this unit can see it, which is the opposite of `static`.
     pub external: bool,
+    /// The unit's [`types`](crate::Unit::types) its body uses, as [`Function::uses`] has them.
+    ///
+    /// [`Function::uses`]: crate::Function::uses
+    pub uses: Vec<usize>,
 }
 
 /// One body the inliner copied into a function, which is a `DW_TAG_inlined_subroutine`.
