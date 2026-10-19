@@ -253,6 +253,7 @@ pub struct Tast {
     vlas: Vec<ExprId>,
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
+    defined: Map<DeclId, Option<(Symbol, TypeId)>>,
     prototypes: Map<DeclId, Vec<Prototype>>,
     targets: Vec<(DeclId, Isa)>,
     versions: Vec<(DeclId, Vec<Version>)>,
@@ -481,6 +482,23 @@ impl Tast {
     /// and the first is the one that counts.
     pub fn record_spelling(&mut self, decl: DeclId, name: Symbol, of: TypeId) {
         self.spellings.push((decl, name, of));
+    }
+
+    /// Records the typedef name a function's definition wrote its return type with, or that it
+    /// wrote none.
+    ///
+    /// gcc describes a function as its definition writes it, so `u32 f(int);` followed by
+    /// `unsigned int f(int b) { ... }` returns `unsigned int` in the debug information, and the
+    /// definition counts over whatever a declaration above it said.
+    pub fn record_defined_spelling(&mut self, decl: DeclId, spelled: Option<(Symbol, TypeId)>) {
+        self.defined.insert(decl, spelled);
+    }
+
+    /// The return type's typedef name for each function with a definition, which wins over
+    /// [`Tast::spellings`].
+    #[must_use]
+    pub fn defined_spellings(&self) -> &Map<DeclId, Option<(Symbol, TypeId)>> {
+        &self.defined
     }
 
     /// Every declaration that named its type with a typedef, the name it used and the type the

@@ -433,9 +433,12 @@ impl Checker<'_> {
             self.report(Diagnostic::error(what, span).with_code("E0821").note(note, span));
         }
         // The return type's name, kept for the debug information the way an object's is below.
+        // This one is the definition's, which is what the function is described as even when a
+        // prototype above it spelled the type another way.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
         }
+        self.tast.record_defined_spelling(id, spelled);
         // The specifiers only, for the reason `noreturn` above reads them only. This is where a
         // program picking its fastest path at run time writes it, on the definition of the path.
         // A cloned function is built once for each version, and its `target` attribute, which

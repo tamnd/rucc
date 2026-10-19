@@ -255,6 +255,13 @@ pub(crate) fn collect(
     for &(decl, name, of) in tast.spellings() {
         walk.spellings.entry(decl).or_insert((name, of));
     }
+    // Apart from a function's return type, which is the definition's however it was declared.
+    for (&decl, &spelled) in tast.defined_spellings() {
+        match spelled {
+            Some(spelled) => walk.spellings.insert(decl, spelled),
+            None => walk.spellings.remove(&decl),
+        };
+    }
     for alias in types.aliases() {
         if let Some(over) = alias.spelled {
             walk.chained.entry(alias.name).or_insert(over);
