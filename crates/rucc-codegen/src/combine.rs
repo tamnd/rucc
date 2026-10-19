@@ -1073,7 +1073,36 @@ struct Waiting {
 /// allocator because what makes the pair safe to put together is that a virtual register is written
 /// once, and after the addresses because a load whose address is still a `lea` in front of it has
 /// nothing in its own memory operand worth carrying.
+///
+/// The walk is made again while the one before it folded something, up to [`WALKS`] times. A
+/// load that took the place of another can be the last access in front of arithmetic that it was
+/// not before. A sixty four bit comparison on i386 reads both halves of each side and then compares
+/// the low halves and the high halves, so only the high half of the second side is the last access
+/// in front of its arithmetic. Once it has gone in, the low half is in front of its own, and the
+/// second walk takes that too, where before it was left in a register of its own at the point the
+/// comparison needs the most of them.
 pub fn loads(
+    func: &mut Func,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    pending: &mut Pending<'_>,
+) -> usize {
+    let mut done = 0;
+    for _ in 0..WALKS {
+        let folded = walk(func, machine, names, pending);
+        done += folded;
+        if folded == 0 {
+            break;
+        }
+    }
+    done
+}
+
+/// How many times [`loads`] walks a function at most.
+const WALKS: usize = 4;
+
+/// One walk of [`loads`].
+fn walk(
     func: &mut Func,
     machine: &MachineInsts,
     names: &mut Interner,
