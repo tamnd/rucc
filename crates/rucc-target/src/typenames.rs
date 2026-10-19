@@ -21,7 +21,7 @@ use rucc_tuple::Arch;
 pub enum Lane {
     /// `signed char`.
     I8,
-    /// `unsigned char`, which is also the lane of a polynomial of eight bits.
+    /// `unsigned char`.
     U8,
     /// `short`.
     I16,
@@ -41,6 +41,28 @@ pub enum Lane {
     F32,
     /// `double`.
     F64,
+    /// A polynomial of eight bits, which C reads as an `unsigned char`.
+    P8,
+    /// A polynomial of sixteen bits, read as an `unsigned short`.
+    P16,
+    /// A polynomial of sixty four bits, read as an `unsigned long`.
+    P64,
+}
+
+impl Lane {
+    /// The name gcc's debug information gives the lane where it is not the C type the lane is
+    /// read as: the polynomials are base types of their own there, and a half precision lane is
+    /// `__fp16` rather than `_Float16`.
+    #[must_use]
+    pub fn debug_name(self) -> Option<&'static str> {
+        match self {
+            Lane::P8 => Some("__Poly8_t"),
+            Lane::P16 => Some("__Poly16_t"),
+            Lane::P64 => Some("__Poly64_t"),
+            Lane::F16 => Some("__fp16"),
+            _ => None,
+        }
+    }
 }
 
 /// The type one of the names is.
@@ -54,11 +76,15 @@ pub enum TypeName {
     Sizeless,
     /// `_Float128`, under the name gcc had for it before the ISO one.
     Float128,
+    /// A polynomial scalar of this many bits, which C reads as the unsigned integer of the same
+    /// size and gcc's debug information describes as a base type of its own.
+    Poly(u8),
 }
 
 /// The Advanced SIMD vectors under the names gcc gives them in `aarch64-simd-builtin-types.def`,
-/// which `arm_neon.h` builds `float32x4_t` and the rest out of, and then SVE's. The `__Bfloat16`
-/// ones are left out until `__bf16` is a type here.
+/// which `arm_neon.h` builds `float32x4_t` and the rest out of, and then SVE's, and then the
+/// polynomial scalars `poly8_t` and the rest are built out of. The `__Bfloat16` ones are left out
+/// until `__bf16` is a type here.
 const AARCH64: &[(&str, TypeName)] = &[
     ("__Int8x8_t", TypeName::Vector(Lane::I8, 8)),
     ("__Int16x4_t", TypeName::Vector(Lane::I16, 4)),
@@ -68,9 +94,9 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__Uint16x4_t", TypeName::Vector(Lane::U16, 4)),
     ("__Uint32x2_t", TypeName::Vector(Lane::U32, 2)),
     ("__Uint64x1_t", TypeName::Vector(Lane::U64, 1)),
-    ("__Poly8x8_t", TypeName::Vector(Lane::U8, 8)),
-    ("__Poly16x4_t", TypeName::Vector(Lane::U16, 4)),
-    ("__Poly64x1_t", TypeName::Vector(Lane::U64, 1)),
+    ("__Poly8x8_t", TypeName::Vector(Lane::P8, 8)),
+    ("__Poly16x4_t", TypeName::Vector(Lane::P16, 4)),
+    ("__Poly64x1_t", TypeName::Vector(Lane::P64, 1)),
     ("__Float16x4_t", TypeName::Vector(Lane::F16, 4)),
     ("__Float32x2_t", TypeName::Vector(Lane::F32, 2)),
     ("__Float64x1_t", TypeName::Vector(Lane::F64, 1)),
@@ -82,9 +108,9 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__Uint16x8_t", TypeName::Vector(Lane::U16, 8)),
     ("__Uint32x4_t", TypeName::Vector(Lane::U32, 4)),
     ("__Uint64x2_t", TypeName::Vector(Lane::U64, 2)),
-    ("__Poly8x16_t", TypeName::Vector(Lane::U8, 16)),
-    ("__Poly16x8_t", TypeName::Vector(Lane::U16, 8)),
-    ("__Poly64x2_t", TypeName::Vector(Lane::U64, 2)),
+    ("__Poly8x16_t", TypeName::Vector(Lane::P8, 16)),
+    ("__Poly16x8_t", TypeName::Vector(Lane::P16, 8)),
+    ("__Poly64x2_t", TypeName::Vector(Lane::P64, 2)),
     ("__Float16x8_t", TypeName::Vector(Lane::F16, 8)),
     ("__Float32x4_t", TypeName::Vector(Lane::F32, 4)),
     ("__Float64x2_t", TypeName::Vector(Lane::F64, 2)),
@@ -100,6 +126,10 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__SVFloat32_t", TypeName::Sizeless),
     ("__SVFloat64_t", TypeName::Sizeless),
     ("__SVBool_t", TypeName::Sizeless),
+    ("__Poly8_t", TypeName::Poly(8)),
+    ("__Poly16_t", TypeName::Poly(16)),
+    ("__Poly64_t", TypeName::Poly(64)),
+    ("__Poly128_t", TypeName::Poly(128)),
 ];
 
 /// The name x86, PowerPC and wasm32 have for quad precision.
@@ -122,10 +152,10 @@ mod tests {
     #[test]
     fn every_vector_is_one_of_the_two_widths_the_registers_have() {
         let width = |lane: Lane| match lane {
-            Lane::I8 | Lane::U8 => 1,
-            Lane::I16 | Lane::U16 | Lane::F16 => 2,
+            Lane::I8 | Lane::U8 | Lane::P8 => 1,
+            Lane::I16 | Lane::U16 | Lane::F16 | Lane::P16 => 2,
             Lane::I32 | Lane::U32 | Lane::F32 => 4,
-            Lane::I64 | Lane::U64 | Lane::F64 => 8,
+            Lane::I64 | Lane::U64 | Lane::F64 | Lane::P64 => 8,
         };
         for &(name, ty) in AARCH64 {
             if let TypeName::Vector(lane, lanes) = ty {

@@ -595,6 +595,36 @@ uint8x16_t m[4];
     assert_eq!(under(rows).name.as_deref(), Some("uint8x16_t"));
 }
 
+/// A polynomial is a base type of its own, as gcc has it: `poly8_t` is a typedef over a base type
+/// called `__Poly8_t`, and that is the lane of `__Poly8x16_t` too. A unit that includes
+/// `arm_neon.h` describes the scalars the Advanced SIMD types are built from whether or not it uses
+/// them, which gcc does and so the kernel's BTF has, and a unit that does not include it has none.
+#[test]
+fn a_polynomial_is_a_base_type_of_its_own_and_arm_neon_describes_every_one() {
+    let source = "\
+#include <arm_neon.h>
+poly8_t c;
+poly8x16_t e;
+";
+    let all = entries(&build("poly", source));
+    let typed = |name: &str| {
+        let entry = named(&all, DW_TAG_VARIABLE, name).expect("the variable is described");
+        at(&all, entry.ty.expect("the variable has a type"))
+    };
+    let under = |entry: &Entry| at(&all, entry.ty.expect("the entry has a type"));
+    let poly8 = under(typed("c"));
+    assert_eq!((poly8.tag, poly8.name.as_deref()), (DW_TAG_BASE, Some("__Poly8_t")));
+    let vector = under(typed("e"));
+    assert_eq!(vector.name.as_deref(), Some("__Poly8x16_t"));
+    assert_eq!(under(vector).at, poly8.at, "the lane is the scalar's entry");
+    for name in ["__Poly8_t", "__Poly16_t", "__Poly64_t", "__Poly128_t", "__fp16", "__bf16"] {
+        let count = all.iter().filter(|entry| entry.name.as_deref() == Some(name)).count();
+        assert_eq!(count, 1, "{name} is described once");
+    }
+    let plain = entries(&build("unpoly", "int x;\n"));
+    assert!(named(&plain, DW_TAG_BASE, "__fp16").is_none(), "a plain unit has no SIMD scalars");
+}
+
 /// A type a function or a variable uses is described with it even where no signature, member or
 /// variable has that type, which is gcc's rule and so what the kernel's BTF has: the enumeration of
 /// an enumerator, a type cast to or made a compound literal of, a local nothing reads, and the

@@ -129,7 +129,8 @@ pub(crate) fn describe(
     files: &[FileId],
 ) -> Result<(), Error> {
     let (shapes, funcs, globals, frames) = (&unit.types, &unit.funcs, &unit.globals, unit.frames);
-    let wanted = wanted(shapes, funcs, &unit.abstracts, globals, &unit.declared, frames);
+    let wanted =
+        wanted(shapes, funcs, &unit.abstracts, globals, &unit.declared, frames, &unit.kept);
     let ids = kinds(dwarf, shapes, &wanted);
     let mut tagged = Tagged::new();
     for (shape, &id) in shapes.iter().zip(&ids) {
@@ -198,9 +199,10 @@ fn wanted(
     globals: &[Global],
     declared: &[Declared],
     frames: bool,
+    kept: &[usize],
 ) -> Vec<bool> {
     let mut wanted = vec![false; shapes.len()];
-    let mut work: Vec<usize> = Vec::new();
+    let mut work: Vec<usize> = kept.to_vec();
     let signature = |sig: &Sig, work: &mut Vec<usize>| {
         work.extend(sig.returns);
         work.extend(sig.params.iter().map(|param| param.ty));
@@ -1236,6 +1238,7 @@ mod tests {
             abstracts: Vec::new(),
             globals: Vec::new(),
             declared: Vec::new(),
+            kept: Vec::new(),
             pointer: 8,
             frames: true,
             mach_o: false,
