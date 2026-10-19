@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The inliner's big speedup test now counts a call at the frequency it runs at for each run of its caller, as gcc's `big_speedup_p` does, and no longer rounds a call on a branch up to once a run. A call that runs less often than its caller saves less of the caller's time, and counted as once a run it let calls over the limit in that gcc leaves out of line. The kernel's `uncore_collect_events` stays out of line with its three calls, as in gcc. The X32 uncore.c drops from 3771 to 3753 instructions and skbuff.c from 17046 to 17040, and md.c, sem.c, ohci-hcd.c and alternative.c do not change (#3715).
+- The arm64 assembler takes the memory tagging instructions ARMv8.5 added: `irg`, `gmi`, `addg`, `subg`, `subp`, `subps`, `cmpp`, `ldg`, `stg`, `stzg`, `st2g`, `stz2g`, `stgm`, `stzgm`, `ldgm` and `stgp`, each word checked against GNU as 2.42. kbuild enables `ARM64_MTE` only when `stgm xzr, [x0]` assembles, so a 6.12 arm64 kernel built with rucc was configured without memory tagging, and with it `HAVE_ARCH_KASAN_HW_TAGS`, `ARCH_USES_PG_ARCH_2`, `ARCH_USES_PG_ARCH_3` and `ARCH_HAS_SUBPAGE_FAULTS`, and laid `thread_struct` out without `mte_ctrl` (#3718).
 
 ### Fixed
 
