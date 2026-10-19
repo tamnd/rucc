@@ -186,11 +186,21 @@ impl Checker<'_> {
     /// attribute that changes the type, or an initializer that gives an array its length, still
     /// leaves the name here, and whoever reads it looks for the type inside the declaration's and
     /// finds it or does not.
+    ///
+    /// `__builtin_va_list` is a keyword here and a typedef name to gcc, which describes a list
+    /// as one, so it is answered as a name too.
     pub(in crate::check) fn spelled_with(
-        &self,
+        &mut self,
         specs: ast::DeclSpecsId,
     ) -> Option<(Symbol, TypeId)> {
-        let TypeSpec::Typedef(name) = self.ast[specs].ty else { return None };
+        let name = match self.ast[specs].ty {
+            TypeSpec::Typedef(name) => name,
+            TypeSpec::VaList => {
+                let name = self.cx.names.find("__builtin_va_list")?;
+                return Some((name, self.va_list_type()));
+            }
+            _ => return None,
+        };
         match self.scopes.lookup(name) {
             Some(Binding::Typedef(of)) => Some((name, of)),
             _ => None,
@@ -541,6 +551,11 @@ impl Checker<'_> {
             }
         };
         self.built.va_list = Some(ty);
+        // And a typedef name beside the table, which is what gcc describes a list as. The keyword
+        // table interned the word before anything was read.
+        if let Some(name) = self.cx.names.find("__builtin_va_list") {
+            self.types.alias(name, ty, None);
+        }
         ty
     }
 

@@ -192,6 +192,10 @@ pub struct Function {
     /// addresses. See [`Call`]. Only DWARF 5 has a place for them, and with version 4 they are left
     /// out.
     pub calls: Vec<Call>,
+    /// The unit's [`types`](crate::Unit::types) it uses without its signature or its locals
+    /// naming them, each described because it is, as gcc does: the enumeration of an enumerator
+    /// it names, a type it casts to, the type of a local that has no place.
+    pub uses: Vec<usize>,
 }
 
 /// One row of the table: an address, and where the code at it came from.

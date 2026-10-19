@@ -384,3 +384,43 @@ int h(poll_table *poll_table) { return poll_table->x; }
     let pointee = at(&all, parameter("h").ty.expect("a pointer has a type"));
     assert_eq!((pointee.tag, pointee.name.as_deref()), (DW_TAG_TYPEDEF, Some("poll_table")));
 }
+
+/// A type a function or a variable uses is described with it even where no signature, member or
+/// variable has that type, which is gcc's rule and so what the kernel's BTF has: the enumeration of
+/// an enumerator, a type cast to or made a compound literal of, a local nothing reads, and the
+/// `__builtin_va_list` a list is declared with. An enumerator in the initializer of a `static`
+/// nothing reads goes with it, since the variable is gone.
+#[test]
+fn a_type_a_function_uses_is_described_though_nothing_names_it() {
+    let source = "\
+enum in_func { IF_A, IF_B };
+enum in_case { IC_A, IC_B };
+enum in_global { IG_A, IG_B };
+enum in_attr { IA = 8 };
+enum dropped { DR_A };
+struct in_literal { int a; };
+struct never_read { int a; };
+typedef struct in_cast { int q; } in_cast_t;
+int g = IG_B;
+static int unread = DR_A;
+int al __attribute__((aligned(IA)));
+int f(int v, void *p) {
+  struct never_read n;
+  switch (v) { case IC_B: return 3; }
+  return IF_B + ((in_cast_t *)p)->q + (struct in_literal){ v }.a;
+}
+int va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int r = __builtin_va_arg(ap, int); __builtin_va_end(ap); return r; }
+";
+    let all = entries(&build("used", source));
+    for name in ["in_func", "in_case", "in_global", "in_attr"] {
+        assert!(named(&all, DW_TAG_ENUMERATION, name).is_some(), "{name} is described");
+    }
+    assert!(named(&all, DW_TAG_ENUMERATION, "dropped").is_none(), "dropped goes with unread");
+    for name in ["in_literal", "never_read", "in_cast"] {
+        assert!(named(&all, DW_TAG_STRUCTURE, name).is_some(), "{name} is described");
+    }
+    let cast = named(&all, DW_TAG_TYPEDEF, "in_cast_t").expect("the cast's typedef is described");
+    assert_eq!(at(&all, cast.ty.expect("in_cast_t has a type")).tag, DW_TAG_STRUCTURE);
+    let list = named(&all, DW_TAG_TYPEDEF, "__builtin_va_list").expect("the list's name is there");
+    assert_eq!(at(&all, list.ty.expect("the list has a type")).tag, DW_TAG_STRUCTURE);
+}

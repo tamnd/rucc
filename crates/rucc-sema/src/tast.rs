@@ -233,6 +233,17 @@ pub struct SimdClone {
 /// last written first, the order gcc chains them in.
 pub type TypeTags = Vec<(u32, Vec<Vec<u8>>)>;
 
+/// A type a declaration uses, as [`Tast::record_use`] keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Used {
+    /// A type as it is.
+    Type(TypeId),
+    /// A typedef name, and the type it stood for.
+    Spelled(Symbol, TypeId),
+    /// The type of a declaration, written the way the declaration wrote it.
+    Decl(DeclId),
+}
+
 /// One typed translation unit.
 #[derive(Default)]
 pub struct Tast {
@@ -254,6 +265,7 @@ pub struct Tast {
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
     defined: Map<DeclId, Option<(Symbol, TypeId)>>,
+    uses: Vec<(DeclId, Used)>,
     prototypes: Map<DeclId, Vec<Prototype>>,
     targets: Vec<(DeclId, Isa)>,
     versions: Vec<(DeclId, Vec<Version>)>,
@@ -499,6 +511,23 @@ impl Tast {
     #[must_use]
     pub fn defined_spellings(&self) -> &Map<DeclId, Option<(Symbol, TypeId)>> {
         &self.defined
+    }
+
+    /// Records a type a declaration uses without its own type saying so.
+    ///
+    /// gcc keeps such a type in the debug information whenever it keeps the declaration, even
+    /// where nothing else refers to it. For a function that is the enumeration of each enumerator
+    /// it names, each type it casts to or writes a compound literal of, and the type of each of its
+    /// locals, whether or not the local survived. For a variable it is what was written outside
+    /// any function since the declaration before it, since gcc holds those for the next variable.
+    pub fn record_use(&mut self, owner: DeclId, used: Used) {
+        self.uses.push((owner, used));
+    }
+
+    /// Every type [`Tast::record_use`] was told about, with the declaration it goes with.
+    #[must_use]
+    pub fn uses(&self) -> &[(DeclId, Used)] {
+        &self.uses
     }
 
     /// Every declaration that named its type with a typedef, the name it used and the type the

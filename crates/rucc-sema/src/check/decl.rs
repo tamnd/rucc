@@ -50,7 +50,7 @@ use crate::decl::{
     Startup, StorageDuration, Visibility,
 };
 use crate::scope::Binding;
-use crate::tast::StrId;
+use crate::tast::{StrId, Used};
 
 /// What one declarator declares, before anything already declared under the name is consulted.
 #[derive(Debug, Clone, Copy)]
@@ -1220,6 +1220,18 @@ impl Checker<'_> {
             declared.ty = self.tast[id].ty;
             self.check_storage_size(&declared);
         }
+        if kind == DeclKind::Object {
+            // gcc keeps the type of every local of a function it keeps, including one the code
+            // never reads and one in a block that is never reached, and with it whatever was used
+            // outside a function since the variable before this one.
+            let owner = self.defining.unwrap_or(id);
+            if self.defining.is_some() {
+                self.tast.record_use(owner, Used::Decl(id));
+            }
+            for used in std::mem::take(&mut self.pending_uses) {
+                self.tast.record_use(owner, used);
+            }
+        }
         Some(id)
     }
 
@@ -1369,6 +1381,11 @@ impl Checker<'_> {
                     Some(Binding::Typedef(of)) if over != name => Some((over, of)),
                     _ => None,
                 },
+                // `typedef __builtin_va_list __gnuc_va_list;`, which <stdarg.h> writes.
+                ast::TypeSpec::VaList => {
+                    let over = self.cx.names.find("__builtin_va_list");
+                    over.map(|over| (over, self.va_list_type()))
+                }
                 _ => None,
             };
             self.types.alias(name, ty, spelled);

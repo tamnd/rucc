@@ -131,7 +131,7 @@ impl Checker<'_> {
                 (self.expr(expr), named)
             }
             AttrArg::Ident(name) => match self.scopes.lookup(name) {
-                Some(Binding::Enumerator { value, ty }) => {
+                Some(Binding::Enumerator { value, ty, .. }) => {
                     let ty = rucc_types::promote(&mut self.types, ty, self.cx.target);
                     return Position::Number(value, format!("{value}{}", self.suffix(ty)));
                 }
