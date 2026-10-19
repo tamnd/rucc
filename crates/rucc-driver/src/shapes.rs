@@ -803,8 +803,11 @@ impl Walk<'_> {
     /// Only the `void` the name did not stand for, since `typedef void none;` has an entry and
     /// `none *` points at it.
     fn over_or_void(&mut self, id: TypeId, name: Symbol, of: TypeId) -> Option<Option<usize>> {
-        let ty = self.types.get(id);
-        if matches!(ty.kind, TypeKind::Void) && ty.quals.is_none() && ty != self.types.get(of) {
+        let ty = spaceless(self.types.get(id));
+        if matches!(ty.kind, TypeKind::Void)
+            && ty.quals.is_none()
+            && ty != spaceless(self.types.get(of))
+        {
             return Some(None);
         }
         self.over(id, name, of).map(Some)
@@ -812,6 +815,7 @@ impl Walk<'_> {
 
     /// The same, for a type that may have no identifier of its own. See [`Walk::shaped`].
     fn walked(&mut self, ty: Type, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
+        let ty = spaceless(ty);
         if self.steered(id) {
             return self.layered_over(ty, id, name, of);
         }
@@ -825,7 +829,7 @@ impl Walk<'_> {
 
     /// One level of [`Walk::walked`].
     fn layered_over(&mut self, ty: Type, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
-        let base = self.types.get(of);
+        let base = spaceless(self.types.get(of));
         if ty == base {
             return self.alias(name, of);
         }
@@ -917,7 +921,7 @@ impl Walk<'_> {
     /// to leave alone. Qualified `void` is not this case and goes the long way round, because
     /// `const void *` is a pointer to a const entry with no type under it.
     fn told_or_void(&mut self, id: TypeId) -> Option<Option<usize>> {
-        let ty = self.types.get(id);
+        let ty = spaceless(self.types.get(id));
         if matches!(ty.kind, TypeKind::Void) && ty.quals.is_none() {
             return Some(None);
         }
@@ -935,6 +939,7 @@ impl Walk<'_> {
     /// depends on the qualifiers, so the type a level of the chain stands for and the identifier
     /// the chain started from agree about every number here.
     fn shaped(&mut self, ty: Type, id: TypeId) -> Option<usize> {
+        let ty = spaceless(ty);
         if self.steered(id) {
             return self.layered(ty, id);
         }
@@ -1199,6 +1204,16 @@ impl Walk<'_> {
     fn spelled(&self, name: Symbol) -> String {
         self.names.resolve(name).to_owned()
     }
+}
+
+/// A type without its address space, which the description leaves out.
+///
+/// gcc says which one a pointer reaches with `DW_AT_address_class` on the pointer, which pahole
+/// does not read, and the kernel's `void __percpu *` is `void __seg_gs *` on x86. Kept, it made
+/// `void` with a qualifier no entry spells, which is no type at all, and every member and
+/// parameter of that type went missing.
+fn spaceless(ty: Type) -> Type {
+    Type { kind: ty.kind, quals: ty.quals.without(Qualifiers::SPACES) }
 }
 
 /// The qualifier an entry spells as the checker's set of them, with nothing for `_Atomic`, which
