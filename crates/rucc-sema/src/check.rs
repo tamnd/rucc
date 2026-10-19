@@ -341,9 +341,9 @@ pub struct Checker<'a> {
     /// The types used outside any function since the last variable was declared, which the next
     /// one to be declared takes. See [`Tast::record_use`].
     pub(in crate::check) pending_uses: Vec<Used>,
-    /// The typedef name each function's first declaration wrote its return type with, or that it
-    /// wrote none, which is the spelling `typeof` of the function names. See
-    /// `Checker::record_return_spelling`.
+    /// The typedef name each declaration's first declaration wrote its type with, or a function's
+    /// return type, or that it wrote none, which is what `typeof` of the declared name is spelled
+    /// with. See `Checker::spelled_with`.
     pub(in crate::check) first_spellings: rucc_base::hash::Map<DeclId, Option<(Symbol, TypeId)>>,
     /// The attribute lists `__builtin_has_attribute` and `__builtin_counted_by_ref` read, which
     /// is in `check/annotate.rs` with both of them.

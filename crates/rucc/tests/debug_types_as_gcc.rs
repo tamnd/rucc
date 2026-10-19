@@ -453,6 +453,35 @@ u32 g(int c);
     assert_eq!(returns("g"), (DW_TAG_TYPEDEF, Some("u32".to_owned())));
 }
 
+/// `typeof` of a typedef name, or of a name declared with one, keeps the typedef, as gcc does.
+/// The kernel declares every per-CPU variable as `__typeof__(type) name`, so without it the BTF
+/// of `DEFINE_PER_CPU(u64, x)` says `long long unsigned int` where gcc's says `u64`.
+#[test]
+fn a_typeof_of_a_typedef_name_is_described_with_the_typedef() {
+    let source = "\
+typedef unsigned long long u64;
+typedef struct { int counter; } atomic_t;
+__typeof__(u64) a;
+__typeof__(atomic_t) b;
+u64 c;
+typeof(c) d;
+typeof(u64 *) e;
+";
+    let all = entries(&build("typeof", source));
+    let ty = |name: &str| {
+        let variable = named(&all, DW_TAG_VARIABLE, name).expect("it is described");
+        at(&all, variable.ty.expect("a variable has a type"))
+    };
+    let name = |entry: &Entry| (entry.tag, entry.name.clone());
+    let u64 = (DW_TAG_TYPEDEF, Some("u64".to_owned()));
+    assert_eq!(name(ty("a")), u64);
+    assert_eq!(name(ty("b")), (DW_TAG_TYPEDEF, Some("atomic_t".to_owned())));
+    assert_eq!(name(ty("d")), u64);
+    let pointer = ty("e");
+    assert_eq!(pointer.tag, DW_TAG_POINTER);
+    assert_eq!(name(at(&all, pointer.ty.expect("a pointer has a type"))), u64);
+}
+
 /// A type a function or a variable uses is described with it even where no signature, member or
 /// variable has that type, which is gcc's rule and so what the kernel's BTF has: the enumeration of
 /// an enumerator, a type cast to or made a compound literal of, a local nothing reads, and the
