@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A `mode` written on an enumeration's definition, as in `enum e { ... } __attribute__((mode(byte)))`, now stores the enumeration in an integer of that width, with the signedness its values call for, as gcc's `finish_enum` does. It was ignored before, so the enumeration stayed an `int`. The kernel's netfs and fscache trace headers write `__mode(byte)` on twelve enumerations, and on arm64 the BTF report found those enumerations, `struct netfs_io_request`, `struct netfs_io_stream`, `struct fscache_cookie` and their trace records laid out differently from gcc's. Values that do not fit are refused with "specified mode too small for enumerated values", and a floating mode with "cannot use mode for enumerated types", in gcc's words (#3716).
+- A record member or file-scope object declared as an array of `const` or `volatile` elements now has the qualifier over the array as well in the debug information, as gcc writes it, since gcc treats the object itself as read-only. `const char name[16]` comes out as `const [16]const char`. The arm64 kernel's BTF report listed `kunit_suite`, `devfreq_governor`, `filename`, `ima_template_field` and more than twenty other structs as described differently from gcc's for this alone. A pointer's target, a typedef name's own entry, an inner dimension and a local stay as they were, which is also what gcc does (#3724).
 
 ### Added
 
