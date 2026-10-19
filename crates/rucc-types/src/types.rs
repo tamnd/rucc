@@ -10,7 +10,7 @@
 
 use std::num::NonZeroU32;
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Symbol};
 
 use crate::kind::{
@@ -235,6 +235,8 @@ pub struct Types {
     member_prototypes: Map<(RecordId, Symbol), Vec<Prototype>>,
     /// The prototypes each file-scope typedef's declarator wrote.
     alias_prototypes: Map<Symbol, Vec<Prototype>>,
+    /// The typedef names `transparent_union` was written after. See [`Types::hollow_alias`].
+    hollow: Set<Symbol>,
     void: TypeId,
     boolean: TypeId,
     ints: [TypeId; 13],
@@ -268,6 +270,7 @@ impl Types {
             pending: Vec::new(),
             member_prototypes: Map::default(),
             alias_prototypes: Map::default(),
+            hollow: Set::default(),
             // Fixed up immediately below. There is no id to put here before the table exists,
             // and an `Option` on each of them would be paid for on every read for the sake of
             // four lines of construction.
@@ -809,6 +812,23 @@ impl Types {
     #[must_use]
     pub fn alias_prototypes(&self) -> &Map<Symbol, Vec<Prototype>> {
         &self.alias_prototypes
+    }
+
+    /// Records that a typedef name made the union it names transparent from after its declarator,
+    /// as `typedef union { ... } release_pages_arg __attribute__((__transparent_union__));`.
+    ///
+    /// gcc gives the name a copy of the union to carry the attribute, and the copy is described
+    /// with the union's tag and size and no members, which is what the kernel's BTF then says
+    /// `release_pages_arg` is. The union itself keeps its members wherever it is named another way.
+    pub fn hollow_alias(&mut self, name: Symbol) {
+        self.hollow.insert(name);
+    }
+
+    /// Whether a typedef name is described as a union with no members. See
+    /// [`Types::hollow_alias`].
+    #[must_use]
+    pub fn is_hollow(&self, name: Symbol) -> bool {
+        self.hollow.contains(&name)
     }
 
     /// How a function type's parameters were first written, or nothing when no prototype of it

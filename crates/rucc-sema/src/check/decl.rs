@@ -1351,7 +1351,14 @@ impl Checker<'_> {
         // its own, and the union in every program that writes this is declared right here.
         if let Some(at) = self.transparent_union(item.attrs) {
             match self.types.kind(self.types.canonical(ty)) {
-                TypeKind::Record(id) => self.make_transparent(id, at),
+                TypeKind::Record(id) => {
+                    // gcc describes the name as a union with no members when the specifiers
+                    // name the union itself. See `Types::hollow_alias`.
+                    let named = matches!(specs.ty, ast::TypeSpec::Record { .. });
+                    if self.make_transparent(id, at) && named && self.scopes.at_file_scope() {
+                        self.types.hollow_alias(name);
+                    }
+                }
                 _ => {
                     let what = "'transparent_union' attribute ignored";
                     let note = "only a union is passed the way one of its members is";

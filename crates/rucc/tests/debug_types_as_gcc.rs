@@ -26,6 +26,7 @@ const DW_TAG_POINTER: u64 = 0x0f;
 const DW_TAG_STRUCTURE: u64 = 0x13;
 const DW_TAG_SUBROUTINE: u64 = 0x15;
 const DW_TAG_TYPEDEF: u64 = 0x16;
+const DW_TAG_UNION: u64 = 0x17;
 const DW_TAG_UNSPECIFIED_PARAMETERS: u64 = 0x18;
 const DW_TAG_VARIABLE: u64 = 0x34;
 const DW_TAG_SUBRANGE: u64 = 0x21;
@@ -480,6 +481,41 @@ typeof(u64 *) e;
     let pointer = ty("e");
     assert_eq!(pointer.tag, DW_TAG_POINTER);
     assert_eq!(name(at(&all, pointer.ty.expect("a pointer has a type"))), u64);
+}
+
+/// A typedef name `transparent_union` is written after is described as a union with no members,
+/// which is how gcc describes the copy of the union it gives the name, and so how the kernel's BTF
+/// has `release_pages_arg`. The union named another way still has its members.
+#[test]
+fn a_transparent_union_named_by_its_typedef_has_no_members() {
+    let source = "\
+struct page;
+struct folio;
+typedef union { struct page **pages; struct folio **folios; } release_pages_arg
+    __attribute__((__transparent_union__));
+union tagged { int *a; long *b; };
+typedef union tagged named __attribute__((__transparent_union__));
+void release_pages(release_pages_arg pages, int n) { (void)pages; (void)n; }
+void g(named n, union tagged t) { (void)n; (void)t; }
+";
+    let all = entries(&build("hollow", source));
+    let under = |name: &str| {
+        let alias = named(&all, DW_TAG_TYPEDEF, name).expect("the typedef is described");
+        at(&all, alias.ty.expect("a typedef has a type"))
+    };
+    let pages = under("release_pages_arg");
+    assert_eq!((pages.tag, pages.name.as_deref(), pages.children.len()), (DW_TAG_UNION, None, 0));
+    let hollow = under("named");
+    assert_eq!(
+        (hollow.tag, hollow.name.as_deref(), hollow.children.len()),
+        (DW_TAG_UNION, Some("tagged"), 0)
+    );
+    let whole = all
+        .iter()
+        .find(|entry| entry.tag == DW_TAG_UNION && !entry.children.is_empty())
+        .expect("the union itself is described");
+    assert_eq!((whole.name.as_deref(), whole.children.len()), (Some("tagged"), 2));
+    assert!(named(&all, DW_TAG_STRUCTURE, "folio").is_none(), "nothing names a folio");
 }
 
 /// A type a function or a variable uses is described with it even where no signature, member or

@@ -483,7 +483,9 @@ impl Checker<'_> {
     /// A `struct` is the other way to get here and is dropped as well. gcc has a second attribute
     /// for the structure case, which it spells `transparent_union` too and applies only to a
     /// one-member structure, and no program in the corpus writes it.
-    pub(in crate::check) fn make_transparent(&mut self, id: RecordId, at: Span) {
+    ///
+    /// Whether the union was made transparent comes back.
+    pub(in crate::check) fn make_transparent(&mut self, id: RecordId, at: Span) -> bool {
         let info = self.types.record_info(id);
         let whole = info.layout;
         let kind = info.kind;
@@ -495,26 +497,27 @@ impl Checker<'_> {
         };
         if kind != RecordKind::Union {
             dropped("only a union is passed the way one of its members is", self);
-            return;
+            return false;
         }
         let (Some(whole), Some(first)) = (whole, first) else {
             dropped("a union with no members has no member to be passed as", self);
-            return;
+            return false;
         };
         if first.bits.is_some() {
             dropped("a bit-field is not a member a whole value can be passed as", self);
-            return;
+            return false;
         }
         let Ok(member) = layout(&self.types, first.ty, self.cx.target) else {
             dropped("the first member has no layout of its own", self);
-            return;
+            return false;
         };
         if member.size != whole.size || member.align != whole.align {
             let note = "the union is not the size and the alignment of its first member";
             dropped(note, self);
-            return;
+            return false;
         }
         self.types.make_transparent(id);
+        true
     }
 
     /// One member, or nothing where what was written does not declare one.
