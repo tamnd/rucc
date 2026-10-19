@@ -620,3 +620,44 @@ int f(void) { return seven; }
     assert!(named(&all, DW_TAG_VARIABLE, "kept").is_none());
     assert!(named(&all, DW_TAG_STRUCTURE, "local_only").is_none());
 }
+
+/// A call after a statement control never comes out of has no declaration, since gcc drops those
+/// statements before it looks at the calls. A `return`, an `if (!0) return;`, a `break`, a call to
+/// a `noreturn` function and an `if` whose arms both return are such statements. A call a label
+/// makes reachable again, or one a loop comes back round to, is declared as usual.
+#[test]
+fn a_call_control_never_reaches_is_not_declared() {
+    let source = "\
+extern void after_return(void);
+extern void after_true_if(void);
+extern void after_label(void);
+extern void after_break(void);
+extern void in_loop_tail(void);
+extern void after_noreturn(void);
+extern void after_bug(void);
+extern void kept(void);
+extern void after_both(int);
+extern void bye(void) __attribute__((noreturn));
+void a(void) { kept(); return; after_return(); }
+void b(void) { if (!0) { return; } after_true_if(); }
+void c(int x) { if (x) goto out; return; out: after_label(); }
+void d(int x) { while (x) { break; after_break(); } for (;;) { if (x) break; in_loop_tail(); } }
+void e(void) { bye(); after_noreturn(); }
+void f(int x) { if (x) return; else return; after_both(x); }
+void g(void) { do { __builtin_unreachable(); } while (0); after_bug(); }
+";
+    let all = entries(&build("never-reached", source));
+    for name in ["kept", "after_label", "in_loop_tail", "bye"] {
+        assert!(named(&all, DW_TAG_SUBPROGRAM, name).is_some(), "{name} is declared");
+    }
+    for name in [
+        "after_return",
+        "after_true_if",
+        "after_break",
+        "after_noreturn",
+        "after_both",
+        "after_bug",
+    ] {
+        assert!(named(&all, DW_TAG_SUBPROGRAM, name).is_none(), "{name} is not");
+    }
+}

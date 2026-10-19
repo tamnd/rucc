@@ -64,9 +64,21 @@ use rucc_types::Types;
 /// anything does. See [`crate::unit`]'s `weak_references`.
 #[must_use]
 pub(crate) fn reachable(decide: Decide<'_>) -> (Set<DeclId>, Set<DeclId>) {
+    walk(decide, false)
+}
+
+/// The walk [`reachable`] and [`referred`] share, which for the second leaves out what follows a
+/// statement control never comes out of. See [`Reach::pruned`].
+fn walk(decide: Decide<'_>, pruned: bool) -> (Set<DeclId>, Set<DeclId>) {
     let tast = decide.tast;
-    let mut walk =
-        Reach { tast, decide, seen: Set::default(), named: Set::default(), work: Vec::new() };
+    let mut walk = Reach {
+        tast,
+        decide,
+        pruned,
+        seen: Set::default(),
+        named: Set::default(),
+        work: Vec::new(),
+    };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
         if is_root(&tast[decl]) {
@@ -95,14 +107,15 @@ pub(crate) fn reachable(decide: Decide<'_>) -> (Set<DeclId>, Set<DeclId>) {
 
 /// The declarations something the file emits names, which is the second set [`reachable`] hands
 /// back: a call or an address in a body that is reached or in an initializer, and not one in an arm
-/// a constant condition never takes or in a `static inline` nothing reaches.
+/// a constant condition never takes, in one after a statement control never comes out of or in a
+/// `static inline` nothing reaches.
 ///
 /// gcc writes a declaration in the debug information for each of these that another unit defines,
 /// from the same walk over its call graph before it optimizes, so a call the optimizer later
 /// folded away still has one and a call the compiler made up on its own does not.
 #[must_use]
 pub fn referred(tast: &Tast, types: &Types, target: &TargetInfo, names: &Interner) -> Set<DeclId> {
-    reachable(Decide::new(tast, types, target, names)).1
+    walk(Decide::new(tast, types, target, names), true).1
 }
 
 /// The declarations an `alias` attribute in the file names, found by the symbol each is emitted
@@ -191,6 +204,15 @@ fn is_root(node: &Decl) -> bool {
 struct Reach<'a> {
     tast: &'a Tast,
     decide: Decide<'a>,
+    /// Whether to leave out the statements after one control never comes out of, a `return`, a
+    /// call to a `noreturn` function or an `if (1) return;` among them, up to the next label.
+    ///
+    /// gcc throws those away when it builds the flow graph, before it looks at what the calls in
+    /// a body are, so it writes no declaration for a function only they call. `cleanup_lazy_tlbs`
+    /// in `kernel/fork.c` returns early unless a config option is set, and the call after it is
+    /// how `smp_cond_func_t` got into rucc's BTF and not gcc's. Only the debug information asks
+    /// for this. Lowering keeps those statements, so what it emits is walked in full.
+    pruned: bool,
     seen: Set<DeclId>,
     /// What an expression in something reached names, which is what a use is.
     named: Set<DeclId>,
@@ -252,10 +274,20 @@ impl Reach<'_> {
                 self.expr(cond);
                 self.stmt(body);
             }
+            // A declaration after the end is still walked, since a `static` one is emitted
+            // wherever it is written.
             Stmt::Block(body) => {
+                let mut dead = false;
                 for index in 0..self.tast[body].len() {
                     let stmt = self.tast[body][index];
+                    if dead && !self.labelled(stmt) {
+                        if matches!(self.tast[stmt], Stmt::Decls(_)) {
+                            self.stmt(stmt);
+                        }
+                        continue;
+                    }
                     self.stmt(stmt);
+                    dead = self.pruned && self.ends(stmt);
                 }
             }
             // A declaration in a block reaches whatever its initializer names, and a `static`
@@ -463,6 +495,80 @@ impl Reach<'_> {
             | Stmt::DoWhile { body, .. }
             | Stmt::For { body, .. }
             | Stmt::Switch { body, .. } => self.labelled(body),
+            _ => false,
+        }
+    }
+
+    /// Whether control never comes out of the end of a statement into the one after it.
+    ///
+    /// No more than gcc can tell before it optimizes, and never a loop. A `do ... while (0)` is
+    /// one when its body is and nothing in it breaks out, which is what the kernel's `BUG()` is.
+    fn ends(&self, id: StmtId) -> bool {
+        match self.tast[id] {
+            Stmt::Goto(_)
+            | Stmt::IndirectGoto(_)
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::Return(_) => true,
+            Stmt::Expr(value) => self.stops(value),
+            Stmt::Block(body) => {
+                let mut dead = false;
+                for index in 0..self.tast[body].len() {
+                    let stmt = self.tast[body][index];
+                    dead = self.ends(stmt) || dead && !self.labelled(stmt);
+                }
+                dead
+            }
+            Stmt::If { cond, then, otherwise } => match self.decide.condition(cond) {
+                Some((_, true)) => self.ends(then),
+                Some((_, false)) => otherwise.is_some_and(|otherwise| self.ends(otherwise)),
+                None => self.ends(then) && otherwise.is_some_and(|otherwise| self.ends(otherwise)),
+            },
+            Stmt::DoWhile { body, .. } => self.ends(body) && !self.leaves(body),
+            Stmt::Case { body, .. } | Stmt::Default { body } | Stmt::Label { body, .. } => {
+                self.ends(body)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a `break` or a `continue` is anywhere in a statement, nested loops included, which
+    /// is more than can leave it and never less.
+    fn leaves(&self, id: StmtId) -> bool {
+        match self.tast[id] {
+            Stmt::Break | Stmt::Continue => true,
+            Stmt::Block(body) => {
+                (0..self.tast[body].len()).any(|index| self.leaves(self.tast[body][index]))
+            }
+            Stmt::If { then, otherwise, .. } => {
+                self.leaves(then) || otherwise.is_some_and(|otherwise| self.leaves(otherwise))
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::Switch { body, .. }
+            | Stmt::Case { body, .. }
+            | Stmt::Default { body }
+            | Stmt::Label { body, .. } => self.leaves(body),
+            _ => false,
+        }
+    }
+
+    /// Whether an expression never gives control back: `__builtin_unreachable()`, or a call by
+    /// name to a function declared `noreturn`.
+    fn stops(&self, id: ExprId) -> bool {
+        match self.tast[id].kind {
+            ExprKind::Unreachable => true,
+            ExprKind::Comma { rhs, .. } => self.stops(rhs),
+            ExprKind::Call { callee, .. } => {
+                let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } =
+                    self.tast[callee].kind
+                else {
+                    return false;
+                };
+                let ExprKind::Decl(decl) = self.tast[operand].kind else { return false };
+                self.tast[decl].flags.contains(DeclFlags::NORETURN)
+            }
             _ => false,
         }
     }
