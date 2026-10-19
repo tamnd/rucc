@@ -450,13 +450,13 @@ impl<'a> Checker<'a> {
                 TypeName::Vector(lane, lanes) => {
                     let elem = match lane {
                         Lane::I8 => self.types.int(IntKind::SChar),
-                        Lane::U8 => self.types.int(IntKind::UChar),
+                        Lane::U8 | Lane::P8 => self.types.int(IntKind::UChar),
                         Lane::I16 => self.types.int(IntKind::Short),
-                        Lane::U16 => self.types.int(IntKind::UShort),
+                        Lane::U16 | Lane::P16 => self.types.int(IntKind::UShort),
                         Lane::I32 => self.types.int(IntKind::Int),
                         Lane::U32 => self.types.int(IntKind::UInt),
                         Lane::I64 => self.types.int(IntKind::Long),
-                        Lane::U64 => self.types.int(IntKind::ULong),
+                        Lane::U64 | Lane::P64 => self.types.int(IntKind::ULong),
                         Lane::F16 => self.types.float(FloatKind::Float16),
                         Lane::F32 => self.types.float(FloatKind::Float),
                         Lane::F64 => self.types.float(FloatKind::Double),
@@ -468,6 +468,12 @@ impl<'a> Checker<'a> {
                     self.types.record(id)
                 }
                 TypeName::Float128 => self.types.float(FloatKind::Float128),
+                TypeName::Poly(bits) => self.types.int(match bits {
+                    8 => IntKind::UChar,
+                    16 => IntKind::UShort,
+                    64 => IntKind::ULong,
+                    _ => IntKind::UInt128,
+                }),
             };
             self.scopes.declare(name, Binding::Typedef(ty));
         }

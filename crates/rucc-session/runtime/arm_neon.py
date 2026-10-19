@@ -234,10 +234,10 @@ def emit():
     w("")
     w("typedef float float32_t;")
     w("typedef double float64_t;")
-    w("typedef uint8_t poly8_t;")
-    w("typedef uint16_t poly16_t;")
-    w("typedef uint64_t poly64_t;")
-    w("typedef unsigned __int128 poly128_t;")
+    w("typedef __Poly8_t poly8_t;")
+    w("typedef __Poly16_t poly16_t;")
+    w("typedef __Poly64_t poly64_t;")
+    w("typedef __Poly128_t poly128_t;")
     w("")
     for q in QS:
         for e in ALL:

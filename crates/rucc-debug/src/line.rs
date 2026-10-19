@@ -84,6 +84,9 @@ pub struct Unit {
     /// the tags are only what its entry points at. An entry nothing names is not written and
     /// neither are its tags.
     pub type_tags: Vec<(usize, Vec<Vec<u8>>)>,
+    /// The entries of [`Unit::types`] to write whether or not anything names them, which gcc has
+    /// a few of: the scalars of the Advanced SIMD types in a unit that includes `arm_neon.h`.
+    pub kept: Vec<usize>,
     /// The functions, in the order the text section holds them.
     pub funcs: Vec<Function>,
     /// The functions the inliner copied into others, which each copy names as its origin. See
@@ -505,6 +508,7 @@ mod tests {
             abstracts: Vec::new(),
             globals: Vec::new(),
             declared: Vec::new(),
+            kept: Vec::new(),
             pointer: 8,
             frames: true,
             mach_o: false,

@@ -31,10 +31,10 @@
 
 typedef float float32_t;
 typedef double float64_t;
-typedef uint8_t poly8_t;
-typedef uint16_t poly16_t;
-typedef uint64_t poly64_t;
-typedef unsigned __int128 poly128_t;
+typedef __Poly8_t poly8_t;
+typedef __Poly16_t poly16_t;
+typedef __Poly64_t poly64_t;
+typedef __Poly128_t poly128_t;
 
 typedef __Int8x8_t int8x8_t;
 typedef __Int16x4_t int16x4_t;

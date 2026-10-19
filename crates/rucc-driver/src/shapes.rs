@@ -73,7 +73,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_debug::{Bits, Constant, Encoding, Member, Param, Qualifier, Shape, Sig};
 use rucc_diag::{SourceMap, Span};
 use rucc_sema::{DeclId, DeclKind, Definition, Linkage, Stmt, StmtId, StorageDuration, Tast, Used};
-use rucc_target::{TargetInfo, TypeName};
+use rucc_target::{Lane, TargetInfo, TypeName};
 use rucc_types::{
     ArrayLen, FunctionId, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type, TypeId,
     TypeKind, Types,
@@ -120,6 +120,9 @@ pub(crate) struct Meaning {
     /// The strings of the `btf_type_tag`s on each entry in [`Meaning::types`] that has any, in
     /// the order gcc chains them.
     pub type_tags: Vec<(usize, Vec<Vec<u8>>)>,
+    /// The entries in [`Meaning::types`] gcc describes in this unit whether or not anything
+    /// reaches them. See [`Walk::simd_scalars`].
+    pub kept: Vec<usize>,
     /// What is known about each local the program declared, by the number the declaration has.
     ///
     /// Keyed by the number rather than by a name, because a name is not unique in a unit and is not
@@ -272,6 +275,7 @@ pub(crate) fn collect(
         variants: Map::default(),
         rebuilt: Map::default(),
         readonly: Map::default(),
+        bases: Map::default(),
         type_tags: Map::default(),
         members: types
             .member_spellings()
@@ -463,11 +467,13 @@ pub(crate) fn collect(
     // A typedef name nothing above was written with gets no entry, which is what gcc does. The
     // kernel's BTF is pahole's reading of this, and a name only one compiler describes is a
     // difference in it.
+    let kept = walk.simd_scalars();
     let mut type_tags: Vec<(usize, Vec<Vec<u8>>)> = walk.type_tags.into_iter().collect();
     type_tags.sort_by_key(|&(at, _)| at);
     Meaning {
         types: walk.out,
         type_tags,
+        kept,
         funcs,
         objects,
         statics,
@@ -644,6 +650,9 @@ struct Walk<'a> {
     /// The entry for each array a declaration names with its elements' qualifiers over it, by the
     /// entry for the array. See [`Walk::readonly`].
     readonly: Map<usize, usize>,
+    /// The base types written under a name of gcc's rather than for a C type, by that name. See
+    /// [`Walk::base_named`].
+    bases: Map<String, usize>,
     /// The strings of the `btf_type_tag`s on each entry that has any.
     type_tags: Map<usize, Vec<Vec<u8>>>,
 }
@@ -884,7 +893,7 @@ impl Walk<'_> {
     /// happens when the checker had its say after the name was read: `name a[] = {1, 2}` with
     /// `name` an array of unknown length is an array of two, and the name does not stand for it.
     fn over(&mut self, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
-        if !self.written.contains(&(name, of)) && !self.builtin_vector(name, of) {
+        if !self.written.contains(&(name, of)) && self.builtin(name, of).is_none() {
             return self.told(id);
         }
         self.walked(self.types.get(id), id, name, of)
@@ -997,18 +1006,8 @@ impl Walk<'_> {
                 return at;
             }
         }
-        // A vector the target names is one entry with the name on it, which is how gcc writes
-        // `__Uint8x16_t`, and `typedef __Uint8x16_t uint8x16_t;` in `arm_neon.h` is a typedef
-        // over that entry rather than over a typedef over it.
-        if self.builtin_vector(name, of) {
-            let at = self.told(of).map(|at| {
-                let mut shape = self.out[at].clone();
-                if let Shape::Vector { name: named, .. } = &mut shape {
-                    *named = Some(self.spelled(name));
-                }
-                self.out.push(shape);
-                self.out.len() - 1
-            });
+        if let Some(builtin) = self.builtin(name, of) {
+            let at = self.builtin_entry(name, of, builtin);
             self.aliases.insert((name, of), at);
             return at;
         }
@@ -1332,17 +1331,86 @@ impl Walk<'_> {
         self.names.resolve(name).to_owned()
     }
 
-    /// Whether a name is one of the vectors the target declares before the file starts, still
-    /// standing for that vector.
-    fn builtin_vector(&self, name: Symbol, of: TypeId) -> bool {
-        if !matches!(self.types.kind(of), TypeKind::Vector { .. }) {
-            return false;
-        }
+    /// Which of the target's builtin type names a name is, where it still stands for the type the
+    /// target gave it and gcc describes it as that type with the name on it.
+    fn builtin(&self, name: Symbol, of: TypeId) -> Option<TypeName> {
         let spelled = self.names.resolve(name);
-        let vector = |&(builtin, shape): &(&str, TypeName)| {
-            builtin == spelled && matches!(shape, TypeName::Vector(..))
+        let names = self.target.type_names();
+        let &(_, builtin) = names.iter().find(|&&(builtin, _)| builtin == spelled)?;
+        let kind = self.types.kind(self.types.canonical(of));
+        let fits = match builtin {
+            TypeName::Vector(..) => matches!(kind, TypeKind::Vector { .. }),
+            TypeName::Poly(_) => matches!(kind, TypeKind::Int(_)),
+            TypeName::Sizeless | TypeName::Float128 => false,
         };
-        self.target.type_names().iter().any(vector)
+        fits.then_some(builtin)
+    }
+
+    /// The entry for one of the target's builtin type names, which is the type itself with the
+    /// name on it rather than a typedef: `__Uint8x16_t` is a vector entry of that name, the way gcc
+    /// writes it, and `typedef __Uint8x16_t uint8x16_t;` in `arm_neon.h` is a typedef over that
+    /// entry. A polynomial is a base type of its own, and so is the lane of a polynomial vector.
+    fn builtin_entry(&mut self, name: Symbol, of: TypeId, builtin: TypeName) -> Option<usize> {
+        let spelled = self.spelled(name);
+        match (builtin, self.types.kind(self.types.canonical(of))) {
+            (TypeName::Vector(lane, _), TypeKind::Vector { elem, len }) => {
+                let lanes = match lane.debug_name() {
+                    Some(named) => {
+                        let encoding =
+                            if lane == Lane::F16 { Encoding::Float } else { Encoding::Unsigned };
+                        self.base_named(named, encoding, self.size(elem)?)
+                    }
+                    None => self.told(elem)?,
+                };
+                let count = u64::from(len);
+                self.out.push(Shape::Vector { name: Some(spelled), of: lanes, count });
+                Some(self.out.len() - 1)
+            }
+            (TypeName::Poly(_), _) => {
+                Some(self.base_named(&spelled, Encoding::Unsigned, self.size(of)?))
+            }
+            _ => None,
+        }
+    }
+
+    /// A base type under a name of gcc's, made the first time it is asked for, so that the
+    /// polynomial scalar and the lane of every polynomial vector are one entry.
+    fn base_named(&mut self, name: &str, encoding: Encoding, size: u64) -> usize {
+        if let Some(&at) = self.bases.get(name) {
+            return at;
+        }
+        self.out.push(Shape::Base { name: name.to_owned(), encoding, size });
+        let at = self.out.len() - 1;
+        self.bases.insert(name.to_owned(), at);
+        at
+    }
+
+    /// The base types gcc writes into a unit that includes `arm_neon.h`, whether or not anything
+    /// there uses them.
+    ///
+    /// gcc's header is a pragma that registers the Advanced SIMD types, and every unit that has
+    /// read it gets an entry for the scalars they are built from. pahole writes each into the
+    /// kernel's BTF, so `__Poly8_t` and `__fp16` are there in a build with gcc. rucc's header is
+    /// typedefs over the target's builtin vectors, and a unit that wrote one is taken to have
+    /// included it. `__bf16` is among them though it is not a type here yet.
+    fn simd_scalars(&mut self) -> Vec<usize> {
+        let over_vector = self.types.aliases().iter().any(|alias| {
+            let Some((over, stood)) = alias.spelled else { return false };
+            matches!(self.builtin(over, stood), Some(TypeName::Vector(..)))
+        });
+        if !over_vector {
+            return Vec::new();
+        }
+        let mut kept = Vec::new();
+        for &(name, builtin) in self.target.type_names() {
+            if let TypeName::Poly(bits) = builtin {
+                kept.push(self.base_named(name, Encoding::Unsigned, u64::from(bits / 8)));
+            }
+        }
+        for name in ["__fp16", "__bf16"] {
+            kept.push(self.base_named(name, Encoding::Float, 2));
+        }
+        kept
     }
 }
 
