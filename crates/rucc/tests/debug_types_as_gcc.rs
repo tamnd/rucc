@@ -27,6 +27,7 @@ const DW_TAG_SUBROUTINE: u64 = 0x15;
 const DW_TAG_TYPEDEF: u64 = 0x16;
 const DW_TAG_VARIABLE: u64 = 0x34;
 const DW_TAG_SUBRANGE: u64 = 0x21;
+const DW_TAG_SUBPROGRAM: u64 = 0x2e;
 const DW_TAG_BASE: u64 = 0x24;
 const DW_TAG_CONST: u64 = 0x26;
 
@@ -349,4 +350,37 @@ int f(void) { return 0; }
     let name = at(&all, n.ty.expect("the const has a type"));
     assert_eq!((name.tag, name.name.as_deref()), (DW_TAG_TYPEDEF, Some("name_t")));
     assert_eq!(at(&all, name.ty.expect("name_t has a type")).tag, DW_TAG_ARRAY);
+}
+
+/// A function is described the way its definition writes it: the return type as the definition
+/// spells it, whatever a prototype above said, and a parameter named like its typedef still
+/// typed with the typedef.
+#[test]
+fn a_function_is_described_as_its_definition_writes_it() {
+    let source = "\
+typedef unsigned int u32;
+typedef unsigned int phandle;
+typedef struct pts { int x; } poll_table;
+u32 f(int a);
+unsigned int f(int b) { return b; }
+int g(phandle phandle) { return phandle; }
+int h(poll_table *poll_table) { return poll_table->x; }
+";
+    let all = entries(&build("definition", source));
+    let function = |name: &str| named(&all, DW_TAG_SUBPROGRAM, name).expect("it is described");
+    let parameter = |name: &str| {
+        let param = function(name)
+            .children
+            .iter()
+            .map(|&child| &all[child])
+            .find(|child| child.tag == DW_TAG_FORMAL_PARAMETER)
+            .expect("the function takes a parameter");
+        at(&all, param.ty.expect("a parameter has a type"))
+    };
+    let returns = at(&all, function("f").ty.expect("f returns a value"));
+    assert_eq!((returns.tag, returns.name.as_deref()), (DW_TAG_BASE, Some("unsigned int")));
+    let g = parameter("g");
+    assert_eq!((g.tag, g.name.as_deref()), (DW_TAG_TYPEDEF, Some("phandle")));
+    let pointee = at(&all, parameter("h").ty.expect("a pointer has a type"));
+    assert_eq!((pointee.tag, pointee.name.as_deref()), (DW_TAG_TYPEDEF, Some("poll_table")));
 }

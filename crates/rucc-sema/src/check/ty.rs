@@ -1286,6 +1286,11 @@ impl Checker<'_> {
             };
             types.push(adjusted);
 
+            // The typedef name the parameter was written with, which the type does not keep and
+            // which a debugger printing the parameter says in place of what the name stands for.
+            // Looked up before the parameter is declared, since `phandle phandle` names the
+            // typedef with its type and hides it with its name.
+            let named = param.specs.and_then(|specs| self.spelled_with(specs));
             // The adjusted type and not the written one, because that is what the parameter is:
             // `sizeof a` inside `void f(int a[3])` is the size of a pointer, and a compiler that
             // declares the array here says twelve.
@@ -1323,9 +1328,6 @@ impl Checker<'_> {
             if let TypeKind::Array { len: ArrayLen::Variable(_), .. } = self.types.kind(written) {
                 self.tast.record_adjustment(decl, written);
             }
-            // The typedef name the parameter was written with, which the type does not keep and
-            // which a debugger printing the parameter says in place of what the name stands for.
-            let named = param.specs.and_then(|specs| self.spelled_with(specs));
             if let Some((name, of)) = named {
                 self.tast.record_spelling(decl, name, of);
             }
