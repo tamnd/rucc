@@ -462,8 +462,9 @@ int va(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int r = __
     }
     let cast = named(&all, DW_TAG_TYPEDEF, "in_cast_t").expect("the cast's typedef is described");
     assert_eq!(at(&all, cast.ty.expect("in_cast_t has a type")).tag, DW_TAG_STRUCTURE);
-    let list = named(&all, DW_TAG_TYPEDEF, "__builtin_va_list").expect("the list's name is there");
-    assert_eq!(at(&all, list.ty.expect("the list has a type")).tag, DW_TAG_STRUCTURE);
+    // The AAPCS64 list is a structure with a tag, which gcc describes with no typedef name over it.
+    assert!(named(&all, DW_TAG_STRUCTURE, "__va_list").is_some(), "the list is described");
+    assert!(named(&all, DW_TAG_TYPEDEF, "__builtin_va_list").is_none());
 }
 
 /// An enumerator used outside a function keeps its enumeration with the next file-scope variable
@@ -660,4 +661,25 @@ void g(void) { do { __builtin_unreachable(); } while (0); after_bug(); }
     ] {
         assert!(named(&all, DW_TAG_SUBPROGRAM, name).is_none(), "{name} is not");
     }
+}
+
+/// A `va_list` is a typedef of `__builtin_va_list` where the list has no name of its own, an array
+/// on x86-64 and a pointer on i386, and a typedef of `struct __va_list` on AArch64, as gcc writes
+/// both. A `typedef __builtin_va_list` there was a type only rucc's BTF had.
+#[test]
+fn a_va_list_on_aarch64_names_the_structure_and_elsewhere_the_builtin() {
+    let source = "\
+typedef __builtin_va_list va_list;
+int vf(const char *f, va_list ap);
+int g(const char *f, ...) { va_list ap; __builtin_va_start(ap, f); int r = vf(f, ap); __builtin_va_end(ap); return r; }
+";
+    let all = entries(&build("va-list", source));
+    let list = named(&all, DW_TAG_TYPEDEF, "va_list").expect("va_list is described");
+    let under = at(&all, list.ty.expect("va_list has a type"));
+    assert_eq!((under.tag, under.name.as_deref()), (DW_TAG_STRUCTURE, Some("__va_list")));
+    assert!(named(&all, DW_TAG_TYPEDEF, "__builtin_va_list").is_none());
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "va-list", source));
+    let list = named(&all, DW_TAG_TYPEDEF, "va_list").expect("va_list is described");
+    let under = at(&all, list.ty.expect("va_list has a type"));
+    assert_eq!((under.tag, under.name.as_deref()), (DW_TAG_TYPEDEF, Some("__builtin_va_list")));
 }
