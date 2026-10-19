@@ -264,6 +264,10 @@ pub struct Global {
     /// The unit's [`types`](crate::Unit::types) used outside any function just before it was
     /// declared, each described because it is, as gcc does.
     pub uses: Vec<usize>,
+    /// Whether the back end dropped it, which is a `static` nothing reads. gcc still writes an
+    /// entry for one, with its name and its type and no location, so its type is described as
+    /// well. In the kernel that is how `exitcall_t` gets into every module with a `module_exit`.
+    pub dropped: bool,
 }
 
 /// A function or a variable the unit refers to and another unit defines.

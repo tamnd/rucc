@@ -2278,6 +2278,26 @@ fn describe(
             external: held.external,
             tags: held.tags.clone(),
             uses: held.uses.clone(),
+            dropped: false,
+        });
+    }
+    // And the `static` ones the back end dropped, which gcc describes anyway, with no location.
+    // What was used outside a function just before one was declared went with it, and gcc loses
+    // those types the same way, so they are left off.
+    let laid: Set<&str> = data.objects.iter().map(|object| object.name.as_str()).collect();
+    for name in origin.meaning.statics.iter().filter(|name| !laid.contains(name.as_str())) {
+        let Some(held) = origin.meaning.objects.get(name) else { continue };
+        globals.push(rucc_debug::Global {
+            name: name.clone(),
+            ty: held.ty,
+            decl: Some(rucc_debug::Place {
+                file: interned(&mut files, rewrite(&held.file)),
+                line: held.line,
+            }),
+            external: false,
+            tags: held.tags.clone(),
+            uses: Vec::new(),
+            dropped: true,
         });
     }
     // And the functions and variables the C code names that another unit defines. gcc writes these
@@ -2293,6 +2313,7 @@ fn describe(
         .map(|extent| extent.name.as_str())
         .chain(data.objects.iter().map(|object| object.name.as_str()))
         .chain(meaning.funcs.keys().map(String::as_str))
+        .chain(meaning.statics.iter().map(String::as_str))
         .collect();
     // And the functions of this unit the same references reach that have no code of their own
     // here, each as the function a copy would be a copy of, for the same reason.
@@ -2555,6 +2576,7 @@ fn describe_wasm(
             external: held.external,
             tags: held.tags.clone(),
             uses: held.uses.clone(),
+            dropped: false,
         });
     }
     let unit = rucc_debug::Unit {
