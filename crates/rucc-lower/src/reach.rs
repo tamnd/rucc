@@ -93,6 +93,18 @@ pub(crate) fn reachable(decide: Decide<'_>) -> (Set<DeclId>, Set<DeclId>) {
     (walk.seen, walk.named)
 }
 
+/// The declarations something the file emits names, which is the second set [`reachable`] hands
+/// back: a call or an address in a body that is reached or in an initializer, and not one in an arm
+/// a constant condition never takes or in a `static inline` nothing reaches.
+///
+/// gcc writes a declaration in the debug information for each of these that another unit defines,
+/// from the same walk over its call graph before it optimizes, so a call the optimizer later
+/// folded away still has one and a call the compiler made up on its own does not.
+#[must_use]
+pub fn referred(tast: &Tast, types: &Types, target: &TargetInfo, names: &Interner) -> Set<DeclId> {
+    reachable(Decide::new(tast, types, target, names)).1
+}
+
 /// The declarations an `alias` attribute in the file names, found by the symbol each is emitted
 /// under, which is its assembler name when it was given one.
 fn aliased(tast: &Tast, names: &Interner) -> Vec<DeclId> {

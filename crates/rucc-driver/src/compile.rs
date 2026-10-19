@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_codegen::coverage::Fired;
 use rucc_codegen::elsewhere::{Elsewhere, Slot};
@@ -2280,6 +2280,35 @@ fn describe(
             uses: held.uses.clone(),
         });
     }
+    // And the functions and variables the C code names that another unit defines. gcc writes these
+    // from what the source says before it optimizes anything, so a call it later folded away still
+    // has one and a call to a routine the compiler added on its own, a retpoline thunk or
+    // `__stack_chk_fail`, has none. A name the unit went on to define is described as a definition
+    // above, or was not emitted and has no business being declared either.
+    let meaning = &origin.meaning;
+    let defined: Set<&str> = text
+        .funcs
+        .iter()
+        .map(|extent| extent.name.as_str())
+        .chain(data.objects.iter().map(|object| object.name.as_str()))
+        .chain(meaning.funcs.keys().map(String::as_str))
+        .collect();
+    let mut declared = Vec::new();
+    for (name, held) in &meaning.declared {
+        let Some(ty) = held.ty else { continue };
+        if defined.contains(name.as_str()) {
+            continue;
+        }
+        declared.push(rucc_debug::Declared {
+            name: name.clone(),
+            ty,
+            decl: Some(rucc_debug::Place {
+                file: interned(&mut files, rewrite(&held.file)),
+                line: held.line,
+            }),
+            external: held.external,
+        });
+    }
     let unit = rucc_debug::Unit {
         name: rewrite(origin.name),
         // A single dot when the process could not say where it was, which is a directory name every
@@ -2292,6 +2321,7 @@ fn describe(
         funcs,
         abstracts: copying.abstracts,
         globals,
+        declared,
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(8),
         // Whether a function can say where its frame base is, which it can when the build writes a
         // table that answers the question: the unwind table, or `.debug_frame` in its place. Read
@@ -2529,6 +2559,7 @@ fn describe_wasm(
         funcs,
         abstracts: copying.abstracts,
         globals,
+        declared: Vec::new(),
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(4),
         frames: false,
         mach_o: false,
@@ -8641,7 +8672,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             // An entry of two words for each copy, each naming a place of its own: the first word
             // the load of its copy in `.text`, the second the fixup of it.
             assert_eq!(table.relocs.len(), 2 * copies, "{level:?}");
-            let places: rucc_base::hash::Set<(String, i64)> = table
+            let places: Set<(String, i64)> = table
                 .relocs
                 .iter()
                 .map(|reloc| {

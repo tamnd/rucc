@@ -39,6 +39,7 @@ mod restrict;
 mod ssa;
 mod unit;
 
+pub use reach::referred;
 pub use ssa::{Ssa, Var};
 pub use unit::{AutoInit, Context, Lowered, Protector, Wrapping, lower};
 
