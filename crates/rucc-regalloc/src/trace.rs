@@ -505,7 +505,7 @@ mod tests {
         let live = Live::of(func, &order);
         let mut assignment = assign(func, &order, &live, env);
         let taken = shape(func);
-        let edits = rewrite(func, &mut assignment, env);
+        let edits = rewrite(func, &mut assignment, env, &order, &live);
         (taken, assignment, edits)
     }
 
