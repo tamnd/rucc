@@ -438,7 +438,7 @@ impl Checker<'_> {
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
         }
-        self.record_return_spelling(id, &specs, spelled);
+        self.record_return_spelling(id, spelled);
         // The specifiers only, for the reason `noreturn` above reads them only. This is where a
         // program picking its fastest path at run time writes it, on the definition of the path.
         // A cloned function is built once for each version, and its `target` attribute, which
@@ -1079,7 +1079,9 @@ impl Checker<'_> {
             self.tast.record_spelling(id, name, of);
         }
         if kind == DeclKind::Function && self.scopes.at_file_scope() {
-            self.record_return_spelling(id, &specs, spelled);
+            self.record_return_spelling(id, spelled);
+        } else {
+            self.first_spellings.entry(id).or_insert(spelled);
         }
         self.tast.record_prototypes(id, prototypes);
         // Both places, for the reason `noreturn` above reads both. gcc says nothing about the
@@ -2051,6 +2053,20 @@ impl Checker<'_> {
         previous
     }
 
+    /// Records the typedef name a file-scope declaration of a function wrote its return type with,
+    /// which the function is described with until a later declaration says otherwise.
+    ///
+    /// gcc describes a function with its last declaration's spelling, the definition's or one
+    /// after it, so `u32 f(int);` followed by `unsigned int f(int b) { ... }` returns
+    /// `unsigned int`. `EXPORT_SYMBOL(f)` after a definition is `extern typeof(f) f;`, which
+    /// `Checker::spelled_with` spells the way `f`'s first declaration did. That is how gcc
+    /// describes the kernel's `bit_waitqueue` as returning the `struct wait_queue_head *` its
+    /// prototype says rather than the `wait_queue_head_t *` its definition says.
+    fn record_return_spelling(&mut self, id: DeclId, spelled: Option<(Symbol, TypeId)>) {
+        self.first_spellings.entry(id).or_insert(spelled);
+        self.tast.record_defined_spelling(id, spelled);
+    }
+
     /// The two readings of the string one declarator wrote after `asm`, which are the assembler
     /// name of a symbol and the name of the machine register an object is kept in.
     ///
@@ -2060,38 +2076,6 @@ impl Checker<'_> {
     /// string as the name of a register and keeps the object there, which is what a program that
     /// writes assembly around a variable depends on. Only `register` asks for that, and a local
     /// without it is warned about and its string dropped, which is what gcc does.
-    /// Records the typedef name a file-scope declaration of a function wrote its return type with,
-    /// which the function is described with until a later declaration says otherwise.
-    ///
-    /// gcc describes a function with its last declaration's spelling, the definition's or one
-    /// after it, so `u32 f(int);` followed by `unsigned int f(int b) { ... }` returns
-    /// `unsigned int`. `typeof(f)` names the type the way `f`'s first declaration spelled it, and
-    /// `EXPORT_SYMBOL(f)` after a definition is `extern typeof(f) f;`. That is how gcc describes
-    /// the kernel's `bit_waitqueue` as returning the `struct wait_queue_head *` its prototype says
-    /// rather than the `wait_queue_head_t *` its definition says.
-    fn record_return_spelling(
-        &mut self,
-        id: DeclId,
-        specs: &ast::DeclSpecs,
-        spelled: Option<(Symbol, TypeId)>,
-    ) {
-        let named = match specs.ty {
-            ast::TypeSpec::Typeof { operand: ast::TypeofArg::Expr(expr), .. } => {
-                match self.ast[expr] {
-                    ast::Expr::Name(name) => match self.scopes.lookup(name) {
-                        Some(Binding::Decl(of)) => self.first_spellings.get(&of).copied(),
-                        _ => None,
-                    },
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-        let spelled = named.unwrap_or(spelled);
-        self.first_spellings.entry(id).or_insert(spelled);
-        self.tast.record_defined_spelling(id, spelled);
-    }
-
     fn declared_asm(
         &mut self,
         item: ast::InitDeclarator,

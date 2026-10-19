@@ -189,6 +189,11 @@ impl Checker<'_> {
     ///
     /// `__builtin_va_list` is a keyword here and a typedef name to gcc, which describes a list
     /// as one, so it is answered as a name too.
+    ///
+    /// gcc keeps the name through `typeof`: `typeof(u64)` is spelled `u64`, and so is `typeof(x)`
+    /// where `x` was first declared with it. The kernel's `DEFINE_PER_CPU(u64, x)` is
+    /// `__typeof__(u64) x`, and its `EXPORT_SYMBOL(f)` is `extern typeof(f) f;`, which spells the
+    /// return type the way `f`'s first declaration did.
     pub(in crate::check) fn spelled_with(
         &mut self,
         specs: ast::DeclSpecsId,
@@ -198,6 +203,14 @@ impl Checker<'_> {
             TypeSpec::VaList => {
                 let name = self.va_list_name()?;
                 return Some((name, self.va_list_type()));
+            }
+            TypeSpec::Typeof { operand: TypeofArg::Type(name), .. } => {
+                return self.spelled_with(self.ast[name].specs);
+            }
+            TypeSpec::Typeof { operand: TypeofArg::Expr(expr), .. } => {
+                let ast::Expr::Name(name) = self.ast[expr] else { return None };
+                let Some(Binding::Decl(of)) = self.scopes.lookup(name) else { return None };
+                return self.first_spellings.get(&of).copied().flatten();
             }
             _ => return None,
         };
@@ -1358,6 +1371,7 @@ impl Checker<'_> {
             if let Some((name, of)) = named {
                 self.tast.record_spelling(decl, name, of);
             }
+            self.first_spellings.entry(decl).or_insert(named);
             // A tag can be on a `*` of the declarator as well as in the two lists.
             let starred = ast[declarator.derived]
                 .iter()
