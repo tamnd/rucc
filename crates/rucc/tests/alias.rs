@@ -153,6 +153,25 @@ extern int b __attribute__((alias(\"nowhere\")));
     assert!(said.contains("'nowhere'"), "{said}");
 }
 
+/// The arm64 EFI stub under KASAN: `__memmove` names `memmove`, which names `memcpy` further down
+/// and is called, and every name in the chain is at the function, which is what gcc writes.
+#[test]
+fn a_second_name_for_a_second_name_is_a_name_for_the_first() {
+    let text = asm(
+        "chain",
+        "\
+typedef unsigned long size_t;
+extern void *memmove(void *, const void *, size_t);
+void *__memmove(void *d, const void *s, size_t n) __attribute__((alias(\"memmove\")));
+void *memcpy(void *dst, const void *src, size_t len) { (void)src; (void)len; return dst; }
+extern void *memmove(void *dst, const void *src, size_t len) __attribute__((alias(\"memcpy\")));
+void *use(void *a, void *b) { return memmove(a, b, 4); }
+",
+    );
+    assert!(text.contains("\t.set\t__memmove,memcpy\n"), "{text}");
+    assert!(text.contains("\t.set\tmemmove,memcpy\n"), "{text}");
+}
+
 #[test]
 fn what_is_aliased_has_to_be_written_as_a_string() {
     // `alias(a)` reads as an identifier rather than an expression, because `format(printf, 1, 2)`

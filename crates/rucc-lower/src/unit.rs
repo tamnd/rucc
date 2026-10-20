@@ -681,8 +681,19 @@ impl Unit<'_> {
         }
         self.weak_references();
         self.unused_weak();
+        // What each alias names, so that one naming another can be followed to what the last
+        // names, the way gcc follows it.
+        let mut named = Map::default();
         for index in 0..self.aliases.len() {
-            self.alias(self.aliases[index]);
+            let decl = self.aliases[index];
+            if let (Some(written), false) = (self.tast[decl].alias, self.tast.is_ifunc(decl)) {
+                let name = self.symbol_of(decl);
+                let target = self.names.intern(&self.spelled(written));
+                named.insert(name, target);
+            }
+        }
+        for index in 0..self.aliases.len() {
+            self.alias(self.aliases[index], &named);
         }
         self.symvers();
         for index in 0..self.sets.len() {
@@ -1799,12 +1810,26 @@ impl Unit<'_> {
     /// a name this file does not define has no address for one to be at. A program that writes
     /// an alias of something in another object wants a reference rather than a definition, and
     /// what it gets from gcc is this same error rather than a name the linker cannot resolve.
-    fn alias(&mut self, decl: DeclId) {
+    ///
+    /// A target that is itself an alias stands for what that one stands for, which is what gcc
+    /// writes: the arm64 EFI stub's `__memmove` is an alias of `memmove`, which is an alias of
+    /// `memcpy` further down, and gcc's `.set __memmove,memcpy` names the function. `named` is
+    /// every attribute alias by its name, and the count bounds a cycle, which ends at a name the
+    /// file does not define.
+    fn alias(&mut self, decl: DeclId, named: &Map<Symbol, Symbol>) {
         let Some(written) = self.tast[decl].alias else { return };
         let span = self.tast.decl_span(decl);
         let name = self.symbol_of(decl);
         let spelling = self.spelled(written);
-        let target = self.names.intern(&spelling);
+        let mut target = self.names.intern(&spelling);
+        if !self.tast.is_ifunc(decl) {
+            for _ in 0..named.len() {
+                match named.get(&target) {
+                    Some(&next) if target != name => target = next,
+                    _ => break,
+                }
+            }
+        }
         if self.no_address(name, target, span) {
             return;
         }
@@ -1998,9 +2023,9 @@ impl Unit<'_> {
         let defined = match self.module.lookup(target) {
             Some(SymbolRef::Func(id)) => !self.module[id].is_declaration(),
             Some(SymbolRef::Global(id)) => self.module[id].init.is_some(),
-            // A chain of them is a thing gcc takes and this does not yet, because resolving one
-            // wants the aliases put in an order that the file they were written in need not be
-            // in. It is reported rather than written out as a name pointing at a name.
+            // A chain of attribute aliases was followed before this, and what is left is an
+            // `ifunc`, which has no address of its own to share. It is reported rather than
+            // written out as a name pointing at a name.
             Some(SymbolRef::Alias(_)) | None => false,
         };
         if !defined {
