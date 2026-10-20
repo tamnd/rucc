@@ -341,7 +341,13 @@ fn live(func: &mir::Func, machine: &MachineInsts, names: &Interner) -> Vec<Set> 
                     gen_.insert(key);
                 }
             }
-            for key in keys(func, inst, true) {
+            // A call writes only the top of a register AArch64 keeps the low half of, so a double
+            // in d8 is still there behind it and whatever reads it there reads what was in front.
+            // See [`mir::Constraint::Above`].
+            let written = func[func[inst].operands].iter().filter(|operand| {
+                operand.role.is_def() && !matches!(operand.constraint, mir::Constraint::Above(_))
+            });
+            for key in written.filter_map(key) {
                 kill.insert(key);
             }
         }
@@ -611,6 +617,46 @@ mod tests {
         assert_eq!(lifted(&mut func, &Moves::default(), &mut names), 1);
         assert_eq!(func.insts(left).count() + func.insts(right).count(), 1);
         assert_eq!(opcodes(&func, above, &names).len(), 3);
+    }
+
+    /// The same, with a call between the join and its read that writes only the top of the
+    /// register, as an AArch64 call does to d8. The copy is still what the read finds, so the one
+    /// on the other edge must stay. Both went in front of the branch before, and `x < m ? x : m`
+    /// with `x` in d8 gave back `m` either way (#3722).
+    #[test]
+    fn a_call_that_keeps_the_low_bytes_does_not_end_the_copy() {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let [above, left, right, join] =
+            [func.create_block(), func.create_block(), func.create_block(), func.create_block()];
+        func.build(above, op(&mut names, "cmp_set_l_32"))
+            .def(Reg::physical(RDX), GPR)
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .finish();
+        func.build(above, op(&mut names, "br_cond_8"))
+            .operand(Operand::read(Reg::physical(RDX), GPR))
+            .finish();
+        *func.succs_mut(above) = vec![
+            BlockCall::to(left).taken(Weight::parts(1)),
+            BlockCall::to(right).taken(Weight::parts(1)),
+        ];
+        for (block, from) in [(left, RAX), (right, RCX)] {
+            func.build(block, op(&mut names, "mov_rr_64"))
+                .def(Reg::physical(RSI), GPR)
+                .uses(Reg::physical(from), GPR)
+                .finish();
+            *func.succs_mut(block) = vec![BlockCall::to(join)];
+        }
+        func.build(join, op(&mut names, "call"))
+            .operand(Operand::write(Reg::physical(RSI), GPR).with(mir::Constraint::Above(8)))
+            .finish();
+        func.build(join, op(&mut names, "ret"))
+            .operand(Operand::read(Reg::physical(RSI), GPR))
+            .finish();
+
+        assert_eq!(lifted(&mut func, &Moves::default(), &mut names), 1);
+        assert_eq!(func.insts(left).count() + func.insts(right).count(), 1);
     }
 
     #[test]
