@@ -2141,7 +2141,8 @@ fn describe(
         // one name in one scope is a debugger's problem rather than a reader's.
         let mut sig = known.and_then(|known| known.sig.clone());
         let mut placed: Vec<(u32, i32)> = built.locals.clone();
-        let mut spots = stretches(extent, rows, built, target, opts.dwarf_version != 4);
+        let mut spots =
+            stretches(extent, rows, built, target, opts.dwarf_version != 4 && opts.var_tracking);
         // And a local in the frame that shares its bytes and has no stretch at all, which still
         // gets its entry so that a debugger says it is not available rather than that there is no
         // such name. That is a function whose instructions were scheduled, where no stretch can be
@@ -2161,7 +2162,7 @@ fn describe(
             .chain(
                 taken(&mut spots)
                     .into_iter()
-                    .map(|(decl, spans)| (decl, rucc_debug::Spot::Over(spans))),
+                    .map(|(decl, spans)| (decl, spot(spans, opts.var_tracking))),
             )
             .collect();
         if let (Some(sig), Some(known)) = (sig.as_mut(), known) {
@@ -2176,7 +2177,7 @@ fn describe(
                 // the frame, which is what a scalar parameter whose address is never taken is at
                 // every optimization level including this one.
                 let Some(which) = spots.iter().position(|(at, _)| *at == decl) else { continue };
-                param.spot = Some(rucc_debug::Spot::Over(spots.remove(which).1));
+                param.spot = Some(spot(spots.remove(which).1, opts.var_tracking));
             }
         }
         // Whatever is left, which is the locals that are not parameters, in the order the slots
@@ -2216,7 +2217,7 @@ fn describe(
                     file: interned(&mut files, rewrite(&named.file)),
                     line: named.line,
                 }),
-                spot: rucc_debug::Spot::Over(spans),
+                spot: spot(spans, opts.var_tracking),
                 scope: None,
                 tags: named.tags.clone(),
             });
@@ -2611,6 +2612,23 @@ fn describe_wasm(
         },
     };
     rucc_debug::write(&unit).map_err(|why| why.to_string())
+}
+
+/// Where a local is, from the stretches it was found in.
+///
+/// With `tracking`, which is gcc's `-fvar-tracking` and the default, that is the stretches as they
+/// are. Without it, which is how the kernel builds, gcc says one place for the whole function and
+/// writes no location list at all, and so does this: the place the local is in for longest, which
+/// is the register it was given rather than the ones it passes through. A local with no stretch is
+/// still nowhere.
+fn spot(spans: Vec<rucc_debug::Span>, tracking: bool) -> rucc_debug::Spot {
+    // The first of the longest, so that two stretches of one length give the same answer every
+    // time rather than whichever the back end listed last.
+    let home = spans.iter().rev().max_by_key(|span| span.len).map(|span| span.held);
+    match home {
+        Some(held) if !tracking => rucc_debug::Spot::Always(held),
+        _ => rucc_debug::Spot::Over(spans),
+    }
 }
 
 /// Where each local the back end kept in a register is, as stretches of the function's addresses.

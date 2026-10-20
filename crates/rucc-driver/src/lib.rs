@@ -1136,6 +1136,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.debug_info = true;
                 opts.dwarf_version = 4;
             }
+            // Whether a local's place follows it about or is said once for the whole function. The
+            // assignments flags are gcc's finer way of doing the first, which here is the same.
+            "-fvar-tracking" | "-fvar-tracking-assignments" => opts.var_tracking = true,
+            "-fno-var-tracking" => opts.var_tracking = false,
+            "-fno-var-tracking-assignments" => {}
             _ if arg.starts_with("-gdwarf-") => {
                 return Err(err(format!(
                     "{arg}: this compiler writes DWARF 4 and 5 and no other version, see \
