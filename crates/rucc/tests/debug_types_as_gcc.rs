@@ -625,6 +625,23 @@ poly8x16_t e;
     assert!(named(&plain, DW_TAG_BASE, "__fp16").is_none(), "a plain unit has no SIMD scalars");
 }
 
+/// An intrinsic inlined into a function does not bring the stdint names into the object, since
+/// gcc's intrinsics are builtins with no casts in them. The kernel's raid6 code shifts with these
+/// two, and the casts in their bodies once gave its BTF an `int8_t` and a `uint64_t` gcc's has not.
+#[test]
+fn an_inlined_intrinsic_casts_without_the_stdint_names() {
+    let source = "\
+#include <arm_neon.h>
+uint8x16_t mask(uint8x16_t v) {
+  return veorq_u8(vshlq_n_u8(v, 1), vreinterpretq_u8_s8(vshrq_n_s8(vreinterpretq_s8_u8(v), 7)));
+}
+";
+    let all = entries(&build("intrinsic", source));
+    for name in ["int8_t", "uint64_t"] {
+        assert!(named(&all, DW_TAG_TYPEDEF, name).is_none(), "{name} is not described");
+    }
+}
+
 /// A type a function or a variable uses is described with it even where no signature, member or
 /// variable has that type, which is gcc's rule and so what the kernel's BTF has: the enumeration of
 /// an enumerator, a type cast to or made a compound literal of, a local nothing reads, and the

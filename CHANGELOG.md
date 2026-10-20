@@ -38,6 +38,7 @@ The debug information keeps a typedef name through `typeof`, as gcc does: `typeo
 - A function holding a variable length array no longer stops with an internal error on aarch64 when the saved stack pointer is spilled. The copy of `sp` into a scratch register was read back out of `sp` by the store, which is `str sp` and not an instruction, so LTP's `tst_timer_test.c` failed to build (#3747).
 - An aarch64 inline assembly clobber list may name the SVE and SME registers gcc takes there, `z0` to `z31`, `p0` to `p15`, `ffr`, `za`, `zt0`, `vg` and `fpmr`, which the arm64 hwcap selftest writes (#3749).
 - The aarch64 assembler takes a character as an immediate, as in `mov x0, '\n'`, which the arm64 GCS selftest writes, and a debug build no longer panics working out the bounds of an eight byte number resolved at the end of the file, which rseq's critical section tables put down (#3750).
+- The intrinsics in `arm_neon.h` cast to the types under the stdint names, so an object that inlines one no longer describes an `int8_t` or `uint64_t` gcc's build does not, which the arm64 kernel's raid6 code showed in its BTF (#3751).
 
 ### Added
 

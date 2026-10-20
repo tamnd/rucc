@@ -112,11 +112,27 @@ def wrap(stmt, indent):
         room = 100 - len(indent) - (0 if first else 4)
         cut = max(stmt.rfind(op, 0, room) for op in (" ? ", " : ", " | ", " + ", ", ", " = "))
         if cut <= 0:
+            cut = max(stmt.rfind(op, 0, room) for op in (" - ", " < ", " > "))
+        if cut <= 0:
             break
         out.append(indent + ("" if first else "    ") + stmt[: cut + 1].rstrip())
         stmt, first = stmt[cut + 1 :].lstrip(), False
     out.append(indent + ("" if first else "    ") + stmt)
     return out
+
+
+# A body names the lane types by what they are underneath. A cast to `int8_t` in a body that is
+# inlined gives the object a description of `int8_t`, and gcc's own header has builtins where these
+# bodies have casts, so the kernel's BTF would have a typedef that gcc's build does not.
+LANE = re.compile(r"\b(u?int(?:8|16|32|64)_t|float(?:32|64)_t|poly(?:8|16|64|128)_t)\b")
+
+
+def bare(name):
+    if name.startswith("float"):
+        return "float" if name == "float32_t" else "double"
+    if name.startswith("poly"):
+        return "__P" + name[1:]
+    return "__" + name[:-2].upper() + "_TYPE__"
 
 
 def fn(ret, nm, params, body):
@@ -128,7 +144,7 @@ def fn(ret, nm, params, body):
         head = head[: cut + 1] + "\n    " + head[cut + 2 :]
     w(head)
     for stmt in body if isinstance(body, list) else statements(body):
-        for line in wrap(reserve(stmt), "  "):
+        for line in wrap(LANE.sub(lambda m: bare(m[1]), reserve(stmt)), "  "):
             w(line)
     w("}")
 
