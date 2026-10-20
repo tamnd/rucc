@@ -2155,12 +2155,14 @@ pub struct Options {
     /// Whether a leaf function keeps the frame pointer that `frame_pointer` asks for, from
     /// `-mno-omit-leaf-frame-pointer` and `-momit-leaf-frame-pointer`.
     ///
-    /// Kept by default, which is what gcc does on x86-64 at `-O0`. gcc on AArch64 omits it by
-    /// default. A distribution that wants `perf` to walk each stack passes the flag anyway.
+    /// Kept by default on x86, which is what gcc does there, and left out by default on AArch64,
+    /// which is what gcc does there. A distribution that wants `perf` to walk each stack passes
+    /// the flag anyway.
     ///
-    /// `None` is a command line that said neither, which keeps it in every leaf but one with
-    /// nothing in its frame on x86 when optimizing, as gcc does. An explicit
-    /// `-mno-omit-leaf-frame-pointer` keeps it there too.
+    /// `None` is a command line that said neither. On x86 that keeps it in every leaf but one with
+    /// nothing in its frame when optimizing, as gcc does, and an explicit
+    /// `-mno-omit-leaf-frame-pointer` keeps it there too. On AArch64 it leaves it out of every
+    /// leaf.
     pub leaf_frame_pointer: Option<bool>,
     /// Whether the red zone may be used, from `-mno-red-zone` turned around.
     ///

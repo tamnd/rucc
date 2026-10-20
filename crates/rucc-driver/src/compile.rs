@@ -1451,7 +1451,10 @@ fn generate(
     }
     let flags = pipeline::Flags {
         frame_pointer: opts.keeps_frame_pointer(),
-        leaf_frame_pointer: opts.leaf_frame_pointer.unwrap_or(true),
+        // gcc keeps it in a leaf on x86 and leaves it out of one on AArch64, where the frame record
+        // also holds the return address and so, under `-mbranch-protection=pac-ret`, costs a
+        // signature and a check on every call.
+        leaf_frame_pointer: opts.leaf_frame_pointer.unwrap_or(target.tuple.arch() != Arch::Aarch64),
         // Only when optimizing, which is the one place gcc looks for a leaf to give it back in.
         spare_frame_pointer: opts.leaf_frame_pointer.is_none() && opts.opt_level.runs_optimizer(),
         red_zone: opts.red_zone,
