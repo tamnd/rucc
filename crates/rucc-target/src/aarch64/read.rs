@@ -122,6 +122,8 @@ pub fn read(text: &str) -> Result<Line, Error> {
             // spell. A C global called `le` or `eq` is written `adrp x0, le`, and reading that as
             // the condition would leave the line with no encoding. GNU as reads it the same way.
             line.values.push(reference(piece, &mut named).map(Value::Symbol)?);
+        } else if let Some(pattern) = predicate_pattern(&line.mnemonic, at, piece) {
+            line.values.push(Value::Imm(pattern));
         } else {
             line.values.push(operand(piece, &mut named)?);
         }
@@ -207,6 +209,31 @@ fn takes_label(mnemonic: &str) -> bool {
         mnemonic,
         "b" | "bl" | "cbz" | "cbnz" | "tbz" | "tbnz" | "adr" | "adrp" | "ldr" | "ldrsw" | "prfm"
     ) || mnemonic.starts_with("b.")
+}
+
+/// The number an SVE predicate pattern names, such as `vl4` or `all`, in the one place it is
+/// read, after the register of a `ptrue`. Anywhere else the word is a label, so that `b all` is
+/// still a branch to a function called `all`.
+fn predicate_pattern(mnemonic: &str, at: usize, piece: &str) -> Option<i64> {
+    if at != 1 || !matches!(mnemonic, "ptrue" | "ptrues") {
+        return None;
+    }
+    let lower = piece.to_ascii_lowercase();
+    let pattern = match lower.as_str() {
+        "pow2" => 0,
+        "vl16" => 9,
+        "vl32" => 10,
+        "vl64" => 11,
+        "vl128" => 12,
+        "vl256" => 13,
+        "mul4" => 29,
+        "mul3" => 30,
+        "all" => 31,
+        _ => {
+            lower.strip_prefix("vl").and_then(|n| n.parse().ok()).filter(|n| (1..=8).contains(n))?
+        }
+    };
+    Some(pattern)
 }
 
 /// A list of vector registers, `{v0.16b, v1.16b}` or `{v0.16b - v3.16b}`, which have to follow
@@ -765,6 +792,16 @@ mod tests {
         }
         // A name that happens to spell a float is still a name.
         assert_eq!(read("adrp x0, inf").unwrap().symbol.as_deref(), Some("inf"));
+    }
+
+    #[test]
+    fn a_predicate_pattern_is_a_number_after_ptrue_and_a_name_anywhere_else() {
+        let line = read("ptrue p7.s, VL4").unwrap();
+        assert_eq!(line.values, [Value::Pred(7, Some(Scalar::S)), Value::Imm(4)]);
+        assert_eq!(read("ptrues p0.b, all").unwrap().values[1], Value::Imm(31));
+        assert_eq!(read("b all").unwrap().symbol.as_deref(), Some("all"));
+        assert_eq!(read("adrp x0, vl4").unwrap().symbol.as_deref(), Some("vl4"));
+        assert_eq!(read("ptrue p0.b, vl9").unwrap().symbol.as_deref(), Some("vl9"));
     }
 
     #[test]
