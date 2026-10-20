@@ -51,8 +51,13 @@ fn body<'a>(text: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
+/// The 6.12 kernel for AArch64 is built with `-fno-omit-frame-pointer -mbranch-protection=pac-ret`
+/// and nothing about leaves. A frame record in every leaf was a `paciasp` and an `autiasp` in each
+/// one, and under QEMU with `-cpu max` those two run the QARMA cipher in software, so the KUnit
+/// suite that calls `rtc_time64_to_tm` 58 million times took 113 seconds where gcc's kernel took
+/// 6, and the watchdog called it a soft lockup.
 #[test]
-fn a_leaf_keeps_the_frame_pointer_unless_the_flag_says_not_to() {
+fn a_leaf_keeps_the_frame_pointer_only_where_gcc_keeps_it() {
     for (target, setup) in
         [("x86_64-unknown-linux-gnu", "%rbp"), ("aarch64-unknown-linux-gnu", "x29")]
     {
@@ -60,8 +65,9 @@ fn a_leaf_keeps_the_frame_pointer_unless_the_flag_says_not_to() {
         {
             let text = asm(target, what, flags);
             // Except that gcc on x86 gives it back in a leaf with nothing in its frame, which
-            // this one is, unless the command line asked for it in leaves outright.
-            let kept = what == "keep" || setup == "x29";
+            // this one is, unless the command line asked for it in leaves outright. gcc on
+            // AArch64 leaves it out of every leaf unless asked.
+            let kept = what == "keep";
             assert_eq!(body(&text, "leaf").contains(setup), kept, "{target} {what}:\n{text}");
             assert!(body(&text, "caller").contains(setup), "{target} {what}:\n{text}");
         }
