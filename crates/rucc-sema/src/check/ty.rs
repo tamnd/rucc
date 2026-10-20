@@ -208,6 +208,9 @@ impl Checker<'_> {
                 return self.spelled_with(self.ast[name].specs);
             }
             TypeSpec::Typeof { operand: TypeofArg::Expr(expr), .. } => {
+                if let Some(&spelled) = self.typeof_spellings.get(&expr) {
+                    return Some(spelled);
+                }
                 let ast::Expr::Name(name) = self.ast[expr] else { return None };
                 let Some(Binding::Decl(of)) = self.scopes.lookup(name) else { return None };
                 return self.first_spellings.get(&of).copied().flatten();
@@ -216,6 +219,22 @@ impl Checker<'_> {
         };
         match self.scopes.lookup(name) {
             Some(Binding::Typedef(of)) => Some((name, of)),
+            _ => None,
+        }
+    }
+
+    /// The typedef name the type of a checked expression is spelled with, which is what
+    /// `typeof` of it keeps: the first declaration's for a name, and the member's own for
+    /// `a.m` and `p->m`, which gcc keeps the same way.
+    fn expr_spelled_with(&self, node: crate::expr::ExprId) -> Option<(Symbol, TypeId)> {
+        match self.tast[node].kind {
+            crate::expr::ExprKind::Decl(decl) => self.first_spellings.get(&decl).copied().flatten(),
+            crate::expr::ExprKind::Member { base, field } => {
+                let base = self.types.canonical(self.tast[base].ty);
+                let TypeKind::Record(record) = self.types.kind(base) else { return None };
+                let member = self.types.record_info(record).fields.get(field as usize)?.name?;
+                self.types.member_spelling(record, member)
+            }
             _ => None,
         }
     }
@@ -626,6 +645,9 @@ impl Checker<'_> {
                         Diagnostic::error("'typeof' applied to a bit-field".to_string(), span)
                             .with_code("E0570"),
                     );
+                }
+                if let Some(spelled) = self.expr_spelled_with(node) {
+                    self.typeof_spellings.insert(expr, spelled);
                 }
                 self.tast[node].ty
             }

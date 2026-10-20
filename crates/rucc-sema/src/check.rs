@@ -345,6 +345,10 @@ pub struct Checker<'a> {
     /// return type, or that it wrote none, which is what `typeof` of the declared name is spelled
     /// with. See `Checker::spelled_with`.
     pub(in crate::check) first_spellings: rucc_base::hash::Map<DeclId, Option<(Symbol, TypeId)>>,
+    /// The typedef name the operand of each `typeof(expr)` checked so far is spelled with, by
+    /// the expression, so that `typeof(p->m)` keeps the name `m` was written with. See
+    /// `Checker::spelled_with`.
+    pub(in crate::check) typeof_spellings: rucc_base::hash::Map<rucc_ast::ExprId, (Symbol, TypeId)>,
     /// The attribute lists `__builtin_has_attribute` and `__builtin_counted_by_ref` read, which
     /// is in `check/annotate.rs` with both of them.
     pub(in crate::check) annotations: annotate::Annotations,
@@ -427,6 +431,7 @@ impl<'a> Checker<'a> {
             defining: None,
             pending_uses: Vec::new(),
             first_spellings: rucc_base::hash::Map::default(),
+            typeof_spellings: rucc_base::hash::Map::default(),
             annotations: annotate::Annotations::default(),
             advice: advice::Advice::default(),
             unevaluated: 0,

@@ -227,6 +227,8 @@ pub struct Types {
     enums: Vec<EnumInfo>,
     aliases: Vec<Alias>,
     spelled: Vec<Spelled>,
+    /// The same spellings by record and member, for `typeof(p->m)`. See [`Types::member_spelling`].
+    spelled_by_member: Map<(RecordId, Symbol), (Symbol, TypeId)>,
     params_written: Map<FunctionId, Vec<Written>>,
     /// The prototypes written since the declaration being read began. See
     /// [`Types::prototypes_mark`].
@@ -266,6 +268,7 @@ impl Types {
             enums: Vec::new(),
             aliases: Vec::new(),
             spelled: Vec::new(),
+            spelled_by_member: Map::default(),
             params_written: Map::default(),
             pending: Vec::new(),
             member_prototypes: Map::default(),
@@ -725,7 +728,18 @@ impl Types {
     /// layout or about which records are compatible, and the member is compared for both. The
     /// debug information is the one reader, and it wants `size_type n` where the program wrote it.
     pub fn record_member_spelling(&mut self, spelled: Spelled) {
+        self.spelled_by_member.insert((spelled.record, spelled.member), (spelled.name, spelled.of));
         self.spelled.push(spelled);
+    }
+
+    /// The typedef name one member of a record was written with and the type it stood for.
+    ///
+    /// gcc keeps the name through `typeof(p->m)`, and the kernel's per-CPU macros write
+    /// `typedef typeof(pcp) pcp_op_T__;` with `pcp` a member, so its BTF has the member's typedef
+    /// where the name was written.
+    #[must_use]
+    pub fn member_spelling(&self, record: RecordId, member: Symbol) -> Option<(Symbol, TypeId)> {
+        self.spelled_by_member.get(&(record, member)).copied()
     }
 
     /// Every record member written with a typedef name, in the order they were written.
