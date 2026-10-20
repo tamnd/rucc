@@ -866,7 +866,9 @@ impl At<'_> {
     /// The SVE instructions the kernel saves and restores a task's vector state with: a whole `z`
     /// or `p` register loaded or stored at a number of vector lengths from a base, `pfalse`, which
     /// clears a predicate, and `rdffr` and `wrffr`, which move the first fault register to and from
-    /// one. Any other line with an SVE register in it has no encoding.
+    /// one. `ptrue` sets the lanes of a predicate a pattern picks, every lane when there is none,
+    /// and is how the arm64 `sve-test` selftest changes `p0` under a signal. Any other line with an
+    /// SVE register in it has no encoding.
     fn sve(self, values: &[Value]) -> Result<Option<u32>, Error> {
         let m = self.mnemonic;
         let store = if m == "str" { 0x6000_0000 } else { 0 };
@@ -898,6 +900,25 @@ impl At<'_> {
             ("pfalse", [Value::Pred(d, Some(Scalar::B))]) => 0x2518_e400 | u32::from(*d),
             ("rdffr", [Value::Pred(d, Some(Scalar::B))]) => 0x2519_f000 | u32::from(*d),
             ("wrffr", [Value::Pred(n, Some(Scalar::B))]) => 0x2528_9000 | u32::from(*n) << 5,
+            ("ptrue" | "ptrues", [Value::Pred(d, Some(lanes)), pattern @ ..]) => {
+                let pattern = match pattern {
+                    [] => 31,
+                    [Value::Imm(pattern)] => u32::try_from(*pattern)
+                        .ok()
+                        .filter(|&pattern| pattern < 32)
+                        .ok_or_else(|| self.unwritten())?,
+                    _ => return Err(self.unwritten()),
+                };
+                let size = match lanes {
+                    Scalar::B => 0,
+                    Scalar::H => 1,
+                    Scalar::S => 2,
+                    Scalar::D => 3,
+                    Scalar::Q => return Err(self.unwritten()),
+                };
+                let flags = if m == "ptrues" { 1 << 16 } else { 0 };
+                0x2518_e000 | size << 22 | flags | pattern << 5 | u32::from(*d)
+            }
             _ if values
                 .iter()
                 .any(|value| matches!(value, Value::Z(_) | Value::Pred(..) | Value::Za(..))) =>
@@ -2717,6 +2738,17 @@ mod tests {
             ("pfalse p3.b", 0x2518_e403),
             ("rdffr p2.b", 0x2519_f002),
             ("wrffr p4.b", 0x2528_9080),
+            // Every lane, or the lanes a pattern picks, as GNU as writes each one.
+            ("ptrue p0.d", 0x25d8_e3e0),
+            ("ptrue p1.b", 0x2518_e3e1),
+            ("ptrue p7.s, vl4", 0x2598_e087),
+            ("ptrues p3.h, mul3", 0x2559_e3c3),
+            ("ptrue p15.b, #7", 0x2518_e0ef),
+            ("ptrue p2.h, pow2", 0x2558_e002),
+            ("ptrue p4.d, VL256", 0x25d8_e1a4),
+            ("ptrues p5.b", 0x2519_e3e5),
+            ("ptrue p6.s, all", 0x2598_e3e6),
+            ("ptrue p0.b, vl128", 0x2518_e180),
             // A slice of the SME array, which is how the kernel saves and loads `za`.
             ("str za[w12, #0], [x0]", 0xe120_0000),
             ("ldr za[w12, 0], [x3]", 0xe100_0060),
@@ -2738,6 +2770,10 @@ mod tests {
             "pfalse p0",
             "pfalse p0.h",
             "wrffr p0",
+            "ptrue p0",
+            "ptrue p0.b, #32",
+            "ptrue p0.b, vl9",
+            "ptrue p0.b, vl4, vl4",
             "ldr x0, [x1, #1, mul vl]",
             "ldr za[w11, 0], [x0]",
             "ldr za[w12, 16], [x0, #16, mul vl]",
