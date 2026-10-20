@@ -269,6 +269,24 @@ fn a_local_the_program_kept_in_a_register_comes_out_named_and_placed_over_stretc
     assert!(list.is_some_and(|bytes| !bytes.is_empty()), "the stretches are not written down");
 }
 
+/// With `-fno-var-tracking` the same local is in one place for the whole function, and there is no
+/// list at all, which is what gcc writes and what a kernel built with `CONFIG_DEBUG_INFO_REDUCED`
+/// asks for. The last of the two flags is the one that counts, as with gcc.
+#[test]
+fn a_build_without_var_tracking_places_a_local_once_and_writes_no_list() {
+    let dir = fixture("untracked", SOURCE);
+    let once = build(&dir, &["-g", "-fno-var-tracking"], "once.o");
+    let again = build(&dir, &["-g", "-fno-var-tracking", "-fvar-tracking"], "again.o");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(holds(&once, ".debug_str", b"index"), "the local is not named");
+    assert!(!holds(&once, ".debug_abbrev", &LISTED), "a place is still said over time");
+    let list = section(&once, ".debug_loclists");
+    assert!(list.is_none_or(|bytes| bytes.is_empty()), "a list was written");
+
+    assert!(holds(&again, ".debug_abbrev", &LISTED), "the later flag did not win");
+}
+
 /// `DW_TAG_lexical_block`, which is the entry a name declared inside a `{ ... }` hangs off.
 const BLOCK: u64 = 0x0b;
 

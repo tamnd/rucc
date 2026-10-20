@@ -2108,6 +2108,11 @@ pub struct Options {
     /// The version of DWARF that debug information is written in, which is 5 unless `-gdwarf-4`
     /// asked for 4. Only 4 and 5 are ever here.
     pub dwarf_version: u8,
+    /// Whether a local's place in the debug information follows it from register to register, as
+    /// gcc's `-fvar-tracking` does, which is the default. Off with `-fno-var-tracking`, which is
+    /// what the kernel builds with, and then every local has one place for the whole function and
+    /// `.debug_loclists` is not written at all, as with gcc.
+    pub var_tracking: bool,
     /// The flags that `DW_AT_producer` names after the version, as gcc does with
     /// `-grecord-gcc-switches`. That is on by default in gcc, so it is here too, and
     /// `-gno-record-gcc-switches` leaves this empty. Paths, macros, warnings and link flags are not
@@ -2900,6 +2905,7 @@ impl Options {
             debug_info: false,
             switches: Vec::new(),
             dwarf_version: 5,
+            var_tracking: true,
             working_dir: None,
             config_files: Vec::new(),
             compress: Compress::None,

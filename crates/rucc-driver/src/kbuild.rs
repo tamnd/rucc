@@ -77,14 +77,6 @@ pub(crate) const TABLE: &[Row] = &[
     ),
     same("-fno-verbose-asm", "no comments in the assembly output is what happens"),
     same(
-        "-fvar-tracking",
-        "it is about how hard gcc works at where a variable lives in the debug information, and \
-         the code is the same either way",
-    ),
-    same("-fno-var-tracking", "the same flag, and it changes no code either"),
-    same("-fvar-tracking-assignments", "the same family, and it changes no code"),
-    same("-fno-var-tracking-assignments", "the same family, and it changes no code"),
-    same(
         "-femit-struct-debug-baseonly",
         "it trims type information from the debug sections of a unit that does not define the \
          type, which changes their size and nothing a debugger or the program sees",

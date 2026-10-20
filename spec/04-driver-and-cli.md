@@ -259,6 +259,8 @@ Two things are deliberately not copied. gcc warns under `-Wmissing-profile` when
 
 The levels are a request for how much, and this compiler writes one amount, so `-g1` through `-g3` and the `-ggdb` spellings are `-g` and `-g0` is off. `-gdwarf-4` and `-gdwarf-5` turn debug information on as well as choosing the version, as they do in gcc, and the last one on the line wins. Any other version is refused, because a debugger handed version 5 when it was told version 3 is a worse outcome than a build that stopped.
 
+`-fvar-tracking` is the default and a local in a register is placed stretch by stretch through `.debug_loclists`. `-fno-var-tracking` places each local once for the whole function, in the place it is in for longest, and writes no list, as gcc does. A kernel with `CONFIG_DEBUG_INFO_REDUCED` builds that way. The last of the two wins. `-fvar-tracking-assignments` and `-fno-var-tracking-assignments` are taken and change nothing, since they are gcc's finer way of doing the same tracking. The code is the same in every case.
+
 `-gz` is how the debug sections are compressed. Its values are `none`, `zlib`, `zlib-gnu` and `zstd`, and the bare spelling means `zlib`, which gcc's manual describes the flag without ever saying. `zlib`, `zlib-gnu` and `zstd` are written, as section 11.4 describes, and `none` writes the sections as they are. A value outside the list is refused as not a way to compress, with the list given. Like gcc, the driver passes `--compress-debug-sections=` on to an ELF linker, so that debug sections arriving from objects it did not compile are compressed too. On Mach-O and COFF the flag is taken and the sections are written as they are, since neither linker has the option.
 
 `-gsplit-dwarf` is refused. It writes the debug information into a `.dwo` file beside the object, and gcc writes that file whether or not it found anything to put in it, so a build system that declares it as an output or a make rule that depends on it gets a file from gcc and nothing from here. Section 4.1 takes a flag that changes nothing and refuses one that changes what is produced, and a file that never appears is the plainest case of the second there is. `-gno-split-dwarf` is taken, because writing it all into the object is what happens.
@@ -370,7 +372,6 @@ Taken because what they ask for is what happens:
 | Flag | Why nothing changes |
 |---|---|
 | `-fverbose-asm`, `-fno-verbose-asm` | Comments in assembly output. The instructions are the same. |
-| `-fvar-tracking`, `-fno-var-tracking`, `-fvar-tracking-assignments`, `-fno-var-tracking-assignments` | How hard gcc works at where a variable lives in the debug information. The code is the same. |
 | `-femit-struct-debug-baseonly` | Less type information in the debug sections of a unit that does not define the type. The size changes and nothing a debugger or the program sees does. |
 | `-femit-struct-debug-reduced` | The same, for a type whose header is not the unit's own. |
 | `-femit-struct-debug-detailed=*` | The same, with the cases spelled out one by one. |
