@@ -42,7 +42,7 @@
 ///
 /// The set C needs and no more. An enumeration rather than the `DW_ATE_` constants themselves so
 /// that whoever builds a table does not have to depend on `gimli` to name one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Encoding {
     /// `bool`, whose one byte holds zero or one.
     Boolean,
@@ -62,7 +62,7 @@ pub enum Encoding {
 }
 
 /// A qualifier, which DWARF writes as an entry wrapping the type it qualifies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Qualifier {
     /// `const`.
     Const,
@@ -75,7 +75,7 @@ pub enum Qualifier {
 }
 
 /// Which bits of a record a bit-field member is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Bits {
     /// How far into the record the first bit is, in bits from the start of it.
     ///
@@ -88,7 +88,7 @@ pub struct Bits {
 }
 
 /// One member of a record.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Member {
     /// Its name, absent for an anonymous `struct` or `union` member and for an unnamed bit-field.
     pub name: Option<String>,
@@ -105,7 +105,7 @@ pub struct Member {
 }
 
 /// One type, in the terms DWARF describes one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Shape {
     /// A type whose bytes are read directly, which is every arithmetic type C has.
     Base {
@@ -197,7 +197,7 @@ pub enum Shape {
 }
 
 /// One enumerator of an enumeration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Constant {
     /// The name the program wrote, which is what a debugger prints in place of the number.
     pub name: String,
@@ -211,7 +211,7 @@ pub struct Constant {
 }
 
 /// What a function takes and gives back.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Sig {
     /// Which of the unit's [`types`](crate::Unit::types) it returns, and [`None`] for `void`.
     pub returns: Option<usize>,
@@ -228,7 +228,7 @@ pub struct Sig {
 }
 
 /// One parameter of a function.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     /// Its name, absent in a prototype that gave none and in a function type.
     pub name: Option<String>,
@@ -451,7 +451,7 @@ pub struct Call {
 /// afterwards, and one expression says so. A scalar whose address is never taken is put in an SSA
 /// value instead, at every optimization level including `-O0`, and where the register allocator put
 /// that value changes from one program counter to the next.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Spot {
     /// In one place at every address in the function.
     Always(Held),
@@ -466,7 +466,7 @@ pub enum Spot {
 }
 
 /// One stretch of a function's addresses and where a local is over it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     /// How far into the function the stretch starts, in bytes.
     pub from: u64,
@@ -477,7 +477,7 @@ pub struct Span {
 }
 
 /// A place in the machine something can be.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Held {
     /// This far from the function's frame base, which is a negative number for anything in the
     /// frame, since the frame base is the stack pointer the caller had and a frame is below that.
