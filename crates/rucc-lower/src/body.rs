@@ -4338,6 +4338,9 @@ impl<'u> Body<'_, 'u> {
             return;
         }
         if repr::value_type(self.types(), self.target(), ty).is_none() {
+            if self.literal_in_place(place, value, addr) {
+                return;
+            }
             // An aggregate initializing part of an aggregate, which is `struct p = q;` and
             // `struct p = (struct point){ 1, 2 };`. It is a copy rather than a store, because
             // an aggregate is not a value the IR can hold.
@@ -4356,6 +4359,41 @@ impl<'u> Body<'_, 'u> {
         // a plain type landing in an object no pass may fold a write to away.
         let flags = self.flags(ty).union(self.flags(place.ty));
         self.build(span).store(value, addr, info, flags);
+    }
+
+    /// Initialize an object from a compound literal by writing the literal's own initializer
+    /// straight into it, when that is the same thing as building the literal and copying it.
+    ///
+    /// The literal is an object with no name, and the initializer is the one place the program
+    /// reaches it, so nothing can tell where it was built. The object being initialized holds
+    /// nothing yet that the literal's initializer could read. So the literal's slot is pointed at
+    /// the object for the length of its initialization, and the slot of its own is never used.
+    ///
+    /// The kernel's `damon_test_three_regions_in_vmas` in 6.12 fills an array of six
+    /// `vm_area_struct` with `(struct vm_area_struct){ ... }` each. With a slot for every literal
+    /// and a copy out of it the frame was 2304 bytes, over FRAME_WARN, where gcc's is 1280.
+    fn literal_in_place(&mut self, place: Place, value: ExprId, addr: Value) -> bool {
+        let tast = self.tast();
+        let literal = match tast[value].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            _ => value,
+        };
+        let ExprKind::CompoundLiteral(decl) = tast[literal].kind else { return false };
+        let ty = tast[value].ty;
+        let own = tast[decl].ty;
+        let Some(Local::Slot(slot)) = self.vars.get(&decl).copied() else { return false };
+        if repr::size_of(self.types(), self.target(), own)
+            != repr::size_of(self.types(), self.target(), ty)
+            || self.is_volatile(own)
+            || self.is_volatile(ty)
+            || self.is_volatile(place.ty)
+        {
+            return false;
+        }
+        self.vars.insert(decl, Local::Slot(addr));
+        self.init(decl);
+        self.vars.insert(decl, Local::Slot(slot));
+        true
     }
 
     /// A fill of a fixed number of bytes with one byte.
