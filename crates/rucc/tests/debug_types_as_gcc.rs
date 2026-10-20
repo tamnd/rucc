@@ -1009,3 +1009,35 @@ int b(void) { int x = read_into; (void)x; (void)touched; return ({ held; in_valu
     }
     assert!(named(&all, DW_TAG_STRUCTURE, "only_voided").is_none());
 }
+
+/// A type the unit reaches more than once is one entry, as with gcc. pahole takes each unit as
+/// having one entry per type, and a second pointer to `struct s` would make it keep a second copy
+/// of every type that reaches one. Here `u32 (struct s *)` is reached from a member and from a
+/// variable, and `struct s *` without the typedef name and through it.
+#[test]
+fn a_type_reached_twice_is_one_entry() {
+    let source = "\
+struct s { int x; };
+typedef unsigned int u32;
+typedef u32 (*op)(struct s *);
+struct t { struct s *p; u32 (*f)(struct s *); op o; };
+struct t tt;
+const struct s *ca;
+u32 (*g)(struct s *);
+struct s *(*k)(u32);
+int fn(struct s *x, u32 y) { return x->x + y; }
+";
+    let all = entries(&build("once", source));
+    let mut seen: Vec<(u64, Option<u64>, Vec<Option<u64>>)> = Vec::new();
+    for entry in &all {
+        if ![DW_TAG_POINTER, DW_TAG_CONST, DW_TAG_SUBROUTINE].contains(&entry.tag) {
+            continue;
+        }
+        let params = entry.children.iter().map(|&child| all[child].ty).collect();
+        let key = (entry.tag, entry.ty, params);
+        assert!(!seen.contains(&key), "{key:?} is written twice");
+        seen.push(key);
+    }
+    let subroutines = all.iter().filter(|entry| entry.tag == DW_TAG_SUBROUTINE).count();
+    assert_eq!(subroutines, 2, "u32 (struct s *) and struct s *(u32)");
+}

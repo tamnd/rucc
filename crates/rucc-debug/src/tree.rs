@@ -20,6 +20,16 @@
 //! driver walked the types in. Nothing about DWARF depends on it: an entry is found by its offset
 //! through an attribute rather than by being in any particular place.
 //!
+//! # One entry for each type
+//!
+//! The table can hold one type more than once. `u32 (*)(struct s *)` walked for a member and again
+//! for a variable is two subroutines with the same parameters, and `struct irqaction *` reached
+//! through a typedef name and without one is two pointers to the same record. gcc writes one entry
+//! for each type, and pahole depends on that: its dedup of the kernel's BTF takes each unit as
+//! already having one entry per type, and a unit with two pointers to one record keeps a second
+//! copy of everything that reaches either. A kernel built from such units had five hundred copies
+//! of `task_struct`. So the types that are written the same way share one entry, see [`alike`].
+//!
 //! # A function with no signature gets no entry
 //!
 //! [`Function::sig`] is [`None`] for a function whose signature this compiler cannot yet fully
@@ -131,11 +141,15 @@ pub(crate) fn describe(
     let (shapes, funcs, globals, frames) = (&unit.types, &unit.funcs, &unit.globals, unit.frames);
     let wanted =
         wanted(shapes, funcs, &unit.abstracts, globals, &unit.declared, frames, &unit.kept);
-    let ids = kinds(dwarf, shapes, &wanted);
+    let alike = alike(shapes, &unit.type_tags);
+    let ids = kinds(dwarf, shapes, &wanted, &alike);
     let mut tagged = Tagged::new();
-    for (shape, &id) in shapes.iter().zip(&ids) {
+    let mut filled = vec![false; shapes.len()];
+    for (index, (shape, &id)) in shapes.iter().zip(&ids).enumerate() {
         if let Some(id) = id {
-            tagged.extend(fill(dwarf, shape, id, &ids, shapes)?);
+            if !std::mem::replace(&mut filled[alike[index]], true) {
+                tagged.extend(fill(dwarf, shape, id, &ids, shapes)?);
+            }
         }
     }
     let origins = abstracted(dwarf, &unit.abstracts, files, &ids)?;
@@ -262,15 +276,81 @@ fn wanted(
     wanted
 }
 
-/// An entry for every type something names, holding its tag and nothing else yet.
+/// An entry for every type something names, holding its tag and nothing else yet, and one entry
+/// for all the types [`alike`] says are the same.
 fn kinds(
     dwarf: &mut gimli::write::DwarfUnit,
     shapes: &[Shape],
     wanted: &[bool],
+    alike: &[usize],
 ) -> Vec<Option<UnitEntryId>> {
     let root = dwarf.unit.root();
-    let entries = shapes.iter().zip(wanted);
-    entries.map(|(shape, &wanted)| wanted.then(|| dwarf.unit.add(root, tag(shape)))).collect()
+    let mut made: HashMap<usize, UnitEntryId> = HashMap::new();
+    let entries = shapes.iter().zip(wanted).zip(alike);
+    entries
+        .map(|((shape, &wanted), &same)| {
+            wanted.then(|| *made.entry(same).or_insert_with(|| dwarf.unit.add(root, tag(shape))))
+        })
+        .collect()
+}
+
+/// For each type, the first type in the table that is written the same way.
+///
+/// Two types are the same when they are the same kind of entry with the same attributes and name
+/// the same types, so the answer is worked out again over the answer before it until it stops
+/// changing: two pointers are the same once what they point at is, and two subroutines once their
+/// parameters are. A record and an enumeration are only ever themselves, since each is the one
+/// definition the program wrote and two definitions that look alike are still two types. So is a
+/// type with tags on it, since its entry is what the tags point at.
+fn alike(shapes: &[Shape], tagged: &[(usize, Vec<Vec<u8>>)]) -> Vec<usize> {
+    let mut alike: Vec<usize> = (0..shapes.len()).collect();
+    let mut own: Vec<bool> = shapes
+        .iter()
+        .map(|shape| matches!(shape, Shape::Record { .. } | Shape::Enumeration { .. }))
+        .collect();
+    for &(index, _) in tagged {
+        if let Some(slot) = own.get_mut(index) {
+            *slot = true;
+        }
+    }
+    loop {
+        let mut first: HashMap<Shape, usize> = HashMap::new();
+        let next: Vec<usize> = shapes
+            .iter()
+            .enumerate()
+            .map(|(index, shape)| {
+                if own[index] {
+                    return index;
+                }
+                *first.entry(renamed(shape, &alike)).or_insert(index)
+            })
+            .collect();
+        if next == alike {
+            return alike;
+        }
+        alike = next;
+    }
+}
+
+/// A type with every type it names replaced by the one [`alike`] says it is.
+fn renamed(shape: &Shape, alike: &[usize]) -> Shape {
+    let to = |at: usize| alike.get(at).copied().unwrap_or(at);
+    let mut shape = shape.clone();
+    match &mut shape {
+        Shape::Pointer { to: Some(at), .. }
+        | Shape::Alias { of: Some(at), .. }
+        | Shape::Qualified { of: Some(at), .. }
+        | Shape::Array { of: at, .. }
+        | Shape::Vector { of: at, .. } => *at = to(*at),
+        Shape::Subroutine(sig) => {
+            sig.returns = sig.returns.map(to);
+            for param in &mut sig.params {
+                param.ty = to(param.ty);
+            }
+        }
+        _ => {}
+    }
+    shape
 }
 
 /// Which DWARF tag a shape is written as.
