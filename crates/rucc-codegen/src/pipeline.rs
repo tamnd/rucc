@@ -1552,7 +1552,14 @@ pub fn compile_recording(
         copies::reloads(&mut func, &moves, machine.shapes, (int, held), names);
         // After the reloads, which fold a load into the instruction that wanted it, where this
         // only ever takes out a copy between two registers.
-        copies::forward(&mut func, machine.shapes, machine.insts, (int, held), names);
+        copies::forward(
+            &mut func,
+            machine.shapes,
+            machine.insts,
+            (int, held),
+            machine.conv.stack_pointer,
+            names,
+        );
     }
 
     // After the allocator's moves are cleaned up, because a number written twice into one register
