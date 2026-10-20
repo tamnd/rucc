@@ -552,6 +552,43 @@ typeof(u64 *) e;
     assert_eq!(name(at(&all, pointer.ty.expect("a pointer has a type"))), u64);
 }
 
+/// A typedef written with `typeof` names the typedef the operand was spelled with, and `typeof` of
+/// a member keeps the member's, as gcc does. The arm64 kernel's `this_cpu_cmpxchg128` writes
+/// `typedef typeof(pcp) pcp_op_T__;` with `pcp` a member, and gcc's BTF has `pcp_op_T__` over
+/// `freelist_full_t` where it would otherwise be over `__int128 unsigned`.
+#[test]
+fn a_typedef_through_typeof_names_the_typedef_of_its_operand() {
+    let source = "\
+typedef unsigned long long u64;
+typedef int myint;
+struct s { myint m; u64 *p; };
+struct s v;
+struct s *ptr;
+myint x;
+typedef typeof(x) t_name;
+typedef typeof(v.m) t_dot;
+typedef typeof(ptr->m) t_arrow;
+typedef typeof(myint) t_type;
+t_name a;
+t_dot b;
+t_arrow c;
+t_type d;
+typeof(ptr->p) e;
+";
+    let all = entries(&build("typeof-typedef", source));
+    let myint = (DW_TAG_TYPEDEF, Some("myint".to_owned()));
+    for alias in ["t_name", "t_dot", "t_arrow", "t_type"] {
+        let entry = named(&all, DW_TAG_TYPEDEF, alias).expect("the typedef is described");
+        let over = at(&all, entry.ty.expect("a typedef has a type"));
+        assert_eq!((over.tag, over.name.clone()), myint, "{alias}");
+    }
+    let variable = named(&all, DW_TAG_VARIABLE, "e").expect("it is described");
+    let pointer = at(&all, variable.ty.expect("a variable has a type"));
+    assert_eq!(pointer.tag, DW_TAG_POINTER);
+    let to = at(&all, pointer.ty.expect("a pointer has a type"));
+    assert_eq!((to.tag, to.name.as_deref()), (DW_TAG_TYPEDEF, Some("u64")));
+}
+
 /// A typedef name `transparent_union` is written after is described as a union with no members,
 /// which is how gcc describes the copy of the union it gives the name, and so how the kernel's BTF
 /// has `release_pages_arg`. The union named another way still has its members.

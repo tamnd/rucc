@@ -762,11 +762,13 @@ impl Checker<'_> {
         // A deduced type is not known until its initializer is checked, and until then the
         // declaration is made with `int` so that everything else about it is still checked.
         let deduces = self.ast[specs].deduces();
-        let spelled = self.spelled_with(specs);
         let deducible = deduces.is_some_and(|which| self.deducible(which, item));
         let mark = self.types.prototypes_mark();
         let ty =
             if deduces.is_some() { self.int() } else { self.declared_type(specs, item.declarator) };
+        // After the type, since `typeof(p->m)` is spelled the way `m` was and that is known once
+        // the operand has been checked.
+        let spelled = self.spelled_with(specs);
         let prototypes = self.types.take_prototypes(mark);
         // `constexpr` implies `const`, which C23 6.7.2p6 says and which is what makes taking the
         // address of one and writing through it the diagnostic gcc gives it rather than silence.
@@ -799,7 +801,7 @@ impl Checker<'_> {
         if specs.is_typedef() {
             self.types.record_alias_prototypes(name, prototypes);
             self.tast.record_alias_type_tags(name, type_tags);
-            return self.typedef(name, ty, &specs, item, span);
+            return self.typedef(name, ty, &specs, item, span, spelled);
         }
         let kind = if is_function(&self.types, ty) { DeclKind::Function } else { DeclKind::Object };
         let named = item.asm_label.is_some();
@@ -1288,6 +1290,7 @@ impl Checker<'_> {
         specs: &ast::DeclSpecs,
         item: ast::InitDeclarator,
         span: Span,
+        spelled: Option<(Symbol, TypeId)>,
     ) -> Option<DeclId> {
         // A type is not something the linker places, so a section on one is refused the way gcc
         // refuses it rather than dropped.
@@ -1390,19 +1393,10 @@ impl Checker<'_> {
         // `kpti_remap_fn` and `ttbr_replace_func` are typedefs in a function that its BTF has.
         //
         // The name this one was written over, looked up before this one is declared, since
-        // `typedef u64 u64;` in a second header names the one already there.
-        let spelled = match specs.ty {
-            ast::TypeSpec::Typedef(over) => match self.scopes.lookup(over) {
-                Some(Binding::Typedef(of)) if over != name => Some((over, of)),
-                _ => None,
-            },
-            // `typedef __builtin_va_list __gnuc_va_list;`, which <stdarg.h> writes.
-            ast::TypeSpec::VaList => {
-                let over = self.va_list_name();
-                over.map(|over| (over, self.va_list_type()))
-            }
-            _ => None,
-        };
+        // `typedef u64 u64;` in a second header names the one already there. It is the one
+        // `typeof` keeps too, so the kernel's `typedef typeof(pcp) pcp_op_T__;` is the typedef
+        // its member was written with, which is what gcc says.
+        let spelled = spelled.filter(|&(over, _)| over != name);
         self.types.alias(name, ty, spelled);
         match self.scopes.lookup_here(name) {
             // A typedef may be written twice for the same type, which is what lets two headers
