@@ -7462,12 +7462,22 @@ impl<'a> Lowering<'a> {
 
     /// [`Self::clobbered`] on AArch64, where a clobber may name a vector register as well as a
     /// general purpose one, so each comes back with the file it is in. See [`aarch64::named`].
+    ///
+    /// The SVE predicates, the first fault register, the SME array and its lookup table, the
+    /// vector granule and the FP8 mode register are names gcc takes in a clobber list too. Nothing
+    /// this compiler writes keeps a value in any of them, so a clobber of one has nothing to say.
     fn clobbered_a64(inst: Inst, clobbers: &str) -> Result<Vec<(PhysReg, RegClass)>, Unsupported> {
         let refused = || Unsupported::Assembly { inst, refused: Written::Clobber };
+        let predicate = |entry: &str| {
+            entry.strip_prefix('p').and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| n < 16)
+        };
         let mut named = Vec::new();
         for entry in clobbers.split(',') {
             let entry = entry.trim().trim_matches('"');
-            if entry.is_empty() || matches!(entry, "memory" | "cc") {
+            if entry.is_empty()
+                || matches!(entry, "memory" | "cc" | "ffr" | "za" | "zt0" | "vg" | "fpmr")
+                || predicate(entry)
+            {
                 continue;
             }
             let reg = aarch64::named(entry).ok_or_else(refused)?;
