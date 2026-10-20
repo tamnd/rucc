@@ -37,6 +37,7 @@ The debug information keeps a typedef name through `typeof`, as gcc does: `typeo
 - `-fno-var-tracking` is honoured. Each local gets one place for the whole function, the one it is in for longest, and no `.debug_loclists` is written, as with gcc. A kernel with `CONFIG_DEBUG_INFO_REDUCED`, which allmodconfig turns on, builds that way, and its objects were carrying location lists gcc never writes. (#3746)
 - A function holding a variable length array no longer stops with an internal error on aarch64 when the saved stack pointer is spilled. The copy of `sp` into a scratch register was read back out of `sp` by the store, which is `str sp` and not an instruction, so LTP's `tst_timer_test.c` failed to build (#3747).
 - An aarch64 inline assembly clobber list may name the SVE and SME registers gcc takes there, `z0` to `z31`, `p0` to `p15`, `ffr`, `za`, `zt0`, `vg` and `fpmr`, which the arm64 hwcap selftest writes (#3749).
+- The aarch64 assembler takes a character as an immediate, as in `mov x0, '\n'`, which the arm64 GCS selftest writes, and a debug build no longer panics working out the bounds of an eight byte number resolved at the end of the file, which rseq's critical section tables put down (#3750).
 
 ### Added
 
