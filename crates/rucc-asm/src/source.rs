@@ -961,8 +961,10 @@ impl Reader {
     ///
     /// GNU as takes an immediate with no `#` in front of it, and the kernel writes some that way:
     /// `subs count, count, 128 + 16` in `memcpy.S`, and `cmp x0, ((0b0001))` once the preprocessor
-    /// has been over a constant handed to a macro in `el2_setup.h`. An operand inside brackets or
-    /// braces is an address or a list and is left alone, and so is one that is not all numbers.
+    /// has been over a constant handed to a macro in `el2_setup.h`. A character is one too, and the
+    /// arm64 GCS selftest's `gcs-stress-thread.S` prints a newline with `mov x0, '\n'`. An operand
+    /// inside brackets or braces is an address or a list and is left alone, and so is one that is
+    /// not all numbers.
     fn bare_sums(&self, rest: &str) -> String {
         let mut out = String::with_capacity(rest.len());
         let mut depth = 0i32;
@@ -985,8 +987,10 @@ impl Reader {
                 out.push(',');
             }
             let text = piece.trim();
-            let sum = text.starts_with(|c: char| c == '(' || c == '~' || c.is_ascii_digit())
-                && text.contains(['(', '+', '-', '*', '/', '<', '>', '|', '&', '^', '~', ' '])
+            let sum = (text.starts_with('\'')
+                || (text.starts_with(|c: char| c == '(' || c == '~' || c.is_ascii_digit())
+                    && text
+                        .contains(['(', '+', '-', '*', '/', '<', '>', '|', '&', '^', '~', ' '])))
                 && !text.contains(['[', '{', ':', '#']);
             let number = sum
                 .then(|| {
@@ -4810,8 +4814,10 @@ impl Reader {
                     // either means it. Either way what does not fit is refused: a branch out of
                     // reach cut down to its low byte goes somewhere nobody wrote, and so does a
                     // table of offsets whose entries were quietly truncated.
+                    // Eight bytes hold every number there is, and the bounds of them would not
+                    // fit in one.
                     let width = fixup.width as usize;
-                    let room = 8 * width as u32;
+                    let room = 8 * width.min(7) as u32;
                     let low = -(1i64 << (room - 1));
                     let high = if matches!(fixup.reach, Reach::Branch | Reach::Plain) {
                         (1i64 << (room - 1)) - 1
@@ -6703,6 +6709,22 @@ _tls$tlv$init:
             words(&read, ".text"),
             [0xd280_1800, 0x9100_2021, 0xd280_00a2, 0xf940_0883, 0xa9be_7bfd, 0xd503_245f]
         );
+    }
+
+    /// The length of a critical section in the table rseq's headers put down, which is two labels
+    /// below the `.quad` that holds their distance. A number worked out that late into eight
+    /// bytes is checked against no bounds, and working them out overflowed.
+    #[test]
+    fn a_distance_worked_out_late_fills_eight_bytes() {
+        let read = aarch64("\t.quad (2f - 1f)\n1:\tnop\n2:\n");
+        assert_eq!(words(&read, ".text"), [4, 0, 0xd503_201f]);
+    }
+
+    /// A character as an immediate, with the `#` and without it, which GNU as takes both ways.
+    #[test]
+    fn an_aarch64_immediate_may_be_a_character() {
+        let read = aarch64("\tmov x0, '\\n'\n\tmov w0, '0'\n\tadd w0, w0, #'0'\n");
+        assert_eq!(words(&read, ".text"), [0xd280_0140, 0x5280_0600, 0x1100_c000]);
     }
 
     #[test]
