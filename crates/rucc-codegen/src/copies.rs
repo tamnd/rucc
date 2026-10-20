@@ -494,11 +494,18 @@ pub fn reloads(
 /// scratch register too, or insists on it, keeps the copy. So does a read behind a call or an
 /// instruction the target does not have, since what those read and write is not all in their
 /// operands.
+///
+/// A copy out of the stack pointer stays too. On aarch64 the stack pointer is register 31 only to
+/// an add, a subtract and an address, and to a store or most of the rest the same number is the
+/// zero register, so `str sp, [x29, #-88]` is not an instruction. The copy in front of it is what
+/// a function holding a variable length array saves the stack pointer with, which tst_timer_test.c
+/// in LTP spilled from a scratch register.
 pub fn forward(
     func: &mut Func,
     machine: &MachineInsts,
     frame: &FrameInsts,
     scratch: (RegClass, &[PhysReg]),
+    stack: PhysReg,
     names: &Interner,
 ) -> usize {
     let (class, held) = scratch;
@@ -528,6 +535,7 @@ pub fn forward(
                 || to.class != class
                 || from.class != class
                 || into == out
+                || out == stack
                 || !held.contains(&into)
             {
                 continue;
@@ -1546,7 +1554,18 @@ mod tests {
     }
 
     fn forward(func: &mut Func, names: &Interner) -> usize {
-        super::forward(func, &MACHINE, &FRAME, (GPR, &[R10, R11]), names)
+        super::forward(func, &MACHINE, &FRAME, (GPR, &[R10, R11]), SYSV.stack_pointer, names)
+    }
+
+    /// A copy of the stack pointer into scratch, as a variable length array saves it, and a store
+    /// of the copy. Reading the stack pointer in the store is not an instruction on aarch64.
+    #[test]
+    fn a_copy_out_of_the_stack_pointer_stays() {
+        let (mut names, mut func, block) = empty();
+        copy(&mut func, &mut names, block, R10, SYSV.stack_pointer);
+        store(&mut func, &mut names, block, R10, 16);
+        assert_eq!(forward(&mut func, &names), 0);
+        assert_eq!(left(&func, block), 2);
     }
 
     #[test]
