@@ -4861,27 +4861,27 @@ static __inline__ poly64x2_t vreinterpretq_p64_p16(poly16x8_t __v) {
 /* Arithmetic and logic, a lane at a time. */
 static __inline__ int8x8_t vadd_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vsub_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vmul_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vmla_s8(int8x8_t __a, int8x8_t __b, int8x8_t __c) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int8x8_t vmls_s8(int8x8_t __a, int8x8_t __b, int8x8_t __c) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int8x8_t vmax_s8(int8x8_t __a, int8x8_t __b) {
@@ -4897,114 +4897,114 @@ static __inline__ int8x8_t vmin_s8(int8x8_t __a, int8x8_t __b) {
 static __inline__ int8x8_t vabd_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__INT8_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vceq_s8(int8x8_t __a, int8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vceqz_s8(int8x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcge_s8(int8x8_t __a, int8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcgez_s8(int8x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcgt_s8(int8x8_t __a, int8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcgtz_s8(int8x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcle_s8(int8x8_t __a, int8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vclez_s8(int8x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vclt_s8(int8x8_t __a, int8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcltz_s8(int8x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int8_t vaddv_s8(int8x8_t __a) {
-  int8_t __r = 0;
+  __INT8_TYPE__ __r = 0;
   for (int __i = 0; __i < 8; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int8_t vmaxv_s8(int8x8_t __a) {
-  int8_t __r = __a[0];
+  __INT8_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 8; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int8_t vminv_s8(int8x8_t __a) {
-  int8_t __r = __a[0];
+  __INT8_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 8; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int8x8_t vpadd_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = __i < 4 ? (int8_t)(__a[2 * __i] + __a[2 * __i + 1]) : (int8_t)(__b[2 * (__i - 4)]
-        + __b[2 * (__i - 4) + 1]);
+    __r[__i] = __i < 4 ? (__INT8_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__INT8_TYPE__)(__b[2 * (__i - 4)] + __b[2 * (__i - 4) + 1]);
   return __r;
 }
 static __inline__ int16x4_t vadd_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vsub_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vmul_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vmul_n_s16(int16x4_t __a, int16_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] * __b);
   return __r;
 }
 static __inline__ int16x4_t vmla_s16(int16x4_t __a, int16x4_t __b, int16x4_t __c) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int16x4_t vmls_s16(int16x4_t __a, int16x4_t __b, int16x4_t __c) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int16x4_t vmla_n_s16(int16x4_t __a, int16x4_t __b, int16_t __c) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ int16x4_t vmax_s16(int16x4_t __a, int16x4_t __b) {
@@ -5020,114 +5020,114 @@ static __inline__ int16x4_t vmin_s16(int16x4_t __a, int16x4_t __b) {
 static __inline__ int16x4_t vabd_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vceq_s16(int16x4_t __a, int16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vceqz_s16(int16x4_t __a) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcge_s16(int16x4_t __a, int16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcgez_s16(int16x4_t __a) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcgt_s16(int16x4_t __a, int16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcgtz_s16(int16x4_t __a) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcle_s16(int16x4_t __a, int16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vclez_s16(int16x4_t __a) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vclt_s16(int16x4_t __a, int16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcltz_s16(int16x4_t __a) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int16_t vaddv_s16(int16x4_t __a) {
-  int16_t __r = 0;
+  __INT16_TYPE__ __r = 0;
   for (int __i = 0; __i < 4; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int16_t vmaxv_s16(int16x4_t __a) {
-  int16_t __r = __a[0];
+  __INT16_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 4; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int16_t vminv_s16(int16x4_t __a) {
-  int16_t __r = __a[0];
+  __INT16_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 4; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int16x4_t vpadd_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __i < 2 ? (int16_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (int16_t)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
+    __r[__i] = __i < 2 ? (__INT16_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__INT16_TYPE__)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
   return __r;
 }
 static __inline__ int32x2_t vadd_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vsub_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vmul_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vmul_n_s32(int32x2_t __a, int32_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] * __b);
   return __r;
 }
 static __inline__ int32x2_t vmla_s32(int32x2_t __a, int32x2_t __b, int32x2_t __c) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int32x2_t vmls_s32(int32x2_t __a, int32x2_t __b, int32x2_t __c) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int32x2_t vmla_n_s32(int32x2_t __a, int32x2_t __b, int32_t __c) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ int32x2_t vmax_s32(int32x2_t __a, int32x2_t __b) {
@@ -5143,164 +5143,164 @@ static __inline__ int32x2_t vmin_s32(int32x2_t __a, int32x2_t __b) {
 static __inline__ int32x2_t vabd_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vceq_s32(int32x2_t __a, int32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vceqz_s32(int32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcge_s32(int32x2_t __a, int32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcgez_s32(int32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcgt_s32(int32x2_t __a, int32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcgtz_s32(int32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcle_s32(int32x2_t __a, int32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vclez_s32(int32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vclt_s32(int32x2_t __a, int32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcltz_s32(int32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int32_t vaddv_s32(int32x2_t __a) {
-  int32_t __r = 0;
+  __INT32_TYPE__ __r = 0;
   for (int __i = 0; __i < 2; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int32_t vmaxv_s32(int32x2_t __a) {
-  int32_t __r = __a[0];
+  __INT32_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 2; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int32_t vminv_s32(int32x2_t __a) {
-  int32_t __r = __a[0];
+  __INT32_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 2; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int32x2_t vpadd_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __i < 1 ? (int32_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (int32_t)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
+    __r[__i] = __i < 1 ? (__INT32_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__INT32_TYPE__)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
   return __r;
 }
 static __inline__ int64x1_t vadd_s64(int64x1_t __a, int64x1_t __b) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ int64x1_t vsub_s64(int64x1_t __a, int64x1_t __b) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vceq_s64(int64x1_t __a, int64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vceqz_s64(int64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcge_s64(int64x1_t __a, int64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcgez_s64(int64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcgt_s64(int64x1_t __a, int64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcgtz_s64(int64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcle_s64(int64x1_t __a, int64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vclez_s64(int64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vclt_s64(int64x1_t __a, int64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcltz_s64(int64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vadd_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vsub_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vmul_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vmla_u8(uint8x8_t __a, uint8x8_t __b, uint8x8_t __c) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vmls_u8(uint8x8_t __a, uint8x8_t __b, uint8x8_t __c) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vmax_u8(uint8x8_t __a, uint8x8_t __b) {
@@ -5316,94 +5316,94 @@ static __inline__ uint8x8_t vmin_u8(uint8x8_t __a, uint8x8_t __b) {
 static __inline__ uint8x8_t vabd_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__UINT8_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vceq_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vceqz_u8(uint8x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcge_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcgt_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vcle_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vclt_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8_t vaddv_u8(uint8x8_t __a) {
-  uint8_t __r = 0;
+  __UINT8_TYPE__ __r = 0;
   for (int __i = 0; __i < 8; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint8_t vmaxv_u8(uint8x8_t __a) {
-  uint8_t __r = __a[0];
+  __UINT8_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 8; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint8_t vminv_u8(uint8x8_t __a) {
-  uint8_t __r = __a[0];
+  __UINT8_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 8; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint8x8_t vpadd_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = __i < 4 ? (uint8_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (uint8_t)(__b[2 * (__i - 4)] + __b[2 * (__i - 4) + 1]);
+    __r[__i] = __i < 4 ? (__UINT8_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__UINT8_TYPE__)(__b[2 * (__i - 4)] + __b[2 * (__i - 4) + 1]);
   return __r;
 }
 static __inline__ uint16x4_t vadd_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vsub_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vmul_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vmul_n_u16(uint16x4_t __a, uint16_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] * __b);
   return __r;
 }
 static __inline__ uint16x4_t vmla_u16(uint16x4_t __a, uint16x4_t __b, uint16x4_t __c) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vmls_u16(uint16x4_t __a, uint16x4_t __b, uint16x4_t __c) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vmla_n_u16(uint16x4_t __a, uint16x4_t __b, uint16_t __c) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ uint16x4_t vmax_u16(uint16x4_t __a, uint16x4_t __b) {
@@ -5419,94 +5419,94 @@ static __inline__ uint16x4_t vmin_u16(uint16x4_t __a, uint16x4_t __b) {
 static __inline__ uint16x4_t vabd_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vceq_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vceqz_u16(uint16x4_t __a) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcge_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcgt_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vcle_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vclt_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16_t vaddv_u16(uint16x4_t __a) {
-  uint16_t __r = 0;
+  __UINT16_TYPE__ __r = 0;
   for (int __i = 0; __i < 4; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint16_t vmaxv_u16(uint16x4_t __a) {
-  uint16_t __r = __a[0];
+  __UINT16_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 4; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint16_t vminv_u16(uint16x4_t __a) {
-  uint16_t __r = __a[0];
+  __UINT16_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 4; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint16x4_t vpadd_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __i < 2 ? (uint16_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (uint16_t)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
+    __r[__i] = __i < 2 ? (__UINT16_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__UINT16_TYPE__)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
   return __r;
 }
 static __inline__ uint32x2_t vadd_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vsub_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vmul_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vmul_n_u32(uint32x2_t __a, uint32_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] * __b);
   return __r;
 }
 static __inline__ uint32x2_t vmla_u32(uint32x2_t __a, uint32x2_t __b, uint32x2_t __c) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vmls_u32(uint32x2_t __a, uint32x2_t __b, uint32x2_t __c) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vmla_n_u32(uint32x2_t __a, uint32x2_t __b, uint32_t __c) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ uint32x2_t vmax_u32(uint32x2_t __a, uint32x2_t __b) {
@@ -5522,134 +5522,134 @@ static __inline__ uint32x2_t vmin_u32(uint32x2_t __a, uint32x2_t __b) {
 static __inline__ uint32x2_t vabd_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vceq_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vceqz_u32(uint32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcge_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcgt_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcle_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vclt_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32_t vaddv_u32(uint32x2_t __a) {
-  uint32_t __r = 0;
+  __UINT32_TYPE__ __r = 0;
   for (int __i = 0; __i < 2; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint32_t vmaxv_u32(uint32x2_t __a) {
-  uint32_t __r = __a[0];
+  __UINT32_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 2; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint32_t vminv_u32(uint32x2_t __a) {
-  uint32_t __r = __a[0];
+  __UINT32_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 2; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint32x2_t vpadd_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __i < 1 ? (uint32_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (uint32_t)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
+    __r[__i] = __i < 1 ? (__UINT32_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__UINT32_TYPE__)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
   return __r;
 }
 static __inline__ uint64x1_t vadd_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (uint64_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vsub_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (uint64_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vceq_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vceqz_u64(uint64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcge_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcgt_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcle_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vclt_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ float32x2_t vadd_f32(float32x2_t __a, float32x2_t __b) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ float32x2_t vsub_f32(float32x2_t __a, float32x2_t __b) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ float32x2_t vmul_f32(float32x2_t __a, float32x2_t __b) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ float32x2_t vmul_n_f32(float32x2_t __a, float32_t __b) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)(__a[__i] * __b);
   return __r;
 }
 static __inline__ float32x2_t vmla_f32(float32x2_t __a, float32x2_t __b, float32x2_t __c) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ float32x2_t vmls_f32(float32x2_t __a, float32x2_t __b, float32x2_t __c) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ float32x2_t vmla_n_f32(float32x2_t __a, float32x2_t __b, float32_t __c) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ float32x2_t vmax_f32(float32x2_t __a, float32x2_t __b) {
@@ -5674,52 +5674,52 @@ static __inline__ float32x2_t vabd_f32(float32x2_t __a, float32x2_t __b) {
 }
 static __inline__ uint32x2_t vceq_f32(float32x2_t __a, float32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vceqz_f32(float32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcge_f32(float32x2_t __a, float32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcgez_f32(float32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcgt_f32(float32x2_t __a, float32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcgtz_f32(float32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcle_f32(float32x2_t __a, float32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vclez_f32(float32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vclt_f32(float32x2_t __a, float32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vcltz_f32(float32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ float32_t vaddv_f32(float32x2_t __a) {
@@ -5737,38 +5737,38 @@ static __inline__ float32_t vminv_f32(float32x2_t __a) {
 static __inline__ float32x2_t vpadd_f32(float32x2_t __a, float32x2_t __b) {
   float32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __i < 1 ? (float32_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (float32_t)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
+    __r[__i] = __i < 1 ? (float)(__a[2 * __i] + __a[2 * __i + 1]) : (float)(__b[2 * (__i - 1)]
+        + __b[2 * (__i - 1) + 1]);
   return __r;
 }
 static __inline__ float64x1_t vadd_f64(float64x1_t __a, float64x1_t __b) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ float64x1_t vsub_f64(float64x1_t __a, float64x1_t __b) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ float64x1_t vmul_f64(float64x1_t __a, float64x1_t __b) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ float64x1_t vmul_n_f64(float64x1_t __a, float64_t __b) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)(__a[__i] * __b);
   return __r;
 }
 static __inline__ float64x1_t vmla_f64(float64x1_t __a, float64x1_t __b, float64x1_t __c) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ float64x1_t vmls_f64(float64x1_t __a, float64x1_t __b, float64x1_t __c) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ float64x1_t vmax_f64(float64x1_t __a, float64x1_t __b) {
@@ -5793,97 +5793,97 @@ static __inline__ float64x1_t vabd_f64(float64x1_t __a, float64x1_t __b) {
 }
 static __inline__ uint64x1_t vceq_f64(float64x1_t __a, float64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vceqz_f64(float64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] == 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcge_f64(float64x1_t __a, float64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcgez_f64(float64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcgt_f64(float64x1_t __a, float64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcgtz_f64(float64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] > 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcle_f64(float64x1_t __a, float64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vclez_f64(float64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vclt_f64(float64x1_t __a, float64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vcltz_f64(float64x1_t __a) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int8x8_t vneg_s8(int8x8_t __a) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)-__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)-__a[__i];
   return __r;
 }
 static __inline__ int8x8_t vabs_s8(int8x8_t __a) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < 0 ? (int8_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < 0 ? (__INT8_TYPE__)-__a[__i] : __a[__i];
   return __r;
 }
 static __inline__ int16x4_t vneg_s16(int16x4_t __a) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)-__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)-__a[__i];
   return __r;
 }
 static __inline__ int16x4_t vabs_s16(int16x4_t __a) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (int16_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (__INT16_TYPE__)-__a[__i] : __a[__i];
   return __r;
 }
 static __inline__ int32x2_t vneg_s32(int32x2_t __a) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)-__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)-__a[__i];
   return __r;
 }
 static __inline__ int32x2_t vabs_s32(int32x2_t __a) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (int32_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (__INT32_TYPE__)-__a[__i] : __a[__i];
   return __r;
 }
 static __inline__ int64x1_t vneg_s64(int64x1_t __a) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)-__a[__i];
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)-__a[__i];
   return __r;
 }
 static __inline__ int64x1_t vabs_s64(int64x1_t __a) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < 0 ? (int64_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 1; __i++) __r[__i] = __a[__i] < 0 ? (__INT64_TYPE__)-__a[__i] : __a[__i];
   return __r;
 }
 static __inline__ float32x2_t vneg_f32(float32x2_t __a) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)-__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)-__a[__i];
   return __r;
 }
 static __inline__ float32x2_t vabs_f32(float32x2_t __a) {
@@ -5893,7 +5893,7 @@ static __inline__ float32x2_t vabs_f32(float32x2_t __a) {
 }
 static __inline__ float64x1_t vneg_f64(float64x1_t __a) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)-__a[__i];
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)-__a[__i];
   return __r;
 }
 static __inline__ float64x1_t vabs_f64(float64x1_t __a) {
@@ -5913,292 +5913,292 @@ static __inline__ float64x1_t vdiv_f64(float64x1_t __a, float64x1_t __b) {
 }
 static __inline__ int8x8_t vand_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vorr_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ int8x8_t veor_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vbic_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vorn_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vmvn_s8(int8x8_t __a) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)~__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint8x8_t vtst_s8(int8x8_t __a, int8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int16x4_t vand_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vorr_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ int16x4_t veor_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vbic_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vorn_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vmvn_s16(int16x4_t __a) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)~__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint16x4_t vtst_s16(int16x4_t __a, int16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int32x2_t vand_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vorr_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ int32x2_t veor_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vbic_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vorn_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vmvn_s32(int32x2_t __a) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)~__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint32x2_t vtst_s32(int32x2_t __a, int32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int64x1_t vand_s64(int64x1_t __a, int64x1_t __b) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ int64x1_t vorr_s64(int64x1_t __a, int64x1_t __b) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ int64x1_t veor_s64(int64x1_t __a, int64x1_t __b) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ int64x1_t vbic_s64(int64x1_t __a, int64x1_t __b) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ int64x1_t vorn_s64(int64x1_t __a, int64x1_t __b) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vtst_s64(int64x1_t __a, int64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x8_t vand_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vorr_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t veor_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vbic_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vorn_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vmvn_u8(uint8x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)~__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint8x8_t vtst_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vand_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vorr_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t veor_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vbic_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vorn_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vmvn_u16(uint16x4_t __a) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)~__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint16x4_t vtst_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x2_t vand_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vorr_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t veor_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vbic_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vorn_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vmvn_u32(uint32x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)~__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint32x2_t vtst_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vand_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (uint64_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vorr_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (uint64_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t veor_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (uint64_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vbic_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (uint64_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vorn_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (uint64_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vtst_u64(uint64x1_t __a, uint64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ poly8x8_t vmvn_p8(poly8x8_t __a) {
   poly8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (poly8_t)~__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__Poly8_t)~__a[__i];
   return __r;
 }
 static __inline__ uint8x8_t vtst_p8(poly8x8_t __a, poly8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x4_t vtst_p16(poly16x4_t __a, poly16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x1_t vtst_p64(poly64x1_t __a, poly64x1_t __b) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int8x8_t vbsl_s8(uint8x8_t __m, int8x8_t __a, int8x8_t __b) {
@@ -6321,232 +6321,257 @@ static __inline__ poly64x1_t vbsl_p64(uint64x1_t __m, poly64x1_t __a, poly64x1_t
 static __inline__ int8x8_t vqadd_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 7) - 1
-        ? ((int64_t)1 << 7) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < -((int64_t)1 << 7)
-        ? -((int64_t)1 << 7) : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 7) - 1 ? ((__INT64_TYPE__)1 << 7) - 1
+        : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 7)
+        ? -((__INT64_TYPE__)1 << 7) : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vqsub_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 7) - 1
-        ? ((int64_t)1 << 7) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < -((int64_t)1 << 7)
-        ? -((int64_t)1 << 7) : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__INT8_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 7) - 1 ? ((__INT64_TYPE__)1 << 7) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 7)
+        ? -((__INT64_TYPE__)1 << 7) : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vhadd_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT8_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ int8x8_t vrhadd_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT8_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ int8x8_t vshl_n_s8(int8x8_t __a, const int __n) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ int8x8_t vshr_n_s8(int8x8_t __a, const int __n) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = __n == 8 ? (int8_t)(__a[__i] < 0 ? -1 : 0) : (int8_t)(__a[__i] >> __n);
+    __r[__i] = __n == 8 ? (__INT8_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ int8x8_t vsra_n_s8(int8x8_t __a, int8x8_t __b, const int __n) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)(__a[__i] + (__n == 8 ? (int8_t)(__b[__i] < 0 ? -1 : 0)
-        : (int8_t)(__b[__i] >> __n)));
+    __r[__i] = (__INT8_TYPE__)(__a[__i] + (__n == 8 ? (__INT8_TYPE__)(__b[__i] < 0 ? -1 : 0)
+        : (__INT8_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ int8x8_t vshl_s8(int8x8_t __a, int8x8_t __b) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 8 ? 0 : (int8_t)__b[__i] <= -8 ? (int8_t)(__a[__i] < 0 ? -1
-        : 0) : (int8_t)__b[__i] >= 0 ? (int8_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (int8_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 8 ? 0 : (__INT8_TYPE__)__b[__i] <= -8
+        ? (__INT8_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__INT8_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__INT8_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int8x8_t vsli_n_s8(int8x8_t __a, int8x8_t __b, const int __n) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 56) >> (8 - __n))));
+    __r[__i] = (__INT8_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 56) >> (8 - __n))));
   return __r;
 }
 static __inline__ int8x8_t vsri_n_s8(int8x8_t __a, int8x8_t __b, const int __n) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 56)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 56) >> __n)));
+    __r[__i] = (__INT8_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 56)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 56) >> __n)));
   return __r;
 }
 static __inline__ int8x8_t vclz_s8(int8x8_t __a) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)(__a[__i] == 0 ? 8
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 56)) - 24);
+    __r[__i] = (__INT8_TYPE__)(__a[__i] == 0 ? 8
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 56)) - 24);
   return __r;
 }
 static __inline__ int8x8_t vcnt_s8(int8x8_t __a) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)__builtin_popcount((uint8_t)__a[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT8_TYPE__)__builtin_popcount((__UINT8_TYPE__)__a[__i]);
   return __r;
 }
 static __inline__ int8x8_t vrbit_s8(int8x8_t __a) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)(((((uint8_t)__a[__i] * 0x0802u & 0x22110u)
-        | ((uint8_t)__a[__i] * 0x8020u & 0x88440u)) * 0x10101u >> 16) & 0xff);
+    __r[__i] = (__INT8_TYPE__)(((((__UINT8_TYPE__)__a[__i] * 0x0802u & 0x22110u)
+        | ((__UINT8_TYPE__)__a[__i] * 0x8020u & 0x88440u)) * 0x10101u >> 16) & 0xff);
   return __r;
 }
 static __inline__ int16x4_t vqadd_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 15) - 1
-        ? ((int64_t)1 << 15) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < -((int64_t)1 << 15)
-        ? -((int64_t)1 << 15) : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__INT16_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 15) - 1
+        ? ((__INT64_TYPE__)1 << 15) - 1 : (__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 15) ? -((__INT64_TYPE__)1 << 15)
+        : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vqsub_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 15) - 1
-        ? ((int64_t)1 << 15) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < -((int64_t)1 << 15)
-        ? -((int64_t)1 << 15) : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__INT16_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 15) - 1 ? ((__INT64_TYPE__)1 << 15) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 15)
+        ? -((__INT64_TYPE__)1 << 15) : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vhadd_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT16_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ int16x4_t vrhadd_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT16_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ int16x4_t vshl_n_s16(int16x4_t __a, const int __n) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ int16x4_t vshr_n_s16(int16x4_t __a, const int __n) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __n == 16 ? (int16_t)(__a[__i] < 0 ? -1 : 0) : (int16_t)(__a[__i] >> __n);
+    __r[__i] = __n == 16 ? (__INT16_TYPE__)(__a[__i] < 0 ? -1 : 0)
+        : (__INT16_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ int16x4_t vsra_n_s16(int16x4_t __a, int16x4_t __b, const int __n) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)(__a[__i] + (__n == 16 ? (int16_t)(__b[__i] < 0 ? -1 : 0)
-        : (int16_t)(__b[__i] >> __n)));
+    __r[__i] = (__INT16_TYPE__)(__a[__i] + (__n == 16 ? (__INT16_TYPE__)(__b[__i] < 0 ? -1 : 0)
+        : (__INT16_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ int16x4_t vshl_s16(int16x4_t __a, int16x4_t __b) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 16 ? 0 : (int8_t)__b[__i] <= -16 ? (int16_t)(__a[__i] < 0 ? -1
-        : 0) : (int8_t)__b[__i] >= 0 ? (int16_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (int16_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 16 ? 0 : (__INT8_TYPE__)__b[__i] <= -16
+        ? (__INT16_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__INT16_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__INT16_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x4_t vsli_n_s16(int16x4_t __a, int16x4_t __b, const int __n) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 48) >> (16 - __n))));
+    __r[__i] = (__INT16_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 48) >> (16 - __n))));
   return __r;
 }
 static __inline__ int16x4_t vsri_n_s16(int16x4_t __a, int16x4_t __b, const int __n) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 48)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 48) >> __n)));
+    __r[__i]
+        = (__INT16_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 48)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 48) >> __n)));
   return __r;
 }
 static __inline__ int16x4_t vclz_s16(int16x4_t __a) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)(__a[__i] == 0 ? 16
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 48)) - 16);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] == 0 ? 16
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 48)) - 16);
   return __r;
 }
 static __inline__ int32x2_t vqadd_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 31) - 1
-        ? ((int64_t)1 << 31) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < -((int64_t)1 << 31)
-        ? -((int64_t)1 << 31) : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__INT32_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 31) - 1
+        ? ((__INT64_TYPE__)1 << 31) - 1 : (__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 31) ? -((__INT64_TYPE__)1 << 31)
+        : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vqsub_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 31) - 1
-        ? ((int64_t)1 << 31) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < -((int64_t)1 << 31)
-        ? -((int64_t)1 << 31) : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__INT32_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 31) - 1 ? ((__INT64_TYPE__)1 << 31) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 31)
+        ? -((__INT64_TYPE__)1 << 31) : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vhadd_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT32_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ int32x2_t vrhadd_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT32_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ int32x2_t vshl_n_s32(int32x2_t __a, const int __n) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ int32x2_t vshr_n_s32(int32x2_t __a, const int __n) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __n == 32 ? (int32_t)(__a[__i] < 0 ? -1 : 0) : (int32_t)(__a[__i] >> __n);
+    __r[__i] = __n == 32 ? (__INT32_TYPE__)(__a[__i] < 0 ? -1 : 0)
+        : (__INT32_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ int32x2_t vsra_n_s32(int32x2_t __a, int32x2_t __b, const int __n) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)(__a[__i] + (__n == 32 ? (int32_t)(__b[__i] < 0 ? -1 : 0)
-        : (int32_t)(__b[__i] >> __n)));
+    __r[__i] = (__INT32_TYPE__)(__a[__i] + (__n == 32 ? (__INT32_TYPE__)(__b[__i] < 0 ? -1 : 0)
+        : (__INT32_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ int32x2_t vshl_s32(int32x2_t __a, int32x2_t __b) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 32 ? 0 : (int8_t)__b[__i] <= -32 ? (int32_t)(__a[__i] < 0 ? -1
-        : 0) : (int8_t)__b[__i] >= 0 ? (int32_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (int32_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 32 ? 0 : (__INT8_TYPE__)__b[__i] <= -32
+        ? (__INT32_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__INT32_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__INT32_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x2_t vsli_n_s32(int32x2_t __a, int32x2_t __b, const int __n) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 32) >> (32 - __n))));
+    __r[__i] = (__INT32_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 32) >> (32 - __n))));
   return __r;
 }
 static __inline__ int32x2_t vsri_n_s32(int32x2_t __a, int32x2_t __b, const int __n) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 32)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 32) >> __n)));
+    __r[__i]
+        = (__INT32_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 32)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 32) >> __n)));
   return __r;
 }
 static __inline__ int32x2_t vclz_s32(int32x2_t __a) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)(__a[__i] == 0 ? 32
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 32)) - 0);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] == 0 ? 32
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 32)) - 0);
   return __r;
 }
 static __inline__ int64x1_t vqadd_s64(int64x1_t __a, int64x1_t __b) {
@@ -6565,270 +6590,298 @@ static __inline__ int64x1_t vqsub_s64(int64x1_t __a, int64x1_t __b) {
 }
 static __inline__ int64x1_t vshl_n_s64(int64x1_t __a, const int __n) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__INT64_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ int64x1_t vshr_n_s64(int64x1_t __a, const int __n) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = __n == 64 ? (int64_t)(__a[__i] < 0 ? -1 : 0) : (int64_t)(__a[__i] >> __n);
+    __r[__i] = __n == 64 ? (__INT64_TYPE__)(__a[__i] < 0 ? -1 : 0)
+        : (__INT64_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ int64x1_t vsra_n_s64(int64x1_t __a, int64x1_t __b, const int __n) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (int64_t)(__a[__i] + (__n == 64 ? (int64_t)(__b[__i] < 0 ? -1 : 0)
-        : (int64_t)(__b[__i] >> __n)));
+    __r[__i] = (__INT64_TYPE__)(__a[__i] + (__n == 64 ? (__INT64_TYPE__)(__b[__i] < 0 ? -1 : 0)
+        : (__INT64_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ int64x1_t vshl_s64(int64x1_t __a, int64x1_t __b) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 64 ? 0 : (int8_t)__b[__i] <= -64 ? (int64_t)(__a[__i] < 0 ? -1
-        : 0) : (int8_t)__b[__i] >= 0 ? (int64_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (int64_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 64 ? 0 : (__INT8_TYPE__)__b[__i] <= -64
+        ? (__INT64_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__INT64_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__INT64_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int64x1_t vsli_n_s64(int64x1_t __a, int64x1_t __b, const int __n) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = __n == 0 ? __b[__i] : (int64_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 0) >> (64 - __n))));
+    __r[__i] = __n == 0 ? __b[__i] : (__INT64_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 0) >> (64 - __n))));
   return __r;
 }
 static __inline__ int64x1_t vsri_n_s64(int64x1_t __a, int64x1_t __b, const int __n) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
     __r[__i] = __n == 64 ? __a[__i]
-        : (int64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 0) >> __n)));
+        : (__INT64_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 0)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 0) >> __n)));
   return __r;
 }
 static __inline__ uint8x8_t vqadd_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 8) - 1
-        ? ((int64_t)1 << 8) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__UINT8_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 8) - 1 ? ((__INT64_TYPE__)1 << 8) - 1
+        : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i] < 0 ? 0 : (__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vqsub_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 8) - 1
-        ? ((int64_t)1 << 8) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__UINT8_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 8) - 1 ? ((__INT64_TYPE__)1 << 8) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < 0 ? 0
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vhadd_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT8_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ uint8x8_t vrhadd_u8(uint8x8_t __a, uint8x8_t __b) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT8_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ uint8x8_t vshl_n_u8(uint8x8_t __a, const int __n) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ uint8x8_t vshr_n_u8(uint8x8_t __a, const int __n) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __n == 8 ? (uint8_t)(0) : (uint8_t)(__a[__i] >> __n);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = __n == 8 ? (__UINT8_TYPE__)(0) : (__UINT8_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ uint8x8_t vsra_n_u8(uint8x8_t __a, uint8x8_t __b, const int __n) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)(__a[__i] + (__n == 8 ? (uint8_t)(0) : (uint8_t)(__b[__i] >> __n)));
+    __r[__i] = (__UINT8_TYPE__)(__a[__i] + (__n == 8 ? (__UINT8_TYPE__)(0)
+        : (__UINT8_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ uint8x8_t vshl_u8(uint8x8_t __a, int8x8_t __b) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 8 ? 0 : (int8_t)__b[__i] <= -8 ? (uint8_t)(0)
-        : (int8_t)__b[__i] >= 0 ? (uint8_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (uint8_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 8 ? 0 : (__INT8_TYPE__)__b[__i] <= -8
+        ? (__UINT8_TYPE__)(0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__UINT8_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__UINT8_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vsli_n_u8(uint8x8_t __a, uint8x8_t __b, const int __n) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 56) >> (8 - __n))));
+    __r[__i] = (__UINT8_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 56) >> (8 - __n))));
   return __r;
 }
 static __inline__ uint8x8_t vsri_n_u8(uint8x8_t __a, uint8x8_t __b, const int __n) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 56)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 56) >> __n)));
+    __r[__i]
+        = (__UINT8_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 56)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 56) >> __n)));
   return __r;
 }
 static __inline__ uint8x8_t vclz_u8(uint8x8_t __a) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)(__a[__i] == 0 ? 8
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 56)) - 24);
+    __r[__i] = (__UINT8_TYPE__)(__a[__i] == 0 ? 8
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 56)) - 24);
   return __r;
 }
 static __inline__ uint8x8_t vcnt_u8(uint8x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)__builtin_popcount((uint8_t)__a[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT8_TYPE__)__builtin_popcount((__UINT8_TYPE__)__a[__i]);
   return __r;
 }
 static __inline__ uint8x8_t vrbit_u8(uint8x8_t __a) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)(((((uint8_t)__a[__i] * 0x0802u & 0x22110u)
-        | ((uint8_t)__a[__i] * 0x8020u & 0x88440u)) * 0x10101u >> 16) & 0xff);
+    __r[__i] = (__UINT8_TYPE__)(((((__UINT8_TYPE__)__a[__i] * 0x0802u & 0x22110u)
+        | ((__UINT8_TYPE__)__a[__i] * 0x8020u & 0x88440u)) * 0x10101u >> 16) & 0xff);
   return __r;
 }
 static __inline__ uint16x4_t vqadd_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 16) - 1
-        ? ((int64_t)1 << 16) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__UINT16_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 16) - 1
+        ? ((__INT64_TYPE__)1 << 16) - 1 : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i] < 0
+        ? 0 : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vqsub_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 16) - 1
-        ? ((int64_t)1 << 16) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__UINT16_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 16) - 1 ? ((__INT64_TYPE__)1 << 16) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < 0 ? 0
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vhadd_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT16_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ uint16x4_t vrhadd_u16(uint16x4_t __a, uint16x4_t __b) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT16_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ uint16x4_t vshl_n_u16(uint16x4_t __a, const int __n) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ uint16x4_t vshr_n_u16(uint16x4_t __a, const int __n) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __n == 16 ? (uint16_t)(0) : (uint16_t)(__a[__i] >> __n);
+    __r[__i] = __n == 16 ? (__UINT16_TYPE__)(0) : (__UINT16_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ uint16x4_t vsra_n_u16(uint16x4_t __a, uint16x4_t __b, const int __n) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)(__a[__i] + (__n == 16 ? (uint16_t)(0) : (uint16_t)(__b[__i] >> __n)));
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] + (__n == 16 ? (__UINT16_TYPE__)(0)
+        : (__UINT16_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ uint16x4_t vshl_u16(uint16x4_t __a, int16x4_t __b) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 16 ? 0 : (int8_t)__b[__i] <= -16 ? (uint16_t)(0)
-        : (int8_t)__b[__i] >= 0 ? (uint16_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (uint16_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 16 ? 0 : (__INT8_TYPE__)__b[__i] <= -16
+        ? (__UINT16_TYPE__)(0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__UINT16_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__UINT16_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x4_t vsli_n_u16(uint16x4_t __a, uint16x4_t __b, const int __n) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 48) >> (16 - __n))));
+    __r[__i] = (__UINT16_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 48) >> (16 - __n))));
   return __r;
 }
 static __inline__ uint16x4_t vsri_n_u16(uint16x4_t __a, uint16x4_t __b, const int __n) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 48)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 48) >> __n)));
+    __r[__i]
+        = (__UINT16_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 48)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 48) >> __n)));
   return __r;
 }
 static __inline__ uint16x4_t vclz_u16(uint16x4_t __a) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)(__a[__i] == 0 ? 16
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 48)) - 16);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] == 0 ? 16
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 48)) - 16);
   return __r;
 }
 static __inline__ uint32x2_t vqadd_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 32) - 1
-        ? ((int64_t)1 << 32) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__UINT32_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 32) - 1
+        ? ((__INT64_TYPE__)1 << 32) - 1 : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i] < 0
+        ? 0 : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vqsub_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 32) - 1
-        ? ((int64_t)1 << 32) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__UINT32_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 32) - 1 ? ((__INT64_TYPE__)1 << 32) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < 0 ? 0
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vhadd_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT32_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ uint32x2_t vrhadd_u32(uint32x2_t __a, uint32x2_t __b) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT32_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ uint32x2_t vshl_n_u32(uint32x2_t __a, const int __n) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ uint32x2_t vshr_n_u32(uint32x2_t __a, const int __n) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __n == 32 ? (uint32_t)(0) : (uint32_t)(__a[__i] >> __n);
+    __r[__i] = __n == 32 ? (__UINT32_TYPE__)(0) : (__UINT32_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ uint32x2_t vsra_n_u32(uint32x2_t __a, uint32x2_t __b, const int __n) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)(__a[__i] + (__n == 32 ? (uint32_t)(0) : (uint32_t)(__b[__i] >> __n)));
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] + (__n == 32 ? (__UINT32_TYPE__)(0)
+        : (__UINT32_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ uint32x2_t vshl_u32(uint32x2_t __a, int32x2_t __b) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 32 ? 0 : (int8_t)__b[__i] <= -32 ? (uint32_t)(0)
-        : (int8_t)__b[__i] >= 0 ? (uint32_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (uint32_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 32 ? 0 : (__INT8_TYPE__)__b[__i] <= -32
+        ? (__UINT32_TYPE__)(0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__UINT32_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__UINT32_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x2_t vsli_n_u32(uint32x2_t __a, uint32x2_t __b, const int __n) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 32) >> (32 - __n))));
+    __r[__i] = (__UINT32_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 32) >> (32 - __n))));
   return __r;
 }
 static __inline__ uint32x2_t vsri_n_u32(uint32x2_t __a, uint32x2_t __b, const int __n) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 32)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 32) >> __n)));
+    __r[__i]
+        = (__UINT32_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 32)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 32) >> __n)));
   return __r;
 }
 static __inline__ uint32x2_t vclz_u32(uint32x2_t __a) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)(__a[__i] == 0 ? 32
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 32)) - 0);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] == 0 ? 32
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 32)) - 0);
   return __r;
 }
 static __inline__ uint64x1_t vqadd_u64(uint64x1_t __a, uint64x1_t __b) {
@@ -6844,67 +6897,69 @@ static __inline__ uint64x1_t vqsub_u64(uint64x1_t __a, uint64x1_t __b) {
 }
 static __inline__ uint64x1_t vshl_n_u64(uint64x1_t __a, const int __n) {
   uint64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (uint64_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ uint64x1_t vshr_n_u64(uint64x1_t __a, const int __n) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = __n == 64 ? (uint64_t)(0) : (uint64_t)(__a[__i] >> __n);
+    __r[__i] = __n == 64 ? (__UINT64_TYPE__)(0) : (__UINT64_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ uint64x1_t vsra_n_u64(uint64x1_t __a, uint64x1_t __b, const int __n) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (uint64_t)(__a[__i] + (__n == 64 ? (uint64_t)(0) : (uint64_t)(__b[__i] >> __n)));
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] + (__n == 64 ? (__UINT64_TYPE__)(0)
+        : (__UINT64_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ uint64x1_t vshl_u64(uint64x1_t __a, int64x1_t __b) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 64 ? 0 : (int8_t)__b[__i] <= -64 ? (uint64_t)(0)
-        : (int8_t)__b[__i] >= 0 ? (uint64_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (uint64_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 64 ? 0 : (__INT8_TYPE__)__b[__i] <= -64
+        ? (__UINT64_TYPE__)(0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__UINT64_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint64x1_t vsli_n_u64(uint64x1_t __a, uint64x1_t __b, const int __n) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = __n == 0 ? __b[__i] : (uint64_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 0) >> (64 - __n))));
+    __r[__i] = __n == 0 ? __b[__i] : (__UINT64_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 0) >> (64 - __n))));
   return __r;
 }
 static __inline__ uint64x1_t vsri_n_u64(uint64x1_t __a, uint64x1_t __b, const int __n) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
     __r[__i] = __n == 64 ? __a[__i]
-        : (uint64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 0) >> __n)));
+        : (__UINT64_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 0)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 0) >> __n)));
   return __r;
 }
 static __inline__ int8x16_t vaddq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vsubq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vmulq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vmlaq_s8(int8x16_t __a, int8x16_t __b, int8x16_t __c) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int8x16_t vmlsq_s8(int8x16_t __a, int8x16_t __b, int8x16_t __c) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int8x16_t vmaxq_s8(int8x16_t __a, int8x16_t __b) {
@@ -6920,114 +6975,114 @@ static __inline__ int8x16_t vminq_s8(int8x16_t __a, int8x16_t __b) {
 static __inline__ int8x16_t vabdq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__INT8_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vceqq_s8(int8x16_t __a, int8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vceqzq_s8(int8x16_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] == 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] == 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcgeq_s8(int8x16_t __a, int8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcgezq_s8(int8x16_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] >= 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcgtq_s8(int8x16_t __a, int8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcgtzq_s8(int8x16_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] > 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] > 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcleq_s8(int8x16_t __a, int8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vclezq_s8(int8x16_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] <= 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcltq_s8(int8x16_t __a, int8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcltzq_s8(int8x16_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] < 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] < 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int8_t vaddvq_s8(int8x16_t __a) {
-  int8_t __r = 0;
+  __INT8_TYPE__ __r = 0;
   for (int __i = 0; __i < 16; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int8_t vmaxvq_s8(int8x16_t __a) {
-  int8_t __r = __a[0];
+  __INT8_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 16; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int8_t vminvq_s8(int8x16_t __a) {
-  int8_t __r = __a[0];
+  __INT8_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 16; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int8x16_t vpaddq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = __i < 8 ? (int8_t)(__a[2 * __i] + __a[2 * __i + 1]) : (int8_t)(__b[2 * (__i - 8)]
-        + __b[2 * (__i - 8) + 1]);
+    __r[__i] = __i < 8 ? (__INT8_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__INT8_TYPE__)(__b[2 * (__i - 8)] + __b[2 * (__i - 8) + 1]);
   return __r;
 }
 static __inline__ int16x8_t vaddq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vsubq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vmulq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vmulq_n_s16(int16x8_t __a, int16_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] * __b);
   return __r;
 }
 static __inline__ int16x8_t vmlaq_s16(int16x8_t __a, int16x8_t __b, int16x8_t __c) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int16x8_t vmlsq_s16(int16x8_t __a, int16x8_t __b, int16x8_t __c) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int16x8_t vmlaq_n_s16(int16x8_t __a, int16x8_t __b, int16_t __c) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ int16x8_t vmaxq_s16(int16x8_t __a, int16x8_t __b) {
@@ -7043,114 +7098,114 @@ static __inline__ int16x8_t vminq_s16(int16x8_t __a, int16x8_t __b) {
 static __inline__ int16x8_t vabdq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vceqq_s16(int16x8_t __a, int16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vceqzq_s16(int16x8_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcgeq_s16(int16x8_t __a, int16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcgezq_s16(int16x8_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcgtq_s16(int16x8_t __a, int16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcgtzq_s16(int16x8_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcleq_s16(int16x8_t __a, int16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vclezq_s16(int16x8_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcltq_s16(int16x8_t __a, int16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcltzq_s16(int16x8_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int16_t vaddvq_s16(int16x8_t __a) {
-  int16_t __r = 0;
+  __INT16_TYPE__ __r = 0;
   for (int __i = 0; __i < 8; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int16_t vmaxvq_s16(int16x8_t __a) {
-  int16_t __r = __a[0];
+  __INT16_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 8; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int16_t vminvq_s16(int16x8_t __a) {
-  int16_t __r = __a[0];
+  __INT16_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 8; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int16x8_t vpaddq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = __i < 4 ? (int16_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (int16_t)(__b[2 * (__i - 4)] + __b[2 * (__i - 4) + 1]);
+    __r[__i] = __i < 4 ? (__INT16_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__INT16_TYPE__)(__b[2 * (__i - 4)] + __b[2 * (__i - 4) + 1]);
   return __r;
 }
 static __inline__ int32x4_t vaddq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vsubq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vmulq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vmulq_n_s32(int32x4_t __a, int32_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] * __b);
   return __r;
 }
 static __inline__ int32x4_t vmlaq_s32(int32x4_t __a, int32x4_t __b, int32x4_t __c) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int32x4_t vmlsq_s32(int32x4_t __a, int32x4_t __b, int32x4_t __c) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ int32x4_t vmlaq_n_s32(int32x4_t __a, int32x4_t __b, int32_t __c) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ int32x4_t vmaxq_s32(int32x4_t __a, int32x4_t __b) {
@@ -7166,176 +7221,176 @@ static __inline__ int32x4_t vminq_s32(int32x4_t __a, int32x4_t __b) {
 static __inline__ int32x4_t vabdq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vceqq_s32(int32x4_t __a, int32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vceqzq_s32(int32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgeq_s32(int32x4_t __a, int32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgezq_s32(int32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgtq_s32(int32x4_t __a, int32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgtzq_s32(int32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcleq_s32(int32x4_t __a, int32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vclezq_s32(int32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcltq_s32(int32x4_t __a, int32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcltzq_s32(int32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int32_t vaddvq_s32(int32x4_t __a) {
-  int32_t __r = 0;
+  __INT32_TYPE__ __r = 0;
   for (int __i = 0; __i < 4; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int32_t vmaxvq_s32(int32x4_t __a) {
-  int32_t __r = __a[0];
+  __INT32_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 4; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int32_t vminvq_s32(int32x4_t __a) {
-  int32_t __r = __a[0];
+  __INT32_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 4; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ int32x4_t vpaddq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __i < 2 ? (int32_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (int32_t)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
+    __r[__i] = __i < 2 ? (__INT32_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__INT32_TYPE__)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
   return __r;
 }
 static __inline__ int64x2_t vaddq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vsubq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vceqq_s64(int64x2_t __a, int64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vceqzq_s64(int64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgeq_s64(int64x2_t __a, int64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgezq_s64(int64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgtq_s64(int64x2_t __a, int64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgtzq_s64(int64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcleq_s64(int64x2_t __a, int64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vclezq_s64(int64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcltq_s64(int64x2_t __a, int64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcltzq_s64(int64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int64_t vaddvq_s64(int64x2_t __a) {
-  int64_t __r = 0;
+  __INT64_TYPE__ __r = 0;
   for (int __i = 0; __i < 2; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int64x2_t vpaddq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __i < 1 ? (int64_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (int64_t)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
+    __r[__i] = __i < 1 ? (__INT64_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__INT64_TYPE__)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
   return __r;
 }
 static __inline__ uint8x16_t vaddq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vsubq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vmulq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vmlaq_u8(uint8x16_t __a, uint8x16_t __b, uint8x16_t __c) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vmlsq_u8(uint8x16_t __a, uint8x16_t __b, uint8x16_t __c) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vmaxq_u8(uint8x16_t __a, uint8x16_t __b) {
@@ -7351,94 +7406,94 @@ static __inline__ uint8x16_t vminq_u8(uint8x16_t __a, uint8x16_t __b) {
 static __inline__ uint8x16_t vabdq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (uint8_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__UINT8_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vceqq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vceqzq_u8(uint8x16_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] == 0 ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] == 0 ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcgeq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcgtq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcleq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vcltq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8_t vaddvq_u8(uint8x16_t __a) {
-  uint8_t __r = 0;
+  __UINT8_TYPE__ __r = 0;
   for (int __i = 0; __i < 16; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint8_t vmaxvq_u8(uint8x16_t __a) {
-  uint8_t __r = __a[0];
+  __UINT8_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 16; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint8_t vminvq_u8(uint8x16_t __a) {
-  uint8_t __r = __a[0];
+  __UINT8_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 16; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint8x16_t vpaddq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = __i < 8 ? (uint8_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (uint8_t)(__b[2 * (__i - 8)] + __b[2 * (__i - 8) + 1]);
+    __r[__i] = __i < 8 ? (__UINT8_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__UINT8_TYPE__)(__b[2 * (__i - 8)] + __b[2 * (__i - 8) + 1]);
   return __r;
 }
 static __inline__ uint16x8_t vaddq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vsubq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vmulq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vmulq_n_u16(uint16x8_t __a, uint16_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] * __b);
   return __r;
 }
 static __inline__ uint16x8_t vmlaq_u16(uint16x8_t __a, uint16x8_t __b, uint16x8_t __c) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vmlsq_u16(uint16x8_t __a, uint16x8_t __b, uint16x8_t __c) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vmlaq_n_u16(uint16x8_t __a, uint16x8_t __b, uint16_t __c) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ uint16x8_t vmaxq_u16(uint16x8_t __a, uint16x8_t __b) {
@@ -7454,94 +7509,94 @@ static __inline__ uint16x8_t vminq_u16(uint16x8_t __a, uint16x8_t __b) {
 static __inline__ uint16x8_t vabdq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vceqq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vceqzq_u16(uint16x8_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == 0 ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] == 0 ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcgeq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcgtq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcleq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vcltq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16_t vaddvq_u16(uint16x8_t __a) {
-  uint16_t __r = 0;
+  __UINT16_TYPE__ __r = 0;
   for (int __i = 0; __i < 8; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint16_t vmaxvq_u16(uint16x8_t __a) {
-  uint16_t __r = __a[0];
+  __UINT16_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 8; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint16_t vminvq_u16(uint16x8_t __a) {
-  uint16_t __r = __a[0];
+  __UINT16_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 8; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint16x8_t vpaddq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = __i < 4 ? (uint16_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (uint16_t)(__b[2 * (__i - 4)] + __b[2 * (__i - 4) + 1]);
+    __r[__i] = __i < 4 ? (__UINT16_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__UINT16_TYPE__)(__b[2 * (__i - 4)] + __b[2 * (__i - 4) + 1]);
   return __r;
 }
 static __inline__ uint32x4_t vaddq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vsubq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vmulq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vmulq_n_u32(uint32x4_t __a, uint32_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] * __b);
   return __r;
 }
 static __inline__ uint32x4_t vmlaq_u32(uint32x4_t __a, uint32x4_t __b, uint32x4_t __c) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vmlsq_u32(uint32x4_t __a, uint32x4_t __b, uint32x4_t __c) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vmlaq_n_u32(uint32x4_t __a, uint32x4_t __b, uint32_t __c) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ uint32x4_t vmaxq_u32(uint32x4_t __a, uint32x4_t __b) {
@@ -7557,146 +7612,146 @@ static __inline__ uint32x4_t vminq_u32(uint32x4_t __a, uint32x4_t __b) {
 static __inline__ uint32x4_t vabdq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] > __b[__i] ? __a[__i] - __b[__i] : __b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vceqq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vceqzq_u32(uint32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgeq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgtq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcleq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcltq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32_t vaddvq_u32(uint32x4_t __a) {
-  uint32_t __r = 0;
+  __UINT32_TYPE__ __r = 0;
   for (int __i = 0; __i < 4; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint32_t vmaxvq_u32(uint32x4_t __a) {
-  uint32_t __r = __a[0];
+  __UINT32_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 4; __i++) if (__a[__i] > __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint32_t vminvq_u32(uint32x4_t __a) {
-  uint32_t __r = __a[0];
+  __UINT32_TYPE__ __r = __a[0];
   for (int __i = 1; __i < 4; __i++) if (__a[__i] < __r) __r = __a[__i];
   return __r;
 }
 static __inline__ uint32x4_t vpaddq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __i < 2 ? (uint32_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (uint32_t)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
+    __r[__i] = __i < 2 ? (__UINT32_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__UINT32_TYPE__)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
   return __r;
 }
 static __inline__ uint64x2_t vaddq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vsubq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vceqq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vceqzq_u64(uint64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgeq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgtq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcleq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcltq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64_t vaddvq_u64(uint64x2_t __a) {
-  uint64_t __r = 0;
+  __UINT64_TYPE__ __r = 0;
   for (int __i = 0; __i < 2; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint64x2_t vpaddq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __i < 1 ? (uint64_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (uint64_t)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
+    __r[__i] = __i < 1 ? (__UINT64_TYPE__)(__a[2 * __i] + __a[2 * __i + 1])
+        : (__UINT64_TYPE__)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
   return __r;
 }
 static __inline__ float32x4_t vaddq_f32(float32x4_t __a, float32x4_t __b) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ float32x4_t vsubq_f32(float32x4_t __a, float32x4_t __b) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ float32x4_t vmulq_f32(float32x4_t __a, float32x4_t __b) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ float32x4_t vmulq_n_f32(float32x4_t __a, float32_t __b) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)(__a[__i] * __b);
   return __r;
 }
 static __inline__ float32x4_t vmlaq_f32(float32x4_t __a, float32x4_t __b, float32x4_t __c) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ float32x4_t vmlsq_f32(float32x4_t __a, float32x4_t __b, float32x4_t __c) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ float32x4_t vmlaq_n_f32(float32x4_t __a, float32x4_t __b, float32_t __c) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)(__a[__i] + __b[__i] * __c);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)(__a[__i] + __b[__i] * __c);
   return __r;
 }
 static __inline__ float32x4_t vmaxq_f32(float32x4_t __a, float32x4_t __b) {
@@ -7721,71 +7776,71 @@ static __inline__ float32x4_t vabdq_f32(float32x4_t __a, float32x4_t __b) {
 }
 static __inline__ uint32x4_t vceqq_f32(float32x4_t __a, float32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vceqzq_f32(float32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] == 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgeq_f32(float32x4_t __a, float32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgezq_f32(float32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgtq_f32(float32x4_t __a, float32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcgtzq_f32(float32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] > 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcleq_f32(float32x4_t __a, float32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vclezq_f32(float32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcltq_f32(float32x4_t __a, float32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vcltzq_f32(float32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ float32_t vaddvq_f32(float32x4_t __a) {
-  float32_t __lo = __a[0] + __a[1];
-  float32_t __hi = __a[2] + __a[3];
+  float __lo = __a[0] + __a[1];
+  float __hi = __a[2] + __a[3];
   return __lo + __hi;
 }
 static __inline__ float32_t vmaxvq_f32(float32x4_t __a) {
-  float32_t __lo = __a[0] > __a[1] ? __a[0] : __a[0] < __a[1] ? __a[1]
+  float __lo = __a[0] > __a[1] ? __a[0] : __a[0] < __a[1] ? __a[1]
       : __a[0] == __a[1] && __a[0] != 0 ? __a[0] : __a[0] + __a[1];
-  float32_t __hi = __a[2] > __a[3] ? __a[2] : __a[2] < __a[3] ? __a[3]
+  float __hi = __a[2] > __a[3] ? __a[2] : __a[2] < __a[3] ? __a[3]
       : __a[2] == __a[3] && __a[2] != 0 ? __a[2] : __a[2] + __a[3];
   return __lo > __hi ? __lo : __lo < __hi ? __hi : __lo == __hi && __lo != 0 ? __lo : __lo + __hi;
 }
 static __inline__ float32_t vminvq_f32(float32x4_t __a) {
-  float32_t __lo = __a[0] < __a[1] ? __a[0] : __a[0] > __a[1] ? __a[1]
+  float __lo = __a[0] < __a[1] ? __a[0] : __a[0] > __a[1] ? __a[1]
       : __a[0] != __a[0] || __a[1] != __a[1] ? __a[0] + __a[1] : __builtin_signbit(__a[0])
       ? __a[0] : __a[1];
-  float32_t __hi = __a[2] < __a[3] ? __a[2] : __a[2] > __a[3] ? __a[3]
+  float __hi = __a[2] < __a[3] ? __a[2] : __a[2] > __a[3] ? __a[3]
       : __a[2] != __a[2] || __a[3] != __a[3] ? __a[2] + __a[3] : __builtin_signbit(__a[2])
       ? __a[2] : __a[3];
   return __lo < __hi ? __lo : __lo > __hi ? __hi : __lo != __lo || __hi != __hi ? __lo + __hi
@@ -7794,38 +7849,38 @@ static __inline__ float32_t vminvq_f32(float32x4_t __a) {
 static __inline__ float32x4_t vpaddq_f32(float32x4_t __a, float32x4_t __b) {
   float32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __i < 2 ? (float32_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (float32_t)(__b[2 * (__i - 2)] + __b[2 * (__i - 2) + 1]);
+    __r[__i] = __i < 2 ? (float)(__a[2 * __i] + __a[2 * __i + 1]) : (float)(__b[2 * (__i - 2)]
+        + __b[2 * (__i - 2) + 1]);
   return __r;
 }
 static __inline__ float64x2_t vaddq_f64(float64x2_t __a, float64x2_t __b) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)(__a[__i] + __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)(__a[__i] + __b[__i]);
   return __r;
 }
 static __inline__ float64x2_t vsubq_f64(float64x2_t __a, float64x2_t __b) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)(__a[__i] - __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)(__a[__i] - __b[__i]);
   return __r;
 }
 static __inline__ float64x2_t vmulq_f64(float64x2_t __a, float64x2_t __b) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)(__a[__i] * __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)(__a[__i] * __b[__i]);
   return __r;
 }
 static __inline__ float64x2_t vmulq_n_f64(float64x2_t __a, float64_t __b) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)(__a[__i] * __b);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)(__a[__i] * __b);
   return __r;
 }
 static __inline__ float64x2_t vmlaq_f64(float64x2_t __a, float64x2_t __b, float64x2_t __c) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)(__a[__i] + __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)(__a[__i] + __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ float64x2_t vmlsq_f64(float64x2_t __a, float64x2_t __b, float64x2_t __c) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)(__a[__i] - __b[__i] * __c[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)(__a[__i] - __b[__i] * __c[__i]);
   return __r;
 }
 static __inline__ float64x2_t vmaxq_f64(float64x2_t __a, float64x2_t __b) {
@@ -7850,52 +7905,52 @@ static __inline__ float64x2_t vabdq_f64(float64x2_t __a, float64x2_t __b) {
 }
 static __inline__ uint64x2_t vceqq_f64(float64x2_t __a, float64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vceqzq_f64(float64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] == 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgeq_f64(float64x2_t __a, float64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgezq_f64(float64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] >= 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgtq_f64(float64x2_t __a, float64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcgtzq_f64(float64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] > 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcleq_f64(float64x2_t __a, float64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vclezq_f64(float64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] <= 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcltq_f64(float64x2_t __a, float64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < __b[__i] ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vcltzq_f64(float64x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ float64_t vaddvq_f64(float64x2_t __a) {
@@ -7913,53 +7968,53 @@ static __inline__ float64_t vminvq_f64(float64x2_t __a) {
 static __inline__ float64x2_t vpaddq_f64(float64x2_t __a, float64x2_t __b) {
   float64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __i < 1 ? (float64_t)(__a[2 * __i] + __a[2 * __i + 1])
-        : (float64_t)(__b[2 * (__i - 1)] + __b[2 * (__i - 1) + 1]);
+    __r[__i] = __i < 1 ? (double)(__a[2 * __i] + __a[2 * __i + 1]) : (double)(__b[2 * (__i - 1)]
+        + __b[2 * (__i - 1) + 1]);
   return __r;
 }
 static __inline__ int8x16_t vnegq_s8(int8x16_t __a) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)-__a[__i];
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)-__a[__i];
   return __r;
 }
 static __inline__ int8x16_t vabsq_s8(int8x16_t __a) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] < 0 ? (int8_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __a[__i] < 0 ? (__INT8_TYPE__)-__a[__i] : __a[__i];
   return __r;
 }
 static __inline__ int16x8_t vnegq_s16(int16x8_t __a) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)-__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)-__a[__i];
   return __r;
 }
 static __inline__ int16x8_t vabsq_s16(int16x8_t __a) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < 0 ? (int16_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __a[__i] < 0 ? (__INT16_TYPE__)-__a[__i] : __a[__i];
   return __r;
 }
 static __inline__ int32x4_t vnegq_s32(int32x4_t __a) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)-__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)-__a[__i];
   return __r;
 }
 static __inline__ int32x4_t vabsq_s32(int32x4_t __a) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (int32_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __a[__i] < 0 ? (__INT32_TYPE__)-__a[__i] : __a[__i];
   return __r;
 }
 static __inline__ int64x2_t vnegq_s64(int64x2_t __a) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)-__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)-__a[__i];
   return __r;
 }
 static __inline__ int64x2_t vabsq_s64(int64x2_t __a) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (int64_t)-__a[__i] : __a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __a[__i] < 0 ? (__INT64_TYPE__)-__a[__i] : __a[__i];
   return __r;
 }
 static __inline__ float32x4_t vnegq_f32(float32x4_t __a) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)-__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)-__a[__i];
   return __r;
 }
 static __inline__ float32x4_t vabsq_f32(float32x4_t __a) {
@@ -7969,7 +8024,7 @@ static __inline__ float32x4_t vabsq_f32(float32x4_t __a) {
 }
 static __inline__ float64x2_t vnegq_f64(float64x2_t __a) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)-__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)-__a[__i];
   return __r;
 }
 static __inline__ float64x2_t vabsq_f64(float64x2_t __a) {
@@ -7989,292 +8044,292 @@ static __inline__ float64x2_t vdivq_f64(float64x2_t __a, float64x2_t __b) {
 }
 static __inline__ int8x16_t vandq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vorrq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ int8x16_t veorq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vbicq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vornq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vmvnq_s8(int8x16_t __a) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)~__a[__i];
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint8x16_t vtstq_s8(int8x16_t __a, int8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int16x8_t vandq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vorrq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ int16x8_t veorq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vbicq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vornq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vmvnq_s16(int16x8_t __a) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)~__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint16x8_t vtstq_s16(int16x8_t __a, int16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int32x4_t vandq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vorrq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ int32x4_t veorq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vbicq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vornq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vmvnq_s32(int32x4_t __a) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)~__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint32x4_t vtstq_s32(int32x4_t __a, int32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int64x2_t vandq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vorrq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ int64x2_t veorq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vbicq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vornq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vtstq_s64(int64x2_t __a, int64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint8x16_t vandq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vorrq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t veorq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vbicq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vornq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vmvnq_u8(uint8x16_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)~__a[__i];
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint8x16_t vtstq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vandq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vorrq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t veorq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vbicq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vornq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vmvnq_u16(uint16x8_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)~__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint16x8_t vtstq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint32x4_t vandq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vorrq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t veorq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vbicq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vornq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vmvnq_u32(uint32x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)~__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)~__a[__i];
   return __r;
 }
 static __inline__ uint32x4_t vtstq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint32_t)-1 : 0;
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT32_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vandq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] & __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] & __b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vorrq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] | __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] | __b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t veorq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] ^ __b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] ^ __b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vbicq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] & ~__b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] & ~__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vornq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] | ~__b[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)(__a[__i] | ~__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vtstq_u64(uint64x2_t __a, uint64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ poly8x16_t vmvnq_p8(poly8x16_t __a) {
   poly8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (poly8_t)~__a[__i];
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__Poly8_t)~__a[__i];
   return __r;
 }
 static __inline__ uint8x16_t vtstq_p8(poly8x16_t __a, poly8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint8_t)-1 : 0;
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT8_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint16x8_t vtstq_p16(poly16x8_t __a, poly16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint16_t)-1 : 0;
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT16_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ uint64x2_t vtstq_p64(poly64x2_t __a, poly64x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (uint64_t)-1 : 0;
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__a[__i] & __b[__i]) ? (__UINT64_TYPE__)-1 : 0;
   return __r;
 }
 static __inline__ int8x16_t vbslq_s8(uint8x16_t __m, int8x16_t __a, int8x16_t __b) {
@@ -8397,232 +8452,257 @@ static __inline__ poly64x2_t vbslq_p64(uint64x2_t __m, poly64x2_t __a, poly64x2_
 static __inline__ int8x16_t vqaddq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 7) - 1
-        ? ((int64_t)1 << 7) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < -((int64_t)1 << 7)
-        ? -((int64_t)1 << 7) : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 7) - 1 ? ((__INT64_TYPE__)1 << 7) - 1
+        : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 7)
+        ? -((__INT64_TYPE__)1 << 7) : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vqsubq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 7) - 1
-        ? ((int64_t)1 << 7) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < -((int64_t)1 << 7)
-        ? -((int64_t)1 << 7) : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__INT8_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 7) - 1 ? ((__INT64_TYPE__)1 << 7) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 7)
+        ? -((__INT64_TYPE__)1 << 7) : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vhaddq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 16; __i++)
+    __r[__i] = (__INT8_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ int8x16_t vrhaddq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 16; __i++)
+    __r[__i] = (__INT8_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ int8x16_t vshlq_n_s8(int8x16_t __a, const int __n) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__INT8_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ int8x16_t vshrq_n_s8(int8x16_t __a, const int __n) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = __n == 8 ? (int8_t)(__a[__i] < 0 ? -1 : 0) : (int8_t)(__a[__i] >> __n);
+    __r[__i] = __n == 8 ? (__INT8_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ int8x16_t vsraq_n_s8(int8x16_t __a, int8x16_t __b, const int __n) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)(__a[__i] + (__n == 8 ? (int8_t)(__b[__i] < 0 ? -1 : 0)
-        : (int8_t)(__b[__i] >> __n)));
+    __r[__i] = (__INT8_TYPE__)(__a[__i] + (__n == 8 ? (__INT8_TYPE__)(__b[__i] < 0 ? -1 : 0)
+        : (__INT8_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ int8x16_t vshlq_s8(int8x16_t __a, int8x16_t __b) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 8 ? 0 : (int8_t)__b[__i] <= -8 ? (int8_t)(__a[__i] < 0 ? -1
-        : 0) : (int8_t)__b[__i] >= 0 ? (int8_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (int8_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 8 ? 0 : (__INT8_TYPE__)__b[__i] <= -8
+        ? (__INT8_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__INT8_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__INT8_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int8x16_t vsliq_n_s8(int8x16_t __a, int8x16_t __b, const int __n) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 56) >> (8 - __n))));
+    __r[__i] = (__INT8_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 56) >> (8 - __n))));
   return __r;
 }
 static __inline__ int8x16_t vsriq_n_s8(int8x16_t __a, int8x16_t __b, const int __n) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 56)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 56) >> __n)));
+    __r[__i] = (__INT8_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 56)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 56) >> __n)));
   return __r;
 }
 static __inline__ int8x16_t vclzq_s8(int8x16_t __a) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)(__a[__i] == 0 ? 8
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 56)) - 24);
+    __r[__i] = (__INT8_TYPE__)(__a[__i] == 0 ? 8
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 56)) - 24);
   return __r;
 }
 static __inline__ int8x16_t vcntq_s8(int8x16_t __a) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (int8_t)__builtin_popcount((uint8_t)__a[__i]);
+  for (int __i = 0; __i < 16; __i++)
+    __r[__i] = (__INT8_TYPE__)__builtin_popcount((__UINT8_TYPE__)__a[__i]);
   return __r;
 }
 static __inline__ int8x16_t vrbitq_s8(int8x16_t __a) {
   int8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)(((((uint8_t)__a[__i] * 0x0802u & 0x22110u)
-        | ((uint8_t)__a[__i] * 0x8020u & 0x88440u)) * 0x10101u >> 16) & 0xff);
+    __r[__i] = (__INT8_TYPE__)(((((__UINT8_TYPE__)__a[__i] * 0x0802u & 0x22110u)
+        | ((__UINT8_TYPE__)__a[__i] * 0x8020u & 0x88440u)) * 0x10101u >> 16) & 0xff);
   return __r;
 }
 static __inline__ int16x8_t vqaddq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 15) - 1
-        ? ((int64_t)1 << 15) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < -((int64_t)1 << 15)
-        ? -((int64_t)1 << 15) : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__INT16_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 15) - 1
+        ? ((__INT64_TYPE__)1 << 15) - 1 : (__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 15) ? -((__INT64_TYPE__)1 << 15)
+        : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vqsubq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 15) - 1
-        ? ((int64_t)1 << 15) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < -((int64_t)1 << 15)
-        ? -((int64_t)1 << 15) : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__INT16_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 15) - 1 ? ((__INT64_TYPE__)1 << 15) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 15)
+        ? -((__INT64_TYPE__)1 << 15) : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vhaddq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ int16x8_t vrhaddq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ int16x8_t vshlq_n_s16(int16x8_t __a, const int __n) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ int16x8_t vshrq_n_s16(int16x8_t __a, const int __n) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = __n == 16 ? (int16_t)(__a[__i] < 0 ? -1 : 0) : (int16_t)(__a[__i] >> __n);
+    __r[__i] = __n == 16 ? (__INT16_TYPE__)(__a[__i] < 0 ? -1 : 0)
+        : (__INT16_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ int16x8_t vsraq_n_s16(int16x8_t __a, int16x8_t __b, const int __n) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__a[__i] + (__n == 16 ? (int16_t)(__b[__i] < 0 ? -1 : 0)
-        : (int16_t)(__b[__i] >> __n)));
+    __r[__i] = (__INT16_TYPE__)(__a[__i] + (__n == 16 ? (__INT16_TYPE__)(__b[__i] < 0 ? -1 : 0)
+        : (__INT16_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ int16x8_t vshlq_s16(int16x8_t __a, int16x8_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 16 ? 0 : (int8_t)__b[__i] <= -16 ? (int16_t)(__a[__i] < 0 ? -1
-        : 0) : (int8_t)__b[__i] >= 0 ? (int16_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (int16_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 16 ? 0 : (__INT8_TYPE__)__b[__i] <= -16
+        ? (__INT16_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__INT16_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__INT16_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vsliq_n_s16(int16x8_t __a, int16x8_t __b, const int __n) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 48) >> (16 - __n))));
+    __r[__i] = (__INT16_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 48) >> (16 - __n))));
   return __r;
 }
 static __inline__ int16x8_t vsriq_n_s16(int16x8_t __a, int16x8_t __b, const int __n) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 48)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 48) >> __n)));
+    __r[__i]
+        = (__INT16_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 48)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 48) >> __n)));
   return __r;
 }
 static __inline__ int16x8_t vclzq_s16(int16x8_t __a) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__a[__i] == 0 ? 16
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 48)) - 16);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] == 0 ? 16
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 48)) - 16);
   return __r;
 }
 static __inline__ int32x4_t vqaddq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 31) - 1
-        ? ((int64_t)1 << 31) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < -((int64_t)1 << 31)
-        ? -((int64_t)1 << 31) : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__INT32_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 31) - 1
+        ? ((__INT64_TYPE__)1 << 31) - 1 : (__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 31) ? -((__INT64_TYPE__)1 << 31)
+        : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vqsubq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 31) - 1
-        ? ((int64_t)1 << 31) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < -((int64_t)1 << 31)
-        ? -((int64_t)1 << 31) : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__INT32_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 31) - 1 ? ((__INT64_TYPE__)1 << 31) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < -((__INT64_TYPE__)1 << 31)
+        ? -((__INT64_TYPE__)1 << 31) : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vhaddq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ int32x4_t vrhaddq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ int32x4_t vshlq_n_s32(int32x4_t __a, const int __n) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ int32x4_t vshrq_n_s32(int32x4_t __a, const int __n) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __n == 32 ? (int32_t)(__a[__i] < 0 ? -1 : 0) : (int32_t)(__a[__i] >> __n);
+    __r[__i] = __n == 32 ? (__INT32_TYPE__)(__a[__i] < 0 ? -1 : 0)
+        : (__INT32_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ int32x4_t vsraq_n_s32(int32x4_t __a, int32x4_t __b, const int __n) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] + (__n == 32 ? (int32_t)(__b[__i] < 0 ? -1 : 0)
-        : (int32_t)(__b[__i] >> __n)));
+    __r[__i] = (__INT32_TYPE__)(__a[__i] + (__n == 32 ? (__INT32_TYPE__)(__b[__i] < 0 ? -1 : 0)
+        : (__INT32_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ int32x4_t vshlq_s32(int32x4_t __a, int32x4_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 32 ? 0 : (int8_t)__b[__i] <= -32 ? (int32_t)(__a[__i] < 0 ? -1
-        : 0) : (int8_t)__b[__i] >= 0 ? (int32_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (int32_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 32 ? 0 : (__INT8_TYPE__)__b[__i] <= -32
+        ? (__INT32_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__INT32_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__INT32_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vsliq_n_s32(int32x4_t __a, int32x4_t __b, const int __n) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 32) >> (32 - __n))));
+    __r[__i] = (__INT32_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 32) >> (32 - __n))));
   return __r;
 }
 static __inline__ int32x4_t vsriq_n_s32(int32x4_t __a, int32x4_t __b, const int __n) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 32)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 32) >> __n)));
+    __r[__i]
+        = (__INT32_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 32)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 32) >> __n)));
   return __r;
 }
 static __inline__ int32x4_t vclzq_s32(int32x4_t __a) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] == 0 ? 32
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 32)) - 0);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] == 0 ? 32
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 32)) - 0);
   return __r;
 }
 static __inline__ int64x2_t vqaddq_s64(int64x2_t __a, int64x2_t __b) {
@@ -8641,271 +8721,298 @@ static __inline__ int64x2_t vqsubq_s64(int64x2_t __a, int64x2_t __b) {
 }
 static __inline__ int64x2_t vshlq_n_s64(int64x2_t __a, const int __n) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ int64x2_t vshrq_n_s64(int64x2_t __a, const int __n) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __n == 64 ? (int64_t)(__a[__i] < 0 ? -1 : 0) : (int64_t)(__a[__i] >> __n);
+    __r[__i] = __n == 64 ? (__INT64_TYPE__)(__a[__i] < 0 ? -1 : 0)
+        : (__INT64_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ int64x2_t vsraq_n_s64(int64x2_t __a, int64x2_t __b, const int __n) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__a[__i] + (__n == 64 ? (int64_t)(__b[__i] < 0 ? -1 : 0)
-        : (int64_t)(__b[__i] >> __n)));
+    __r[__i] = (__INT64_TYPE__)(__a[__i] + (__n == 64 ? (__INT64_TYPE__)(__b[__i] < 0 ? -1 : 0)
+        : (__INT64_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ int64x2_t vshlq_s64(int64x2_t __a, int64x2_t __b) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 64 ? 0 : (int8_t)__b[__i] <= -64 ? (int64_t)(__a[__i] < 0 ? -1
-        : 0) : (int8_t)__b[__i] >= 0 ? (int64_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (int64_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 64 ? 0 : (__INT8_TYPE__)__b[__i] <= -64
+        ? (__INT64_TYPE__)(__a[__i] < 0 ? -1 : 0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__INT64_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__INT64_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vsliq_n_s64(int64x2_t __a, int64x2_t __b, const int __n) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __n == 0 ? __b[__i] : (int64_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 0) >> (64 - __n))));
+    __r[__i] = __n == 0 ? __b[__i] : (__INT64_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 0) >> (64 - __n))));
   return __r;
 }
 static __inline__ int64x2_t vsriq_n_s64(int64x2_t __a, int64x2_t __b, const int __n) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
     __r[__i] = __n == 64 ? __a[__i]
-        : (int64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 0) >> __n)));
+        : (__INT64_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 0)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 0) >> __n)));
   return __r;
 }
 static __inline__ uint8x16_t vqaddq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (uint8_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 8) - 1
-        ? ((int64_t)1 << 8) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__UINT8_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 8) - 1 ? ((__INT64_TYPE__)1 << 8) - 1
+        : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i] < 0 ? 0 : (__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vqsubq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (uint8_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 8) - 1
-        ? ((int64_t)1 << 8) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__UINT8_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 8) - 1 ? ((__INT64_TYPE__)1 << 8) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < 0 ? 0
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vhaddq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 16; __i++)
+    __r[__i] = (__UINT8_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ uint8x16_t vrhaddq_u8(uint8x16_t __a, uint8x16_t __b) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 16; __i++)
+    __r[__i] = (__UINT8_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ uint8x16_t vshlq_n_u8(uint8x16_t __a, const int __n) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 16; __i++) __r[__i] = (__UINT8_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ uint8x16_t vshrq_n_u8(uint8x16_t __a, const int __n) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = __n == 8 ? (uint8_t)(0) : (uint8_t)(__a[__i] >> __n);
+    __r[__i] = __n == 8 ? (__UINT8_TYPE__)(0) : (__UINT8_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ uint8x16_t vsraq_n_u8(uint8x16_t __a, uint8x16_t __b, const int __n) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (uint8_t)(__a[__i] + (__n == 8 ? (uint8_t)(0) : (uint8_t)(__b[__i] >> __n)));
+    __r[__i] = (__UINT8_TYPE__)(__a[__i] + (__n == 8 ? (__UINT8_TYPE__)(0)
+        : (__UINT8_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ uint8x16_t vshlq_u8(uint8x16_t __a, int8x16_t __b) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 8 ? 0 : (int8_t)__b[__i] <= -8 ? (uint8_t)(0)
-        : (int8_t)__b[__i] >= 0 ? (uint8_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (uint8_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 8 ? 0 : (__INT8_TYPE__)__b[__i] <= -8
+        ? (__UINT8_TYPE__)(0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__UINT8_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__UINT8_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vsliq_n_u8(uint8x16_t __a, uint8x16_t __b, const int __n) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (uint8_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 56) >> (8 - __n))));
+    __r[__i] = (__UINT8_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 56) >> (8 - __n))));
   return __r;
 }
 static __inline__ uint8x16_t vsriq_n_u8(uint8x16_t __a, uint8x16_t __b, const int __n) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (uint8_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 56)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 56) >> __n)));
+    __r[__i]
+        = (__UINT8_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 56)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 56) >> __n)));
   return __r;
 }
 static __inline__ uint8x16_t vclzq_u8(uint8x16_t __a) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (uint8_t)(__a[__i] == 0 ? 8
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 56)) - 24);
+    __r[__i] = (__UINT8_TYPE__)(__a[__i] == 0 ? 8
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 56)) - 24);
   return __r;
 }
 static __inline__ uint8x16_t vcntq_u8(uint8x16_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = (uint8_t)__builtin_popcount((uint8_t)__a[__i]);
+  for (int __i = 0; __i < 16; __i++)
+    __r[__i] = (__UINT8_TYPE__)__builtin_popcount((__UINT8_TYPE__)__a[__i]);
   return __r;
 }
 static __inline__ uint8x16_t vrbitq_u8(uint8x16_t __a) {
   uint8x16_t __r;
   for (int __i = 0; __i < 16; __i++)
-    __r[__i] = (uint8_t)(((((uint8_t)__a[__i] * 0x0802u & 0x22110u)
-        | ((uint8_t)__a[__i] * 0x8020u & 0x88440u)) * 0x10101u >> 16) & 0xff);
+    __r[__i] = (__UINT8_TYPE__)(((((__UINT8_TYPE__)__a[__i] * 0x0802u & 0x22110u)
+        | ((__UINT8_TYPE__)__a[__i] * 0x8020u & 0x88440u)) * 0x10101u >> 16) & 0xff);
   return __r;
 }
 static __inline__ uint16x8_t vqaddq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 16) - 1
-        ? ((int64_t)1 << 16) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__UINT16_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 16) - 1
+        ? ((__INT64_TYPE__)1 << 16) - 1 : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i] < 0
+        ? 0 : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vqsubq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 16) - 1
-        ? ((int64_t)1 << 16) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__UINT16_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 16) - 1 ? ((__INT64_TYPE__)1 << 16) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < 0 ? 0
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vhaddq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ uint16x8_t vrhaddq_u16(uint16x8_t __a, uint16x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ uint16x8_t vshlq_n_u16(uint16x8_t __a, const int __n) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ uint16x8_t vshrq_n_u16(uint16x8_t __a, const int __n) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = __n == 16 ? (uint16_t)(0) : (uint16_t)(__a[__i] >> __n);
+    __r[__i] = __n == 16 ? (__UINT16_TYPE__)(0) : (__UINT16_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ uint16x8_t vsraq_n_u16(uint16x8_t __a, uint16x8_t __b, const int __n) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__a[__i] + (__n == 16 ? (uint16_t)(0) : (uint16_t)(__b[__i] >> __n)));
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] + (__n == 16 ? (__UINT16_TYPE__)(0)
+        : (__UINT16_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ uint16x8_t vshlq_u16(uint16x8_t __a, int16x8_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 16 ? 0 : (int8_t)__b[__i] <= -16 ? (uint16_t)(0)
-        : (int8_t)__b[__i] >= 0 ? (uint16_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (uint16_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 16 ? 0 : (__INT8_TYPE__)__b[__i] <= -16
+        ? (__UINT16_TYPE__)(0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__UINT16_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__UINT16_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vsliq_n_u16(uint16x8_t __a, uint16x8_t __b, const int __n) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 48) >> (16 - __n))));
+    __r[__i] = (__UINT16_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 48) >> (16 - __n))));
   return __r;
 }
 static __inline__ uint16x8_t vsriq_n_u16(uint16x8_t __a, uint16x8_t __b, const int __n) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 48)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 48) >> __n)));
+    __r[__i]
+        = (__UINT16_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 48)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 48) >> __n)));
   return __r;
 }
 static __inline__ uint16x8_t vclzq_u16(uint16x8_t __a) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__a[__i] == 0 ? 16
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 48)) - 16);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] == 0 ? 16
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 48)) - 16);
   return __r;
 }
 static __inline__ uint32x4_t vqaddq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)((int64_t)__a[__i] + (int64_t)__b[__i] > ((int64_t)1 << 32) - 1
-        ? ((int64_t)1 << 32) - 1 : (int64_t)__a[__i] + (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] + (int64_t)__b[__i]);
+    __r[__i] = (__UINT32_TYPE__)((__INT64_TYPE__)__a[__i]
+        + (__INT64_TYPE__)__b[__i] > ((__INT64_TYPE__)1 << 32) - 1
+        ? ((__INT64_TYPE__)1 << 32) - 1 : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i] < 0
+        ? 0 : (__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vqsubq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)((int64_t)__a[__i] - (int64_t)__b[__i] > ((int64_t)1 << 32) - 1
-        ? ((int64_t)1 << 32) - 1 : (int64_t)__a[__i] - (int64_t)__b[__i] < 0 ? 0
-        : (int64_t)__a[__i] - (int64_t)__b[__i]);
+    __r[__i]
+        = (__UINT32_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]
+        > ((__INT64_TYPE__)1 << 32) - 1 ? ((__INT64_TYPE__)1 << 32) - 1
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i] < 0 ? 0
+        : (__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vhaddq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(((int64_t)__a[__i] + __b[__i]) >> 1);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i]) >> 1);
   return __r;
 }
 static __inline__ uint32x4_t vrhaddq_u32(uint32x4_t __a, uint32x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(((int64_t)__a[__i] + __b[__i] + 1) >> 1);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)(((__INT64_TYPE__)__a[__i] + __b[__i] + 1) >> 1);
   return __r;
 }
 static __inline__ uint32x4_t vshlq_n_u32(uint32x4_t __a, const int __n) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ uint32x4_t vshrq_n_u32(uint32x4_t __a, const int __n) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __n == 32 ? (uint32_t)(0) : (uint32_t)(__a[__i] >> __n);
+    __r[__i] = __n == 32 ? (__UINT32_TYPE__)(0) : (__UINT32_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ uint32x4_t vsraq_n_u32(uint32x4_t __a, uint32x4_t __b, const int __n) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] + (__n == 32 ? (uint32_t)(0) : (uint32_t)(__b[__i] >> __n)));
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] + (__n == 32 ? (__UINT32_TYPE__)(0)
+        : (__UINT32_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ uint32x4_t vshlq_u32(uint32x4_t __a, int32x4_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 32 ? 0 : (int8_t)__b[__i] <= -32 ? (uint32_t)(0)
-        : (int8_t)__b[__i] >= 0 ? (uint32_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (uint32_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 32 ? 0 : (__INT8_TYPE__)__b[__i] <= -32
+        ? (__UINT32_TYPE__)(0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__UINT32_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__UINT32_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vsliq_n_u32(uint32x4_t __a, uint32x4_t __b, const int __n) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 32) >> (32 - __n))));
+    __r[__i] = (__UINT32_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 32) >> (32 - __n))));
   return __r;
 }
 static __inline__ uint32x4_t vsriq_n_u32(uint32x4_t __a, uint32x4_t __b, const int __n) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 32)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 32) >> __n)));
+    __r[__i]
+        = (__UINT32_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 32)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 32) >> __n)));
   return __r;
 }
 static __inline__ uint32x4_t vclzq_u32(uint32x4_t __a) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] == 0 ? 32
-        : __builtin_clz((uint32_t)__a[__i] & ((uint64_t)-1 >> 32)) - 0);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] == 0 ? 32
+        : __builtin_clz((__UINT32_TYPE__)__a[__i] & ((__UINT64_TYPE__)-1 >> 32)) - 0);
   return __r;
 }
 static __inline__ uint64x2_t vqaddq_u64(uint64x2_t __a, uint64x2_t __b) {
@@ -8921,1087 +9028,1159 @@ static __inline__ uint64x2_t vqsubq_u64(uint64x2_t __a, uint64x2_t __b) {
 }
 static __inline__ uint64x2_t vshlq_n_u64(uint64x2_t __a, const int __n) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)((uint64_t)__a[__i] << __n);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] << __n);
   return __r;
 }
 static __inline__ uint64x2_t vshrq_n_u64(uint64x2_t __a, const int __n) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __n == 64 ? (uint64_t)(0) : (uint64_t)(__a[__i] >> __n);
+    __r[__i] = __n == 64 ? (__UINT64_TYPE__)(0) : (__UINT64_TYPE__)(__a[__i] >> __n);
   return __r;
 }
 static __inline__ uint64x2_t vsraq_n_u64(uint64x2_t __a, uint64x2_t __b, const int __n) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__a[__i] + (__n == 64 ? (uint64_t)(0) : (uint64_t)(__b[__i] >> __n)));
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] + (__n == 64 ? (__UINT64_TYPE__)(0)
+        : (__UINT64_TYPE__)(__b[__i] >> __n)));
   return __r;
 }
 static __inline__ uint64x2_t vshlq_u64(uint64x2_t __a, int64x2_t __b) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int8_t)__b[__i] >= 64 ? 0 : (int8_t)__b[__i] <= -64 ? (uint64_t)(0)
-        : (int8_t)__b[__i] >= 0 ? (uint64_t)((uint64_t)__a[__i] << (int8_t)__b[__i])
-        : (uint64_t)(__a[__i] >> -(int8_t)__b[__i]);
+    __r[__i] = (__INT8_TYPE__)__b[__i] >= 64 ? 0 : (__INT8_TYPE__)__b[__i] <= -64
+        ? (__UINT64_TYPE__)(0) : (__INT8_TYPE__)__b[__i] >= 0
+        ? (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] << (__INT8_TYPE__)__b[__i])
+        : (__UINT64_TYPE__)(__a[__i] >> -(__INT8_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vsliq_n_u64(uint64x2_t __a, uint64x2_t __b, const int __n) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __n == 0 ? __b[__i] : (uint64_t)(((uint64_t)__b[__i] << __n)
-        | ((uint64_t)__a[__i] & (((uint64_t)-1 >> 0) >> (64 - __n))));
+    __r[__i] = __n == 0 ? __b[__i] : (__UINT64_TYPE__)(((__UINT64_TYPE__)__b[__i] << __n)
+        | ((__UINT64_TYPE__)__a[__i] & (((__UINT64_TYPE__)-1 >> 0) >> (64 - __n))));
   return __r;
 }
 static __inline__ uint64x2_t vsriq_n_u64(uint64x2_t __a, uint64x2_t __b, const int __n) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
     __r[__i] = __n == 64 ? __a[__i]
-        : (uint64_t)((((uint64_t)__b[__i] & ((uint64_t)-1 >> 0)) >> __n)
-        | ((uint64_t)__a[__i] & ~(((uint64_t)-1 >> 0) >> __n)));
+        : (__UINT64_TYPE__)((((__UINT64_TYPE__)__b[__i] & ((__UINT64_TYPE__)-1 >> 0)) >> __n)
+        | ((__UINT64_TYPE__)__a[__i] & ~(((__UINT64_TYPE__)-1 >> 0) >> __n)));
   return __r;
 }
 
 /* Widening, narrowing and the long forms. */
 static __inline__ int16x8_t vmovl_s8(int8x8_t __a) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ int16x8_t vmovl_high_s8(int8x16_t __a) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)__a[__i + 8];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)__a[__i + 8];
   return __r;
 }
 static __inline__ int8x8_t vmovn_s16(int16x8_t __a) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ int8x16_t vmovn_high_s16(int8x8_t __lo, int16x8_t __a) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __i < 8 ? __lo[__i] : (int8_t)__a[__i - 8];
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __i < 8 ? __lo[__i] : (__INT8_TYPE__)__a[__i - 8];
   return __r;
 }
 static __inline__ int8x8_t vshrn_n_s16(int16x8_t __a, const int __k) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int8_t)(__a[__i] >> __k);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT8_TYPE__)(__a[__i] >> __k);
   return __r;
 }
 static __inline__ int8x8_t vrshrn_n_s16(int16x8_t __a, const int __k) {
   int8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int8_t)((__a[__i] + ((int16_t)1 << (__k - 1))) >> __k);
+    __r[__i] = (__INT8_TYPE__)((__a[__i] + ((__INT16_TYPE__)1 << (__k - 1))) >> __k);
   return __r;
 }
 static __inline__ int16x8_t vaddl_s8(int8x8_t __a, int8x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)((int16_t)__a[__i] + (int16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[__i] + (__INT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vaddl_high_s8(int8x16_t __a, int8x16_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)((int16_t)__a[__i + 8] + (int16_t)__b[__i + 8]);
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[__i + 8] + (__INT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ int16x8_t vsubl_s8(int8x8_t __a, int8x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)((int16_t)__a[__i] - (int16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[__i] - (__INT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vsubl_high_s8(int8x16_t __a, int8x16_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)((int16_t)__a[__i + 8] - (int16_t)__b[__i + 8]);
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[__i + 8] - (__INT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ int16x8_t vmull_s8(int8x8_t __a, int8x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)((int16_t)__a[__i] * (int16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[__i] * (__INT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vmull_high_s8(int8x16_t __a, int8x16_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)((int16_t)__a[__i + 8] * (int16_t)__b[__i + 8]);
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[__i + 8] * (__INT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ int16x8_t vabdl_s8(int8x8_t __a, int8x8_t __b) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__a[__i] > __b[__i] ? (int16_t)__a[__i] - __b[__i]
-        : (int16_t)__b[__i] - __a[__i]);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] > __b[__i] ? (__INT16_TYPE__)__a[__i] - __b[__i]
+        : (__INT16_TYPE__)__b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ int16x8_t vaddw_s8(int16x8_t __a, int8x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] + (int16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)(__a[__i] + (__INT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vaddw_high_s8(int16x8_t __a, int8x16_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] + (int16_t)__b[__i + 8]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)(__a[__i] + (__INT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ int16x8_t vsubw_s8(int16x8_t __a, int8x8_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] - (int16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)(__a[__i] - (__INT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int16x8_t vsubw_high_s8(int16x8_t __a, int8x16_t __b) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)(__a[__i] - (int16_t)__b[__i + 8]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)(__a[__i] - (__INT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ int16x8_t vmlal_s8(int16x8_t __a, int8x8_t __b, int8x8_t __c) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__a[__i] + (int16_t)__b[__i] * (int16_t)__c[__i]);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] + (__INT16_TYPE__)__b[__i] * (__INT16_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ int16x8_t vmlal_high_s8(int16x8_t __a, int8x16_t __b, int8x16_t __c) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__a[__i] + (int16_t)__b[__i + 8] * (int16_t)__c[__i + 8]);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] + (__INT16_TYPE__)__b[__i + 8] * (__INT16_TYPE__)__c[__i
+        + 8]);
   return __r;
 }
 static __inline__ int16x8_t vmlsl_s8(int16x8_t __a, int8x8_t __b, int8x8_t __c) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__a[__i] - (int16_t)__b[__i] * (int16_t)__c[__i]);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] - (__INT16_TYPE__)__b[__i] * (__INT16_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ int16x8_t vmlsl_high_s8(int16x8_t __a, int8x16_t __b, int8x16_t __c) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__a[__i] - (int16_t)__b[__i + 8] * (int16_t)__c[__i + 8]);
+    __r[__i] = (__INT16_TYPE__)(__a[__i] - (__INT16_TYPE__)__b[__i + 8] * (__INT16_TYPE__)__c[__i
+        + 8]);
   return __r;
 }
 static __inline__ int16x4_t vpaddl_s8(int8x8_t __a) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)((int16_t)__a[2 * __i] + __a[2 * __i + 1]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int16x4_t vpadal_s8(int16x4_t __s, int8x8_t __a) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)(__s[__i] + (int16_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__INT16_TYPE__)(__s[__i] + (__INT16_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int16_t vaddlv_s8(int8x8_t __a) {
-  int16_t __r = 0;
+  __INT16_TYPE__ __r = 0;
   for (int __i = 0; __i < 8; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int16x8_t vpaddlq_s8(int8x16_t __a) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)((int16_t)__a[2 * __i] + __a[2 * __i + 1]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int16x8_t vpadalq_s8(int16x8_t __s, int8x16_t __a) {
   int16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (int16_t)(__s[__i] + (int16_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__INT16_TYPE__)(__s[__i] + (__INT16_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int16_t vaddlvq_s8(int8x16_t __a) {
-  int16_t __r = 0;
+  __INT16_TYPE__ __r = 0;
   for (int __i = 0; __i < 16; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int16x8_t vshll_n_s8(int8x8_t __a, const int __k) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)((int16_t)__a[__i] << __k);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[__i] << __k);
   return __r;
 }
 static __inline__ int16x8_t vshll_high_n_s8(int8x16_t __a, const int __k) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (int16_t)((int16_t)__a[__i + 8] << __k);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__INT16_TYPE__)((__INT16_TYPE__)__a[__i + 8] << __k);
   return __r;
 }
 static __inline__ int32x4_t vmovl_s16(int16x4_t __a) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ int32x4_t vmovl_high_s16(int16x8_t __a) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)__a[__i + 4];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)__a[__i + 4];
   return __r;
 }
 static __inline__ int16x4_t vmovn_s32(int32x4_t __a) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ int16x8_t vmovn_high_s32(int16x4_t __lo, int32x4_t __a) {
   int16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __i < 4 ? __lo[__i] : (int16_t)__a[__i - 4];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __i < 4 ? __lo[__i] : (__INT16_TYPE__)__a[__i - 4];
   return __r;
 }
 static __inline__ int16x4_t vshrn_n_s32(int32x4_t __a, const int __k) {
   int16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int16_t)(__a[__i] >> __k);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT16_TYPE__)(__a[__i] >> __k);
   return __r;
 }
 static __inline__ int16x4_t vrshrn_n_s32(int32x4_t __a, const int __k) {
   int16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int16_t)((__a[__i] + ((int32_t)1 << (__k - 1))) >> __k);
+    __r[__i] = (__INT16_TYPE__)((__a[__i] + ((__INT32_TYPE__)1 << (__k - 1))) >> __k);
   return __r;
 }
 static __inline__ int32x4_t vaddl_s16(int16x4_t __a, int16x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)((int32_t)__a[__i] + (int32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i] + (__INT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vaddl_high_s16(int16x8_t __a, int16x8_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)((int32_t)__a[__i + 4] + (int32_t)__b[__i + 4]);
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i + 4] + (__INT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ int32x4_t vsubl_s16(int16x4_t __a, int16x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)((int32_t)__a[__i] - (int32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i] - (__INT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vsubl_high_s16(int16x8_t __a, int16x8_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)((int32_t)__a[__i + 4] - (int32_t)__b[__i + 4]);
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i + 4] - (__INT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ int32x4_t vmull_s16(int16x4_t __a, int16x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)((int32_t)__a[__i] * (int32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i] * (__INT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vmull_high_s16(int16x8_t __a, int16x8_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)((int32_t)__a[__i + 4] * (int32_t)__b[__i + 4]);
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i + 4] * (__INT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ int32x4_t vmull_n_s16(int16x4_t __a, int16_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)((int32_t)__a[__i] * (int32_t)__b);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i] * (__INT32_TYPE__)__b);
   return __r;
 }
 static __inline__ int32x4_t vabdl_s16(int16x4_t __a, int16x4_t __b) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] > __b[__i] ? (int32_t)__a[__i] - __b[__i]
-        : (int32_t)__b[__i] - __a[__i]);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] > __b[__i] ? (__INT32_TYPE__)__a[__i] - __b[__i]
+        : (__INT32_TYPE__)__b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ int32x4_t vaddw_s16(int32x4_t __a, int16x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] + (int32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)(__a[__i] + (__INT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vaddw_high_s16(int32x4_t __a, int16x8_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] + (int32_t)__b[__i + 4]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)(__a[__i] + (__INT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ int32x4_t vsubw_s16(int32x4_t __a, int16x4_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] - (int32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)(__a[__i] - (__INT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int32x4_t vsubw_high_s16(int32x4_t __a, int16x8_t __b) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)(__a[__i] - (int32_t)__b[__i + 4]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)(__a[__i] - (__INT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ int32x4_t vmlal_s16(int32x4_t __a, int16x4_t __b, int16x4_t __c) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] + (int32_t)__b[__i] * (int32_t)__c[__i]);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] + (__INT32_TYPE__)__b[__i] * (__INT32_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ int32x4_t vmlal_high_s16(int32x4_t __a, int16x8_t __b, int16x8_t __c) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] + (int32_t)__b[__i + 4] * (int32_t)__c[__i + 4]);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] + (__INT32_TYPE__)__b[__i + 4] * (__INT32_TYPE__)__c[__i
+        + 4]);
   return __r;
 }
 static __inline__ int32x4_t vmlal_n_s16(int32x4_t __a, int16x4_t __b, int16_t __c) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] + (int32_t)__b[__i] * (int32_t)__c);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] + (__INT32_TYPE__)__b[__i] * (__INT32_TYPE__)__c);
   return __r;
 }
 static __inline__ int32x4_t vmlsl_s16(int32x4_t __a, int16x4_t __b, int16x4_t __c) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] - (int32_t)__b[__i] * (int32_t)__c[__i]);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] - (__INT32_TYPE__)__b[__i] * (__INT32_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ int32x4_t vmlsl_high_s16(int32x4_t __a, int16x8_t __b, int16x8_t __c) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] - (int32_t)__b[__i + 4] * (int32_t)__c[__i + 4]);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] - (__INT32_TYPE__)__b[__i + 4] * (__INT32_TYPE__)__c[__i
+        + 4]);
   return __r;
 }
 static __inline__ int32x4_t vmlsl_n_s16(int32x4_t __a, int16x4_t __b, int16_t __c) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__a[__i] - (int32_t)__b[__i] * (int32_t)__c);
+    __r[__i] = (__INT32_TYPE__)(__a[__i] - (__INT32_TYPE__)__b[__i] * (__INT32_TYPE__)__c);
   return __r;
 }
 static __inline__ int32x2_t vpaddl_s16(int16x4_t __a) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)((int32_t)__a[2 * __i] + __a[2 * __i + 1]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int32x2_t vpadal_s16(int32x2_t __s, int16x4_t __a) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)(__s[__i] + (int32_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__INT32_TYPE__)(__s[__i] + (__INT32_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int32_t vaddlv_s16(int16x4_t __a) {
-  int32_t __r = 0;
+  __INT32_TYPE__ __r = 0;
   for (int __i = 0; __i < 4; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int32x4_t vpaddlq_s16(int16x8_t __a) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)((int32_t)__a[2 * __i] + __a[2 * __i + 1]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int32x4_t vpadalq_s16(int32x4_t __s, int16x8_t __a) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (int32_t)(__s[__i] + (int32_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__INT32_TYPE__)(__s[__i] + (__INT32_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int32_t vaddlvq_s16(int16x8_t __a) {
-  int32_t __r = 0;
+  __INT32_TYPE__ __r = 0;
   for (int __i = 0; __i < 8; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int32x4_t vshll_n_s16(int16x4_t __a, const int __k) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)((int32_t)__a[__i] << __k);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i] << __k);
   return __r;
 }
 static __inline__ int32x4_t vshll_high_n_s16(int16x8_t __a, const int __k) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int32_t)((int32_t)__a[__i + 4] << __k);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__INT32_TYPE__)((__INT32_TYPE__)__a[__i + 4] << __k);
   return __r;
 }
 static __inline__ int64x2_t vmovl_s32(int32x2_t __a) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ int64x2_t vmovl_high_s32(int32x4_t __a) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)__a[__i + 2];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)__a[__i + 2];
   return __r;
 }
 static __inline__ int32x2_t vmovn_s64(int64x2_t __a) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ int32x4_t vmovn_high_s64(int32x2_t __lo, int64x2_t __a) {
   int32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __i < 2 ? __lo[__i] : (int32_t)__a[__i - 2];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __i < 2 ? __lo[__i] : (__INT32_TYPE__)__a[__i - 2];
   return __r;
 }
 static __inline__ int32x2_t vshrn_n_s64(int64x2_t __a, const int __k) {
   int32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int32_t)(__a[__i] >> __k);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT32_TYPE__)(__a[__i] >> __k);
   return __r;
 }
 static __inline__ int32x2_t vrshrn_n_s64(int64x2_t __a, const int __k) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int32_t)((__a[__i] + ((int64_t)1 << (__k - 1))) >> __k);
+    __r[__i] = (__INT32_TYPE__)((__a[__i] + ((__INT64_TYPE__)1 << (__k - 1))) >> __k);
   return __r;
 }
 static __inline__ int64x2_t vaddl_s32(int32x2_t __a, int32x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)((int64_t)__a[__i] + (int64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vaddl_high_s32(int32x4_t __a, int32x4_t __b) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)((int64_t)__a[__i + 2] + (int64_t)__b[__i + 2]);
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i + 2] + (__INT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ int64x2_t vsubl_s32(int32x2_t __a, int32x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)((int64_t)__a[__i] - (int64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vsubl_high_s32(int32x4_t __a, int32x4_t __b) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)((int64_t)__a[__i + 2] - (int64_t)__b[__i + 2]);
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i + 2] - (__INT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ int64x2_t vmull_s32(int32x2_t __a, int32x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)((int64_t)__a[__i] * (int64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i] * (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vmull_high_s32(int32x4_t __a, int32x4_t __b) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)((int64_t)__a[__i + 2] * (int64_t)__b[__i + 2]);
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i + 2] * (__INT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ int64x2_t vmull_n_s32(int32x2_t __a, int32_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)((int64_t)__a[__i] * (int64_t)__b);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i] * (__INT64_TYPE__)__b);
   return __r;
 }
 static __inline__ int64x2_t vabdl_s32(int32x2_t __a, int32x2_t __b) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__a[__i] > __b[__i] ? (int64_t)__a[__i] - __b[__i]
-        : (int64_t)__b[__i] - __a[__i]);
+    __r[__i] = (__INT64_TYPE__)(__a[__i] > __b[__i] ? (__INT64_TYPE__)__a[__i] - __b[__i]
+        : (__INT64_TYPE__)__b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ int64x2_t vaddw_s32(int64x2_t __a, int32x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] + (int64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)(__a[__i] + (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vaddw_high_s32(int64x2_t __a, int32x4_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] + (int64_t)__b[__i + 2]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)(__a[__i] + (__INT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ int64x2_t vsubw_s32(int64x2_t __a, int32x2_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] - (int64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)(__a[__i] - (__INT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ int64x2_t vsubw_high_s32(int64x2_t __a, int32x4_t __b) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)(__a[__i] - (int64_t)__b[__i + 2]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)(__a[__i] - (__INT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ int64x2_t vmlal_s32(int64x2_t __a, int32x2_t __b, int32x2_t __c) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__a[__i] + (int64_t)__b[__i] * (int64_t)__c[__i]);
+    __r[__i] = (__INT64_TYPE__)(__a[__i] + (__INT64_TYPE__)__b[__i] * (__INT64_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ int64x2_t vmlal_high_s32(int64x2_t __a, int32x4_t __b, int32x4_t __c) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__a[__i] + (int64_t)__b[__i + 2] * (int64_t)__c[__i + 2]);
+    __r[__i] = (__INT64_TYPE__)(__a[__i] + (__INT64_TYPE__)__b[__i + 2] * (__INT64_TYPE__)__c[__i
+        + 2]);
   return __r;
 }
 static __inline__ int64x2_t vmlal_n_s32(int64x2_t __a, int32x2_t __b, int32_t __c) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__a[__i] + (int64_t)__b[__i] * (int64_t)__c);
+    __r[__i] = (__INT64_TYPE__)(__a[__i] + (__INT64_TYPE__)__b[__i] * (__INT64_TYPE__)__c);
   return __r;
 }
 static __inline__ int64x2_t vmlsl_s32(int64x2_t __a, int32x2_t __b, int32x2_t __c) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__a[__i] - (int64_t)__b[__i] * (int64_t)__c[__i]);
+    __r[__i] = (__INT64_TYPE__)(__a[__i] - (__INT64_TYPE__)__b[__i] * (__INT64_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ int64x2_t vmlsl_high_s32(int64x2_t __a, int32x4_t __b, int32x4_t __c) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__a[__i] - (int64_t)__b[__i + 2] * (int64_t)__c[__i + 2]);
+    __r[__i] = (__INT64_TYPE__)(__a[__i] - (__INT64_TYPE__)__b[__i + 2] * (__INT64_TYPE__)__c[__i
+        + 2]);
   return __r;
 }
 static __inline__ int64x2_t vmlsl_n_s32(int64x2_t __a, int32x2_t __b, int32_t __c) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__a[__i] - (int64_t)__b[__i] * (int64_t)__c);
+    __r[__i] = (__INT64_TYPE__)(__a[__i] - (__INT64_TYPE__)__b[__i] * (__INT64_TYPE__)__c);
   return __r;
 }
 static __inline__ int64x1_t vpaddl_s32(int32x2_t __a) {
   int64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (int64_t)((int64_t)__a[2 * __i] + __a[2 * __i + 1]);
+  for (int __i = 0; __i < 1; __i++)
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int64x1_t vpadal_s32(int64x1_t __s, int32x2_t __a) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (int64_t)(__s[__i] + (int64_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__INT64_TYPE__)(__s[__i] + (__INT64_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int64_t vaddlv_s32(int32x2_t __a) {
-  int64_t __r = 0;
+  __INT64_TYPE__ __r = 0;
   for (int __i = 0; __i < 2; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int64x2_t vpaddlq_s32(int32x4_t __a) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)((int64_t)__a[2 * __i] + __a[2 * __i + 1]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int64x2_t vpadalq_s32(int64x2_t __s, int32x4_t __a) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (int64_t)(__s[__i] + (int64_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__INT64_TYPE__)(__s[__i] + (__INT64_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ int64_t vaddlvq_s32(int32x4_t __a) {
-  int64_t __r = 0;
+  __INT64_TYPE__ __r = 0;
   for (int __i = 0; __i < 4; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ int64x2_t vshll_n_s32(int32x2_t __a, const int __k) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)((int64_t)__a[__i] << __k);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i] << __k);
   return __r;
 }
 static __inline__ int64x2_t vshll_high_n_s32(int32x4_t __a, const int __k) {
   int64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (int64_t)((int64_t)__a[__i + 2] << __k);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__INT64_TYPE__)((__INT64_TYPE__)__a[__i + 2] << __k);
   return __r;
 }
 static __inline__ uint16x8_t vmovl_u8(uint8x8_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ uint16x8_t vmovl_high_u8(uint8x16_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)__a[__i + 8];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)__a[__i + 8];
   return __r;
 }
 static __inline__ uint8x8_t vmovn_u16(uint16x8_t __a) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)__a[__i];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ uint8x16_t vmovn_high_u16(uint8x8_t __lo, uint16x8_t __a) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __i < 8 ? __lo[__i] : (uint8_t)__a[__i - 8];
+  for (int __i = 0; __i < 16; __i++) __r[__i] = __i < 8 ? __lo[__i] : (__UINT8_TYPE__)__a[__i - 8];
   return __r;
 }
 static __inline__ uint8x8_t vshrn_n_u16(uint16x8_t __a, const int __k) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)(__a[__i] >> __k);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT8_TYPE__)(__a[__i] >> __k);
   return __r;
 }
 static __inline__ uint8x8_t vrshrn_n_u16(uint16x8_t __a, const int __k) {
   uint8x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint8_t)((__a[__i] + ((uint16_t)1 << (__k - 1))) >> __k);
+    __r[__i] = (__UINT8_TYPE__)((__a[__i] + ((__UINT16_TYPE__)1 << (__k - 1))) >> __k);
   return __r;
 }
 static __inline__ uint16x8_t vaddl_u8(uint8x8_t __a, uint8x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)((uint16_t)__a[__i] + (uint16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[__i] + (__UINT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vaddl_high_u8(uint8x16_t __a, uint8x16_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)((uint16_t)__a[__i + 8] + (uint16_t)__b[__i + 8]);
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[__i + 8] + (__UINT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ uint16x8_t vsubl_u8(uint8x8_t __a, uint8x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)((uint16_t)__a[__i] - (uint16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[__i] - (__UINT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vsubl_high_u8(uint8x16_t __a, uint8x16_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)((uint16_t)__a[__i + 8] - (uint16_t)__b[__i + 8]);
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[__i + 8] - (__UINT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ uint16x8_t vmull_u8(uint8x8_t __a, uint8x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)((uint16_t)__a[__i] * (uint16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[__i] * (__UINT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vmull_high_u8(uint8x16_t __a, uint8x16_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)((uint16_t)__a[__i + 8] * (uint16_t)__b[__i + 8]);
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[__i + 8] * (__UINT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ uint16x8_t vabdl_u8(uint8x8_t __a, uint8x8_t __b) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__a[__i] > __b[__i] ? (uint16_t)__a[__i] - __b[__i]
-        : (uint16_t)__b[__i] - __a[__i]);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] > __b[__i] ? (__UINT16_TYPE__)__a[__i] - __b[__i]
+        : (__UINT16_TYPE__)__b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vaddw_u8(uint16x8_t __a, uint8x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] + (uint16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] + (__UINT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vaddw_high_u8(uint16x8_t __a, uint8x16_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] + (uint16_t)__b[__i + 8]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] + (__UINT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ uint16x8_t vsubw_u8(uint16x8_t __a, uint8x8_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] - (uint16_t)__b[__i]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] - (__UINT16_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vsubw_high_u8(uint16x8_t __a, uint8x16_t __b) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)(__a[__i] - (uint16_t)__b[__i + 8]);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] - (__UINT16_TYPE__)__b[__i + 8]);
   return __r;
 }
 static __inline__ uint16x8_t vmlal_u8(uint16x8_t __a, uint8x8_t __b, uint8x8_t __c) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__a[__i] + (uint16_t)__b[__i] * (uint16_t)__c[__i]);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] + (__UINT16_TYPE__)__b[__i] * (__UINT16_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vmlal_high_u8(uint16x8_t __a, uint8x16_t __b, uint8x16_t __c) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__a[__i] + (uint16_t)__b[__i + 8] * (uint16_t)__c[__i + 8]);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] + (__UINT16_TYPE__)__b[__i
+        + 8] * (__UINT16_TYPE__)__c[__i + 8]);
   return __r;
 }
 static __inline__ uint16x8_t vmlsl_u8(uint16x8_t __a, uint8x8_t __b, uint8x8_t __c) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__a[__i] - (uint16_t)__b[__i] * (uint16_t)__c[__i]);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] - (__UINT16_TYPE__)__b[__i] * (__UINT16_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ uint16x8_t vmlsl_high_u8(uint16x8_t __a, uint8x16_t __b, uint8x16_t __c) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__a[__i] - (uint16_t)__b[__i + 8] * (uint16_t)__c[__i + 8]);
+    __r[__i] = (__UINT16_TYPE__)(__a[__i] - (__UINT16_TYPE__)__b[__i
+        + 8] * (__UINT16_TYPE__)__c[__i + 8]);
   return __r;
 }
 static __inline__ uint16x4_t vpaddl_u8(uint8x8_t __a) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)((uint16_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint16x4_t vpadal_u8(uint16x4_t __s, uint8x8_t __a) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)(__s[__i] + (uint16_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT16_TYPE__)(__s[__i] + (__UINT16_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint16_t vaddlv_u8(uint8x8_t __a) {
-  uint16_t __r = 0;
+  __UINT16_TYPE__ __r = 0;
   for (int __i = 0; __i < 8; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint16x8_t vpaddlq_u8(uint8x16_t __a) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)((uint16_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint16x8_t vpadalq_u8(uint16x8_t __s, uint8x16_t __a) {
   uint16x8_t __r;
   for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (uint16_t)(__s[__i] + (uint16_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT16_TYPE__)(__s[__i] + (__UINT16_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint16_t vaddlvq_u8(uint8x16_t __a) {
-  uint16_t __r = 0;
+  __UINT16_TYPE__ __r = 0;
   for (int __i = 0; __i < 16; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint16x8_t vshll_n_u8(uint8x8_t __a, const int __k) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)((uint16_t)__a[__i] << __k);
+  for (int __i = 0; __i < 8; __i++) __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[__i] << __k);
   return __r;
 }
 static __inline__ uint16x8_t vshll_high_n_u8(uint8x16_t __a, const int __k) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint16_t)((uint16_t)__a[__i + 8] << __k);
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT16_TYPE__)((__UINT16_TYPE__)__a[__i + 8] << __k);
   return __r;
 }
 static __inline__ uint32x4_t vmovl_u16(uint16x4_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ uint32x4_t vmovl_high_u16(uint16x8_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)__a[__i + 4];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)__a[__i + 4];
   return __r;
 }
 static __inline__ uint16x4_t vmovn_u32(uint32x4_t __a) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ uint16x8_t vmovn_high_u32(uint16x4_t __lo, uint32x4_t __a) {
   uint16x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __i < 4 ? __lo[__i] : (uint16_t)__a[__i - 4];
+  for (int __i = 0; __i < 8; __i++) __r[__i] = __i < 4 ? __lo[__i] : (__UINT16_TYPE__)__a[__i - 4];
   return __r;
 }
 static __inline__ uint16x4_t vshrn_n_u32(uint32x4_t __a, const int __k) {
   uint16x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint16_t)(__a[__i] >> __k);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT16_TYPE__)(__a[__i] >> __k);
   return __r;
 }
 static __inline__ uint16x4_t vrshrn_n_u32(uint32x4_t __a, const int __k) {
   uint16x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint16_t)((__a[__i] + ((uint32_t)1 << (__k - 1))) >> __k);
+    __r[__i] = (__UINT16_TYPE__)((__a[__i] + ((__UINT32_TYPE__)1 << (__k - 1))) >> __k);
   return __r;
 }
 static __inline__ uint32x4_t vaddl_u16(uint16x4_t __a, uint16x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)((uint32_t)__a[__i] + (uint32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i] + (__UINT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vaddl_high_u16(uint16x8_t __a, uint16x8_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)((uint32_t)__a[__i + 4] + (uint32_t)__b[__i + 4]);
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i + 4] + (__UINT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ uint32x4_t vsubl_u16(uint16x4_t __a, uint16x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)((uint32_t)__a[__i] - (uint32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i] - (__UINT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vsubl_high_u16(uint16x8_t __a, uint16x8_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)((uint32_t)__a[__i + 4] - (uint32_t)__b[__i + 4]);
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i + 4] - (__UINT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ uint32x4_t vmull_u16(uint16x4_t __a, uint16x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)((uint32_t)__a[__i] * (uint32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i] * (__UINT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vmull_high_u16(uint16x8_t __a, uint16x8_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)((uint32_t)__a[__i + 4] * (uint32_t)__b[__i + 4]);
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i + 4] * (__UINT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ uint32x4_t vmull_n_u16(uint16x4_t __a, uint16_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)((uint32_t)__a[__i] * (uint32_t)__b);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i] * (__UINT32_TYPE__)__b);
   return __r;
 }
 static __inline__ uint32x4_t vabdl_u16(uint16x4_t __a, uint16x4_t __b) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] > __b[__i] ? (uint32_t)__a[__i] - __b[__i]
-        : (uint32_t)__b[__i] - __a[__i]);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] > __b[__i] ? (__UINT32_TYPE__)__a[__i] - __b[__i]
+        : (__UINT32_TYPE__)__b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vaddw_u16(uint32x4_t __a, uint16x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] + (uint32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] + (__UINT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vaddw_high_u16(uint32x4_t __a, uint16x8_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] + (uint32_t)__b[__i + 4]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] + (__UINT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ uint32x4_t vsubw_u16(uint32x4_t __a, uint16x4_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] - (uint32_t)__b[__i]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] - (__UINT32_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vsubw_high_u16(uint32x4_t __a, uint16x8_t __b) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)(__a[__i] - (uint32_t)__b[__i + 4]);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] - (__UINT32_TYPE__)__b[__i + 4]);
   return __r;
 }
 static __inline__ uint32x4_t vmlal_u16(uint32x4_t __a, uint16x4_t __b, uint16x4_t __c) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] + (uint32_t)__b[__i] * (uint32_t)__c[__i]);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] + (__UINT32_TYPE__)__b[__i] * (__UINT32_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vmlal_high_u16(uint32x4_t __a, uint16x8_t __b, uint16x8_t __c) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] + (uint32_t)__b[__i + 4] * (uint32_t)__c[__i + 4]);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] + (__UINT32_TYPE__)__b[__i
+        + 4] * (__UINT32_TYPE__)__c[__i + 4]);
   return __r;
 }
 static __inline__ uint32x4_t vmlal_n_u16(uint32x4_t __a, uint16x4_t __b, uint16_t __c) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] + (uint32_t)__b[__i] * (uint32_t)__c);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] + (__UINT32_TYPE__)__b[__i] * (__UINT32_TYPE__)__c);
   return __r;
 }
 static __inline__ uint32x4_t vmlsl_u16(uint32x4_t __a, uint16x4_t __b, uint16x4_t __c) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] - (uint32_t)__b[__i] * (uint32_t)__c[__i]);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] - (__UINT32_TYPE__)__b[__i] * (__UINT32_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ uint32x4_t vmlsl_high_u16(uint32x4_t __a, uint16x8_t __b, uint16x8_t __c) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] - (uint32_t)__b[__i + 4] * (uint32_t)__c[__i + 4]);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] - (__UINT32_TYPE__)__b[__i
+        + 4] * (__UINT32_TYPE__)__c[__i + 4]);
   return __r;
 }
 static __inline__ uint32x4_t vmlsl_n_u16(uint32x4_t __a, uint16x4_t __b, uint16_t __c) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__a[__i] - (uint32_t)__b[__i] * (uint32_t)__c);
+    __r[__i] = (__UINT32_TYPE__)(__a[__i] - (__UINT32_TYPE__)__b[__i] * (__UINT32_TYPE__)__c);
   return __r;
 }
 static __inline__ uint32x2_t vpaddl_u16(uint16x4_t __a) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)((uint32_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint32x2_t vpadal_u16(uint32x2_t __s, uint16x4_t __a) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)(__s[__i] + (uint32_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT32_TYPE__)(__s[__i] + (__UINT32_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint32_t vaddlv_u16(uint16x4_t __a) {
-  uint32_t __r = 0;
+  __UINT32_TYPE__ __r = 0;
   for (int __i = 0; __i < 4; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint32x4_t vpaddlq_u16(uint16x8_t __a) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)((uint32_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint32x4_t vpadalq_u16(uint32x4_t __s, uint16x8_t __a) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (uint32_t)(__s[__i] + (uint32_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT32_TYPE__)(__s[__i] + (__UINT32_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint32_t vaddlvq_u16(uint16x8_t __a) {
-  uint32_t __r = 0;
+  __UINT32_TYPE__ __r = 0;
   for (int __i = 0; __i < 8; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint32x4_t vshll_n_u16(uint16x4_t __a, const int __k) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)((uint32_t)__a[__i] << __k);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i] << __k);
   return __r;
 }
 static __inline__ uint32x4_t vshll_high_n_u16(uint16x8_t __a, const int __k) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (uint32_t)((uint32_t)__a[__i + 4] << __k);
+  for (int __i = 0; __i < 4; __i++)
+    __r[__i] = (__UINT32_TYPE__)((__UINT32_TYPE__)__a[__i + 4] << __k);
   return __r;
 }
 static __inline__ uint64x2_t vmovl_u32(uint32x2_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ uint64x2_t vmovl_high_u32(uint32x4_t __a) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)__a[__i + 2];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)__a[__i + 2];
   return __r;
 }
 static __inline__ uint32x2_t vmovn_u64(uint64x2_t __a) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ uint32x4_t vmovn_high_u64(uint32x2_t __lo, uint64x2_t __a) {
   uint32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __i < 2 ? __lo[__i] : (uint32_t)__a[__i - 2];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __i < 2 ? __lo[__i] : (__UINT32_TYPE__)__a[__i - 2];
   return __r;
 }
 static __inline__ uint32x2_t vshrn_n_u64(uint64x2_t __a, const int __k) {
   uint32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint32_t)(__a[__i] >> __k);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT32_TYPE__)(__a[__i] >> __k);
   return __r;
 }
 static __inline__ uint32x2_t vrshrn_n_u64(uint64x2_t __a, const int __k) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint32_t)((__a[__i] + ((uint64_t)1 << (__k - 1))) >> __k);
+    __r[__i] = (__UINT32_TYPE__)((__a[__i] + ((__UINT64_TYPE__)1 << (__k - 1))) >> __k);
   return __r;
 }
 static __inline__ uint64x2_t vaddl_u32(uint32x2_t __a, uint32x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)((uint64_t)__a[__i] + (uint64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] + (__UINT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vaddl_high_u32(uint32x4_t __a, uint32x4_t __b) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)((uint64_t)__a[__i + 2] + (uint64_t)__b[__i + 2]);
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i + 2] + (__UINT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ uint64x2_t vsubl_u32(uint32x2_t __a, uint32x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)((uint64_t)__a[__i] - (uint64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] - (__UINT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vsubl_high_u32(uint32x4_t __a, uint32x4_t __b) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)((uint64_t)__a[__i + 2] - (uint64_t)__b[__i + 2]);
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i + 2] - (__UINT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ uint64x2_t vmull_u32(uint32x2_t __a, uint32x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)((uint64_t)__a[__i] * (uint64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] * (__UINT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vmull_high_u32(uint32x4_t __a, uint32x4_t __b) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)((uint64_t)__a[__i + 2] * (uint64_t)__b[__i + 2]);
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i + 2] * (__UINT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ uint64x2_t vmull_n_u32(uint32x2_t __a, uint32_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)((uint64_t)__a[__i] * (uint64_t)__b);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] * (__UINT64_TYPE__)__b);
   return __r;
 }
 static __inline__ uint64x2_t vabdl_u32(uint32x2_t __a, uint32x2_t __b) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__a[__i] > __b[__i] ? (uint64_t)__a[__i] - __b[__i]
-        : (uint64_t)__b[__i] - __a[__i]);
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] > __b[__i] ? (__UINT64_TYPE__)__a[__i] - __b[__i]
+        : (__UINT64_TYPE__)__b[__i] - __a[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vaddw_u32(uint64x2_t __a, uint32x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] + (uint64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] + (__UINT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vaddw_high_u32(uint64x2_t __a, uint32x4_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] + (uint64_t)__b[__i + 2]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] + (__UINT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ uint64x2_t vsubw_u32(uint64x2_t __a, uint32x2_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] - (uint64_t)__b[__i]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] - (__UINT64_TYPE__)__b[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vsubw_high_u32(uint64x2_t __a, uint32x4_t __b) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)(__a[__i] - (uint64_t)__b[__i + 2]);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] - (__UINT64_TYPE__)__b[__i + 2]);
   return __r;
 }
 static __inline__ uint64x2_t vmlal_u32(uint64x2_t __a, uint32x2_t __b, uint32x2_t __c) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__a[__i] + (uint64_t)__b[__i] * (uint64_t)__c[__i]);
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] + (__UINT64_TYPE__)__b[__i] * (__UINT64_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vmlal_high_u32(uint64x2_t __a, uint32x4_t __b, uint32x4_t __c) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__a[__i] + (uint64_t)__b[__i + 2] * (uint64_t)__c[__i + 2]);
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] + (__UINT64_TYPE__)__b[__i
+        + 2] * (__UINT64_TYPE__)__c[__i + 2]);
   return __r;
 }
 static __inline__ uint64x2_t vmlal_n_u32(uint64x2_t __a, uint32x2_t __b, uint32_t __c) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__a[__i] + (uint64_t)__b[__i] * (uint64_t)__c);
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] + (__UINT64_TYPE__)__b[__i] * (__UINT64_TYPE__)__c);
   return __r;
 }
 static __inline__ uint64x2_t vmlsl_u32(uint64x2_t __a, uint32x2_t __b, uint32x2_t __c) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__a[__i] - (uint64_t)__b[__i] * (uint64_t)__c[__i]);
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] - (__UINT64_TYPE__)__b[__i] * (__UINT64_TYPE__)__c[__i]);
   return __r;
 }
 static __inline__ uint64x2_t vmlsl_high_u32(uint64x2_t __a, uint32x4_t __b, uint32x4_t __c) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__a[__i] - (uint64_t)__b[__i + 2] * (uint64_t)__c[__i + 2]);
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] - (__UINT64_TYPE__)__b[__i
+        + 2] * (__UINT64_TYPE__)__c[__i + 2]);
   return __r;
 }
 static __inline__ uint64x2_t vmlsl_n_u32(uint64x2_t __a, uint32x2_t __b, uint32_t __c) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__a[__i] - (uint64_t)__b[__i] * (uint64_t)__c);
+    __r[__i] = (__UINT64_TYPE__)(__a[__i] - (__UINT64_TYPE__)__b[__i] * (__UINT64_TYPE__)__c);
   return __r;
 }
 static __inline__ uint64x1_t vpaddl_u32(uint32x2_t __a) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (uint64_t)((uint64_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint64x1_t vpadal_u32(uint64x1_t __s, uint32x2_t __a) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = (uint64_t)(__s[__i] + (uint64_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT64_TYPE__)(__s[__i] + (__UINT64_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint64_t vaddlv_u32(uint32x2_t __a) {
-  uint64_t __r = 0;
+  __UINT64_TYPE__ __r = 0;
   for (int __i = 0; __i < 2; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint64x2_t vpaddlq_u32(uint32x4_t __a) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)((uint64_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint64x2_t vpadalq_u32(uint64x2_t __s, uint32x4_t __a) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (uint64_t)(__s[__i] + (uint64_t)__a[2 * __i] + __a[2 * __i + 1]);
+    __r[__i] = (__UINT64_TYPE__)(__s[__i] + (__UINT64_TYPE__)__a[2 * __i] + __a[2 * __i + 1]);
   return __r;
 }
 static __inline__ uint64_t vaddlvq_u32(uint32x4_t __a) {
-  uint64_t __r = 0;
+  __UINT64_TYPE__ __r = 0;
   for (int __i = 0; __i < 4; __i++) __r += __a[__i];
   return __r;
 }
 static __inline__ uint64x2_t vshll_n_u32(uint32x2_t __a, const int __k) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)((uint64_t)__a[__i] << __k);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i] << __k);
   return __r;
 }
 static __inline__ uint64x2_t vshll_high_n_u32(uint32x4_t __a, const int __k) {
   uint64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (uint64_t)((uint64_t)__a[__i + 2] << __k);
+  for (int __i = 0; __i < 2; __i++)
+    __r[__i] = (__UINT64_TYPE__)((__UINT64_TYPE__)__a[__i + 2] << __k);
   return __r;
 }
 static __inline__ poly16x8_t vmull_p8(poly8x8_t __a, poly8x8_t __b) {
   poly16x8_t __r = {0};
   for (int __i = 0; __i < 8; __i++)
     for (int __k = 0; __k < 8; __k++)
-      if (__b[__i] >> __k & 1) __r[__i] ^= (uint16_t)(__a[__i] << __k);
+      if (__b[__i] >> __k & 1) __r[__i] ^= (__UINT16_TYPE__)(__a[__i] << __k);
   return __r;
 }
 static __inline__ poly8x8_t vmul_p8(poly8x8_t __a, poly8x8_t __b) {
   poly8x8_t __r = {0};
   for (int __i = 0; __i < 8; __i++)
     for (int __k = 0; __k < 8; __k++)
-      if (__b[__i] >> __k & 1) __r[__i] ^= (uint8_t)(__a[__i] << __k);
+      if (__b[__i] >> __k & 1) __r[__i] ^= (__UINT8_TYPE__)(__a[__i] << __k);
   return __r;
 }
 static __inline__ poly8x16_t vmulq_p8(poly8x16_t __a, poly8x16_t __b) {
   poly8x16_t __r = {0};
   for (int __i = 0; __i < 16; __i++)
     for (int __k = 0; __k < 8; __k++)
-      if (__b[__i] >> __k & 1) __r[__i] ^= (uint8_t)(__a[__i] << __k);
+      if (__b[__i] >> __k & 1) __r[__i] ^= (__UINT8_TYPE__)(__a[__i] << __k);
   return __r;
 }
 static __inline__ poly128_t vmull_p64(poly64_t __a, poly64_t __b) {
-  poly128_t __r = 0;
+  __Poly128_t __r = 0;
   for (int __k = 0; __k < 64; __k++)
-    if (__b >> __k & 1) __r ^= (poly128_t)__a << __k;
+    if (__b >> __k & 1) __r ^= (__Poly128_t)__a << __k;
   return __r;
 }
 static __inline__ poly128_t vmull_high_p64(poly64x2_t __a, poly64x2_t __b) {
@@ -10013,7 +10192,7 @@ static __inline__ int8x16_t vreinterpretq_s8_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_s8(int8x16_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10023,7 +10202,7 @@ static __inline__ int16x8_t vreinterpretq_s16_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_s16(int16x8_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10033,7 +10212,7 @@ static __inline__ int32x4_t vreinterpretq_s32_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_s32(int32x4_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10043,7 +10222,7 @@ static __inline__ int64x2_t vreinterpretq_s64_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_s64(int64x2_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10053,7 +10232,7 @@ static __inline__ uint8x16_t vreinterpretq_u8_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_u8(uint8x16_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10063,7 +10242,7 @@ static __inline__ uint16x8_t vreinterpretq_u16_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_u16(uint16x8_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10073,7 +10252,7 @@ static __inline__ uint32x4_t vreinterpretq_u32_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_u32(uint32x4_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10083,7 +10262,7 @@ static __inline__ uint64x2_t vreinterpretq_u64_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_u64(uint64x2_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10093,7 +10272,7 @@ static __inline__ float32x4_t vreinterpretq_f32_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_f32(float32x4_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10103,7 +10282,7 @@ static __inline__ float64x2_t vreinterpretq_f64_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_f64(float64x2_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10113,7 +10292,7 @@ static __inline__ poly8x16_t vreinterpretq_p8_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_p8(poly8x16_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10123,7 +10302,7 @@ static __inline__ poly16x8_t vreinterpretq_p16_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_p16(poly16x8_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10133,7 +10312,7 @@ static __inline__ poly64x2_t vreinterpretq_p64_p128(poly128_t __v) {
   return __r;
 }
 static __inline__ poly128_t vreinterpretq_p128_p64(poly64x2_t __v) {
-  poly128_t __r;
+  __Poly128_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
@@ -10141,108 +10320,116 @@ static __inline__ poly128_t vreinterpretq_p128_p64(poly64x2_t __v) {
 /* Conversions between integers and floats, where a value out of range saturates. */
 static __inline__ float32x2_t vcvt_f32_s32(int32x2_t __a) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)__a[__i];
   return __r;
 }
 static __inline__ int32x2_t vcvt_s32_f32(float32x2_t __a) {
   int32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p31 ? (int32_t)((uint64_t)-1 >> 33)
-        : __a[__i] <= -0x1p31 ? (int32_t)(-(int32_t)((uint64_t)-1 >> 33) - 1) : (int32_t)__a[__i];
+    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p31
+        ? (__INT32_TYPE__)((__UINT64_TYPE__)-1 >> 33) : __a[__i] <= -0x1p31
+        ? (__INT32_TYPE__)(-(__INT32_TYPE__)((__UINT64_TYPE__)-1 >> 33) - 1)
+        : (__INT32_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ float32x2_t vcvt_f32_u32(uint32x2_t __a) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)__a[__i];
   return __r;
 }
 static __inline__ uint32x2_t vcvt_u32_f32(float32x2_t __a) {
   uint32x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p32 ? (uint32_t)~(uint32_t)0
-        : __a[__i] <= 0 ? 0 : (uint32_t)__a[__i];
+    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p32
+        ? (__UINT32_TYPE__)~(__UINT32_TYPE__)0 : __a[__i] <= 0 ? 0 : (__UINT32_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ float64x1_t vcvt_f64_s64(int64x1_t __a) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)__a[__i];
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)__a[__i];
   return __r;
 }
 static __inline__ int64x1_t vcvt_s64_f64(float64x1_t __a) {
   int64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p63 ? (int64_t)((uint64_t)-1 >> 1)
-        : __a[__i] <= -0x1p63 ? (int64_t)(-(int64_t)((uint64_t)-1 >> 1) - 1) : (int64_t)__a[__i];
+    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p63
+        ? (__INT64_TYPE__)((__UINT64_TYPE__)-1 >> 1) : __a[__i] <= -0x1p63
+        ? (__INT64_TYPE__)(-(__INT64_TYPE__)((__UINT64_TYPE__)-1 >> 1) - 1)
+        : (__INT64_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ float64x1_t vcvt_f64_u64(uint64x1_t __a) {
   float64x1_t __r;
-  for (int __i = 0; __i < 1; __i++) __r[__i] = (float64_t)__a[__i];
+  for (int __i = 0; __i < 1; __i++) __r[__i] = (double)__a[__i];
   return __r;
 }
 static __inline__ uint64x1_t vcvt_u64_f64(float64x1_t __a) {
   uint64x1_t __r;
   for (int __i = 0; __i < 1; __i++)
-    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p64 ? (uint64_t)~(uint64_t)0
-        : __a[__i] <= 0 ? 0 : (uint64_t)__a[__i];
+    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p64
+        ? (__UINT64_TYPE__)~(__UINT64_TYPE__)0 : __a[__i] <= 0 ? 0 : (__UINT64_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ float32x4_t vcvtq_f32_s32(int32x4_t __a) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)__a[__i];
   return __r;
 }
 static __inline__ int32x4_t vcvtq_s32_f32(float32x4_t __a) {
   int32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p31 ? (int32_t)((uint64_t)-1 >> 33)
-        : __a[__i] <= -0x1p31 ? (int32_t)(-(int32_t)((uint64_t)-1 >> 33) - 1) : (int32_t)__a[__i];
+    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p31
+        ? (__INT32_TYPE__)((__UINT64_TYPE__)-1 >> 33) : __a[__i] <= -0x1p31
+        ? (__INT32_TYPE__)(-(__INT32_TYPE__)((__UINT64_TYPE__)-1 >> 33) - 1)
+        : (__INT32_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ float32x4_t vcvtq_f32_u32(uint32x4_t __a) {
   float32x4_t __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (float32_t)__a[__i];
+  for (int __i = 0; __i < 4; __i++) __r[__i] = (float)__a[__i];
   return __r;
 }
 static __inline__ uint32x4_t vcvtq_u32_f32(float32x4_t __a) {
   uint32x4_t __r;
   for (int __i = 0; __i < 4; __i++)
-    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p32 ? (uint32_t)~(uint32_t)0
-        : __a[__i] <= 0 ? 0 : (uint32_t)__a[__i];
+    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p32
+        ? (__UINT32_TYPE__)~(__UINT32_TYPE__)0 : __a[__i] <= 0 ? 0 : (__UINT32_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ float64x2_t vcvtq_f64_s64(int64x2_t __a) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)__a[__i];
   return __r;
 }
 static __inline__ int64x2_t vcvtq_s64_f64(float64x2_t __a) {
   int64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p63 ? (int64_t)((uint64_t)-1 >> 1)
-        : __a[__i] <= -0x1p63 ? (int64_t)(-(int64_t)((uint64_t)-1 >> 1) - 1) : (int64_t)__a[__i];
+    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p63
+        ? (__INT64_TYPE__)((__UINT64_TYPE__)-1 >> 1) : __a[__i] <= -0x1p63
+        ? (__INT64_TYPE__)(-(__INT64_TYPE__)((__UINT64_TYPE__)-1 >> 1) - 1)
+        : (__INT64_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ float64x2_t vcvtq_f64_u64(uint64x2_t __a) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)__a[__i];
   return __r;
 }
 static __inline__ uint64x2_t vcvtq_u64_f64(float64x2_t __a) {
   uint64x2_t __r;
   for (int __i = 0; __i < 2; __i++)
-    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p64 ? (uint64_t)~(uint64_t)0
-        : __a[__i] <= 0 ? 0 : (uint64_t)__a[__i];
+    __r[__i] = __a[__i] != __a[__i] ? 0 : __a[__i] >= 0x1p64
+        ? (__UINT64_TYPE__)~(__UINT64_TYPE__)0 : __a[__i] <= 0 ? 0 : (__UINT64_TYPE__)__a[__i];
   return __r;
 }
 static __inline__ float64x2_t vcvt_f64_f32(float32x2_t __a) {
   float64x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float64_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (double)__a[__i];
   return __r;
 }
 static __inline__ float32x2_t vcvt_f32_f64(float64x2_t __a) {
   float32x2_t __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (float32_t)__a[__i];
+  for (int __i = 0; __i < 2; __i++) __r[__i] = (float)__a[__i];
   return __r;
 }
 
@@ -11606,17 +11793,20 @@ static __inline__ poly8x16_t vqtbx1q_p8(poly8x16_t __lo, poly8x16_t __t, uint8x1
 }
 static __inline__ uint8x8_t vtbl1_u8(uint8x8_t __t, uint8x8_t __x) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)__x[__i] < 8 ? __t[(uint8_t)__x[__i]] : 0;
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT8_TYPE__)__x[__i] < 8 ? __t[(__UINT8_TYPE__)__x[__i]] : 0;
   return __r;
 }
 static __inline__ int8x8_t vtbl1_s8(int8x8_t __t, int8x8_t __x) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)__x[__i] < 8 ? __t[(uint8_t)__x[__i]] : 0;
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT8_TYPE__)__x[__i] < 8 ? __t[(__UINT8_TYPE__)__x[__i]] : 0;
   return __r;
 }
 static __inline__ poly8x8_t vtbl1_p8(poly8x8_t __t, uint8x8_t __x) {
   poly8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (uint8_t)__x[__i] < 8 ? __t[(uint8_t)__x[__i]] : 0;
+  for (int __i = 0; __i < 8; __i++)
+    __r[__i] = (__UINT8_TYPE__)__x[__i] < 8 ? __t[(__UINT8_TYPE__)__x[__i]] : 0;
   return __r;
 }
 
