@@ -853,8 +853,8 @@ impl Tast {
         self.btf_type_tags.get(&decl).map_or(&[], Vec::as_slice)
     }
 
-    /// Records the `btf_type_tag`s on the levels of the type a file-scope typedef name stands
-    /// for, the first declaration of the name being the one that stands.
+    /// Records the `btf_type_tag`s on the levels of the type a typedef name stands for, the first
+    /// declaration of the name being the one that stands.
     pub fn record_alias_type_tags(&mut self, name: Symbol, tags: TypeTags) {
         if !tags.is_empty() {
             self.alias_type_tags.entry(name).or_insert(tags);

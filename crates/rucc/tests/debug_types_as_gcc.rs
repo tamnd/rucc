@@ -459,6 +459,70 @@ u32 g(int c);
     assert_eq!(returns("g"), (DW_TAG_TYPEDEF, Some("u32".to_owned())));
 }
 
+/// A function declared with a typedef name for the whole of its type returns what the name's own
+/// declaration wrote, which is how the kernel declares `inet_ehashfn` before defining it and
+/// exporting it, and gcc's BTF says it returns `u32`. One that is only declared and called is a
+/// function too, with its parameters as the name wrote them, and the name itself gets no entry.
+#[test]
+fn a_function_declared_with_a_typedef_for_its_type_returns_what_the_typedef_wrote() {
+    let source = "\
+typedef unsigned int u32;
+typedef unsigned int __be32;
+typedef u32 (fn_t)(const __be32 a);
+fn_t f;
+u32 f(const __be32 a) { return a + 1; }
+extern typeof(f) f;
+fn_t h;
+extern typeof(h) h;
+int use(void) { return h(1); }
+";
+    let all = entries(&build("whole", source));
+    let returns = |name: &str| {
+        let function = named(&all, DW_TAG_SUBPROGRAM, name).expect("it is a function");
+        let ty = at(&all, function.ty.expect("it returns a value"));
+        (ty.tag, ty.name.clone())
+    };
+    assert_eq!(returns("f"), (DW_TAG_TYPEDEF, Some("u32".to_owned())));
+    assert_eq!(returns("h"), (DW_TAG_TYPEDEF, Some("u32".to_owned())));
+    let h = named(&all, DW_TAG_SUBPROGRAM, "h").expect("it is a function");
+    let param = at(&all, all[h.children[0]].ty.expect("the parameter has a type"));
+    assert_eq!(param.tag, DW_TAG_CONST);
+    assert_eq!(at(&all, param.ty.expect("over a type")).name.as_deref(), Some("__be32"));
+    assert!(named(&all, DW_TAG_VARIABLE, "h").is_none(), "h is not a variable");
+    assert!(named(&all, DW_TAG_TYPEDEF, "fn_t").is_none(), "fn_t is not described");
+}
+
+/// A typedef written inside a function is described when a local is declared with it, the way the
+/// arm64 kernel's `kpti_install_ng_mappings` declares a pointer to the assembly it calls. gcc puts
+/// the entry inside the function and this compiler at the top of the unit, which pahole reads the
+/// same way, so the kernel's BTF has the name either way.
+#[test]
+fn a_typedef_inside_a_function_is_described_for_its_locals() {
+    let source = "\
+typedef unsigned long phys_addr_t;
+extern int sel;
+int fa(int), fb(int);
+void g(phys_addr_t x) {
+  typedef void (remap_fn)(phys_addr_t);
+  remap_fn *p = (void *)x;
+  p(x);
+}
+int k(int y) {
+  typedef int (*pick_fn)(int);
+  pick_fn h = sel ? fa : fb;
+  return h(y);
+}
+";
+    let all = entries(&build("block-typedef", source));
+    let remap = named(&all, DW_TAG_TYPEDEF, "remap_fn").expect("remap_fn is described");
+    let function = at(&all, remap.ty.expect("over a type"));
+    assert_eq!(function.tag, DW_TAG_SUBROUTINE);
+    let param = at(&all, all[function.children[0]].ty.expect("the parameter has a type"));
+    assert_eq!(param.name.as_deref(), Some("phys_addr_t"));
+    let pick = named(&all, DW_TAG_TYPEDEF, "pick_fn").expect("pick_fn is described");
+    assert_eq!(at(&all, pick.ty.expect("over a type")).tag, DW_TAG_POINTER);
+}
+
 /// `typeof` of a typedef name, or of a name declared with one, keeps the typedef, as gcc does.
 /// The kernel declares every per-CPU variable as `__typeof__(type) name`, so without it the BTF
 /// of `DEFINE_PER_CPU(u64, x)` says `long long unsigned int` where gcc's says `u64`.
