@@ -669,8 +669,16 @@ impl Walk<'_> {
             return None;
         };
         let signature = self.types.signature(which).clone();
-        let returns = match self.spellings.get(&id) {
-            Some(&(name, of)) => self.over_or_void(signature.ret, name, of),
+        // A function declared with a typedef name for the whole of its type returns what that
+        // name's own declaration wrote, so `typedef u32 (fn_t)(int); fn_t f;` followed by the
+        // definition and `extern typeof(f) f;` returns `u32`. The kernel's `inet_ehashfn` is that,
+        // and its BTF says `u32`.
+        let spelled = match self.spellings.get(&id).copied() {
+            Some((name, of)) if self.whole_function(of) => self.chained.get(&name).copied(),
+            spelled => spelled,
+        };
+        let returns = match spelled {
+            Some((name, of)) => self.over_or_void(signature.ret, name, of),
             None => self.told_or_void(signature.ret),
         }?;
         // The function's own level is never tagged, so the levels are counted from what it
@@ -707,11 +715,27 @@ impl Walk<'_> {
         Some((sig, declared))
     }
 
+    /// Whether a typedef name stood for a function type, which only the declaration of a function
+    /// can be written with as the whole of its type.
+    fn whole_function(&self, of: TypeId) -> bool {
+        matches!(self.types.kind(self.types.canonical(of)), TypeKind::Function(_))
+    }
+
     /// Which entry a declaration's type is, going through the typedef name it was written with.
     fn declared(&mut self, id: DeclId, ty: TypeId) -> Option<usize> {
         let written = self.tast.prototypes(id).to_vec();
-        let at = self.within(written, |walk| match walk.spellings.get(&id) {
-            Some(&(name, of)) => walk.over(ty, name, of),
+        let at = self.within(written, |walk| match walk.spellings.get(&id).copied() {
+            // A function declared with a typedef name for the whole of its type is the function
+            // type under the name, which gcc describes as a function rather than as a variable of
+            // the name's type, and with no entry for the name.
+            Some((name, of))
+                if walk.whole_function(of)
+                    && walk.types.canonical(of) == walk.types.canonical(ty) =>
+            {
+                let written = walk.types.alias_prototypes().get(&name).cloned().unwrap_or_default();
+                walk.within(written, |walk| walk.under(name, of)).flatten()
+            }
+            Some((name, of)) => walk.over(ty, name, of),
             None => walk.told(ty),
         })?;
         let tast = self.tast;

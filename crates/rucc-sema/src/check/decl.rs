@@ -797,10 +797,8 @@ impl Checker<'_> {
         }
         let type_tags = self.btf_type_tags(&specs, node.derived, item.attrs, ty);
         if specs.is_typedef() {
-            if self.scopes.at_file_scope() {
-                self.types.record_alias_prototypes(name, prototypes);
-                self.tast.record_alias_type_tags(name, type_tags);
-            }
+            self.types.record_alias_prototypes(name, prototypes);
+            self.tast.record_alias_type_tags(name, type_tags);
             return self.typedef(name, ty, &specs, item, span);
         }
         let kind = if is_function(&self.types, ty) { DeclKind::Function } else { DeclKind::Object };
@@ -1386,26 +1384,26 @@ impl Checker<'_> {
         // the only record of it there will be: the binding below is in a scope that closes, and
         // the ordinary typedef above interned nothing, so by the end of the translation unit
         // there is otherwise nowhere left that knows the program wrote the word. Debug
-        // information is the reader. File scope only, because a block-scope typedef belongs to
-        // the block it was written in and there is nothing yet that says which block a type was
-        // named in.
-        if self.scopes.at_file_scope() {
-            // The name this one was written over, looked up before this one is declared, since
-            // `typedef u64 u64;` in a second header names the one already there.
-            let spelled = match specs.ty {
-                ast::TypeSpec::Typedef(over) => match self.scopes.lookup(over) {
-                    Some(Binding::Typedef(of)) if over != name => Some((over, of)),
-                    _ => None,
-                },
-                // `typedef __builtin_va_list __gnuc_va_list;`, which <stdarg.h> writes.
-                ast::TypeSpec::VaList => {
-                    let over = self.va_list_name();
-                    over.map(|over| (over, self.va_list_type()))
-                }
+        // information is the reader. A block-scope typedef goes in too, though nothing yet says
+        // which block it was written in, so it is described at the top of the unit where gcc
+        // puts it inside the function. pahole reads either the same way, and the arm64 kernel's
+        // `kpti_remap_fn` and `ttbr_replace_func` are typedefs in a function that its BTF has.
+        //
+        // The name this one was written over, looked up before this one is declared, since
+        // `typedef u64 u64;` in a second header names the one already there.
+        let spelled = match specs.ty {
+            ast::TypeSpec::Typedef(over) => match self.scopes.lookup(over) {
+                Some(Binding::Typedef(of)) if over != name => Some((over, of)),
                 _ => None,
-            };
-            self.types.alias(name, ty, spelled);
-        }
+            },
+            // `typedef __builtin_va_list __gnuc_va_list;`, which <stdarg.h> writes.
+            ast::TypeSpec::VaList => {
+                let over = self.va_list_name();
+                over.map(|over| (over, self.va_list_type()))
+            }
+            _ => None,
+        };
+        self.types.alias(name, ty, spelled);
         match self.scopes.lookup_here(name) {
             // A typedef may be written twice for the same type, which is what lets two headers
             // that both define `size_t` be included by one file.

@@ -233,7 +233,7 @@ pub struct Types {
     pending: Vec<Prototype>,
     /// The prototypes each record member's declarator wrote, keyed by the record and the member.
     member_prototypes: Map<(RecordId, Symbol), Vec<Prototype>>,
-    /// The prototypes each file-scope typedef's declarator wrote.
+    /// The prototypes each typedef's declarator wrote.
     alias_prototypes: Map<Symbol, Vec<Prototype>>,
     /// The typedef names `transparent_union` was written after. See [`Types::hollow_alias`].
     hollow: Set<Symbol>,
@@ -800,8 +800,8 @@ impl Types {
         &self.member_prototypes
     }
 
-    /// Records the prototypes a file-scope typedef's declarator wrote. The first wins, as it does
-    /// for [`Types::alias`].
+    /// Records the prototypes a typedef's declarator wrote. The first wins, as it does for
+    /// [`Types::alias`].
     pub fn record_alias_prototypes(&mut self, name: Symbol, written: Vec<Prototype>) {
         if !written.is_empty() {
             self.alias_prototypes.entry(name).or_insert(written);
