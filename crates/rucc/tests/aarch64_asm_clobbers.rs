@@ -145,3 +145,16 @@ void crash(void) {{
     );
     assert!(body(&text, "crash").iter().any(|line| line.starts_with("stp x28, x29")), "{text}");
 }
+
+/// The arm64 hwcap selftest probes each SVE instruction with `.inst` and a clobber of `z0`, which
+/// holds `v0` in its low bits. The predicates, the first fault register and the SME array are
+/// names gcc takes in a clobber list too, and nothing here keeps a value in them.
+#[test]
+fn a_clobber_of_an_sve_register_takes_the_vector_register_under_it() {
+    let text = listing(
+        "sve",
+        "double sve(double a, double b) { asm volatile(\".inst 0x4207800\" ::: \"z0\", \"p0\", \"p15\", \"ffr\", \"za\"); return a + b; }\n",
+    );
+    // `a` arrives in `d0`, so an add still reading it there read it after the probe wrote it.
+    assert!(!body(&text, "sve").contains(&"fadd d0, d0, d1".to_string()), "{text}");
+}

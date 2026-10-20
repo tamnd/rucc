@@ -36,6 +36,7 @@ The debug information keeps a typedef name through `typeof`, as gcc does: `typeo
 - The debug info no longer declares an `extern` variable that only a statement doing nothing names, such as `(void)var;`, since gcc throws such a statement away before it looks at what the body names. The kernel's `lockdep_assert_in_rcu_read_lock()` reads `RCU` that way, and it had put `struct __ctx_lock_RCU` into rucc's BTF and not into gcc's. On a 7.2.8 arm64 build, kernel/irq/irqdesc.o, io_uring/tw.o, kernel/fork.o, kernel/sched/core.o and mm/memory.o now have the same type names as gcc. (#3744)
 - `-fno-var-tracking` is honoured. Each local gets one place for the whole function, the one it is in for longest, and no `.debug_loclists` is written, as with gcc. A kernel with `CONFIG_DEBUG_INFO_REDUCED`, which allmodconfig turns on, builds that way, and its objects were carrying location lists gcc never writes. (#3746)
 - A function holding a variable length array no longer stops with an internal error on aarch64 when the saved stack pointer is spilled. The copy of `sp` into a scratch register was read back out of `sp` by the store, which is `str sp` and not an instruction, so LTP's `tst_timer_test.c` failed to build (#3747).
+- An aarch64 inline assembly clobber list may name the SVE and SME registers gcc takes there, `z0` to `z31`, `p0` to `p15`, `ffr`, `za`, `zt0`, `vg` and `fpmr`, which the arm64 hwcap selftest writes (#3749).
 
 ### Added
 

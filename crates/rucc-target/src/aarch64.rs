@@ -115,8 +115,10 @@ pub const SP: PhysReg = PhysReg::new(31);
 /// A clobber list and a local register variable both name a register this way, and either width
 /// of it means the whole of it: `w19` in a clobber list is `x19` gone, and `d8` is `v8`. `fp` and
 /// `lr` are the names GNU as gives `x29` and `x30`, and `r0` to `r30` are the names gcc takes for
-/// the same registers, which the kernel's SMC calls in `arm-smccc.h` keep their arguments in. The stack pointer and the zero register are
-/// not here, since neither is somewhere a value can be put or taken away.
+/// the same registers, which the kernel's SMC calls in `arm-smccc.h` keep their arguments in. An
+/// SVE register `z0` holds `v0` in its low bits, so a clobber of it is `v0` gone, which is what the
+/// arm64 hwcap selftest's probes of SVE instructions write. The stack pointer and the zero
+/// register are not here, since neither is somewhere a value can be put or taken away.
 #[must_use]
 pub fn named(name: &str) -> Option<(PhysReg, RegClass)> {
     match name {
@@ -131,7 +133,7 @@ pub fn named(name: &str) -> Option<(PhysReg, RegClass)> {
     let number: u8 = number.parse().ok()?;
     match file {
         "x" | "w" | "r" if number < 31 => Some((x(number), GPR)),
-        "v" | "q" | "d" | "s" | "h" | "b" if number < 32 => Some((v(number), FPR)),
+        "v" | "q" | "d" | "s" | "h" | "b" | "z" if number < 32 => Some((v(number), FPR)),
         _ => None,
     }
 }
