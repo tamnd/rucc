@@ -1122,6 +1122,19 @@ impl At<'_> {
             "rev" => self.one_source(|width| 0b10 | width.sf(), values)?,
             "clz" => self.one_source(|_| 0b00_0100, values)?,
             "cls" => self.one_source(|_| 0b00_0101, values)?,
+            "pacia" | "pacib" | "pacda" | "pacdb" | "autia" | "autib" | "autda" | "autdb"
+            | "paciza" | "pacizb" | "pacdza" | "pacdzb" | "autiza" | "autizb" | "autdza"
+            | "autdzb" | "xpaci" | "xpacd" => self.authenticate(values)?,
+            "pacga" => match values {
+                [d, n, mm] => {
+                    let ((wd, rd), (wn, rn), (wm, rmm)) = (self.zr(d)?, self.zr(n)?, self.sp(mm)?);
+                    if [wd, wn, wm] != [Width::X; 3] {
+                        return Err(self.register());
+                    }
+                    0x9ac0_3000 | rmm << 16 | rn << 5 | rd
+                }
+                _ => return Err(self.unwritten()),
+            },
             "ldp" | "stp" | "ldpsw" | "ldnp" | "stnp" => self.pair(values)?,
             "ldxr" | "ldxrb" | "ldxrh" | "ldaxr" | "ldaxrb" | "ldaxrh" | "ldar" | "ldarb"
             | "ldarh" | "stlr" | "stlrb" | "stlrh" => self.exclusive(None, values)?,
@@ -1799,6 +1812,48 @@ impl At<'_> {
             return Err(self.register());
         }
         Ok(data.sf() << 31 | 0x1ac0_4000 | rmm << 16 | castagnoli << 12 | sz << 10 | rn << 5 | rd)
+    }
+
+    /// The pointer authentication instructions that sign, check or strip a pointer in a register,
+    /// from Armv8.3: `1 1 0 11010110 00001 opcode Rn Rd`. The low three bits of the opcode are
+    /// sign or check and which key, the next one is set for the forms with zero as the modifier,
+    /// which have no `Rn` and write thirty one there, and the two that strip take `010000` and
+    /// `010001`. The modifier of the other forms can be the stack pointer. Every one of them is
+    /// on whole `x` registers.
+    fn authenticate(self, values: &[Value]) -> Result<u32, Error> {
+        let m = self.mnemonic;
+        let (opcode, zero) = match m {
+            "xpaci" => (0b01_0000, true),
+            "xpacd" => (0b01_0001, true),
+            _ => {
+                let (check, rest) = match m.strip_prefix("pac") {
+                    Some(rest) => (0, rest),
+                    None => (0b100, m.strip_prefix("aut").ok_or_else(|| self.unwritten())?),
+                };
+                let (zero, key) = match rest.strip_prefix(['i', 'd']) {
+                    Some(after) => (after.starts_with('z'), u32::from(rest.starts_with('d'))),
+                    None => return Err(self.unwritten()),
+                };
+                let b = u32::from(rest.ends_with('b'));
+                (u32::from(zero) << 3 | check | key << 1 | b, zero)
+            }
+        };
+        let (d, rn) = match (values, zero) {
+            ([d], true) => (d, 31),
+            ([d, n], false) => {
+                let (width, rn) = self.sp(n)?;
+                if width != Width::X {
+                    return Err(self.register());
+                }
+                (d, rn)
+            }
+            _ => return Err(self.unwritten()),
+        };
+        let (width, rd) = self.zr(d)?;
+        if width != Width::X {
+            return Err(self.register());
+        }
+        Ok(0xdac1_0000 | opcode << 10 | rn << 5 | rd)
     }
 
     /// The instructions with one register source.
@@ -2533,6 +2588,37 @@ mod tests {
     #[test]
     fn the_carry_instructions_refuse_mixed_widths_and_the_stack_pointer() {
         for text in ["adc x1, w2, x3", "adc sp, x2, x3", "sbcs w1, w2, sp", "ngc x1"] {
+            let line = read(text).expect("a line");
+            assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+        }
+    }
+
+    /// The pointer authentication instructions the arm64 pauth selftest writes in inline
+    /// assembly, and their siblings, as the words GNU as writes for them under
+    /// `-march=armv8.3-a`.
+    #[test]
+    fn the_pointer_authentication_instructions_are_the_words_gnu_as_writes() {
+        for (text, word) in [
+            ("paciza x0", 0xdac1_23e0),
+            ("pacizb x1", 0xdac1_27e1),
+            ("pacdza x2", 0xdac1_2be2),
+            ("pacdzb x3", 0xdac1_2fe3),
+            ("autiza x4", 0xdac1_33e4),
+            ("autdzb x5", 0xdac1_3fe5),
+            ("pacia x0, x1", 0xdac1_0020),
+            ("pacib x0, sp", 0xdac1_07e0),
+            ("autda x2, x3", 0xdac1_1862),
+            ("autdb x4, x5", 0xdac1_1ca4),
+            ("xpaci x6", 0xdac1_43e6),
+            ("xpacd x7", 0xdac1_47e7),
+            ("pacga x0, x1, x2", 0x9ac2_3020),
+            ("pacga x0, x1, sp", 0x9adf_3020),
+        ] {
+            let line = read(text).expect("a line");
+            let encoded = encode(&line.mnemonic, &line.values).expect(text);
+            assert_eq!(encoded.word, word, "{text}");
+        }
+        for text in ["paciza w0", "paciza x0, x1", "pacia x0", "pacia sp, x1", "pacga x0, sp, x2"] {
             let line = read(text).expect("a line");
             assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
         }
