@@ -410,6 +410,13 @@ fn same_address(func: &Func, pred: IntPred, args: &[Value], ty: Type) -> Option<
     if let Some(answer) = apart(func, pred, first, second) {
         return Some(Imm::int(i128::from(answer), ty));
     }
+    if distinct(func, first, second) {
+        return match pred {
+            IntPred::Eq => Some(Imm::int(0, ty)),
+            IntPred::Ne => Some(Imm::int(1, ty)),
+            _ => None,
+        };
+    }
     let (lhs, from) = cast(func, *args.first()?)?;
     let (rhs, other) = cast(func, *args.get(1)?)?;
     if from != other {
@@ -457,6 +464,33 @@ fn apart(func: &Func, pred: IntPred, first: Value, second: Value) -> Option<bool
         IntPred::Ugt => Some(lhs > rhs),
         IntPred::Uge => Some(lhs >= rhs),
         _ => None,
+    }
+}
+
+/// Whether two addresses are inside two different stack slots, and so are not the same address.
+///
+/// Both have to be strictly inside their slot. The place just past the end of one slot can be the
+/// start of the next one, and an empty slot, which a GNU `struct {}` gets, can share its address
+/// with anything. A slot sized at run time is left alone, since its size is not known here.
+///
+/// The kernel's `typecheck` writes `(void)(&__dummy == &__dummy2)` with two locals to make the
+/// compiler warn when their types differ, and `rt2x00_set_field32` in `rt2800lib.c` does that for
+/// every register field it sets. While the comparison stands both locals have their address taken
+/// and keep a slot each, and `rt2800_init_registers` came out at 2800 bytes of frame against the
+/// 96 gcc gives it.
+fn distinct(func: &Func, first: Value, second: Value) -> bool {
+    let inside = |value| {
+        let (Object::Slot(inst), at) = offset(func, value)? else { return None };
+        let Extra::Mem(mem) = func[inst].extra else { return None };
+        if !func[func[inst].args].is_empty() {
+            return None;
+        }
+        let size = i128::from(func[mem].size);
+        (0..size).contains(&at).then_some(inst)
+    };
+    match (inside(first), inside(second)) {
+        (Some(lhs), Some(rhs)) => lhs != rhs,
+        _ => false,
     }
 }
 
