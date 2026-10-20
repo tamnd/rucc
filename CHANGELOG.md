@@ -41,6 +41,7 @@ The debug information keeps a typedef name through `typeof`, as gcc does: `typeo
 - The intrinsics in `arm_neon.h` cast to the types under the stdint names, so an object that inlines one no longer describes an `int8_t` or `uint64_t` gcc's build does not, which the arm64 kernel's raid6 code showed in its BTF (#3751).
 - A function declared with a typedef name for its whole type returns what that typedef wrote, and a typedef written inside a function is described when a local uses it, so the arm64 kernel's BTF has `inet_ehashfn` returning `u32` and has `kpti_remap_fn` and `ttbr_replace_func` (#3752).
 Two addresses strictly inside two different stack slots now compare unequal, so the kernel's `typecheck` comparison no longer keeps a slot for each local and `rt2800_init_registers` drops from 2800 bytes of frame to under 112 on AArch64 (#3754).
+A compound literal that initializes an object or one of its members or elements is now written straight into it, instead of being built in a slot of its own and copied, which takes `damon_test_three_regions_in_vmas` on 6.12 back under FRAME_WARN on AArch64 (#3755).
 
 ### Added
 

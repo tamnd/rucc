@@ -39,12 +39,11 @@ block0(%0: i32):
     %10 = ptr_add.nuw %2, %9
     store %0 -> %10, align 4, tbaa !1
     %11 = iconst.i32 1
-    store %11 -> %4, align 4, tbaa !1
+    store %11 -> %3, align 4, tbaa !1
     %12 = iconst.i64 4
-    %13 = ptr_add.nuw %4, %12
+    %13 = ptr_add.nuw %3, %12
     %14 = iconst.i32 2
     store %14 -> %13, align 4, tbaa !1
-    memcpy %3, %4, size 8, align 4
     %15 = load.i32 %1, align 4, tbaa !1
     %16 = iconst.i32 0
     %17 = sext.i64 %16
