@@ -9497,6 +9497,16 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
     }
 
+    /// `__clear_cache` needs no declaration, as in gcc, and both spellings call the one libgcc
+    /// defines with nothing said about either. LTP's `mprotect04.c` calls the plain one.
+    #[test]
+    fn clear_cache_is_a_call_to_the_libgcc_function_under_either_name() {
+        let text = body("void f(char *p, char *q) { __clear_cache(p, q); }\n");
+        assert!(text.contains("call @__clear_cache(%0, %1) : (ptr, ptr)"), "{text}");
+        let text = body("void f(char *p, char *q) { __builtin___clear_cache(p, q); }\n");
+        assert!(text.contains("call @__clear_cache(%0, %1) : (ptr, ptr)"), "{text}");
+    }
+
     /// A `_chk` builtin reaches the checking function in the library with the object size still
     /// on the end of it.
     ///

@@ -3852,6 +3852,17 @@ tests = ["rucc-driver::the_first_set_bit_is_one_based_and_zero_for_a_zero"]
 # parameter in a signature is adjusted the way a parameter in a declaration is.
 
 [[feature]]
+name = "__builtin___clear_cache"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "void(void *, void *)"
+library = "__clear_cache"
+used_by = ["ltp", "libffi"]
+tests = ["rucc-sema::a_library_function_in_the_reserved_namespace_needs_no_declaration", "rucc-driver::clear_cache_is_a_call_to_the_libgcc_function_under_either_name"]
+notes = "libgcc defines `__clear_cache` on every target, and gcc makes the plain name visible without a declaration because it is in the implementation's namespace. LTP's `mprotect04.c` calls it with nothing declaring it."
+
+[[feature]]
 name = "__builtin___memcpy_chk"
 kind = "builtin"
 gcc_version = "4.0"

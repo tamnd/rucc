@@ -182,7 +182,10 @@ impl Checker<'_> {
         if !spelled.starts_with("__") {
             return None;
         }
-        let feature = rucc_gnu::lookup(Kind::Builtin, spelled)?;
+        let feature = match rucc_gnu::lookup(Kind::Builtin, spelled) {
+            Some(feature) => feature,
+            None => self.reserved_library(spelled)?,
+        };
         if feature.signature.is_empty() {
             return None;
         }
@@ -228,6 +231,21 @@ impl Checker<'_> {
         self.scopes.declare_at_file_scope(name, Binding::Decl(decl));
         self.declared_builtins.push(name);
         Some(decl)
+    }
+
+    /// The row for a library function whose own name is in the implementation's namespace.
+    ///
+    /// gcc makes every builtin spelled with two underscores visible without a declaration, and
+    /// that takes in the library names that start that way as well as the prefixed ones. So
+    /// `__clear_cache` is declared for the program the way `__builtin___clear_cache` is, and LTP's
+    /// `mprotect04.c` calls it with nothing declaring it. Where the program has taken the name back
+    /// from the library, gcc does not declare it and neither does this.
+    fn reserved_library(&self, spelled: &str) -> Option<&'static rucc_gnu::Feature> {
+        if !self.cx.means_the_library(spelled) {
+            return None;
+        }
+        let feature = rucc_gnu::lookup(Kind::Builtin, &format!("__builtin_{spelled}"))?;
+        (feature.library == spelled).then_some(feature)
     }
 
     /// The type the implicit declaration of `name` gets, when the name is one the implementation
@@ -743,14 +761,12 @@ mod tests {
     /// has, which is the failure this whole mechanism exists to prevent.
     #[test]
     fn every_chk_builtin_calls_the_checking_function_the_library_defines() {
-        let family: Vec<_> = rucc_gnu::features()
-            .iter()
-            .filter(|feature| feature.name.starts_with("__builtin___"))
-            .collect();
+        let family: Vec<_> =
+            rucc_gnu::features().iter().filter(|feature| feature.name.ends_with("_chk")).collect();
         assert_eq!(family.len(), 16, "the table lost part of the family");
         for feature in family {
             let name = feature.name;
-            assert!(name.ends_with("_chk"), "{name} is not one of the checking builtins");
+            assert!(name.starts_with("__builtin___"), "{name} is not one of the checking builtins");
             let plain = name.strip_prefix("__builtin_").expect("the prefix");
             assert_eq!(feature.library, plain, "{name}");
             assert_eq!(library_name(name), Some(feature.library), "{name}");
@@ -770,7 +786,6 @@ mod tests {
     fn ten_of_the_family_fold_to_the_function_they_guard_and_the_formatted_six_do_not() {
         let folding: Vec<_> = rucc_gnu::features()
             .iter()
-            .filter(|feature| feature.name.starts_with("__builtin___"))
             .filter(|feature| unchecked_name(feature.name).is_some())
             .collect();
         assert_eq!(folding.len(), 10, "the folding half of the family is ten names");
@@ -822,6 +837,31 @@ mod tests {
             let decl = c.declare_builtin(name, Span::DUMMY).expect("in the table");
             assert_eq!(spelled(&c, c.tast[decl].ty), written, "for {spelling}");
         }
+    }
+
+    /// `__clear_cache` is the library's own name and is declared like the prefixed one, while a
+    /// reserved name that is not a library function, and the plain name under `-fno-builtin`, are
+    /// left for the program to declare.
+    #[test]
+    fn a_library_function_in_the_reserved_namespace_needs_no_declaration() {
+        let mut fixture = Fixture::new("aarch64-unknown-linux-gnu");
+        let plain = fixture.names.intern("__clear_cache");
+        let prefixed = fixture.names.intern("__builtin___clear_cache");
+        let other = fixture.names.intern("__nonesuch");
+        let mut c = fixture.checker();
+        let decl = c.declare_builtin(plain, Span::DUMMY).expect("gcc declares it");
+        assert_eq!(c.tast[decl].name, Some(plain));
+        assert_eq!(spelled(&c, c.tast[decl].ty), "void(void *, void *)");
+        let decl = c.declare_builtin(prefixed, Span::DUMMY).expect("in the table");
+        assert_eq!(spelled(&c, c.tast[decl].ty), "void(void *, void *)");
+        assert_eq!(library_name("__builtin___clear_cache"), Some("__clear_cache"));
+        assert_eq!(library_name("__clear_cache"), None, "the name stands");
+        assert!(c.declare_builtin(other, Span::DUMMY).is_none());
+        let mut cx = Context::new(&fixture.names, &fixture.target, Std::C23);
+        cx.builtins = false;
+        let mut c = Checker::new(&fixture.ast, cx);
+        assert!(c.declare_builtin(plain, Span::DUMMY).is_none(), "-fno-builtin takes it away");
+        assert!(c.declare_builtin(prefixed, Span::DUMMY).is_some(), "the prefix is always there");
     }
 
     /// The declaration a program did not write goes where C says the implementation made it,
