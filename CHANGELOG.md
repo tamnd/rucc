@@ -55,6 +55,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-gz=zstd` is now an unrecognized argument when `-fgnuc-version=` claims a gcc before 13, which is when gcc added it. 6.12's Kconfig asks for it with `cc-option`, and under the gcc 12.2 persona rucc said yes where gcc 12 says no (#3770).
 - `-fprofile-update=atomic` and `-fprofile-update=prefer-atomic` now make each `-fprofile-arcs` counter increment one relaxed atomic add where a pointer is 64 bits, as gcc does, instead of being checked and dropped. The kernel passes `prefer-atomic` with its gcov flags, so two CPUs counting the same edge could lose counts (#3772).
 - The constructor and destructor that `-fprofile-arcs` adds now run at priority 100 and go where gcc puts them, in `.text.startup` and `.text.exit` with `-freorder-functions` and with the function's name after it under `-ffunction-sections`. They ran at 101 in plain code, so every gcov object in a kernel build had its own sections differ from gcc's (#3777).
+- On AArch64 every array, structure and union that rucc defines now gets at least 8 byte alignment, as gcc gives it, unless the build is `-Os` or `-Oz`. The kernel's tracepoint names sat 4 or 2 bytes apart in `__tracepoints_strings` where gcc puts them 8 apart, so that section differed in hundreds of arm64 objects (#3778).
 
 ### Added
 

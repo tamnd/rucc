@@ -311,6 +311,11 @@ pub(crate) fn local_align(types: &Types, target: &TargetInfo, id: TypeId, align:
 /// the padding. The kernel is where it shows: `struct tracepoint` is 72 bytes, so gcc lays the
 /// `__tracepoints` section out 96 bytes apart, and its name strings 8 apart.
 ///
+/// On AArch64 gcc aligns every array, structure and union to 8, whatever its size, so that a copy
+/// of it can move a word at a time. That is `AARCH64_EXPAND_ALIGNMENT`, and gcc skips it when it
+/// optimizes for size. The kernel's tracepoint names show it there, 8 apart in
+/// `__tracepoints_strings` as on x86.
+///
 /// Mach-O is left alone, since the compiler a Mach-O target is compared with is clang, which has
 /// no such rule.
 #[must_use]
@@ -320,15 +325,21 @@ pub(crate) fn static_align(
     id: TypeId,
     align: u32,
     thread: bool,
+    for_size: bool,
 ) -> u32 {
-    let x86 = matches!(target.tuple.arch(), rucc_tuple::Arch::X86_64 | rucc_tuple::Arch::X86);
-    if !x86 || target.object_format == rucc_target::ObjectFormat::MachO {
+    let arch = target.tuple.arch();
+    let x86 = matches!(arch, rucc_tuple::Arch::X86_64 | rucc_tuple::Arch::X86);
+    let a64 = arch == rucc_tuple::Arch::Aarch64 && !for_size;
+    if !(x86 || a64) || target.object_format == rucc_target::ObjectFormat::MachO {
         return align;
     }
     let aggregate =
         matches!(types.kind(types.canonical(id)), TypeKind::Array { .. } | TypeKind::Record(_));
     if !aggregate || is_variable_length(types, id) {
         return align;
+    }
+    if a64 {
+        return align.max(8);
     }
     let size = size_of(types, target, id);
     let word = u64::from(target.pointer_width / 8);
