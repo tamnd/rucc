@@ -281,6 +281,8 @@ pub struct Tast {
     fentry_names: Map<DeclId, StrId>,
     fentry_sections: Map<DeclId, StrId>,
     tls_models: Map<DeclId, TlsModel>,
+    strict_flex: Map<(RecordId, Symbol), u8>,
+    strict_flex_arrays: u8,
     symvers: Map<DeclId, Vec<(String, Span)>>,
     btf_decl_tags: Map<DeclId, Vec<Vec<u8>>>,
     member_tags: Map<(RecordId, Symbol), Vec<Vec<u8>>>,
@@ -742,6 +744,24 @@ impl Tast {
     #[must_use]
     pub fn tls_model(&self, decl: DeclId) -> Option<TlsModel> {
         self.tls_models.get(&decl).copied()
+    }
+
+    /// Records the `-fstrict-flex-arrays` level the command line asked for.
+    pub fn record_strict_flex_arrays(&mut self, level: u8) {
+        self.strict_flex_arrays = level;
+    }
+
+    /// Records the level a member's own `strict_flex_array` asked for in place of that one.
+    pub fn record_strict_flex(&mut self, record: RecordId, name: Symbol, level: u8) {
+        self.strict_flex.insert((record, name), level);
+    }
+
+    /// The `-fstrict-flex-arrays` level this member of this record is read under, which is its
+    /// own `strict_flex_array` where it has one and the command line's where it does not.
+    #[must_use]
+    pub fn strict_flex(&self, record: RecordId, name: Option<Symbol>) -> u8 {
+        let own = name.and_then(|name| self.strict_flex.get(&(record, name)));
+        own.copied().unwrap_or(self.strict_flex_arrays)
     }
 
     /// Records the section `__attribute__((fentry_section("name")))` asked the address of the
@@ -1405,5 +1425,29 @@ mod tests {
 
         assert_eq!(tast[jump], Stmt::Goto(label));
         assert_eq!(tast[label].stmt, Some(target));
+    }
+}
+
+/// Whether an array of this type at the end of a record may run past its end under this
+/// `-fstrict-flex-arrays` level, so that a program may allocate more of it than the type says.
+///
+/// Zero takes every trailing array, one takes `[]`, `[0]` and `[1]`, two takes `[]` and `[0]`
+/// and three takes only `[]`, which are gcc 15's four levels as measured through a pointer at
+/// `-O2`. Something that is not an array is not flexible at any level.
+#[must_use]
+pub fn flexible_at(types: &rucc_types::Types, ty: TypeId, level: u8) -> bool {
+    let rucc_types::TypeKind::Array { len, .. } = crate::eval::bare(types, ty) else {
+        return false;
+    };
+    let count = match len {
+        rucc_types::ArrayLen::Unknown | rucc_types::ArrayLen::Star => return true,
+        rucc_types::ArrayLen::Fixed(count) => count,
+        rucc_types::ArrayLen::Variable(_) => return false,
+    };
+    match level {
+        0 => true,
+        1 => count <= 1,
+        2 => count == 0,
+        _ => false,
     }
 }

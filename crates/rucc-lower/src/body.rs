@@ -6441,7 +6441,9 @@ impl<'u> Body<'_, 'u> {
         }
         let addr = self.offset(addr, byte, span);
         let last = self.types().record_info(id).fields.len() == field as usize + 1;
-        let closest = self.closest(kind, last, ty);
+        let level = self.tast().strict_flex(id, member.name);
+        let closest =
+            self.closest(kind, last && rucc_sema::flexible_at(self.types(), ty, level), ty);
         if byte != 0 {
             if let Some(size) = closest {
                 let array = is_array(self.types(), ty);
@@ -6464,18 +6466,20 @@ impl<'u> Body<'_, 'u> {
     ///
     /// Nothing for a member of a union, which leaves the question to whatever holds the union, and
     /// nothing for a member with no bytes, since the kernel puts those in the middle of a structure
-    /// as markers to copy from and up to. An array at the end of a structure, which a program may
-    /// allocate past the end of, is zero: which of those count is `-fstrict-flex-arrays` and the
-    /// member's own attribute, which the checker reads, so the IR is told only that the member does
-    /// not bound the answer. A record that ends in a flexible array is zero for the same reason,
-    /// since that is how the program reaches past it. A zero is in the member under it where that
-    /// has room for it and is the whole object where it has none, which is what bcachefs's
-    /// `bkey_xattr_init` clears `v` through after `container_of` on the member before it.
-    fn closest(&self, kind: RecordKind, last: bool, ty: TypeId) -> Option<u32> {
+    /// as markers to copy from and up to. An array at the end of a structure that a program may
+    /// allocate past the end of, which `flexible` says under `-fstrict-flex-arrays` and the
+    /// member's own `strict_flex_array`, is zero, so the IR is told only that the member does not
+    /// bound the answer. At the kernel's level three that is only one written `[]`, and the
+    /// `bits` of a `struct cpumask` is its 64 bytes, as gcc has it. A record that ends in a
+    /// flexible array is zero for the same reason, since that is how the program reaches past
+    /// it. A zero is in the member under it where that has room for it and is the whole object
+    /// where it has none, which is what bcachefs's `bkey_xattr_init` clears `v` through after
+    /// `container_of` on the member before it.
+    fn closest(&self, kind: RecordKind, flexible: bool, ty: TypeId) -> Option<u32> {
         if kind == RecordKind::Union {
             return None;
         }
-        if last && is_array(self.types(), ty) || self.types().ends_flexible(ty) {
+        if flexible || self.types().ends_flexible(ty) {
             return Some(0);
         }
         let size = repr::size_of(self.types(), self.target(), ty);
