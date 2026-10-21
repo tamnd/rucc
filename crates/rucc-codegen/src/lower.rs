@@ -1137,6 +1137,9 @@ pub enum Written {
     Goto,
     /// An operand this cannot put where the constraint says it goes.
     Operand,
+    /// A constant the constraint's immediate letter does not take, with no register or memory
+    /// letter beside it to put the constant in instead.
+    Impossible,
     /// A clobber list naming something this has no register for.
     Clobber,
     /// A `jmp` out of the function in a function that has an epilogue behind it.
@@ -1154,6 +1157,10 @@ impl Written {
             Written::Template => "has instructions in its template, which nothing here assembles",
             Written::Goto => "jumps to a label, which nothing here builds an edge for",
             Written::Operand => "has an operand this cannot place",
+            Written::Impossible => {
+                "hands a constant to a constraint that takes neither that constant nor a register, \
+                 which gcc calls an impossible constraint"
+            }
             Written::Clobber => "says it destroys a register this has no name for",
             Written::Away => {
                 "jumps out of the function, which only a function that is `naked` may do, since \
@@ -6334,6 +6341,25 @@ impl<'a> Lowering<'a> {
                     Some(fixed) => written.with(fixed),
                     None => written,
                 });
+            }
+            // gcc refuses a constant that the only letters in its constraint do not take, as in
+            // `"K" (4294967295)`, which no 32 bit logical instruction carries. arm64's Makefile
+            // asks exactly that, and a compiler that compiles it gets no
+            // `-DCONFIG_CC_HAS_K_CONSTRAINT=1`, so the kernel's LL/SC atomics put every constant
+            // in a register. A letter that takes a register or memory gives the constant a place.
+            // Only AArch64 asks for now, so x86 keeps spelling what it is given.
+            let entries: Vec<&str> = constraints.split(',').collect();
+            for (index, operand) in list.iter().enumerate().filter(|_| a64) {
+                let (Some(value), Some(letter)) = (operand.value, operand.range) else { continue };
+                let Some(number) = self.bare_number(value) else { continue };
+                let only_constants = entries.len() == list.len()
+                    && entries[index]
+                        .chars()
+                        .all(|c| matches!(c, 'E'..='P' | 'e' | 'Z' | '=' | '+' | '&' | '%'));
+                let taken = letter == 'Z' || aarch64::takes(letter, number);
+                if only_constants && operand.tied.is_none() && !taken {
+                    return Err(Unsupported::Assembly { inst, refused: Written::Impossible });
+                }
             }
             for (index, operand) in list.iter().enumerate() {
                 let Some(value) = operand.value else { continue };

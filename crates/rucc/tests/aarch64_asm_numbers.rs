@@ -145,3 +145,33 @@ void two(void) { prefetch(&table[1]); }
     assert_eq!(two.last().map(String::as_str), Some("ret"), "{text}");
     assert_eq!(two[two.len() - 2], "prfm pldl1keep, [x0]", "{text}");
 }
+
+#[test]
+fn a_constant_no_letter_takes_is_refused() {
+    // arm64's Makefile compiles `"K" (4294967295)` and passes `-DCONFIG_CC_HAS_K_CONSTRAINT=1`
+    // only when that fails, as it does with gcc, which calls it an impossible constraint.
+    let dir = dir("impossible");
+    std::fs::write(
+        dir.join("a.c"),
+        "int main(void) { asm volatile(\"and w0, w0, %w0\" :: \"K\" (4294967295)); return 0; }\n",
+    )
+    .expect("the fixture can be written");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args([TARGET, "-S", "-o", "-", "a.c"])
+        .current_dir(Path::new(&dir))
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(&dir);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("impossible constraint"), "{err}");
+
+    let text = listing(
+        "possible",
+        "int both(int a) { asm(\"and %w0, %w0, %w1\" : \"+r\"(a) : \"Kr\"(4294967295)); return a; }
+int byte(int a) { asm(\"and %w0, %w0, %w1\" : \"+r\"(a) : \"K\"(0xff)); return a; }
+",
+    );
+    assert!(body(&text, "both").iter().any(|line| line == "and w0, w0, w1"), "{text}");
+    assert_eq!(body(&text, "byte"), ["and w0, w0, 255", "ret"], "{text}");
+}
