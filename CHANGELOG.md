@@ -50,6 +50,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An alias whose target is another alias in the same file now names what that one names, as gcc does. The arm64 EFI stub under KASAN writes `__memmove` as an alias of `memmove`, which is an alias of `memcpy` further down, and rucc refused it with "'__memmove' is aliased to undefined symbol 'memmove'". That was the one unit that failed in the 6.12.111 and 7.2.8 A64 allmodconfig census (#3762).
 - An `asm` constant that the only letters in its constraint do not take is now refused on AArch64 as an impossible constraint, as gcc does. arm64's Makefile compiles `"K" (4294967295)` and passes `-DCONFIG_CC_HAS_K_CONSTRAINT=1` only when that fails, so rucc kernels lacked the define and their LL/SC atomics put every constant in a register (#3765).
 - `-m64` and `-m32` are now refused on AArch64 and RISC-V as an unrecognized option, as gcc for either does. The kernel's `cc-option-bit,-m64` took the yes and put `-m64` in its link test, where gcc's build has no flag (#3766).
+- `__builtin_constant_p(p[i])` now waits for the optimizer when `p` and `i` are names, constants or other operands it already waits on, as `*p` does, so a subscript into a `const` array answers one at `-O2` as in gcc. The kernel's FORTIFY `strcpy` asks this of its source's last byte, and without the yes the overflow into a smaller buffer was missed and lib/test_fortify failed its strcpy and strcpy-lit cases (#3769).
 
 ### Added
 
