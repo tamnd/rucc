@@ -400,6 +400,11 @@ d53be040	mrs x0, cntvct_el0
 1e701000	fmov d0, #-2.0
 1e6c1000	fmov d0, #0.5
 1e27f000	fmov s0, #31.0
+1e2e1000	fmov s0, #1
+1e601000	fmov d0, #2
+1e711001	fmov d1, #-3
+4f03f600	fmov v0.4s, #1
+6f04f402	fmov v2.2d, #-2
 1e681000	fmov d0, #0.125
 1e7ff000	fmov d0, #-1.9375
 9e6703e0	fmov d0, xzr

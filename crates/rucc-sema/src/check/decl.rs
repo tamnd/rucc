@@ -481,7 +481,9 @@ impl Checker<'_> {
         self.record_fentry(Some(id), &[specs.attrs], DeclKind::Function);
         self.record_symver(Some(id), &[specs.attrs], StorageDuration::Static, span);
         let merged = self.tast[id].ty;
-        self.record_alloc_size(id, &[specs.attrs], DeclKind::Function, merged);
+        let sized: Vec<AttrList> =
+            std::iter::once(specs.attrs).chain(starred.iter().copied()).collect();
+        self.record_alloc_size(id, &sized, DeclKind::Function, merged);
         self.string_arg(&[specs.attrs], merged);
         let conditional = self.nonnull_if_nonzero(&[specs.attrs], merged);
         self.read_nonnull(id, &[specs.attrs], conditional);
@@ -1148,10 +1150,15 @@ impl Checker<'_> {
             self.tast.record_ifunc(id);
         }
         // Both places, for the reason `noreturn` above reads both. glibc writes it after the
-        // declarator, as `extern void *malloc (size_t __size) __attr_alloc_size ((1));`.
+        // declarator, as `extern void *malloc (size_t __size) __attr_alloc_size ((1));`. On a
+        // function it is read beside a star as well, which is where 6.12's `<linux/device.h>`
+        // writes it, as `void * __alloc_size(2) __malloc devm_kmalloc (...)`. Read only in front
+        // of the star and after the name, fortify_kunit's devm tests found no size.
         let merged = self.tast[id].ty;
         if may!(carried, "alloc_size") {
-            self.record_alloc_size(id, &lists, kind, merged);
+            let starred = if kind == DeclKind::Function { starred.as_slice() } else { &[] };
+            let sized: Vec<AttrList> = lists.iter().chain(starred).copied().collect();
+            self.record_alloc_size(id, &sized, kind, merged);
         }
         if may!(carried, "null_terminated_string_arg") {
             self.string_arg(&lists, merged);

@@ -14,6 +14,8 @@ typedef unsigned long size_t;
 void *my(size_t) __attribute__((alloc_size(1)));
 void *my2(size_t, size_t) __attribute__((alloc_size(1, 2)));
 void *plain(size_t);
+void * __attribute__((alloc_size(2))) __attribute__((malloc)) beside(void *, size_t);
+void *cached(void *, size_t) __attribute__((alloc_size(2)));
 void ok(void *);
 void wrong_a(void);
 void wrong_b(void);
@@ -22,7 +24,33 @@ void wrong_d(void);
 void wrong_e(void);
 void wrong_f(void);
 void wrong_g(void);
-void f(size_t n) {
+void wrong_h(void);
+void wrong_i(void);
+void wrong_j(void);
+void wrong_k(void);
+void wrong_l(void);
+/* Which allocator is settled only after the questions are answered, as in `kmalloc`. */
+static inline __attribute__((always_inline)) void *pick(size_t n) {
+    if (__builtin_constant_p(n) && n) return cached(0, n);
+    return my(n);
+}
+static const char *ptr_of_11 = "this is 11!";
+/* `check_mul_overflow` and `kvmalloc_array`, which give back NULL on the way that overflows. */
+static inline __attribute__((always_inline)) _Bool checked(_Bool overflow) {
+    return __builtin_expect(!!overflow, 0);
+}
+static inline __attribute__((always_inline)) void *array(size_t n, size_t size) {
+    size_t bytes;
+    if (__builtin_expect(!!checked(__builtin_mul_overflow(n, size, &bytes)), 0)) return 0;
+    return my(bytes);
+}
+/* `kmemdup`, whose other way is only taken when the source is known to be too small. */
+static inline __attribute__((always_inline)) void *dup(const void *p, size_t size) {
+    size_t p_size = __builtin_dynamic_object_size(p, 0);
+    if (p_size < size) return cached(0, 0);
+    return cached(0, size);
+}
+void f(size_t n, const char *src) {
     char *p = my(10);
     if (__builtin_object_size(p, 0) != 10) wrong_a();
     if (__builtin_object_size(p + 4, 2) != 6) wrong_b();
@@ -36,10 +64,25 @@ void f(size_t n) {
     char *s = my(n);
     if (__builtin_object_size(s, 0) != (size_t)-1) wrong_f();
     if (__builtin_dynamic_object_size(s, 0) != n) wrong_g();
+    /* Beside the star, where the kernel writes it on `devm_kmalloc`. */
+    char *t = beside(0, 7);
+    if (__builtin_object_size(t, 0) != 7) wrong_h();
+    char *u = pick(n);
+    if (__builtin_dynamic_object_size(u, 0) != n) wrong_i();
+    /* Read out of a pointer nothing writes, as fortify_kunit's known sizes test does. */
+    if (__builtin_object_size(ptr_of_11, 1) != 12) wrong_j();
+    char *v = array(1, 1 * (1UL << 12));
+    if (__builtin_object_size(v, 0) != 4096) wrong_k();
+    char *w = dup(src, n);
+    if (__builtin_dynamic_object_size(w, 1) != n) wrong_l();
     ok(p);
     ok(q);
     ok(r);
     ok(s);
+    ok(t);
+    ok(u);
+    ok(v);
+    ok(w);
 }
 "#;
 
