@@ -76,6 +76,9 @@ pub struct Outside {
     vectors: bool,
     /// Whether any vector of sixteen bytes may be a value. See [`Self::with_simd128`].
     simd128: bool,
+    /// Whether a vector of sixteen bytes of integer lanes may be a value. See
+    /// [`Self::with_neon`].
+    neon: bool,
     /// The functions a call to can come back twice, or nothing when this was built without the
     /// names. See [`Self::knowing_twice`].
     twice: Option<Set<Symbol>>,
@@ -103,6 +106,7 @@ impl Outside {
             layout: Some(module.datalayout),
             vectors: false,
             simd128: false,
+            neon: false,
             twice: None,
         }
     }
@@ -155,6 +159,21 @@ impl Outside {
     #[must_use]
     pub fn simd128(&self) -> bool {
         self.simd128
+    }
+
+    /// The same facts, saying the module is built for AArch64 with the vector registers, where the
+    /// back end keeps a vector of sixteen bytes of integer lanes in one `v` register and reads and
+    /// writes its lanes. `-mgeneral-regs-only` takes the registers away, so false is the default.
+    #[must_use]
+    pub fn with_neon(self, neon: bool) -> Self {
+        Self { neon, ..self }
+    }
+
+    /// Whether a vector of sixteen bytes with integer lanes of 8, 16, 32 or 64 bits may be a
+    /// value rather than bytes in memory, which is AArch64 with the vector registers.
+    #[must_use]
+    pub fn neon(&self) -> bool {
+        self.neon
     }
 
     /// Whether this symbol is a name for an object no other name in the module also names.

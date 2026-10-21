@@ -310,7 +310,8 @@ impl Walk<'_> {
 }
 
 /// An address as a pointer and a constant offset from it, through any number of `ptr_add`s.
-fn split(func: &Func, address: Value) -> Option<(Value, i64)> {
+/// [`crate::lanes`] asks it too, about the two halves of a vector.
+pub(crate) fn split(func: &Func, address: Value) -> Option<(Value, i64)> {
     let mut base = address;
     let mut offset: i64 = 0;
     loop {
