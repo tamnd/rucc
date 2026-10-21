@@ -3170,6 +3170,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             None if word == "-m16" => {
                 return Err(err(format!("-m16 is for x86, and {} is not", opts.target)));
             }
+            // gcc for AArch64 and RISC-V has no word size flag at all, and the kernel's
+            // `cc-option-bit,-m64` asks exactly that. A yes puts `-m64` in its link test.
+            None if matches!(opts.target.arch, Arch::Aarch64 | Arch::Riscv64) => {
+                return Err(err(format!(
+                    "unrecognized command-line option '{word}', which gcc for {} does not have",
+                    opts.target
+                )));
+            }
             None => {
                 let want = if word == "-m64" { 64 } else { 32 };
                 let have = rucc_target::TargetInfo::new(opts.target).pointer_width;
@@ -8778,9 +8786,15 @@ mod tests {
         assert!(refused(&["-mcmodel=large", "-c", "a.c"]).contains("tiny code models"));
         assert!(refused(&["-gdwarf-3", "-c", "a.c"]).contains("DWARF 4 and 5"));
         // The word size the target does not have, which is a target this compiler was not asked
-        // for rather than a flag it does not know.
+        // for rather than a flag it does not know, except where gcc does not know it either.
         let no32 = refused(&["--target=aarch64-unknown-linux-gnu", "-m32", "-c", "a.c"]);
-        assert!(no32.contains("32 bit target"), "{no32}");
+        assert!(no32.contains("unrecognized command-line option '-m32'"), "{no32}");
+        let no64 = refused(&["--target=aarch64-unknown-linux-gnu", "-m64", "-E", "a.c"]);
+        assert!(no64.contains("unrecognized command-line option '-m64'"), "{no64}");
+        let rv = refused(&["--target=riscv64-unknown-linux-gnu", "-m64", "-c", "a.c"]);
+        assert!(rv.contains("unrecognized command-line option '-m64'"), "{rv}");
+        let wasm = refused(&["--target=wasm32-unknown-unknown", "-m64", "-c", "a.c"]);
+        assert!(wasm.contains("64 bit target"), "{wasm}");
     }
 
     /// `-gz` and the two spellings of the split, which are the two questions about the shape of
