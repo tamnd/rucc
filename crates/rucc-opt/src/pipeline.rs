@@ -78,8 +78,16 @@ const READS_SUMMARIES: &[&str] = &[
 ///
 /// [`tailrec`] reads it for a different fact, which is the functions a call to can come back twice.
 /// With the empty table every call can, so forgetting it there costs every loop the pass makes.
-const READS_OUTSIDE: &[&str] =
-    &[load::NAME, reload::NAME, sroa::NAME, dse::NAME, lanes::NAME, vectorize::NAME, tailrec::NAME];
+const READS_OUTSIDE: &[&str] = &[
+    load::NAME,
+    reload::NAME,
+    sroa::NAME,
+    dse::NAME,
+    lanes::NAME,
+    lanes::REJOIN,
+    vectorize::NAME,
+    tailrec::NAME,
+];
 
 /// Which passes ask what a call is allowed to do.
 ///
@@ -332,6 +340,7 @@ const O1: &[&str] = &[
     "rangetest",
     "number",
     "load-forward",
+    "rejoin",
     "constant-p",
     "fold",
     "image",
@@ -450,6 +459,7 @@ const O2: &[&str] = &[
     "redundant-load",
     "dse",
     "bswap",
+    "rejoin",
     "constant-p",
     "fold",
     "image",
@@ -519,6 +529,7 @@ const O3: &[&str] = &[
     "redundant-load",
     "dse",
     "bswap",
+    "rejoin",
     "constant-p",
     "fold",
     "image",
@@ -614,6 +625,7 @@ const OS: &[&str] = &[
     "load-forward",
     "dse",
     "bswap",
+    "rejoin",
     "constant-p",
     "fold",
     "image",
@@ -665,6 +677,7 @@ const OZ: &[&str] = &[
     "load-forward",
     "dse",
     "bswap",
+    "rejoin",
     "constant-p",
     "fold",
     "image",
@@ -873,6 +886,10 @@ pub struct Options {
     /// Whether the module is for wasm32 with `-msimd128`, where the back end keeps a vector of
     /// sixteen bytes in one `v128`. False is the default.
     pub simd128: bool,
+    /// Whether the module is for AArch64 with the vector registers, where the back end keeps a
+    /// vector of sixteen bytes of integer lanes in one `v` register. False is the default, which
+    /// is also what `-mgeneral-regs-only` asks for.
+    pub neon: bool,
     /// Whether `-fconserve-stack` asked for gcc's tighter limits on how far inlining may grow a
     /// frame. See [`inline::Growth`].
     pub conserve_stack: bool,
@@ -900,6 +917,7 @@ impl Default for Options {
             no_builtin: Vec::new(),
             isa: Isa::NONE,
             simd128: false,
+            neon: false,
             conserve_stack: false,
             stack_reuse: false,
             rewriter: Rewriter::Default,
@@ -1224,6 +1242,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             outside::Outside::of(module)
                 .with_vectors(sse2)
                 .with_simd128(opts.simd128)
+                .with_neon(opts.neon)
                 .knowing_twice(module, names),
         )
     } else {

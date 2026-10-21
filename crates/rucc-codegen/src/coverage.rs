@@ -137,9 +137,10 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
         "tamnd/rucc#1064",
     ),
     (
-        "a vector other than four lanes of thirty two bits or two of sixty four",
-        "a rule at a width says nothing about how many lanes, and x86-64 has rules at those two \
-         shapes only",
+        "a vector other than sixteen bytes of integer lanes",
+        "a rule at a width says nothing about how many lanes, and the rules are written at four \
+         lanes of thirty two bits and two of sixty four on x86-64, and at those and eight of \
+         sixteen and sixteen of eight on AArch64",
         "tamnd/rucc#200",
     ),
 ];
@@ -161,9 +162,29 @@ pub static WIDTHS: &[(&str, &str, &str)] = &[
 /// to come back were the divides, which narrow when the operands are zero extensions and, for
 /// sign extensions, when the ranges rule out the most negative value over minus one.
 ///
-/// So the list is empty, and it stays here for the next name somebody decides to leave out, since
-/// the report and the capability table both read it.
-pub static NAMES: &[(&str, &str, &str)] = &[];
+/// So the list was empty for a while, and what is on it now is the two narrow lane shapes of
+/// integer vector. AArch64 computes in those and gave them names, and nothing on x86-64 writes a
+/// vector of `short` or `char` lanes whole yet: the front end keeps those a lane at a time here.
+pub static NAMES: &[(&str, &str, &str)] = &[
+    (
+        "add.i16x8",
+        "an integer vector of narrow lanes, which only AArch64 has rules for so far",
+        "tamnd/rucc#3775",
+    ),
+    ("add.i8x16", "the same", "tamnd/rucc#3775"),
+    ("and.i16x8", "the same", "tamnd/rucc#3775"),
+    ("and.i8x16", "the same", "tamnd/rucc#3775"),
+    ("load.i16x8", "the same", "tamnd/rucc#3775"),
+    ("load.i8x16", "the same", "tamnd/rucc#3775"),
+    ("or.i16x8", "the same", "tamnd/rucc#3775"),
+    ("or.i8x16", "the same", "tamnd/rucc#3775"),
+    ("store.i16x8", "the same", "tamnd/rucc#3775"),
+    ("store.i8x16", "the same", "tamnd/rucc#3775"),
+    ("sub.i16x8", "the same", "tamnd/rucc#3775"),
+    ("sub.i8x16", "the same", "tamnd/rucc#3775"),
+    ("xor.i16x8", "the same", "tamnd/rucc#3775"),
+    ("xor.i8x16", "the same", "tamnd/rucc#3775"),
+];
 
 /// [`NAMES`] for `aarch64.rules`.
 ///
@@ -182,20 +203,6 @@ pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
         "tamnd/rucc#2247",
     ),
     ("smulh.i32", "the same, signed", "tamnd/rucc#2247"),
-    ("add.i32x4", "an integer vector, which only x86-64 has rules for so far", "tamnd/rucc#2320"),
-    ("add.i64x2", "the same", "tamnd/rucc#2320"),
-    ("and.i32x4", "the same", "tamnd/rucc#2320"),
-    ("and.i64x2", "the same", "tamnd/rucc#2320"),
-    ("load.i32x4", "the same", "tamnd/rucc#2320"),
-    ("load.i64x2", "the same", "tamnd/rucc#2320"),
-    ("or.i32x4", "the same", "tamnd/rucc#2320"),
-    ("or.i64x2", "the same", "tamnd/rucc#2320"),
-    ("store.i32x4", "the same", "tamnd/rucc#2320"),
-    ("store.i64x2", "the same", "tamnd/rucc#2320"),
-    ("sub.i32x4", "the same", "tamnd/rucc#2320"),
-    ("sub.i64x2", "the same", "tamnd/rucc#2320"),
-    ("xor.i32x4", "the same", "tamnd/rucc#2320"),
-    ("xor.i64x2", "the same", "tamnd/rucc#2320"),
     (
         "bswap.i16",
         "a byte swap, which `expand::bytes` writes out as shifts and masks before selection",
@@ -263,7 +270,11 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
         "tamnd/rucc#2247",
     ),
     ("umulh.i64", "the same, unsigned", "tamnd/rucc#2247"),
-    ("add.i32x4", "an integer vector, which only x86-64 has rules for so far", "tamnd/rucc#2320"),
+    (
+        "add.i32x4",
+        "an integer vector, which only x86-64 and AArch64 have rules for so far",
+        "tamnd/rucc#2320",
+    ),
     ("add.i64x2", "the same", "tamnd/rucc#2320"),
     ("and.i32x4", "the same", "tamnd/rucc#2320"),
     ("and.i64x2", "the same", "tamnd/rucc#2320"),
@@ -277,6 +288,24 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
     ("sub.i64x2", "the same", "tamnd/rucc#2320"),
     ("xor.i32x4", "the same", "tamnd/rucc#2320"),
     ("xor.i64x2", "the same", "tamnd/rucc#2320"),
+    (
+        "add.i16x8",
+        "an integer vector of narrow lanes, which only AArch64 has rules for so far",
+        "tamnd/rucc#3775",
+    ),
+    ("add.i8x16", "the same", "tamnd/rucc#3775"),
+    ("and.i16x8", "the same", "tamnd/rucc#3775"),
+    ("and.i8x16", "the same", "tamnd/rucc#3775"),
+    ("load.i16x8", "the same", "tamnd/rucc#3775"),
+    ("load.i8x16", "the same", "tamnd/rucc#3775"),
+    ("or.i16x8", "the same", "tamnd/rucc#3775"),
+    ("or.i8x16", "the same", "tamnd/rucc#3775"),
+    ("store.i16x8", "the same", "tamnd/rucc#3775"),
+    ("store.i8x16", "the same", "tamnd/rucc#3775"),
+    ("sub.i16x8", "the same", "tamnd/rucc#3775"),
+    ("sub.i8x16", "the same", "tamnd/rucc#3775"),
+    ("xor.i16x8", "the same", "tamnd/rucc#3775"),
+    ("xor.i8x16", "the same", "tamnd/rucc#3775"),
     (
         "ctlz.i64",
         "a bit count of a pair of words, which `expand::counts` writes as counts of each word or \
