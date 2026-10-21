@@ -1,5 +1,6 @@
 //! Tests for how far an object with static storage is aligned on x86-64, which is past what its
-//! type asks for once it is long enough, as gcc does it under `-malign-data=compat`.
+//! type asks for once it is long enough, as gcc does it under `-malign-data=compat`, and on
+//! AArch64, where gcc aligns every aggregate to a word unless it optimizes for size.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -18,9 +19,14 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 
 /// The assembly the compiler writes for that source at the level given.
 fn asm(what: &str, level: &str, source: &str) -> String {
+    asm_for(TARGET, what, level, source)
+}
+
+/// The same for another target.
+fn asm_for(target: &str, what: &str, level: &str, source: &str) -> String {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
-        .arg(format!("--target={TARGET}"))
+        .arg(format!("--target={target}"))
         .args([level, "-S", "-o", "-"])
         .arg(&path)
         .output()
@@ -76,4 +82,31 @@ fn an_asked_for_alignment_and_a_thread_local_are_not_raised_past_a_word() {
     let listing = asm("asked", "-O2", source);
     assert_eq!(p2align(&listing, "asked"), 3, "{listing}");
     assert_eq!(p2align(&listing, "each"), 3, "{listing}");
+}
+
+/// gcc aligns every array, structure and union on AArch64 to a word, however short, so the
+/// kernel's tracepoint names are 8 apart there as well. An alignment the declaration asked for is
+/// kept, and under `-Os` nothing is raised.
+#[test]
+fn every_aggregate_on_aarch64_is_aligned_to_a_word_unless_it_is_built_for_size() {
+    let source = "struct one { char c; };\n\
+        struct one small = { 1 };\n\
+        static const char s1[] __attribute__((used, section(\"__tps\"))) = \"rd\";\n\
+        int pair[2] = { 1 };\n\
+        char three[3];\n\
+        __thread char each[3];\n\
+        struct one asked __attribute__((aligned(2))) = { 1 };\n\
+        int scalar = 1;\n";
+    let target = "aarch64-unknown-linux-gnu";
+    for level in ["-O0", "-O2"] {
+        let listing = asm_for(target, "a64", level, source);
+        for name in ["small", "s1", "pair", "three", "each"] {
+            assert_eq!(p2align(&listing, name), 3, "{name} at {level}:\n{listing}");
+        }
+        assert_eq!(p2align(&listing, "asked"), 1, "{listing}");
+        assert_eq!(p2align(&listing, "scalar"), 2, "{listing}");
+    }
+    let listing = asm_for(target, "a64s", "-Os", source);
+    assert_eq!(p2align(&listing, "small"), 0, "{listing}");
+    assert_eq!(p2align(&listing, "pair"), 2, "{listing}");
 }
