@@ -32,13 +32,14 @@ use crate::aarch64::encode::{
 use crate::aarch64::read::system_field;
 use crate::named;
 
-use Arg::Doubles;
+use Arg::{Arranged, Doubles, Lane};
 use Arg::{
     At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, LowSlot, Lowest,
     Mem, Near, Ones, Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Shifted, Symbol, Task, Teb,
     Thread, Through, TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
 };
-use Scalar::{B, D, Q, S};
+use Arrangement::{B16, D2, H8, S4};
+use Scalar::{B, D, H, Q, S};
 use Width::{W, X};
 
 /// One argument of one instruction.
@@ -53,6 +54,12 @@ pub enum Arg {
     /// The same sixteen bytes as two eight byte lanes, `v0.2d`, which is how gcc writes the
     /// `movi` that clears a vector register in front of a `ret` under `-fzero-call-used-regs=`.
     Doubles(u8),
+    /// The sixteen bytes of the register in the other file the operand at that index was given,
+    /// as lanes of that arrangement.
+    Arranged(u8, Arrangement),
+    /// The lane of that size of the register in the other file the operand at that index was
+    /// given, the lane the instruction's constant names.
+    Lane(u8, Scalar),
     /// The instruction's constant.
     Imm,
     /// A constant that is part of the opcode rather than of the instruction.
@@ -690,6 +697,71 @@ static TEXT: &[(&str, &[Written])] = &[
     // nothing else writes. The register is read as well as written as far as the form says, which
     // costs nothing, since the one thing writing it does so after the allocator.
     ("movi_zero", &[spell("movi", &[Doubles(0), Lit(0)])]),
+    // Sixteen bytes of the other register file as a vector of integer lanes. The bitwise ones are
+    // written on bytes, which is how gcc writes them whatever the lanes are.
+    ("ldr_q", &[spell("ldr", &[Fp(0, Q), Mem])]),
+    ("str_q", &[spell("str", &[Fp(0, Q), Mem])]),
+    ("add_16b", &[spell("add", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("add_8h", &[spell("add", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("add_4s", &[spell("add", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("add_2d", &[spell("add", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("sub_16b", &[spell("sub", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("sub_8h", &[spell("sub", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("sub_4s", &[spell("sub", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("sub_2d", &[spell("sub", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("and_v", &[spell("and", &[Vector(0), Vector(1), Vector(2)])]),
+    ("orr_v", &[spell("orr", &[Vector(0), Vector(1), Vector(2)])]),
+    ("eor_v", &[spell("eor", &[Vector(0), Vector(1), Vector(2)])]),
+    ("not_v", &[spell("not", &[Vector(0), Vector(1)])]),
+    ("neg_16b", &[spell("neg", &[Arranged(0, B16), Arranged(1, B16)])]),
+    ("neg_8h", &[spell("neg", &[Arranged(0, H8), Arranged(1, H8)])]),
+    ("neg_4s", &[spell("neg", &[Arranged(0, S4), Arranged(1, S4)])]),
+    ("neg_2d", &[spell("neg", &[Arranged(0, D2), Arranged(1, D2)])]),
+    ("cmeq_16b", &[spell("cmeq", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmeq_8h", &[spell("cmeq", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmeq_4s", &[spell("cmeq", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmeq_2d", &[spell("cmeq", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("cmgt_16b", &[spell("cmgt", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmgt_8h", &[spell("cmgt", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmgt_4s", &[spell("cmgt", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmgt_2d", &[spell("cmgt", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("cmge_16b", &[spell("cmge", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmge_8h", &[spell("cmge", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmge_4s", &[spell("cmge", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmge_2d", &[spell("cmge", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("cmhi_16b", &[spell("cmhi", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmhi_8h", &[spell("cmhi", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmhi_4s", &[spell("cmhi", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmhi_2d", &[spell("cmhi", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("cmhs_16b", &[spell("cmhs", &[Arranged(0, B16), Arranged(1, B16), Arranged(2, B16)])]),
+    ("cmhs_8h", &[spell("cmhs", &[Arranged(0, H8), Arranged(1, H8), Arranged(2, H8)])]),
+    ("cmhs_4s", &[spell("cmhs", &[Arranged(0, S4), Arranged(1, S4), Arranged(2, S4)])]),
+    ("cmhs_2d", &[spell("cmhs", &[Arranged(0, D2), Arranged(1, D2), Arranged(2, D2)])]),
+    ("shl_16b", &[spell("shl", &[Arranged(0, B16), Arranged(1, B16), Imm])]),
+    ("shl_8h", &[spell("shl", &[Arranged(0, H8), Arranged(1, H8), Imm])]),
+    ("shl_4s", &[spell("shl", &[Arranged(0, S4), Arranged(1, S4), Imm])]),
+    ("shl_2d", &[spell("shl", &[Arranged(0, D2), Arranged(1, D2), Imm])]),
+    ("ushr_16b", &[spell("ushr", &[Arranged(0, B16), Arranged(1, B16), Imm])]),
+    ("ushr_8h", &[spell("ushr", &[Arranged(0, H8), Arranged(1, H8), Imm])]),
+    ("ushr_4s", &[spell("ushr", &[Arranged(0, S4), Arranged(1, S4), Imm])]),
+    ("ushr_2d", &[spell("ushr", &[Arranged(0, D2), Arranged(1, D2), Imm])]),
+    ("sshr_16b", &[spell("sshr", &[Arranged(0, B16), Arranged(1, B16), Imm])]),
+    ("sshr_8h", &[spell("sshr", &[Arranged(0, H8), Arranged(1, H8), Imm])]),
+    ("sshr_4s", &[spell("sshr", &[Arranged(0, S4), Arranged(1, S4), Imm])]),
+    ("sshr_2d", &[spell("sshr", &[Arranged(0, D2), Arranged(1, D2), Imm])]),
+    ("dup_16b", &[spell("dup", &[Arranged(0, B16), Reg(1, W)])]),
+    ("dup_8h", &[spell("dup", &[Arranged(0, H8), Reg(1, W)])]),
+    ("dup_4s", &[spell("dup", &[Arranged(0, S4), Reg(1, W)])]),
+    ("dup_2d", &[spell("dup", &[Arranged(0, D2), Reg(1, X)])]),
+    ("movi_16b", &[spell("movi", &[Vector(0), Imm])]),
+    ("umov_b", &[spell("umov", &[Reg(0, W), Lane(1, B)])]),
+    ("umov_h", &[spell("umov", &[Reg(0, W), Lane(1, H)])]),
+    ("umov_s", &[spell("umov", &[Reg(0, W), Lane(1, S)])]),
+    ("umov_d", &[spell("umov", &[Reg(0, X), Lane(1, D)])]),
+    ("ins_b", &[spell("ins", &[Lane(0, B), Reg(2, W)])]),
+    ("ins_h", &[spell("ins", &[Lane(0, H), Reg(2, W)])]),
+    ("ins_s", &[spell("ins", &[Lane(0, S), Reg(2, W)])]),
+    ("ins_d", &[spell("ins", &[Lane(0, D), Reg(2, X)])]),
     // Between the two floating point widths.
     ("fcvt_f64_f32", &[spell("fcvt", &[Fp(0, S), Fp(1, D)])]),
     ("fcvt_f32_f64", &[spell("fcvt", &[Fp(0, D), Fp(1, S)])]),
@@ -1144,7 +1216,11 @@ pub fn operand_width(name: &str, operand: u8) -> Option<u32> {
                 Reg(at, width) if at == operand => width.bits(),
                 GotSlot(at) | TlsSlot(at) | LowSlot(at) | At(at) if at == operand => 64,
                 Scaled(base, index) if base == operand || index == operand => 64,
-                Fp(at, _) | Vector(at) | Doubles(at) if at == operand => return None,
+                Fp(at, _) | Vector(at) | Doubles(at) | Arranged(at, _) | Lane(at, _)
+                    if at == operand =>
+                {
+                    return None;
+                }
                 _ => continue,
             };
             found = Some(found.map_or(bits, |had: u32| had.max(bits)));
@@ -1206,8 +1282,13 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
     Ok(match arg {
         Reg(at, width) => gpr(width, reg(at)?),
         Fp(at, scalar) => Value::Fp(scalar, reg(at)?),
-        Vector(at) => Value::Vector(Arrangement::B16, reg(at)?),
-        Doubles(at) => Value::Vector(Arrangement::D2, reg(at)?),
+        Vector(at) => Value::Vector(B16, reg(at)?),
+        Doubles(at) => Value::Vector(D2, reg(at)?),
+        Arranged(at, arrangement) => Value::Vector(arrangement, reg(at)?),
+        // A lane past the last is one no instruction names, which the encoder refuses.
+        Lane(at, scalar) => {
+            Value::Element(scalar, reg(at)?, u8::try_from(with.imm).unwrap_or(u8::MAX))
+        }
         Imm => Value::Imm(with.imm),
         Lit(imm) => Value::Imm(imm),
         Arg::Shift(shift, amount) => Value::Shift(shift, amount),
@@ -1301,7 +1382,9 @@ mod tests {
                             }
                             continue;
                         }
-                        Fp(at, _) | Vector(at) | Doubles(at) => (at, FPR),
+                        Fp(at, _) | Vector(at) | Doubles(at) | Arranged(at, _) | Lane(at, _) => {
+                            (at, FPR)
+                        }
                         Mem | Base | Disp => {
                             assert!(form.takes_mem(), "{name} names an address it has not got");
                             continue;

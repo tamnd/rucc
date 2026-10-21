@@ -155,28 +155,32 @@ aarch64*)
 	# The float intrinsics of <arm_neon.h> whose answer turns on a signed zero, on which NaN comes
 	# back or on the order the lanes are added in, and the 64 bit shift and insert forms at the
 	# ends of their range. float.c prints bits, so gcc's build with its own header is the
-	# reference down to the payload of a NaN. See tamnd/rucc#2300 to #2303.
-	neon=$here/tests/qemu/neon/float.c
-	"$triple-gcc" -O2 -o "$out/neon-reference" "$neon"
-	"$qemu" "$out/neon-reference" >"$out/neon-reference.txt"
-	for level in 0 1 2; do
-		binary=$out/neon-O$level
-		if ! $rucc --target="$triple" -O$level -o "$binary" "$neon" 2>"$out/build.log"; then
-			printf 'neon -O%s  did not build\n' "$level"
-			sed 's/^/    /' "$out/build.log"
-			failed=$((failed + 1))
-		elif ! "$qemu" "$binary" >"$binary.txt" 2>&1; then
-			printf 'neon -O%s  exited nonzero\n' "$level"
-			tail -5 "$binary.txt" | sed 's/^/    /'
-			failed=$((failed + 1))
-		elif diff -u "$out/neon-reference.txt" "$binary.txt" >"$out/diff"; then
-			printf 'neon -O%s  ok, %s lines\n' "$level" "$(wc -l <"$binary.txt")"
-			passed=$((passed + 1))
-		else
-			printf 'neon -O%s  printed something else than gcc\n' "$level"
-			head -20 "$out/diff" | sed 's/^/    /'
-			failed=$((failed + 1))
-		fi
+	# reference down to the payload of a NaN. See tamnd/rucc#2300 to #2303. whole.c is the integer
+	# intrinsics and vector operators that are one instruction on a whole `v` register, at every
+	# lane width and at each end of a shift's range. See tamnd/rucc#3775.
+	for fixture in float whole; do
+		neon=$here/tests/qemu/neon/$fixture.c
+		"$triple-gcc" -O2 -o "$out/neon-$fixture-reference" "$neon"
+		"$qemu" "$out/neon-$fixture-reference" >"$out/neon-$fixture-reference.txt"
+		for level in 0 1 2; do
+			binary=$out/neon-$fixture-O$level
+			if ! $rucc --target="$triple" -O$level -o "$binary" "$neon" 2>"$out/build.log"; then
+				printf 'neon %-5s -O%s  did not build\n' "$fixture" "$level"
+				sed 's/^/    /' "$out/build.log"
+				failed=$((failed + 1))
+			elif ! "$qemu" "$binary" >"$binary.txt" 2>&1; then
+				printf 'neon %-5s -O%s  exited nonzero\n' "$fixture" "$level"
+				tail -5 "$binary.txt" | sed 's/^/    /'
+				failed=$((failed + 1))
+			elif diff -u "$out/neon-$fixture-reference.txt" "$binary.txt" >"$out/diff"; then
+				printf 'neon %-5s -O%s  ok, %s lines\n' "$fixture" "$level" "$(wc -l <"$binary.txt")"
+				passed=$((passed + 1))
+			else
+				printf 'neon %-5s -O%s  printed something else than gcc\n' "$fixture" "$level"
+				head -20 "$out/diff" | sed 's/^/    /'
+				failed=$((failed + 1))
+			fi
+		done
 	done
 	;;
 esac

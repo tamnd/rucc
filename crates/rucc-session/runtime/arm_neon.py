@@ -135,10 +135,15 @@ def bare(name):
     return "__" + name[:-2].upper() + "_TYPE__"
 
 
-def fn(ret, nm, params, body):
+def fn(ret, nm, params, body, always=False):
+    """An intrinsic as a function. `always` is for one that is a single operator on a whole
+    vector: at `-Os` the inliner weighs the call against a body that takes its arguments apart
+    from the pair of `x` registers they came in, and keeps the call, where inlined it is one
+    instruction. gcc's header says the same of every intrinsic."""
     if NOT_ACLE.match(nm):
         return
-    head = f"static __inline__ {ret} {nm}({reserve(params)}) {{"
+    inline = "__inline__ __attribute__((__always_inline__))" if always else "__inline__"
+    head = f"static {inline} {ret} {nm}({reserve(params)}) {{"
     if len(head) > 100:
         cut = head.rfind(", ", 0, 100)
         head = head[: cut + 1] + "\n    " + head[cut + 2 :]
@@ -147,6 +152,27 @@ def fn(ret, nm, params, body):
         for line in wrap(LANE.sub(lambda m: bare(m[1]), reserve(stmt)), "  "):
             w(line)
     w("}")
+
+
+def macro(nm, params, local, value):
+    """An intrinsic written as a macro over a statement expression, for the ones whose count has
+    to be a constant. A count that is a parameter is not one until the call is inlined, and the
+    front end decides whether a vector is one register before that, so the constant has to reach
+    the operator from the call itself."""
+    if NOT_ACLE.match(nm):
+        return
+    w(f"#define {nm}({params}) \\")
+    w("  __extension__({ \\")
+    w(f"    {local} \\")
+    w(f"    {value}; \\")
+    w("  })")
+
+
+def whole(e, q):
+    """Whether this is a vector of sixteen bytes of integer lanes, which AArch64 holds in one `v`
+    register while it is worked on whole, through the C operators on the vector rather than a
+    loop over its lanes."""
+    return q and e in INTS
 
 
 def fabs(e):
@@ -214,9 +240,11 @@ INTRO = """
  * rucc defines `__ARM_NEON` on AArch64 the way gcc does, and a program that sees it includes this
  * header and expects the intrinsics. xxhash is the one that found it missing. Every intrinsic here
  * is C over the lanes of a GNU vector, the same way `<emmintrin.h>` is written, so what a program
- * computes is what the instruction computes and what it compiles to is one lane at a time until
- * `tamnd/rucc#200` keeps vectors in registers. The types are the builtin types gcc registers on
- * AArch64, so a vector made here passes to and from code gcc compiled.
+ * computes is what the instruction computes. The add, subtract, bitwise, broadcast and constant
+ * shift intrinsics on sixteen bytes of integer lanes are the C operators on the whole vector,
+ * which is one instruction each on a `v` register, and the rest are one lane at a time until
+ * `tamnd/rucc#200` keeps more of them in registers. The types are the builtin types gcc
+ * registers on AArch64, so a vector made here passes to and from code gcc compiled.
  *
  * What is here is the loads and stores including the interleaving ones, building and taking apart
  * vectors, reinterpretation, the arithmetic, logic, shifts and comparisons at every lane type the
@@ -276,8 +304,15 @@ def emit():
                 name("vld1", e, q),
                 f"const {c} *p",
                 f"{v} r; __builtin_memcpy(&r, p, sizeof r); return r;",
+                whole(e, q),
             )
-            fn("void", name("vst1", e, q), f"{c} *p, {v} v", "__builtin_memcpy(p, &v, sizeof v);")
+            fn(
+                "void",
+                name("vst1", e, q),
+                f"{c} *p, {v} v",
+                "__builtin_memcpy(p, &v, sizeof v);",
+                whole(e, q),
+            )
             lanewise(e, q, name("vld1", e, q, "_dup"), f"const {c} *p", "*p", n)
             fn(
                 v,
@@ -325,7 +360,11 @@ def emit():
     for q in QS:
         for e in ALL:
             v, c, n = vt(e, q), ct(e), lanes(e, q)
-            lanewise(e, q, name("vdup", e, q, "_n"), f"{c} x", "x", n)
+            if whole(e, q):
+                # The scalar beside a vector is the scalar in each lane, which is one `dup`.
+                fn(v, name("vdup", e, q, "_n"), f"{c} x", f"return ({v}){{0}} + x;", True)
+            else:
+                lanewise(e, q, name("vdup", e, q, "_n"), f"{c} x", "x", n)
             lanewise(e, q, name("vmov", e, q, "_n"), f"{c} x", "x", n)
             fn(c, name("vget", e, q, "_lane"), f"{v} v, const int lane", "return v[lane];")
             fn(
@@ -379,7 +418,10 @@ def emit():
         for e in NUMERIC:
             v, c, n = vt(e, q), ct(e), lanes(e, q)
             for op, sym in (("vadd", "+"), ("vsub", "-"), ("vmul", "*")):
-                lanewise(e, q, name(op, e, q), f"{v} a, {v} b", f"({c})(a[i] {sym} b[i])", n)
+                if whole(e, q) and op != "vmul":
+                    fn(v, name(op, e, q), f"{v} a, {v} b", f"return a {sym} b;", True)
+                else:
+                    lanewise(e, q, name(op, e, q), f"{v} a, {v} b", f"({c})(a[i] {sym} b[i])", n)
             lanewise(e, q, name("vmul", e, q, "_n"), f"{v} a, {c} b", f"({c})(a[i] * b)", n)
             lanewise(
                 e, q, name("vmla", e, q), f"{v} a, {v} b, {v} c", f"({c})(a[i] + b[i] * c[i])", n
@@ -481,7 +523,11 @@ def emit():
                 ("vbic", "a[i] & ~b[i]"),
                 ("vorn", "a[i] | ~b[i]"),
             ):
-                lanewise(e, q, name(op, e, q), f"{v} a, {v} b", f"({c})({expr})", n)
+                if whole(e, q) and op in ("vand", "vorr", "veor"):
+                    body = f"return {expr.replace('[i]', '')};"
+                    fn(v, name(op, e, q), f"{v} a, {v} b", body, True)
+                else:
+                    lanewise(e, q, name(op, e, q), f"{v} a, {v} b", f"({c})({expr})", n)
             lanewise(e, q, name("vmvn", e, q), f"{v} a", f"({c})~a[i]", n)
             u, uc = ut(e), ct(ut(e))
             lanewise(u, q, name("vtst", e, q), f"{v} a, {v} b", f"(a[i] & b[i]) ? ({uc})-1 : 0", n)
@@ -551,25 +597,40 @@ def emit():
                 )
             # Shifts by a constant, and by a vector whose lanes are signed and shift right when
             # negative.
-            lanewise(
-                e,
-                q,
-                name("vshl", e, q, "_n"),
-                f"{v} a, const int n",
-                f"({c})((uint64_t)a[i] << n)",
-                n,
-            )
-            # A shift right by the whole width is allowed, and C does not define it, so it is the
-            # sign or zero written out.
             fill = "a[i] < 0 ? -1 : 0" if BY[e][3] == "s" else "0"
-            lanewise(
-                e,
-                q,
-                name("vshr", e, q, "_n"),
-                f"{v} a, const int n",
-                f"n == {bits} ? ({c})({fill}) : ({c})(a[i] >> n)",
-                n,
-            )
+            if whole(e, q):
+                # A shift right by the whole width is allowed, and C does not define it. Signed,
+                # it is a shift by one less, which leaves the sign in every bit just the same.
+                # Unsigned, it is that shift and then one more, which leaves nothing. Each count
+                # is a constant, so each shift is one instruction. They are macros rather than
+                # functions so that the count is still a constant when the front end sees the
+                # shift, which it is not as a parameter. See `macro`.
+                full = f"((__n) == {bits})"
+                local = f"{v} __rucc_a = (__a);"
+                macro(name("vshl", e, q, "_n"), "__a, __n", local, "__rucc_a << (__n)")
+                right = f"__rucc_a >> ((__n) - {full})"
+                if BY[e][3] == "u":
+                    right = f"({right}) >> {full}"
+                macro(name("vshr", e, q, "_n"), "__a, __n", local, right)
+            else:
+                lanewise(
+                    e,
+                    q,
+                    name("vshl", e, q, "_n"),
+                    f"{v} a, const int n",
+                    f"({c})((uint64_t)a[i] << n)",
+                    n,
+                )
+                # A shift right by the whole width is allowed, and C does not define it, so it is
+                # the sign or zero written out.
+                lanewise(
+                    e,
+                    q,
+                    name("vshr", e, q, "_n"),
+                    f"{v} a, const int n",
+                    f"n == {bits} ? ({c})({fill}) : ({c})(a[i] >> n)",
+                    n,
+                )
             lanewise(
                 e,
                 q,
