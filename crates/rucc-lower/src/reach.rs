@@ -106,7 +106,7 @@ fn walk(decide: Decide<'_>, pruned: bool) -> (Set<DeclId>, Set<DeclId>) {
     (walk.seen, walk.named)
 }
 
-/// The declarations something the file emits names, which is the second set [`reachable`] hands
+/// The declarations something the file emits names, which is the second set `reachable` hands
 /// back: a call or an address in a body that is reached or in an initializer, and not one in an arm
 /// a constant condition never takes, in one after a statement control never comes out of or in a
 /// `static inline` nothing reaches.
