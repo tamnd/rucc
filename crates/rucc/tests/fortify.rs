@@ -84,6 +84,45 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// A member reached at an index the program works out, through a pointer the function was given,
+/// the way cxgb3 copies into `&d->flit[flits]` and catc into `catc->tx_buf[idx] + tx_ptr`. Level 3
+/// knows how much of the member is left when the program runs, as with GCC, and not only the end
+/// of the structure. The first argument is the index and the second the length to copy.
+const MEMBER: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct desc { char flit[16]; char after[48]; };
+struct cat { long n; char buf[2][100]; int idx; };
+
+static inline __attribute__((always_inline)) size_t d1(const void *p) {
+    return __builtin_dynamic_object_size(p, 1);
+}
+
+__attribute__((noinline)) void show(struct cat *c, int idx, int ptr) {
+    printf("%zu %zu %zu\n", d1(&c->buf[1][ptr]), d1(c->buf[idx] + ptr + 2),
+           __builtin_dynamic_object_size(&c->buf[1][ptr], 1));
+}
+
+__attribute__((noinline)) void put(struct desc *d, int i, const char *src) {
+    strcpy(&d->flit[i], src);
+}
+
+int main(int argc, char **argv) {
+    int i = atoi(argv[1]), n = atoi(argv[2]);
+    char big[64];
+    memset(big, 'x', sizeof big - 1);
+    big[63] = 0;
+    struct cat *c = malloc(sizeof *c);
+    show(c, 1, 10);
+    struct desc *d = malloc(sizeof *d);
+    put(d, i, big + 63 - n);
+    printf("ran %d\n", d->flit[i]);
+    return argc > 3;
+}
+"#;
+
 /// The message from glibc for a write past the end of a buffer.
 const OVERFLOWED: &str = "buffer overflow detected";
 
@@ -187,6 +226,21 @@ fn level_3_checks_a_pointer_a_loop_moved_along_a_buffer() {
         let (ok, said) = run(&three, &[case, "4", "16"]);
         assert!(!ok && said.contains(OVERFLOWED), "{case} 16: {said}");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Four bytes into the 16 of `flit` there are twelve left, so eleven characters and the null fit
+/// and twelve do not, though the structure goes on for another 48. The answers for `buf` are what
+/// GCC 13 and 15 print for the same program, which is what is left of the whole `buf` through the
+/// inlined function and when the builtin is called on the address itself.
+#[test]
+fn level_3_checks_a_member_at_an_index_known_at_run_time() {
+    let dir = dir("member");
+    let three = build(&dir, MEMBER, 3);
+    let (ok, said) = run(&three, &["4", "11"]);
+    assert!(ok && said.contains("90 88 90\nran"), "{said}");
+    let (ok, said) = run(&three, &["4", "12"]);
+    assert!(!ok && said.contains(OVERFLOWED), "{said}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
