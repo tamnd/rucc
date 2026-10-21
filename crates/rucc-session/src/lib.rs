@@ -812,6 +812,10 @@ pub struct Profile {
     /// Whether the graph the counters are on is written to a `.gcno` file beside the object, from
     /// `-ftest-coverage`.
     pub notes: bool,
+    /// Whether the counters are added to with an atomic instruction rather than a load and a
+    /// store, from `-fprofile-update=atomic` or `-fprofile-update=prefer-atomic`. The kernel asks
+    /// for the second so that two CPUs counting the same edge do not lose counts.
+    pub atomic: bool,
 }
 
 /// Which functions get a stack protector, which is what the `-fstack-protector` family asks.

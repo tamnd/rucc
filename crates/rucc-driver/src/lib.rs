@@ -2160,11 +2160,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      against nothing on its second pass, see spec/04-driver-and-cli.md"
                 )));
             }
-            // The rest of the family describes instrumentation that is refused above, so what is
-            // left to do with them is check them and drop them. They are checked because a
-            // misspelling in a distribution's flags is worth finding here rather than on the day
-            // the instrumentation lands, and dropped because there is nothing for an answer about
-            // how a counter is written to be an answer about.
+            // How the `-fprofile-arcs` counters are added to. Whether the target can do it
+            // atomically is the driver's to say when the unit is instrumented.
             _ if arg.starts_with("-fprofile-update=") => {
                 let how = &arg["-fprofile-update=".len()..];
                 if !matches!(how, "single" | "atomic" | "prefer-atomic") {
@@ -2173,7 +2170,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                          prefer-atomic"
                     )));
                 }
+                opts.profile_data.atomic = how != "single";
             }
+            // The rest of the family describes instrumentation that is refused above, so what is
+            // left to do with them is check them and drop them. They are checked because a
+            // misspelling in a distribution's flags is worth finding here rather than on the day
+            // the instrumentation lands.
             _ if arg.starts_with("-fprofile-reproducible=") => {
                 let how = &arg["-fprofile-reproducible=".len()..];
                 if !matches!(how, "serial" | "parallel-runs" | "multithreaded") {
@@ -9010,6 +9012,10 @@ mod tests {
             assert!(!opts.profile_data.requested, "{taken} says nothing about reading one");
         }
         assert!(refused(&["-fprofile-update=none", "-c", "a.c"]).contains("update method"));
+        // The update method is kept for the counters, and the last one written wins.
+        assert!(compile(&["-fprofile-update=prefer-atomic", "-c", "a.c"]).0.profile_data.atomic);
+        let line = ["-fprofile-update=atomic", "-fprofile-update=single", "-c", "a.c"];
+        assert!(!compile(&line).0.profile_data.atomic);
         assert!(refused(&["-fprofile-reproducible=any", "-c", "a.c"]).contains("reproducibility"));
     }
 
