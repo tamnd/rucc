@@ -146,9 +146,59 @@ fn turning_the_counters_back_off_gives_the_object_nobody_asked_for() {
     assert_eq!(read("off.o"), read("plain.o"));
     assert_ne!(read("on.o"), read("plain.o"));
     let on = read("on.o");
-    for name in ["__gcov_init", "__gcov_merge_add", "__gcov0.f", ".init_array.00101"] {
+    for name in ["__gcov_init", "__gcov_merge_add", "__gcov0.f", ".init_array.00100"] {
         assert!(on.windows(name.len()).any(|w| w == name.as_bytes()), "no {name} in the object");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The constructor that hands the record to `__gcov_init` runs at priority 100 the way gcc's does,
+/// and from `-O2` it goes in `.text.startup` and the destructor in `.text.exit`, where the
+/// kernel's linker script keeps its init and exit code. At `-O1` and without
+/// `-freorder-functions` both are plain code, and `-ffunction-sections` adds their names.
+#[test]
+fn the_constructor_and_destructor_go_where_gcc_puts_them() {
+    let dir = dir("cdtor");
+    std::fs::write(dir.join("a.c"), "long long x;\nvoid f(void) { x++; }\n")
+        .expect("the fixture can be written");
+    let assembly = |flags: &[&str]| {
+        let mut args = vec!["--target=aarch64-unknown-linux-gnu", "-fprofile-arcs", "-S"];
+        args.extend_from_slice(flags);
+        args.extend_from_slice(&["a.c", "-o", "a.s"]);
+        let (ok, said) = run(&dir, &args);
+        assert!(ok, "{said}");
+        std::fs::read_to_string(dir.join("a.s")).expect("the assembly was written")
+    };
+    // The section the last directive before a label put it in, as `.text` for plain code.
+    let section_of = |text: &str, label: &str| -> String {
+        let at =
+            text.find(&format!("\n{label}:\n")).unwrap_or_else(|| panic!("no {label}\n{text}"));
+        let line = text[..at]
+            .lines()
+            .rev()
+            .find(|l| l.starts_with("\t.section\t") || *l == "\t.text")
+            .unwrap_or_default();
+        line.trim_start_matches("\t.section\t")
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+    for flags in [&["-O2"][..], &["-Os"], &["-O1", "-freorder-functions"]] {
+        let text = assembly(flags);
+        assert!(text.contains(".init_array.00100") && text.contains(".fini_array.00100"), "{text}");
+        assert_eq!(section_of(&text, "_sub_I_00100_0"), ".text.startup", "{flags:?}");
+        assert_eq!(section_of(&text, "_sub_D_00100_1"), ".text.exit", "{flags:?}");
+    }
+    for flags in [&["-O1"][..], &["-O2", "-fno-reorder-functions"]] {
+        let text = assembly(flags);
+        assert_eq!(section_of(&text, "_sub_I_00100_0"), ".text", "{flags:?}");
+        assert_eq!(section_of(&text, "_sub_D_00100_1"), ".text", "{flags:?}");
+    }
+    let text = assembly(&["-O2", "-ffunction-sections"]);
+    assert_eq!(section_of(&text, "_sub_I_00100_0"), ".text.startup._sub_I_00100_0");
+    assert_eq!(section_of(&text, "_sub_D_00100_1"), ".text.exit._sub_D_00100_1");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
