@@ -74,8 +74,8 @@
 //! are taken off, so no pass after this sees one.
 
 use rucc_ir::{
-    AllocSize, AttrSet, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred, Module,
-    Opcode, Pic, SymbolRef, Type, Value,
+    AllocSize, AttrSet, Datum, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred,
+    Module, Opcode, Pic, SymbolRef, Type, Value,
 };
 
 use std::cell::RefCell;
@@ -91,6 +91,15 @@ use crate::extents::vouched;
 /// How far a walk goes before it gives up, which is a chain of block parameters and `ptr_add`
 /// this long.
 const DEPTH: u32 = 16;
+
+/// How far [`Walk::number`] looks for a number from where it is wanted.
+///
+/// `kvcalloc (1, PAGE_SIZE, gfp)` asks for a load of `bytes`, which a `__builtin_mul_overflow`
+/// stored, of `1 * (1UL << 12)` with the 12 widened from an `int`, and it returns `NULL` on the
+/// way the overflow is set. The branch reads that through two `unlikely`s and a block argument,
+/// seventeen steps from the constants, and fortify_kunit's `fortify_test_alloc_size_kvmalloc_const`
+/// found no size while the size was looked for four steps and the branch sixteen.
+const NUMBER: u32 = 24;
 
 /// Answers every `object_size` in the module and says how many there were.
 ///
@@ -131,6 +140,7 @@ pub fn answer(
                 library,
                 live: Set::default(),
                 numbers: RefCell::default(),
+                answered: Map::default(),
             };
             // Twice, since the first round reads every store and every way into a block, and
             // what it rules out can settle a branch the second round reads.
@@ -138,37 +148,31 @@ pub fn answer(
                 walk.live = walk.live_edges();
                 walk.numbers.borrow_mut().clear();
             }
-            asked
-                .iter()
-                .map(|&inst| {
-                    let Extra::Question(asked) = func[inst].extra else {
-                        return (inst, Answer::Known(0));
-                    };
-                    let address = func[func[inst].args][0];
-                    let (kind, dynamic) = (asked & 3, asked & DYNAMIC != 0);
-                    let ask = Ask { largest: kind & 2 == 0, closest: kind & 1 == 1 };
-                    let largest = ask.largest;
-                    let known = match look {
-                        false => None,
-                        true => walk.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten(),
-                    };
-                    let unknown = if largest { -1 } else { 0 };
-                    let answer = match known {
-                        Some(known) => Answer::Known(i128::from(known)),
-                        // Only the dynamic spelling may be answered with something worked out
-                        // while the program runs, and only where the walk found no constant.
-                        None if look && dynamic && kind != SMALLEST_MEMBER => func[inst]
-                            .results()
-                            .next()
-                            .and_then(|result| walk.running(address, func[result].ty, DEPTH))
-                            .map(Answer::Running)
-                            .or_else(|| largest.then(|| walk.within(address, inst, ask)).flatten())
-                            .unwrap_or(Answer::Known(unknown)),
-                        None => Answer::Known(unknown),
-                    };
-                    (inst, answer)
-                })
-                .collect()
+            let compared = compared(func);
+            // Parents before children, so a size a branch in front of a question compares is
+            // answered before the question, as in `kmemdup_noprof` where the join that asks
+            // about the copy is laid out ahead of the block that asks about the source.
+            let mut asked = asked;
+            asked.sort_by_key(|&inst| {
+                func.block_of(inst).and_then(|block| cfg.rank(block)).unwrap_or(u32::MAX)
+            });
+            let mut answers = Vec::with_capacity(asked.len());
+            for &inst in &asked {
+                let answer = walk.ask(inst, look);
+                // A constant is what the question will be, so a branch on it is settled from here
+                // on, the way it is once the answer is written and folded.
+                if let (Answer::Known(number), Some(result)) =
+                    (&answer, func[inst].results().next())
+                {
+                    walk.answered.insert(result, Imm::int(*number, func[result].ty.lane()));
+                    if compared.contains(&result) {
+                        walk.numbers.borrow_mut().clear();
+                        walk.live = walk.live_edges();
+                    }
+                }
+                answers.push((inst, answer));
+            }
+            answers
         };
         let func = &mut module[id];
         for (inst, answer) in answers {
@@ -215,6 +219,14 @@ const DYNAMIC: u8 = 4;
 /// The fourth kind, the smallest answer for the closest member, which the walk cannot give.
 const SMALLEST_MEMBER: u8 = 3;
 
+/// How many bytes a value of the type takes in memory, at the most. An address has no width in
+/// the IR, so it is taken as 16 bytes, more than any target's, which can only make a store next
+/// to one look as if it wrote it.
+fn most_bytes(ty: Type) -> u64 {
+    let bits = u64::from(ty.bits()) * u64::from(ty.lanes());
+    if ty.is_ptr() || bits == 0 { 16 } else { bits.div_ceil(8) }
+}
+
 /// What one question is answered with.
 enum Answer {
     /// A constant, which is every answer the walk finds and every answer that says nothing.
@@ -251,6 +263,15 @@ fn questions(func: &Func) -> Vec<Inst> {
     func.blocks()
         .flat_map(|block| func.insts(block))
         .filter(|&inst| func[inst].opcode == Opcode::ObjectSize)
+        .collect()
+}
+
+/// Every value a comparison reads.
+fn compared(func: &Func) -> Set<Value> {
+    func.blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::ICmp)
+        .flat_map(|inst| func[func[inst].args].iter().copied())
         .collect()
 }
 
@@ -366,17 +387,52 @@ struct Walk<'a> {
     /// The edges a branch on something already a constant here does not rule out, or empty
     /// while that is still being worked out, which counts every edge.
     live: Set<(Block, Block)>,
-    /// What [`Walk::number`] found for each value it was asked about, so that a condition many
-    /// branches share is worked out once. Emptied whenever `live` changes, since what it found
-    /// rests on that.
-    numbers: RefCell<Map<Value, Option<(Imm, Type)>>>,
+    /// What [`Walk::number`] found for each value it was asked about, and how far it was let look
+    /// for it, so that a condition many branches share is worked out once. Emptied whenever `live`
+    /// changes, since what it found rests on that.
+    numbers: RefCell<Map<Value, (Number, u32)>>,
+    /// The questions answered so far with a constant, by the value each one was.
+    answered: Map<Value, Imm>,
 }
+
+/// A number [`Walk::number`] found, with its type, or `None` where it found none.
+type Number = Option<(Imm, Type)>;
 
 /// How many bytes are left in front of an address: `Err` where that is not known, `Ok(None)` where
 /// the only way to the address is round a loop back to itself, and otherwise the number.
 type Left = Result<Option<u64>, ()>;
 
 impl Walk<'_> {
+    /// The answer to one question, which is not known at all where `look` is false.
+    fn ask(&self, inst: Inst, look: bool) -> Answer {
+        let func = self.func;
+        let Extra::Question(asked) = func[inst].extra else {
+            return Answer::Known(0);
+        };
+        let address = func[func[inst].args][0];
+        let (kind, dynamic) = (asked & 3, asked & DYNAMIC != 0);
+        let ask = Ask { largest: kind & 2 == 0, closest: kind & 1 == 1 };
+        let largest = ask.largest;
+        let known = match look {
+            false => None,
+            true => self.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten(),
+        };
+        let unknown = if largest { -1 } else { 0 };
+        match known {
+            Some(known) => Answer::Known(i128::from(known)),
+            // Only the dynamic spelling may be answered with something worked out while the
+            // program runs, and only where the walk found no constant.
+            None if look && dynamic && kind != SMALLEST_MEMBER => func[inst]
+                .results()
+                .next()
+                .and_then(|result| self.running(address, func[result].ty, DEPTH))
+                .map(Answer::Running)
+                .or_else(|| largest.then(|| self.within(address, inst, ask)).flatten())
+                .unwrap_or(Answer::Known(unknown)),
+            None => Answer::Known(unknown),
+        }
+    }
+
     /// How many bytes there are from this address to the end of its object.
     ///
     /// `on` is the block parameters whose answer is being worked out, which is how a loop is seen.
@@ -457,25 +513,24 @@ impl Walk<'_> {
                             Ok(Some(self.func[mem].size))
                         }
                         Some(&count) => {
-                            let (imm, _) = self.number(count, 4).ok_or(())?;
+                            let (imm, _) = self.number(count, NUMBER).ok_or(())?;
                             Ok(Some(u64::try_from(imm.unsigned()).map_err(|_| ())?))
                         }
                     },
                     Opcode::GlobalAddr => {
                         let Extra::Symbol(name) = data.extra else { return Err(()) };
-                        let Some(SymbolRef::Global(id)) = self.module.lookup(name) else {
-                            return Err(());
-                        };
-                        let global = &self.module[id];
-                        if !vouched(global, self.pic) {
-                            return Err(());
-                        }
-                        Ok(Some(global.size))
+                        self.global(name).ok_or(())
                     }
                     // An address read back out of a local it was put in once, which is what a
                     // `__free (kfree)` variable is: the cleanup takes its address, so it stays a
                     // slot rather than becoming a value, and the question is asked of the load.
                     Opcode::Load => {
+                        if let Some(name) = self.pointed(inst) {
+                            if ask.closest && !largest {
+                                return Err(());
+                            }
+                            return self.global(name).ok_or(());
+                        }
                         let put = self.only_store(*args.first().ok_or(())?, inst).ok_or(())?;
                         self.left(put, ask, depth, on)
                     }
@@ -485,7 +540,7 @@ impl Walk<'_> {
                         let (alloc, args) = self.allocation(inst).ok_or(())?;
                         let mut size: u64 = 1;
                         for factor in factors(alloc, args).ok_or(())? {
-                            let (imm, ty) = self.number(factor, 4).ok_or(())?;
+                            let (imm, ty) = self.number(factor, NUMBER).ok_or(())?;
                             let factor = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
                             size = size.checked_mul(factor).ok_or(())?;
                         }
@@ -506,7 +561,7 @@ impl Walk<'_> {
         let value = data.results().next().ok_or(())?;
         let base = *args.first().ok_or(())?;
         let count = *args.get(1).ok_or(())?;
-        let (imm, ty) = self.number(count, 4).ok_or(())?;
+        let (imm, ty) = self.number(count, NUMBER).ok_or(())?;
         let step = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
         // A count the program worked out, even one that comes to a constant, is not known when
         // gcc's early pass asks about the member, so it answers with all of the member and the
@@ -542,11 +597,14 @@ impl Walk<'_> {
         if let Some(found) = crate::fold::constant(self.func, value) {
             return Some(found);
         }
-        if let Some(&found) = self.numbers.borrow().get(&value) {
-            return found;
+        // Nothing found with less room to look is asked again with more.
+        if let Some(&(found, room)) = self.numbers.borrow().get(&value) {
+            if found.is_some() || room >= depth {
+                return found;
+            }
         }
         let found = self.worked_out(value, depth);
-        self.numbers.borrow_mut().insert(value, found);
+        self.numbers.borrow_mut().insert(value, (found, depth));
         found
     }
 
@@ -586,6 +644,7 @@ impl Walk<'_> {
             return None;
         }
         match data.opcode {
+            Opcode::ObjectSize => self.answered.get(&value).map(|&imm| (imm, ty)),
             Opcode::Load => self.number(self.only_store(*args.first()?, inst)?, next),
             Opcode::Expect => self.number(*args.first()?, next),
             _ if data.results == 2 => {
@@ -597,11 +656,39 @@ impl Walk<'_> {
                 Some((found, ty))
             }
             _ if data.results == 1 => {
-                let found = crate::fold::arithmetic(data, args, ty, &|arg| self.number(arg, next))?;
+                let found = crate::fold::arithmetic(data, args, ty, &|arg| self.number(arg, next))
+                    .or_else(|| self.extreme(data, args, next))?;
                 Some((found, ty))
             }
             _ => None,
         }
+    }
+
+    /// What an unsigned comparison gives when one side is a number as small or as large as its
+    /// type goes, which settles it whatever the other side is.
+    ///
+    /// `kmemdup_noprof` in 6.12's `<linux/fortify-string.h>` returns one allocation on the way
+    /// `p_size < size` is true and another on the way it is false, and `p_size` is the size of
+    /// the source, which is `(size_t)-1` where it is not known. gcc folds the test before it
+    /// answers the question about what came back, and fortify_kunit's `fortify_test_realloc_size`
+    /// failed while that took both ways.
+    fn extreme(&self, data: &InstData, args: &[Value], depth: u32) -> Option<Imm> {
+        let Extra::IntPred(pred) = data.extra else { return None };
+        let &[a, b] = args else { return None };
+        if data.opcode != Opcode::ICmp {
+            return None;
+        }
+        let top = |(imm, ty): (Imm, Type)| imm == Imm::int(-1, ty);
+        let bottom = |(imm, _): (Imm, Type)| imm.unsigned() == 0;
+        let (a, b) = (self.number(a, depth), self.number(b, depth));
+        let holds = match pred {
+            IntPred::Ult if a.is_some_and(top) || b.is_some_and(bottom) => false,
+            IntPred::Ugt if a.is_some_and(bottom) || b.is_some_and(top) => false,
+            IntPred::Uge if a.is_some_and(top) || b.is_some_and(bottom) => true,
+            IntPred::Ule if a.is_some_and(bottom) || b.is_some_and(top) => true,
+            _ => return None,
+        };
+        Some(Imm::from_bits(u128::from(holds)))
     }
 
     /// Whether the edge can be taken, as far as is known so far.
@@ -629,7 +716,7 @@ impl Walk<'_> {
             let taken = match (self.func[term].opcode, calls.as_slice()) {
                 (Opcode::BrIf, &[then, other]) => {
                     let cond = self.func[self.func[term].args].first().copied();
-                    match cond.and_then(|cond| self.number(cond, DEPTH)) {
+                    match cond.and_then(|cond| self.number(cond, NUMBER)) {
                         Some((imm, _)) if imm.unsigned() != 0 => vec![then],
                         Some(_) => vec![other],
                         None => calls,
@@ -647,64 +734,174 @@ impl Walk<'_> {
         live
     }
 
+    /// The size of a global, where `extents::vouched` says the definition in the module is the
+    /// one that runs.
+    fn global(&self, name: Symbol) -> Option<Option<u64>> {
+        let Some(SymbolRef::Global(id)) = self.module.lookup(name) else { return None };
+        let global = &self.module[id];
+        vouched(global, self.pic).then_some(Some(global.size))
+    }
+
+    /// The global a load reads the address of, when it loads straight out of a read only global
+    /// whose image is that address with nothing added.
+    ///
+    /// The questions are answered before the loads of read only globals are folded, so
+    /// `__compiletime_strlen(ptr_of_11)` in fortify_kunit's `fortify_test_known_sizes` asks about
+    /// a load of `static const char *ptr_of_11 = "this is 11!"`. gcc answers 12 there, and the
+    /// test failed on the 6.12 arm64 nightly while it was not known.
+    fn pointed(&self, load: Inst) -> Option<Symbol> {
+        let &addr = self.func[self.func[load].args].first()?;
+        let Def::Result { inst, .. } = self.func[addr].def else { return None };
+        let data = self.func[inst];
+        if data.opcode != Opcode::GlobalAddr {
+            return None;
+        }
+        let Extra::Symbol(name) = data.extra else { return None };
+        let Some(SymbolRef::Global(id)) = self.module.lookup(name) else { return None };
+        let global = &self.module[id];
+        if !global.constant || !vouched(global, self.pic) {
+            return None;
+        }
+        let read = self.func[load].first_result?;
+        let pointer = self.module.datalayout.pointer_bits / 8;
+        if !self.func[read].ty.is_ptr() {
+            return None;
+        }
+        match self.module[global.init?] {
+            [Datum::Addr(reloc), ..] => {
+                let reloc = &self.module[reloc];
+                (reloc.addend == 0 && reloc.size == pointer).then_some(reloc.symbol)
+            }
+            _ => None,
+        }
+    }
+
     /// The value the store that reaches this load put in a fixed local, when that is all the load
     /// can read.
     ///
-    /// The slot is only loaded from, stored to and has its lifetime marked, so nothing else can
-    /// write it or hand its address on. One store, of the type the load reads, comes before the
-    /// load on every way to it, and no other store can get to the load without passing through
-    /// that one again. The load then reads what that store put there the last time it ran, and a
-    /// walk of the stored value answers for every time it ran.
+    /// The load may read the local itself or a part of it a constant step in, such as the `cmd`
+    /// of iommufd's `struct iommufd_ucmd`, which is set to the address of a buffer on the stack
+    /// and handed to `copy_struct_from_user`. One store of the bytes the load reads, of the type
+    /// it reads, comes before the load on every way to it, and no other store that writes any of
+    /// those bytes can get to the load without passing through that one again. The load then
+    /// reads what that store put there the last time it ran, and a walk of the stored value
+    /// answers for every time it ran.
     ///
     /// Other stores are allowed because the inliner gives two inlined bodies one slot when their
     /// lifetimes do not overlap. keyboard.c's `vt_do_diacrit` has two `__free (kfree)` buffers in
     /// one slot that way, one in each of two cases of its switch.
+    ///
+    /// Where the address of the local goes anywhere else, to a call or into memory, whatever got
+    /// it may write the local from then on, so the load must not be reachable from there at all.
+    /// iommufd hands `&ucmd` to the handler only after the copy.
     fn only_store(&self, slot: Value, load: Inst) -> Option<Value> {
-        let Def::Result { inst: made, .. } = self.func[slot].def else { return None };
-        if self.func[made].opcode != Opcode::Alloca || !self.func[self.func[made].args].is_empty() {
-            return None;
-        }
+        let (local, at) = self.slot(slot)?;
+        let read = self.func[load].first_result?;
+        let width = most_bytes(self.func[read].ty);
+        let views = self.views(local);
         let mut stores = Vec::new();
+        let mut away = Vec::new();
         for inst in self.func.blocks().flat_map(|block| self.func.insts(block)) {
             let data = &self.func[inst];
-            for (at, &arg) in self.func[data.args].iter().enumerate() {
-                if arg != slot {
-                    continue;
-                }
-                match (data.opcode, at) {
-                    // A comparison of the address hands it to nobody, and the slot shares its
-                    // address with other inlined locals that a guard's cleanup compares.
-                    (Opcode::Load, 0) | (Opcode::LifetimeEnd | Opcode::ICmp, _) => {}
-                    // A store on a way through the function that cannot be taken never runs.
-                    (Opcode::Store, 1) | (Opcode::Memset, 0)
-                        if !self.reached(self.func.block_of(inst)?) => {}
+            let args = &self.func[data.args];
+            for (index, &arg) in args.iter().enumerate() {
+                let Some(&from) = views.get(&arg) else { continue };
+                match (data.opcode, index) {
+                    // A read, a question or a comparison of the address hands it to nobody, and
+                    // the slot shares its address with other inlined locals that a guard's
+                    // cleanup compares.
+                    (Opcode::Load | Opcode::ObjectSize, 0)
+                    | (Opcode::Memcpy | Opcode::Memmove, 1)
+                    | (Opcode::LifetimeEnd | Opcode::ICmp, _) => {}
+                    // A step to another part of the local, whose uses are looked at in turn.
+                    (Opcode::PtrAdd, 0)
+                        if data.first_result.is_some_and(|step| views.contains_key(&step)) => {}
+                    // Something on a way through the function that cannot be taken never runs.
+                    _ if !self.reached(self.func.block_of(inst)?) => {}
+                    (Opcode::Store, 1) => {
+                        let wrote = most_bytes(self.func[args[0]].ty);
+                        if from < at.saturating_add(width) && at < from.saturating_add(wrote) {
+                            stores.push((inst, from));
+                        }
+                    }
                     // `-ftrivial-auto-var-init=zero` clears a local before the program writes
                     // it, which the kernel builds with. The clearing is a store as well, one this
                     // walk cannot read, and it is fine for as long as a later one is the one the
                     // load sees.
-                    (Opcode::Store, 1) | (Opcode::Memset, 0) => stores.push(inst),
-                    _ => return None,
+                    (Opcode::Memset, 0) => stores.push((inst, from)),
+                    _ => away.push(inst),
                 }
             }
         }
         // The stores before the load on every way to it are one after another, so the last of
         // them is the one each of those ways went through most recently.
-        let mut store: Option<Inst> = None;
-        for &each in &stores {
-            if self.precedes(each, load) && store.is_none_or(|had| self.precedes(had, each)) {
-                store = Some(each);
+        let mut store: Option<(Inst, u64)> = None;
+        for &(each, from) in &stores {
+            if self.precedes(each, load) && store.is_none_or(|(had, _)| self.precedes(had, each)) {
+                store = Some((each, from));
             }
         }
-        let store = store?;
-        if stores.iter().any(|&other| other != store && self.reaches(other, load, store)) {
+        let (store, from) = store?;
+        if stores.iter().any(|&(other, _)| other != store && self.reaches(other, load, store)) {
             return None;
         }
-        if self.func[store].opcode != Opcode::Store {
+        if self.func[store].opcode != Opcode::Store || from != at {
+            return None;
+        }
+        if away.iter().any(|&went| self.reaches(went, load, went)) {
             return None;
         }
         let put = self.func[self.func[store].args][0];
-        let read = self.func[load].first_result?;
         (self.func[put].ty == self.func[read].ty).then_some(put)
+    }
+
+    /// The fixed local an address is in, with how far in, where the address is the local or a
+    /// constant step from it.
+    fn slot(&self, address: Value) -> Option<(Value, u64)> {
+        let mut at = 0u64;
+        let mut value = address;
+        loop {
+            let Def::Result { inst, .. } = self.func[value].def else { return None };
+            let data = &self.func[inst];
+            let args = &self.func[data.args];
+            match data.opcode {
+                Opcode::Alloca if args.is_empty() => return Some((value, at)),
+                Opcode::PtrAdd => {
+                    let (imm, ty) = crate::fold::constant(self.func, *args.get(1)?)?;
+                    at = at.checked_add(u64::try_from(imm.signed(ty)).ok()?)?;
+                    value = args[0];
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Each address the function makes by constant steps forward from the start of a local, with
+    /// how far in it is.
+    fn views(&self, local: Value) -> Map<Value, u64> {
+        let mut views: Map<Value, u64> = Map::default();
+        views.insert(local, 0);
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for inst in self.func.blocks().flat_map(|block| self.func.insts(block)) {
+                let data = &self.func[inst];
+                let Some(value) = data.first_result else { continue };
+                if data.opcode != Opcode::PtrAdd || views.contains_key(&value) {
+                    continue;
+                }
+                let args = &self.func[data.args];
+                let Some(&from) = args.first().and_then(|base| views.get(base)) else { continue };
+                let Some((imm, ty)) = crate::fold::constant(self.func, args[1]) else { continue };
+                let Some(at) = u64::try_from(imm.signed(ty)).ok().and_then(|n| from.checked_add(n))
+                else {
+                    continue;
+                };
+                views.insert(value, at);
+                grew = true;
+            }
+        }
+        views
     }
 
     /// Whether one instruction comes before another on every way to the second.
@@ -768,12 +965,15 @@ impl Walk<'_> {
     /// answered as not known instead.
     fn running(&self, value: Value, size: Type, depth: u32) -> Option<Running> {
         let depth = depth.checked_sub(1)?;
+        if let Def::Param { block, index } = self.func[value].def {
+            return self.joined(block, index, size, depth);
+        }
         let Def::Result { inst, .. } = self.func[value].def else { return None };
         let data = &self.func[inst];
         match data.opcode {
             Opcode::PtrAdd => {
                 let args = &self.func[data.args];
-                let (imm, ty) = self.number(*args.get(1)?, 4)?;
+                let (imm, ty) = self.number(*args.get(1)?, NUMBER)?;
                 let step = u64::try_from(imm.signed(ty)).ok()?;
                 let mut running = self.running(args[0], size, depth)?;
                 running.offset = running.offset.checked_add(step)?;
@@ -789,6 +989,46 @@ impl Walk<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The size worked out when the program runs for a block parameter, which is the one every
+    /// way in that can be taken agrees on.
+    ///
+    /// `kmalloc_noprof` calls one of three allocators, and which one depends on a
+    /// `__builtin_constant_p` of the size that is only settled after the questions are answered.
+    /// All three are asked for the same size, so `kmalloc (size++, gfp)` in fortify_kunit's
+    /// `fortify_test_alloc_size_kmalloc_dynamic` has that size, which is what gcc answers. The
+    /// arguments have to be there before the block, so that the question can read them.
+    fn joined(&self, block: Block, index: u32, size: Type, depth: u32) -> Option<Running> {
+        let mut all: Option<Running> = None;
+        for &pred in self.cfg.predecessors(block) {
+            if !self.taken(pred, block) {
+                continue;
+            }
+            let term = self.func.terminator(pred)?;
+            for call in self.func.successors(term).collect::<Vec<_>>() {
+                if call.block != block {
+                    continue;
+                }
+                let arg = *self.func[call.args].get(index as usize)?;
+                let one = self.running(arg, size, depth)?;
+                match &all {
+                    Some(seen) if seen.factors != one.factors || seen.offset != one.offset => {
+                        return None;
+                    }
+                    Some(_) => {}
+                    None => all = Some(one),
+                }
+            }
+        }
+        let all = all?;
+        let before = |factor: Value| match self.func[factor].def {
+            Def::Param { block: at, .. } => self.dom.dominates(at, block),
+            Def::Result { inst, .. } => {
+                self.func.block_of(inst).is_some_and(|at| self.dom.strictly_dominates(at, block))
+            }
+        };
+        all.factors.iter().all(|&factor| before(factor)).then_some(all)
     }
 
     /// The object every way to the address starts in, with its size, for an answer worked out
@@ -885,6 +1125,9 @@ impl Walk<'_> {
                         Ok(Some(Object::Global(name)))
                     }
                     Opcode::Load => {
+                        if let Some(name) = self.pointed(inst) {
+                            return Ok(Some(Object::Global(name)));
+                        }
                         let put = self.only_store(*args.first().ok_or(())?, inst).ok_or(())?;
                         self.object(put, ask, depth, seen)
                     }
@@ -926,7 +1169,7 @@ impl Walk<'_> {
                 args.first().copied()
             }
             "strchr" | "index" => {
-                let (imm, _) = self.number(*args.get(1)?, 4)?;
+                let (imm, _) = self.number(*args.get(1)?, NUMBER)?;
                 (imm.unsigned() == 0).then_some(args[0])
             }
             _ => None,
@@ -1060,6 +1303,101 @@ block0(%0: i64):
         assert!(text.contains("= sub %0, "), "{text}");
     }
 
+    /// A choice of two allocators asked for the same size has that size when the program runs,
+    /// which is what `kmalloc_noprof` is before its `__builtin_constant_p` is settled. Two asked
+    /// for different sizes are not known.
+    #[test]
+    fn a_choice_of_allocators_given_one_size_has_that_size() {
+        let body = "
+global @g : bytes 8 = { zero 8 }, align 8, linkage(external)
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+func @cache(ptr, i64) -> ptr, linkage(external), attrs(alloc_size=2);
+
+func @f(i64, i64, i32), linkage(external) {
+block0(%0: i64, %1: i64, %2: i32):
+    %3 = iconst.i32 0
+    %4 = icmp ne %2, %3
+    br_if %4, block1, block2
+
+block1:
+    %5 = call @my(%0) : (i64) -> ptr
+    jump block3(%5)
+
+block2:
+    %6 = global_addr @g
+    %7 = call @cache(%6, %0) : (ptr, i64) -> ptr
+    jump block3(%7)
+
+block3(%8: ptr):
+    %9 = object_size.i64 %8, kind 5
+    call @use(%9) : (i64)
+    br_if %4, block4, block5
+
+block4:
+    %10 = call @my(%1) : (i64) -> ptr
+    jump block6(%10)
+
+block5:
+    jump block6(%8)
+
+block6(%11: ptr):
+    %12 = object_size.i64 %11, kind 5
+    call @use(%12) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [-1]);
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
+        answer(&mut module, &names, Some(&[]), Pic::Executable, true);
+        let text = rucc_ir::print(&module, &names);
+        assert!(text.contains("call @use(%0)"), "{text}");
+    }
+
+    /// A branch on a question already answered `(size_t)-1` is settled by that answer, the way
+    /// `p_size < size` is in 6.12's `kmemdup_noprof`, so only the allocation on the way it is
+    /// false is what comes back. The other way round the comparison could go either way.
+    #[test]
+    fn a_comparison_with_an_answer_as_large_as_it_goes_is_settled() {
+        let body = |test: &str| {
+            format!(
+                "
+func @cache(ptr, i64) -> ptr, linkage(external), attrs(alloc_size=2);
+
+func @f(ptr, i64), linkage(external) {{
+block0(%0: ptr, %1: i64):
+    %2 = object_size.i64 %0, kind 4
+    %3 = icmp {test}
+    br_if %3, block1, block2
+
+block1:
+    %4 = iconst.i64 0
+    %5 = call @cache(%0, %4) : (ptr, i64) -> ptr
+    jump block3(%5)
+
+block2:
+    %6 = call @cache(%0, %1) : (ptr, i64) -> ptr
+    jump block3(%6)
+
+block3(%7: ptr):
+    %8 = object_size.i64 %7, kind 5
+    call @use(%8) : (i64)
+    return
+}}
+"
+            )
+        };
+        let print = |body: &str| {
+            let mut names = Interner::new();
+            let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
+            answer(&mut module, &names, Some(&[]), Pic::Executable, true);
+            rucc_ir::print(&module, &names)
+        };
+        let text = print(&body("ult %2, %1"));
+        assert!(text.contains("call @use(%1)"), "{text}");
+        assert_eq!(answers(&body("ult %1, %2"), true), [-1]);
+    }
+
     /// An allocator's result put in a local once and read back is what the allocator gave, which
     /// is the shape a `__free (kfree)` variable has. A second store, or the slot's address going
     /// anywhere but a load or a store, and it is not known.
@@ -1091,6 +1429,45 @@ block0(%0: i64):
         // A later store is the one the load reads.
         assert_eq!(answers(&body("    store %5 -> %1, align 8\n"), true), [768, 16, 16]);
         assert_eq!(answers(&body("    call @keep(%1) : (ptr)\n"), true), [768, 16, -1]);
+    }
+
+    /// The address of a buffer put in one field of a local and read back out, the way iommufd
+    /// hands `ucmd.cmd` to `copy_struct_from_user`, is the buffer, though the local goes to a call
+    /// later on. A call that gets the local before the load leaves it unknown, and so does a store
+    /// to part of the field.
+    #[test]
+    fn an_address_read_back_out_of_a_field_of_a_local_is_what_was_stored_there() {
+        let body = |extra: &str| {
+            format!(
+                "
+func @keep(ptr), linkage(external);
+
+func @f(ptr), linkage(external) {{
+block0(%0: ptr):
+    %1 = alloca, size 24, align 8
+    %2 = alloca, size 72, align 8
+    %3 = iconst.i8 0
+    %4 = iconst.i64 16
+    %5 = iconst.i64 20
+    %6 = iconst.i32 0
+    %7 = ptr_add %1, %5
+    memset %1, %3, size 24, align 8
+    %8 = ptr_add %1, %4
+    store %2 -> %8, align 8
+    store %0 -> %1, align 8
+{extra}    %9 = ptr_add %1, %4
+    %10 = load.ptr %9, align 8
+    %11 = object_size.i64 %10, kind 1
+    call @use(%11) : (i64)
+    call @keep(%1) : (ptr)
+    return
+}}
+"
+            )
+        };
+        assert_eq!(answers(&body(""), true), [72]);
+        assert_eq!(answers(&body("    call @keep(%1) : (ptr)\n"), true), [-1]);
+        assert_eq!(answers(&body("    store %6 -> %7, align 4\n"), true), [-1]);
     }
 
     /// A store on one arm of a branch can be what the load reads, so the store before the branch
@@ -1455,6 +1832,37 @@ block0:
 }
 ";
         assert_eq!(answers(body, true), [0, -1]);
+    }
+
+    /// An address loaded out of a read only global that holds it is the object it points at,
+    /// which is `static const char *ptr_of_11 = "this is 11!"` in fortify_kunit. One that may be
+    /// written, or holds an address into the middle of something, is not known.
+    #[test]
+    fn an_address_read_out_of_a_read_only_global_is_what_it_points_at() {
+        let body = "
+global @s : bytes 12 = { zero 12 }, align 1, linkage(internal), constant
+global @p : bytes 8 = { addr.8 @s }, align 8, linkage(internal), constant
+global @q : bytes 8 = { addr.8 @s }, align 8, linkage(internal)
+global @r : bytes 8 = { addr.8 @s + 4 }, align 8, linkage(internal), constant
+
+func @f(), linkage(external) {
+block0:
+    %0 = global_addr @p
+    %1 = load.ptr %0, align 8
+    %2 = object_size.i64 %1, kind 1
+    call @use(%2) : (i64)
+    %3 = global_addr @q
+    %4 = load.ptr %3, align 8
+    %5 = object_size.i64 %4, kind 1
+    call @use(%5) : (i64)
+    %6 = global_addr @r
+    %7 = load.ptr %6, align 8
+    %8 = object_size.i64 %7, kind 1
+    call @use(%8) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [12, -1, -1]);
     }
 
     /// An address lowering marked as the start of a member, or one a constant into it, has what
