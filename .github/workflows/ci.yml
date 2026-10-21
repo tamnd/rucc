@@ -1109,14 +1109,16 @@ jobs:
   differential:
     name: differential against ${{ matrix.libc }}
     needs: quick
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - libc: glibc
+            runner: ubuntu-26.04
             container: ""
           - libc: musl
+            runner: ubuntu-24.04
             container: alpine:3.22
     container: ${{ matrix.container }}
     steps:
@@ -1126,34 +1128,16 @@ jobs:
       # The reference is GCC 16, which is the current release, because a compiler measured
       # against a compiler four years old is measured against the wrong thing: gcc 16 defines
       # __CHAR8_TYPE__ in C23 and gcc 13 defines it in no dialect, and its own stdatomic.h
-      # declares a type behind that macro. Ubuntu 24.04 ships 13, so this comes from the
-      # toolchain PPA. Alpine has no equivalent and keeps its own, which is fine there: the
-      # musl job is about musl's headers rather than about the reference's version.
-      # The PPA has two hosts that serve the same signed archive. The https one is down for hours
-      # at a time and the http one is slow when it is, so the packages are kept in the cache and
-      # Launchpad is asked only when the cache is empty or the packages no longer install.
-      - name: the reference compiler packages
-        if: matrix.libc == 'glibc'
-        uses: actions/cache@v6.1.0
-        with:
-          path: ~/gcc-16-debs
-          key: gcc-16-noble-${{ runner.arch }}-v1
+      # declares a type behind that macro. Ubuntu 26.04 has gcc-16 in its own archive, so the
+      # glibc side runs there. It took gcc-16 from the toolchain PPA on 24.04 before, and the
+      # job failed whenever Launchpad was down. Alpine has no equivalent and keeps its own,
+      # which is fine there: the musl job is about musl's headers rather than about the
+      # reference's version.
       - name: the reference compiler
         if: matrix.libc == 'glibc'
         run: |
-          if ! { ls ~/gcc-16-debs/*.deb > /dev/null 2>&1 \
-                 && sudo apt-get install -y --no-download ~/gcc-16-debs/*.deb; }; then
-            sudo add-apt-repository -y -n ppa:ubuntu-toolchain-r/test
-            for host in https://ppa.launchpadcontent.net http://ppa.launchpad.net; do
-              sudo sed -i -E "s|https?://ppa\.launchpad[a-z]*\.net|$host|" \
-                /etc/apt/sources.list.d/ubuntu-toolchain-r-ubuntu-test-*
-              sudo apt-get update -q || true
-              apt-cache show gcc-16 > /dev/null 2>&1 && break
-            done
-            sudo apt-get install -y -o Acquire::Retries=10 -o Acquire::http::Timeout=120 gcc-16
-            mkdir -p ~/gcc-16-debs
-            cp /var/cache/apt/archives/*.deb ~/gcc-16-debs/
-          fi
+          sudo apt-get update -q
+          sudo apt-get install -y gcc-16
           gcc-16 --version | head -1
       - uses: actions/checkout@v7.0.1
       - name: check out the harness
