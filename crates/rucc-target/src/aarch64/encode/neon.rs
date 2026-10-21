@@ -669,18 +669,24 @@ impl At<'_> {
     /// around a field that says how they are placed in a lane.
     fn modified(self, values: &[Value]) -> Result<Option<u32>, Error> {
         let m = self.mnemonic;
+        let float = match values {
+            [Value::Vector(a, d), Value::Float(number)] => Some((*a, *d, *number)),
+            // A whole number is the same float to GNU as.
+            [Value::Vector(a, d), Value::Imm(imm)] => Some((*a, *d, *imm as f64)),
+            _ => None,
+        };
+        if let (Some((a, d, number)), "fmov") = (float, m) {
+            let imm8 = float_imm8(number).ok_or_else(|| self.unwritten())?;
+            let (op, q) = match a {
+                Arrangement::S2 | Arrangement::S4 => (0, a.q()),
+                Arrangement::D2 => (1, 1),
+                _ => return Err(self.register()),
+            };
+            return Ok(Some(modified(q, op, 0b1111, imm8, d)));
+        }
         let (q, d, imm, rest) = match values {
             [Value::Vector(a, d), Value::Imm(imm), rest @ ..] => (Some(*a), *d, *imm, rest),
             [Value::Fp(Scalar::D, d), Value::Imm(imm)] if m == "movi" => (None, *d, *imm, &[][..]),
-            [Value::Vector(a, d), Value::Float(number)] if m == "fmov" => {
-                let imm8 = float_imm8(*number).ok_or_else(|| self.unwritten())?;
-                let (op, q) = match a {
-                    Arrangement::S2 | Arrangement::S4 => (0, a.q()),
-                    Arrangement::D2 => (1, 1),
-                    _ => return Err(self.register()),
-                };
-                return Ok(Some(modified(q, op, 0b1111, imm8, *d)));
-            }
             _ => return Ok(None),
         };
         let shift = match rest {

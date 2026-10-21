@@ -2075,6 +2075,13 @@ impl At<'_> {
                 let imm8 = float_imm8(*number).ok_or_else(|| self.immediate(*number as i64))?;
                 Ok(0x1e20_1000 | td << 22 | imm8 << 13 | rd)
             }
+            // GNU as takes a whole number for the float, and the arm64 `hwcap` selftest writes
+            // `fmov s0, #1`.
+            [d @ Value::Fp(_, _), Value::Imm(number)] => {
+                let (td, rd) = self.float(d)?;
+                let imm8 = float_imm8(*number as f64).ok_or_else(|| self.immediate(*number))?;
+                Ok(0x1e20_1000 | td << 22 | imm8 << 13 | rd)
+            }
             _ => Err(self.unwritten()),
         }
     }
