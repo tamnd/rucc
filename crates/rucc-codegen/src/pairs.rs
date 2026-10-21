@@ -33,7 +33,9 @@
 //!
 //! An access off the stack pointer is left alone. The frame's own saves and restores are written
 //! as pairs already, and the Windows unwind codes read the stores off the stack pointer in a
-//! prologue as the saves they describe.
+//! prologue as the saves they describe. A frame with a variable length array saves off the frame
+//! pointer instead, so those saves and restores are paired here, and the unwind rows on the two go
+//! to the pair as long as nothing between them has rows of its own.
 
 use rucc_base::Interner;
 use rucc_base::hash::Map;
@@ -115,9 +117,14 @@ pub fn pairs(
                 }
                 let inst = insts[next];
                 if let Some(second) = access(func, inst, &table, stack) {
-                    if partners(func, &first, &second, &between) {
+                    if partners(func, &first, &second, &between) && quiet(func, &between) {
                         let pair = pair(func, insts[at], &first, &second);
                         func.insert_before(if load { insts[at] } else { inst }, pair);
+                        for (row, _) in &mut func.cfi {
+                            if *row == insts[at] || *row == inst {
+                                *row = pair;
+                            }
+                        }
                         func.remove_inst(insts[at]);
                         func.remove_inst(inst);
                         taken[at] = true;
@@ -208,6 +215,17 @@ fn partners(func: &Func, first: &Access, second: &Access, between: &[Inst]) -> b
             }
         })
     })
+}
+
+/// Whether nothing between the two has unwind rows of its own, so that the rows the two had can
+/// move onto the pair in the order they were written.
+///
+/// In a frame with a variable length array the saves of `d8` and `d9` are off the frame pointer,
+/// so they are paired here. Their rows, and the row that remembers the body's rules after the
+/// last of them, were left on the two stores that went away, and the first `.cfi_restore_state`
+/// after an epilogue had nothing to restore. LTP's `matrix_mult.c` did not assemble.
+fn quiet(func: &Func, between: &[Inst]) -> bool {
+    between.iter().all(|&inst| func.cfi_after(inst).next().is_none())
 }
 
 /// Whether two operands are the same register, which takes the file as well as the number, since
