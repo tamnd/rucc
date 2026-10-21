@@ -2094,16 +2094,11 @@ impl Site<'_> {
     /// there is one. A caller that wants a string wants [`Self::literal`] instead.
     fn raw(&self, value: Value) -> Option<Vec<u8>> {
         let (base, offset) = self.address(value)?;
-        let Def::Result { inst, .. } = self.func[base].def else { return None };
-        if self.func[inst].opcode != Opcode::GlobalAddr {
-            return None;
-        }
-        let Extra::Symbol(name) = self.func[inst].extra else { return None };
-        let Some(SymbolRef::Global(id)) = self.module.lookup(name) else { return None };
-        let global = &self.module[id];
-        if !global.constant || !vouched(global, self.pic) {
-            return None;
-        }
+        let (name, offset) = match self.named(base) {
+            Some(name) => (name, offset),
+            None => self.pointed(base, offset)?,
+        };
+        let global = self.constant(name)?;
         let mut bytes = Vec::new();
         for &datum in &self.module[global.init?] {
             match datum {
@@ -2126,6 +2121,44 @@ impl Site<'_> {
             bytes.resize(size, 0);
         }
         Some(bytes.get(usize::try_from(offset).ok()?..)?.to_vec())
+    }
+
+    /// The global this value is the address of.
+    fn named(&self, value: Value) -> Option<Symbol> {
+        let Def::Result { inst, .. } = self.func[value].def else { return None };
+        if self.func[inst].opcode != Opcode::GlobalAddr {
+            return None;
+        }
+        let Extra::Symbol(name) = self.func[inst].extra else { return None };
+        Some(name)
+    }
+
+    /// The global a module that cannot have it replaced holds as it was written and never changes.
+    fn constant(&self, name: Symbol) -> Option<&Global> {
+        let Some(SymbolRef::Global(id)) = self.module.lookup(name) else { return None };
+        let global = &self.module[id];
+        (global.constant && vouched(global, self.pic)).then_some(global)
+    }
+
+    /// The global and the distance into it that a load out of a read only pointer gives back.
+    ///
+    /// This runs before the loads of read only globals are folded, so `__builtin_strlen(__p)` in
+    /// the kernel's `__compiletime_strlen (ptr_of_11)` is a call on a load of
+    /// `static const char *ptr_of_11 = "this is 11!"`. gcc answers 11 there, and fortify_kunit's
+    /// `fortify_test_known_sizes` failed on the 6.12 arm64 nightly while it was a call.
+    fn pointed(&self, load: Value, offset: i128) -> Option<(Symbol, i128)> {
+        let Def::Result { inst, .. } = self.func[load].def else { return None };
+        if self.func[inst].opcode != Opcode::Load || !self.func[load].ty.is_ptr() {
+            return None;
+        }
+        let global = self.constant(self.named(*self.func[self.func[inst].args].first()?)?)?;
+        let pointer = self.module.datalayout.pointer_bits / 8;
+        let [Datum::Addr(reloc), ..] = self.module[global.init?] else { return None };
+        let reloc = &self.module[reloc];
+        if reloc.size != pointer {
+            return None;
+        }
+        Some((reloc.symbol, offset.checked_add(i128::from(reloc.addend))?))
     }
 
     /// The address this value is, as something it was computed from and a distance in bytes from
@@ -3229,6 +3262,32 @@ block0:
         assert!(!out.contains("call @strlen("), "{out}");
         assert!(out.contains("iconst.i64 11"), "{out}");
         assert!(out.contains("iconst.i64 5"), "the world on its own, {out}");
+    }
+
+    /// `strlen` of what a read only pointer points at is the length of that string, which is
+    /// `__compiletime_strlen (ptr_of_11)` in fortify_kunit, where gcc answers 11.
+    #[test]
+    fn strlen_of_a_read_only_pointer_is_the_length_of_its_string() {
+        let out = folded(
+            r#"
+global @.Lstr.0 : bytes 12 = { bytes "this is 11!\00" }, align 1, linkage(internal), constant
+global @ptr_of_11 : bytes 8 = { addr.8 @.Lstr.0 + 5 }, align 8, linkage(internal), constant
+
+func @strlen(ptr) -> i64, linkage(external);
+func @use(i64), linkage(external);
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @ptr_of_11
+    %1 = load %0, align 8
+    %2 = call @strlen(%1) : (ptr) -> i64
+    call @use(%2) : (i64)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("call @strlen("), "{out}");
+        assert!(out.contains("iconst.i64 6"), "the string from where the pointer is, {out}");
     }
 
     /// The module that text is, written out by [`write_out`] and checked by the verifier.
