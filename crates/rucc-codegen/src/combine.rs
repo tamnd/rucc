@@ -1074,7 +1074,7 @@ struct Waiting {
 /// once, and after the addresses because a load whose address is still a `lea` in front of it has
 /// nothing in its own memory operand worth carrying.
 ///
-/// The walk is made again while the one before it folded something, up to [`WALKS`] times. A
+/// The walk is made again while the one before it folded something, up to `WALKS` times. A
 /// load that took the place of another can be the last access in front of arithmetic that it was
 /// not before. A sixty four bit comparison on i386 reads both halves of each side and then compares
 /// the low halves and the high halves, so only the high half of the second side is the last access
