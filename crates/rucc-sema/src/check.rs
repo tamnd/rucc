@@ -575,7 +575,8 @@ impl<'a> Checker<'a> {
 
     /// The tree, the types and the diagnostics.
     #[must_use]
-    pub fn finish(self) -> Checked {
+    pub fn finish(mut self) -> Checked {
+        self.tast.record_strict_flex_arrays(self.cx.strict_flex_arrays);
         Checked { tast: self.tast, types: self.types, diagnostics: self.errors.finish() }
     }
 

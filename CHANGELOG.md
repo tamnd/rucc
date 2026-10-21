@@ -56,6 +56,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-fprofile-update=atomic` and `-fprofile-update=prefer-atomic` now make each `-fprofile-arcs` counter increment one relaxed atomic add where a pointer is 64 bits, as gcc does, instead of being checked and dropped. The kernel passes `prefer-atomic` with its gcov flags, so two CPUs counting the same edge could lose counts (#3772).
 - The constructor and destructor that `-fprofile-arcs` adds now run at priority 100 and go where gcc puts them, in `.text.startup` and `.text.exit` with `-freorder-functions` and with the function's name after it under `-ffunction-sections`. They ran at 101 in plain code, so every gcov object in a kernel build had its own sections differ from gcc's (#3777).
 - On AArch64 every array, structure and union that rucc defines now gets at least 8 byte alignment, as gcc gives it, unless the build is `-Os` or `-Oz`. The kernel's tracepoint names sat 4 or 2 bytes apart in `__tracepoints_strings` where gcc puts them 8 apart, so that section differed in hundreds of arm64 objects (#3778).
+- `__builtin_object_size` and `__builtin_dynamic_object_size` now follow `-fstrict-flex-arrays` for an array at the end of a structure once the call is inlined, and a member reached through a subscript known only at run time is as long as its type. At level three `bitmap_copy` on a `struct cpumask` member was answered as unknown, so the fortify field check that gcc keeps for the kernel's cpumask copies was missing in about 50 arm64 objects (#3779).
 
 ### Added
 
