@@ -8,6 +8,7 @@
 //! half, as `i386_fill_length.rs` shows.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A fill of a member that does not start the record, so the start is an offset as well.
 const FILL: &str = r#"
@@ -43,9 +44,14 @@ void row(char *restrict to, const char *restrict from, unsigned n, int k) {
 }
 "#;
 
+/// A number for each fixture, so that the two tests below writing the same fixture at the same level
+/// at once do not share a directory. One of them removed it while the other was still compiling.
+static FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
 fn assembly(name: &str, source: &str, level: &str) -> String {
-    let dir =
-        std::env::temp_dir().join(format!("rucc-idiom-i686-{}-{name}{level}", std::process::id()));
+    let n = FIXTURE.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir()
+        .join(format!("rucc-idiom-i686-{}-{n}-{name}{level}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, source).expect("the fixture can be written");
