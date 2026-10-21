@@ -457,6 +457,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         module,
         diagnostics: Vec::new(),
         strings: Map::default(),
+        literals: Map::default(),
         anonymous: 0,
         statics: Map::default(),
         labels: Map::default(),
@@ -544,6 +545,11 @@ pub(crate) struct Unit<'a> {
     /// The global each string literal was emitted as, so that two mentions of one literal are
     /// one object.
     strings: Map<StrId, Symbol>,
+    /// The global for each literal by its bytes and alignment, so that two literals spelled the
+    /// same are one object, as gcc makes them. The sound codecs name `"DSP1"` two thousand times
+    /// in their routing tables, and one object for each made 144113 objects in `cs47l90.o` where
+    /// gcc has 1256.
+    literals: Map<(Vec<u8>, u32), Symbol>,
     /// How many runs of bytes written under no label in an `asm` at file scope have been given a
     /// name, which is what keeps the next one from being given the same one.
     anonymous: usize,
@@ -2969,9 +2975,14 @@ impl Unit<'_> {
         if self.tast.is_function_name(id) {
             return self.function_name(id, bytes, align);
         }
+        let align = align.max(1);
+        if let Some(&symbol) = self.literals.get(&(bytes.clone(), align)) {
+            self.strings.insert(id, symbol);
+            return symbol;
+        }
         let symbol = self.names.intern(&format!(".Lstr.{}", self.strings.len()));
 
-        let mut global = Global::new(symbol, bytes.len() as u64, align.max(1));
+        let mut global = Global::new(symbol, bytes.len() as u64, align);
         global.linkage = IrLinkage::Internal;
         // Not because the type says so, since a literal is an array of `char` and not of
         // `const char`, but because writing to one is undefined and every target puts them
@@ -2985,6 +2996,7 @@ impl Unit<'_> {
         global.init = Some(self.module.push_data(&[Datum::Bytes(range)]));
         self.module.add_global(global);
         self.strings.insert(id, symbol);
+        self.literals.insert((bytes, align), symbol);
         symbol
     }
 
