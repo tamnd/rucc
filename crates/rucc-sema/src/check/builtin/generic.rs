@@ -350,7 +350,7 @@ impl Checker<'_> {
     /// which is what lowering it for `__builtin_constant_p` needs, since gcc never evaluates it.
     ///
     /// Reads of objects by name, constants, conversions, the arithmetic that cannot trap and a
-    /// pointer followed with `*`. No call, assignment or increment, and no read of anything
+    /// pointer followed with `*` or a subscript. No call, assignment or increment, and no read of anything
     /// `volatile`. Division and remainder are left out, since the divisor may be zero and the
     /// division is not something the optimizer takes back out.
     ///
@@ -398,7 +398,12 @@ impl Checker<'_> {
             ExprKind::Cond { cond, then, otherwise } => {
                 self.quietly(cond) && self.quietly(then) && self.quietly(otherwise)
             }
-            ExprKind::Subscript { base, index } => self.in_literal(base, index),
+            // `p[i]` is `*(p + i)`, let through for the reason `*p` is. The kernel's FORTIFY
+            // `strlen` asks `__builtin_constant_p(__p[__p_size - 1])` of a `const` array to see
+            // that its last byte is the terminator, and gcc answers one there once it has inlined.
+            ExprKind::Subscript { base, index } => {
+                self.in_literal(base, index) || (self.quietly(base) && self.quietly(index))
+            }
             _ => false,
         }
     }

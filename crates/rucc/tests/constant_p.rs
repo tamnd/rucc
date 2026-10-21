@@ -205,3 +205,47 @@ void d(struct sb *s) { wake(s, 1); }
     assert!(!listing.contains("warned"), "a warning survived:\n{listing}");
     assert!(!listing.contains("\nwake:"), "the function stayed out of line:\n{listing}");
 }
+
+/// A subscript into a `const` array asks about the element, which is one once the optimizer has
+/// read it from the initializer, as `*p` is. This is the FORTIFY `__compiletime_strlen`, which asks
+/// `__builtin_constant_p(__p[__p_size - 1])` to see that the string ends in its last byte, and
+/// without the yes `strcpy` from a `const` array into a smaller one never reached
+/// `__write_overflow`, so lib/test_fortify failed its strcpy and strcpy-lit cases. gcc answers one
+/// at `-O2` for the first three and zero for the writable array and the parameter, and zero for
+/// all of them at `-O0`.
+#[test]
+fn asking_about_an_element_of_a_const_array_answers_yes_once_optimized() {
+    let dir = std::env::temp_dir().join(format!("rucc-constant-p-index-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let source = r#"
+const char large_src[32] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+char mutable_src[32] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+int cast(void) { return __builtin_constant_p(((char *)large_src)[31]); }
+int local(void) { const char *p = large_src; unsigned long i = 31; return __builtin_constant_p(p[i]); }
+int named(void) { return __builtin_constant_p(large_src[5]); }
+int writable(void) { return __builtin_constant_p(mutable_src[5]); }
+int param(const char *p) { return __builtin_constant_p(p[5]); }
+"#;
+    std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
+    for (level, yes) in [("-O0", false), ("-O2", true)] {
+        let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=x86_64-unknown-linux-gnu", level, "-S", "-o", "-"])
+            .arg(dir.join("one.c"))
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(done.status.success(), "{level}: {}", String::from_utf8_lossy(&done.stderr));
+        let listing = String::from_utf8_lossy(&done.stdout);
+        for (name, want) in
+            [("cast", yes), ("local", yes), ("named", yes), ("writable", false), ("param", false)]
+        {
+            let body = listing
+                .split(&format!("\n{name}:"))
+                .nth(1)
+                .and_then(|rest| rest.split("ret").next())
+                .unwrap_or_else(|| panic!("{level} has no {name}:\n{listing}"));
+            let one = body.contains("movl\t$1, %eax");
+            assert_eq!(one, want, "{level} {name} answers {}:\n{listing}", u8::from(one));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
