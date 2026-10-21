@@ -45,6 +45,23 @@ long double quads(long double a, long double b, long double c, long double d) {
 }
 ";
 
+/// Two floats a call keeps in a function with a variable length array, where the saves are off the
+/// frame pointer, and an early return, so that the epilogue restores the rules the prologue kept.
+const VLA: &str = "\
+extern int n, g(void);
+extern float h(float);
+extern void use(void *);
+int vla(float x) {
+  void *p[n];
+  use(p);
+  float a = h(x), b = h(a);
+  if (g())
+    return 3;
+  use(p);
+  return a < b * 2;
+}
+";
+
 /// The fixture, under a directory of its own so that two of these running at once do not write
 /// the same file. Two tests compile the same source for the same target, so the name alone is not
 /// enough: the first to finish would take the directory away from the other.
@@ -151,4 +168,27 @@ fn a_quad_long_double_is_not_kept_in_a_register_a_call_keeps_half_of() {
             "{target}: v{n} holds something over a call\n{text}"
         );
     }
+}
+
+/// The saves of `d8` and `d9` in a frame with a variable length array are off the frame pointer and
+/// go into one `stp`, and the rows saying where they went and that the body's rules are remembered
+/// go with them. Without the last one the `.cfi_restore_state` after the first `ret` has nothing to
+/// restore and the assembler refuses the function.
+#[test]
+fn the_saves_of_a_frame_with_a_variable_length_array_keep_their_rows() {
+    let target = "aarch64-unknown-linux-gnu";
+    let asm = listing_of(target, "vla", VLA, "vla");
+    let text = asm.join("\n");
+    for reg in [72, 73] {
+        let row = format!(".cfi_offset {reg}, ");
+        assert!(
+            asm.iter().any(|line| line.starts_with(&row)),
+            "{target}: no row for d{}\n{text}",
+            reg - 64
+        );
+    }
+    assert!(
+        asm.iter().any(|line| line == ".cfi_remember_state"),
+        "{target}: the body's rules are not remembered before the return\n{text}"
+    );
 }
