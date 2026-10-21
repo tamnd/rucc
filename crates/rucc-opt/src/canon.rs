@@ -289,7 +289,8 @@ fn closed(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats
         from.sort_unstable_by_key(|block| leaving.place[block.index()]);
         from.dedup();
         let terms = from.into_iter().filter_map(|block| func.terminator(block)).collect();
-        let edited = close_from(func, dom, loops, &job, terms);
+        let users = leaving.users(&job);
+        let edited = close_from(func, dom, loops, &job, terms, Some(users));
         leaving.refresh(func, loops, &edited);
         stats.optimized(CLOSED);
         // Every edge is where it was. A parameter appeared on some blocks and the edges into them
@@ -395,6 +396,16 @@ impl Leaving {
             }
             self.walk(func, loops, block);
         }
+    }
+
+    /// The blocks that name the value a repair is for outside its loop, which are the only blocks
+    /// outside the loop the repair has to rewrite.
+    fn users(&self, job: &Leak) -> Vec<Block> {
+        self.blocks[job.id.index()]
+            .iter()
+            .map(|&at| self.order[at as usize])
+            .filter(|block| self.uses[block.index()].contains(&(job.id, job.value)))
+            .collect()
     }
 
     /// Finds one value that crosses an exit without being handed over there.
@@ -624,18 +635,25 @@ fn reaching(
 /// What comes back is every block whose instructions it edited.
 pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak) -> Vec<Block> {
     let terms = terminators(func);
-    close_from(func, dom, loops, job, terms)
+    close_from(func, dom, loops, job, terms, None)
 }
 
 /// [`close`], handed the terminators that may branch to a block that grows a parameter, in the
 /// order of the layout. Any other terminator has nothing to hand over, so leaving it out changes
 /// nothing.
+///
+/// `users`, when the caller knows it, is every block outside the loop that names the value. Only
+/// those blocks have a use to point at a parameter, and the others below the definition are left
+/// alone. A kunit test body is a long line of blocks with hundreds of small loops in it, and
+/// rewriting and then filing again every block below each repaired value took the most of the 16 s
+/// lib/tests/overflow_kunit.c spent at `-O2`.
 fn close_from(
     func: &mut Func,
     dom: &Dominators,
     loops: &Loops,
     job: &Leak,
     terms: Vec<Inst>,
+    users: Option<Vec<Block>>,
 ) -> Vec<Block> {
     let ty = func[job.value].ty;
     let param: Map<Block, Value> =
@@ -663,7 +681,12 @@ fn close_from(
             }
         }
     }
-    for (&block, &hand) in &names {
+    let blocks: Vec<Block> = match users {
+        Some(users) => users.into_iter().filter(|block| names.contains_key(block)).collect(),
+        None => names.keys().copied().collect(),
+    };
+    for block in blocks {
+        let hand = names[&block];
         if loops.contains(job.id, block) {
             continue;
         }
