@@ -1040,6 +1040,9 @@ fn coverage(opts: &Options, target: &TargetInfo, counts: &str) -> rucc_opt::cove
     rucc_opt::coverage::Coverage {
         counts: counts.to_owned(),
         count: opts.profile_data.arcs,
+        // A sixty four bit counter is added to atomically only where a pointer is that wide.
+        // Elsewhere gcc falls back to the load and the store, and so does this.
+        atomic: opts.profile_data.atomic && target.pointer_width == 64,
         gnuc: (major, minor),
         phase,
         ctor: ctor.map(str::to_owned),

@@ -22,6 +22,7 @@
 //! At the end of the source block when it has one way out, at the top of the destination when it
 //! has one way in, and otherwise in a new block on the edge. A load, an add and a store of the
 //! counter, not atomic, which is `-fprofile-update=single` and what gcc does without being asked.
+//! With `-fprofile-update=atomic` or `prefer-atomic` it is one relaxed atomic add instead.
 //!
 //! # Order
 //!
@@ -33,7 +34,7 @@ use rucc_base::{Idx, Interner, Symbol};
 use rucc_diag::Span;
 use rucc_ir::{
     AttrSet, Block, BlockCall, Datum, Extra, Func, FuncId, Global, Imm, Inst, InstData, Linkage,
-    MemInfo, MemOrder, Module, Opcode, Reloc, Restrict, Signature, Type, Value,
+    MemInfo, MemOrder, Module, Opcode, Reloc, Restrict, RmwOp, Signature, Type, Value,
 };
 
 /// What the unit's record says and where its constructor goes, which the driver works out.
@@ -44,6 +45,9 @@ pub struct Coverage {
     /// Whether the counters go in, which is `-fprofile-arcs`. Without it there is only the graph,
     /// for a `.gcno` file from `-ftest-coverage` alone.
     pub count: bool,
+    /// Whether each increment is one relaxed atomic add rather than a load, an add and a store,
+    /// which is `-fprofile-update=atomic` on a target that has one.
+    pub atomic: bool,
     /// The gcc version the unit claims to be built by, as `__GNUC__` and `__GNUC_MINOR__`. The
     /// record's layout and its version word follow it, because the runtime reading the record was
     /// built for the same version the headers were told about. The kernel's `gcc_4_7.c` picks its
@@ -143,7 +147,8 @@ pub fn run(module: &mut Module, names: &mut Interner, coverage: &Coverage) -> Ve
         if module.lookup(array).is_some() {
             continue;
         }
-        let (count, cfg_checksum, graph) = instrument(&mut module[id], array, word, coverage.count);
+        let (count, cfg_checksum, graph) =
+            instrument(&mut module[id], array, word, coverage.count, coverage.atomic);
         let ident = u32::try_from(counted.len() + 1).unwrap_or(u32::MAX);
         let lineno_checksum = crc32(spelled.as_bytes(), 0);
         counted.push(Counted {
@@ -245,7 +250,13 @@ struct Edge {
 
 /// Counts the edges of one function, and says how many counters it took, a hash of its graph and
 /// the graph.
-fn instrument(func: &mut Func, array: Symbol, word: Type, bumps: bool) -> (u32, u32, Graph) {
+fn instrument(
+    func: &mut Func,
+    array: Symbol,
+    word: Type,
+    bumps: bool,
+    atomic: bool,
+) -> (u32, u32, Graph) {
     // A node for each block, numbered in layout order from two, after the entry and exit nodes.
     let blocks: Vec<Block> = func.blocks().collect();
     let mut node = vec![usize::MAX; blocks.iter().map(|b| b.index() + 1).max().unwrap_or(0)];
@@ -371,16 +382,16 @@ fn instrument(func: &mut Func, array: Symbol, word: Type, bumps: bool) -> (u32, 
         let term =
             func.terminator(source).expect("a block with an edge out of it ends in a branch");
         if edge.to == EXIT || outs[edge.from] == 1 {
-            bump(func, array, word, slot, term);
+            bump(func, array, word, slot, term, atomic);
         } else if ins[edge.to] == 1 || edge.kind == Kind::Fixed {
             // An edge out of an `indirect_br` has nowhere else to go, since the branch reaches its
             // blocks by address. Counting it at the top of a block with other ways in counts those
             // too, which is the best there is and the case the tree avoids by taking it first.
             let first = func.insts(blocks[edge.to - 2]).next().expect("a block holds its branch");
-            bump(func, array, word, slot, first);
+            bump(func, array, word, slot, first, atomic);
         } else {
             for &at in &edge.calls {
-                split(func, array, word, slot, term, at);
+                split(func, array, word, slot, term, at, atomic);
             }
         }
     }
@@ -404,14 +415,22 @@ fn find(sets: &mut [usize], mut n: usize) -> usize {
 }
 
 /// Puts an edge's increment in a block of its own, between the branch and where it went.
-fn split(func: &mut Func, array: Symbol, word: Type, slot: u64, term: Inst, at: Idx<BlockCall>) {
+fn split(
+    func: &mut Func,
+    array: Symbol,
+    word: Type,
+    slot: u64,
+    term: Inst,
+    at: Idx<BlockCall>,
+    atomic: bool,
+) {
     let list = func.target_list(term);
     let call = func[list][at.index() - list.as_usize_range().start];
     let args: Vec<Value> = func[call.args].to_vec();
     let span = func.span(term);
     let between = func.create_block();
     let jump = rucc_ir::Builder::new(func, between).at(span).jump(call.block, &args);
-    bump(func, array, word, slot, jump);
+    bump(func, array, word, slot, jump, atomic);
     let args = func.push_values(&[]);
     func.set_block_call(at, BlockCall { block: between, args, hint: call.hint });
 }
@@ -419,7 +438,7 @@ fn split(func: &mut Func, array: Symbol, word: Type, slot: u64, term: Inst, at: 
 /// Adds one to a counter, just before an instruction. The offset of the counter is as wide as a
 /// pointer, since on i386 a `ptr_add` of a sixty four bit offset is not something the step that
 /// splits wide numbers knows, and the counter itself would be left whole for the backend.
-fn bump(func: &mut Func, array: Symbol, word: Type, slot: u64, before: Inst) {
+fn bump(func: &mut Func, array: Symbol, word: Type, slot: u64, before: Inst, atomic: bool) {
     let span = func.span(before);
     let place = |func: &mut Func, data: InstData, ty: Option<Type>| -> Option<Value> {
         let results: &[Type] = match &ty {
@@ -443,18 +462,29 @@ fn bump(func: &mut Func, array: Symbol, word: Type, slot: u64, before: Inst) {
     let access = MemInfo {
         size: 8,
         align: 8,
-        order: MemOrder::NotAtomic,
+        order: if atomic { MemOrder::Relaxed } else { MemOrder::NotAtomic },
         tbaa: None,
         owns: 0,
         restrict: Restrict::NONE,
     };
+    let one = func.add_imm(Imm::int(1, Type::int(64)));
+    let one = InstData { extra: Extra::Imm(one), ..InstData::new(Opcode::IConst) };
+    let one = place(func, one, Some(Type::int(64))).expect("a constant");
+    if atomic {
+        let mem = func.add_mem(access);
+        let args = func.push_values(&[addr, one]);
+        let add = InstData {
+            args,
+            extra: Extra::Rmw(RmwOp::Add, mem),
+            ..InstData::new(Opcode::AtomicRmw)
+        };
+        place(func, add, Some(Type::int(64)));
+        return;
+    }
     let mem = func.add_mem(access);
     let args = func.push_values(&[addr]);
     let read = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Load) };
     let old = place(func, read, Some(Type::int(64))).expect("a value");
-    let one = func.add_imm(Imm::int(1, Type::int(64)));
-    let one = InstData { extra: Extra::Imm(one), ..InstData::new(Opcode::IConst) };
-    let one = place(func, one, Some(Type::int(64))).expect("a constant");
     let args = func.push_values(&[old, one]);
     let sum = place(func, InstData { args, ..InstData::new(Opcode::Add) }, Some(Type::int(64)));
     let mem = func.add_mem(access);
@@ -817,6 +847,7 @@ mod tests {
         Coverage {
             counts: "a.gcda".to_owned(),
             count: true,
+            atomic: false,
             gnuc: (major, minor),
             phase: b'*',
             ctor: None,
