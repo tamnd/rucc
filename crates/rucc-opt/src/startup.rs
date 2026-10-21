@@ -43,11 +43,11 @@ pub fn functions(module: &Module, names: &Interner) -> Startup {
             continue;
         };
         for datum in global.init.map(|list| &module[list]).unwrap_or_default() {
-            if let Datum::Addr(reloc) = *datum
-                && let Some(SymbolRef::Func(func)) = module.lookup(module[reloc].symbol)
-                && !module[func].is_declaration()
-            {
-                into.insert(func);
+            let Datum::Addr(reloc) = *datum else { continue };
+            if let Some(SymbolRef::Func(func)) = module.lookup(module[reloc].symbol) {
+                if !module[func].is_declaration() {
+                    into.insert(func);
+                }
             }
         }
     }

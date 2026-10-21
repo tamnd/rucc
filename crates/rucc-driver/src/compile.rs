@@ -1689,9 +1689,7 @@ fn generate(
         } else {
             None
         };
-        if func.section.is_none()
-            && let Some(base) = base
-        {
+        if let (None, Some(base)) = (func.section, base) {
             let section = if opts.function_sections {
                 format!("{base}.{}", names.resolve(func.name))
             } else {
