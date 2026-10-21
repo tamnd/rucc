@@ -190,6 +190,7 @@ impl Checker<'_> {
             for attr in asked {
                 if let Some(level) = self.strict_flex_level(attr, decl.ty) {
                     self.annotations.strict_flex.insert((record, name), level);
+                    self.tast.record_strict_flex(record, name, level);
                 }
             }
         }

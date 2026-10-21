@@ -292,6 +292,9 @@ pub struct Context<'a> {
     /// Whether the objects are laid out newest first, which is what gcc does when it optimizes.
     /// See `Module::reverse_globals`.
     pub reorder: bool,
+    /// Whether the build optimizes for size, which is `-Os` and `-Oz`. gcc then gives an object
+    /// on AArch64 no more alignment than its type asks for. See `repr::static_align`.
+    pub for_size: bool,
     /// The extensions the command line builds for, which a function's own `target` attribute
     /// stands in place of.
     ///
@@ -336,6 +339,7 @@ impl fmt::Debug for Context<'_> {
             .field("fixed_x18", &self.fixed_x18)
             .field("tls_model", &self.tls_model)
             .field("reorder", &self.reorder)
+            .field("for_size", &self.for_size)
             .field("isa", &self.isa)
             .finish_non_exhaustive()
     }
@@ -417,6 +421,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         fixed_x18,
         tls_model,
         reorder,
+        for_size,
         isa,
         read,
     } = cx;
@@ -452,6 +457,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         fixed_x18,
         tls_model,
         reorder,
+        for_size,
         isa,
         read,
         module,
@@ -535,6 +541,8 @@ pub(crate) struct Unit<'a> {
     tls_model: TlsModel,
     /// Whether the objects are laid out newest first. See [`Context::reorder`].
     reorder: bool,
+    /// Whether the build optimizes for size. See [`Context::for_size`].
+    for_size: bool,
     /// The extensions the command line builds for. See [`Context::isa`].
     pub(crate) isa: rucc_target::Isa,
     /// How a file a `.incbin` names is read. See [`Context::read`].
@@ -1099,7 +1107,7 @@ impl Unit<'_> {
                     }
                 } else {
                     let thread = duration == StorageDuration::Thread;
-                    repr::static_align(self.types, self.target, ty, natural, thread)
+                    repr::static_align(self.types, self.target, ty, natural, thread, self.for_size)
                 }
             }
         };
