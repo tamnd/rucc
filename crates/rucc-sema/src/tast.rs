@@ -1201,6 +1201,30 @@ list_table! {
     add_init_entries, crate::decl::InitList => InitEntry, init_entries
 }
 
+/// Whether an array of this type at the end of a record may run past its end under this
+/// `-fstrict-flex-arrays` level, so that a program may allocate more of it than the type says.
+///
+/// Zero takes every trailing array, one takes `[]`, `[0]` and `[1]`, two takes `[]` and `[0]`
+/// and three takes only `[]`, which are gcc 15's four levels as measured through a pointer at
+/// `-O2`. Something that is not an array is not flexible at any level.
+#[must_use]
+pub fn flexible_at(types: &rucc_types::Types, ty: TypeId, level: u8) -> bool {
+    let rucc_types::TypeKind::Array { len, .. } = crate::eval::bare(types, ty) else {
+        return false;
+    };
+    let count = match len {
+        rucc_types::ArrayLen::Unknown | rucc_types::ArrayLen::Star => return true,
+        rucc_types::ArrayLen::Fixed(count) => count,
+        rucc_types::ArrayLen::Variable(_) => return false,
+    };
+    match level {
+        0 => true,
+        1 => count <= 1,
+        2 => count == 0,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_ast::BinaryOp;
@@ -1425,29 +1449,5 @@ mod tests {
 
         assert_eq!(tast[jump], Stmt::Goto(label));
         assert_eq!(tast[label].stmt, Some(target));
-    }
-}
-
-/// Whether an array of this type at the end of a record may run past its end under this
-/// `-fstrict-flex-arrays` level, so that a program may allocate more of it than the type says.
-///
-/// Zero takes every trailing array, one takes `[]`, `[0]` and `[1]`, two takes `[]` and `[0]`
-/// and three takes only `[]`, which are gcc 15's four levels as measured through a pointer at
-/// `-O2`. Something that is not an array is not flexible at any level.
-#[must_use]
-pub fn flexible_at(types: &rucc_types::Types, ty: TypeId, level: u8) -> bool {
-    let rucc_types::TypeKind::Array { len, .. } = crate::eval::bare(types, ty) else {
-        return false;
-    };
-    let count = match len {
-        rucc_types::ArrayLen::Unknown | rucc_types::ArrayLen::Star => return true,
-        rucc_types::ArrayLen::Fixed(count) => count,
-        rucc_types::ArrayLen::Variable(_) => return false,
-    };
-    match level {
-        0 => true,
-        1 => count <= 1,
-        2 => count == 0,
-        _ => false,
     }
 }

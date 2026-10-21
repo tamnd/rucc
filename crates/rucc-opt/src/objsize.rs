@@ -52,6 +52,12 @@
 //! `-O1` up, and tcc's `c2str`, which reads each line with `fgets (p, sizeof l - (p - l), fp)` at
 //! a `p` a loop moves, gets `__fgets_chk` from both compilers this way. See `Walk::within`.
 //!
+//! For the closest member the walk stops at the first `ptr_add` lowering marked as the start of a
+//! member it knows the length of, and the answer is that length less how far into the member the
+//! address is. That is how cxgb3's `memcpy (&d->flit[flits], ...)` is checked against the 128
+//! bytes of `flit` whatever `flits` is, as gcc checks it. A member that may run past its end
+//! leaves the question not known.
+//!
 //! The closest member, which is the low bit of the kind, is what a `ptr_add` that lowering wrote
 //! for stepping to a member says, as `Extra::Member`. An address the walk finds to be one of
 //! those, or one a constant further on, is in that member, which is how `strcpy (inst.buf, s)`
@@ -227,6 +233,8 @@ enum Object {
     Local(Value),
     /// A global, by its name.
     Global(Symbol),
+    /// The start of a member, which is the `ptr_add` lowering marked, with how long the member is.
+    Member(Value, u32),
 }
 
 /// An address that is what an allocator gave back with a constant number of bytes added, as
@@ -313,7 +321,7 @@ fn measure(func: &mut Func, inst: Inst, object: Object, size: u64) {
         func[at].results().next().expect("one result was asked for")
     };
     let start = match object {
-        Object::Local(start) => start,
+        Object::Local(start) | Object::Member(start, _) => start,
         // The address of a global is taken again here, since the one the walk passed may be in a
         // block that does not come before the question.
         Object::Global(name) => made(
@@ -787,9 +795,10 @@ impl Walk<'_> {
     /// when the program runs from how far into it the address is.
     ///
     /// The local has to be made before the question on every way to it, so that its address is
-    /// there to subtract. A global is one whose size `extents::vouched` stands behind. The closest
-    /// member is the object found, which is no smaller than any member the address is in, except
-    /// where the walk passes the start of a member, which this leaves as not known.
+    /// there to subtract. A global is one whose size `extents::vouched` stands behind. For the
+    /// closest member the object is the first member the walk passes the start of, which has to be
+    /// worked out before the question in the same way. Where the walk passes none it is the whole
+    /// object, which is no smaller than any member the address is in.
     fn within(&self, value: Value, question: Inst, ask: Ask) -> Option<Answer> {
         let object = self.object(value, ask, DEPTH, &mut Set::default()).ok()??;
         let size = match object {
@@ -800,6 +809,13 @@ impl Walk<'_> {
                 }
                 let Extra::Mem(mem) = self.func[inst].extra else { return None };
                 self.func[mem].size
+            }
+            Object::Member(start, size) => {
+                let Def::Result { inst, .. } = self.func[start].def else { return None };
+                if !self.precedes(inst, question) {
+                    return None;
+                }
+                u64::from(size)
             }
             Object::Global(name) => {
                 let Some(SymbolRef::Global(id)) = self.module.lookup(name) else { return None };
@@ -857,8 +873,12 @@ impl Walk<'_> {
                         let then = self.object(then, ask, depth, seen);
                         same(then, self.object(other, ask, depth, seen))
                     }
-                    Opcode::PtrAdd if ask.closest && data.extra.member().is_some() => Err(()),
-                    Opcode::PtrAdd => self.object(*args.first().ok_or(())?, ask, depth, seen),
+                    Opcode::PtrAdd => match data.extra.member().filter(|_| ask.closest) {
+                        // A member that may run past its end is as long as nothing says.
+                        Some(0) => Err(()),
+                        Some(size) => Ok(Some(Object::Member(value, size))),
+                        None => self.object(*args.first().ok_or(())?, ask, depth, seen),
+                    },
                     Opcode::Alloca if args.is_empty() => Ok(Some(Object::Local(value))),
                     Opcode::GlobalAddr => {
                         let Extra::Symbol(name) = data.extra else { return Err(()) };
@@ -1551,5 +1571,40 @@ block0:
         answer(&mut module, &names, Some(&[]), Pic::Executable, true);
         let text = rucc_ir::print(&module, &names);
         assert!(!text.contains("counted"), "{text}");
+    }
+
+    /// The dynamic spelling of the closest member, about an address a step the program works out
+    /// past the start of a member, is the length of the member less how far in the address is,
+    /// worked out when the program runs, wherever the structure is. That is
+    /// `__builtin_dynamic_object_size (&d->flit[i], 1)` with `d` a parameter, which gcc 16 answers
+    /// with `128 - 8 * i` and nothing past the end. The whole object stays not known, and so does
+    /// a member that may run past its end.
+    #[test]
+    fn a_step_the_program_works_out_inside_a_member_is_measured_when_the_program_runs() {
+        let body = "
+func @f(ptr, i64), linkage(external) {
+block0(%0: ptr, %1: i64):
+    %2 = iconst.i64 0
+    %3 = ptr_add %0, %2, array 128
+    %4 = ptr_add.counted %3, %1
+    %5 = object_size.i64 %4, kind 5
+    call @use(%5) : (i64)
+    %6 = object_size.i64 %4, kind 4
+    call @use(%6) : (i64)
+    %7 = object_size.i64 %4, kind 1
+    call @use(%7) : (i64)
+    %8 = iconst.i64 8
+    %9 = ptr_add %0, %8, member 0
+    %10 = ptr_add.counted %9, %1
+    %11 = object_size.i64 %10, kind 5
+    call @use(%11) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [-1, -1, -1]);
+        let text = printed(body, Some(&[]));
+        assert_eq!(text.matches("ptrtoint").count(), 2, "{text}");
+        assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
+        assert!(text.contains("iconst.i64 128"), "{text}");
     }
 }
