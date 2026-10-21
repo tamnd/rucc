@@ -303,6 +303,12 @@ pub struct Context<'a> {
     /// to hold the vector in, and the lanes go through memory one at a time the way they did
     /// before. See `Body::whole_vector`.
     pub isa: rucc_target::Isa,
+    /// Whether a value may be kept in a vector register, which `-mgeneral-regs-only` turns off.
+    ///
+    /// Only read on AArch64, where it says whether an operator over a whole vector of sixteen
+    /// bytes may be done in one `v` register. Without them the lanes go through memory one at a
+    /// time. See `Body::whole_vector`.
+    pub vector: bool,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -341,6 +347,7 @@ impl fmt::Debug for Context<'_> {
             .field("reorder", &self.reorder)
             .field("for_size", &self.for_size)
             .field("isa", &self.isa)
+            .field("vector", &self.vector)
             .finish_non_exhaustive()
     }
 }
@@ -423,6 +430,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         reorder,
         for_size,
         isa,
+        vector,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -459,6 +467,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         reorder,
         for_size,
         isa,
+        vector,
         read,
         module,
         diagnostics: Vec::new(),
@@ -546,6 +555,8 @@ pub(crate) struct Unit<'a> {
     for_size: bool,
     /// The extensions the command line builds for. See [`Context::isa`].
     pub(crate) isa: rucc_target::Isa,
+    /// Whether a value may be kept in a vector register. See [`Context::vector`].
+    pub(crate) vector: bool,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,

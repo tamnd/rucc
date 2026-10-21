@@ -45,6 +45,7 @@ use Form::{
     LoadFp, LoadImm, LoadPair, LoadPairFp, Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push,
     PushPair, Release, Ret, RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select,
     Set, SetBits, Store, StoreFp, StorePair, StorePairFp, Swap, Template, Test, Trap, Unary,
+    VConst, VLaneIn, VLaneOut, VShift,
 };
 
 /// The operand vector one machine instruction has.
@@ -127,6 +128,17 @@ pub enum Form {
     FUnary,
     /// A copy within the other register file.
     FMove,
+    /// A destination and one source in the other register file, each lane of the source shifted
+    /// by the instruction's constant.
+    VShift,
+    /// A destination in the other register file and a constant every byte of it is set to.
+    VConst,
+    /// One lane of a vector register into a general register, the lane the instruction's
+    /// constant names.
+    VLaneOut,
+    /// A general register put into one lane of a vector register, the lane the instruction's
+    /// constant names. The other lanes are kept, so the destination is the first source.
+    VLaneIn,
     /// One floating point width to the other.
     FConvert,
     /// A general register into the other file, as a number or as bits.
@@ -259,6 +271,11 @@ static THREE_FP_TO_FP: [OperandDesc; 4] = [
     OperandDesc::read(FPR),
     OperandDesc::read(FPR),
 ];
+static LANE_IN: [OperandDesc; 3] = [
+    OperandDesc::write(FPR).with(Constraint::Reuse(1)),
+    OperandDesc::read(FPR),
+    OperandDesc::read(GPR),
+];
 static GPR_TO_FP: [OperandDesc; 2] = [OperandDesc::write(FPR), OperandDesc::read(GPR)];
 static FP_TO_GPR: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(FPR)];
 static SET_BITS: [OperandDesc; 3] =
@@ -317,15 +334,16 @@ impl Form {
             CmpI | Test | Store | BrCond | JumpReg | JumpZero | Push => &ONE_READ,
             Pop => &ONE_WRITTEN,
             PopPair | LoadPair => &TWO_WRITTEN,
-            LoadFp | ArgValFp => &ONE_WRITTEN_FP,
+            LoadFp | ArgValFp | VConst => &ONE_WRITTEN_FP,
             StoreFp => &ONE_READ_FP,
             LoadPairFp => &TWO_WRITTEN_FP,
             StorePairFp => &TWO_FP_READ,
-            FUnary | FMove | FConvert => &FP_TO_FP,
+            FUnary | FMove | FConvert | VShift => &FP_TO_FP,
             FAlu => &TWO_FP_TO_FP,
             FMulAdd => &THREE_FP_TO_FP,
             IntToFp => &GPR_TO_FP,
-            FpToInt => &FP_TO_GPR,
+            FpToInt | VLaneOut => &FP_TO_GPR,
+            VLaneIn => &LANE_IN,
             SetBits => &SET_BITS,
             FCmp => &TWO_FP_READ,
             FCmpSet => &TWO_FP_TO_ONE,
@@ -343,7 +361,20 @@ impl Form {
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | Insert | AluI | AluShift | CmpI | CmpSetI | Probe)
+        matches!(
+            self,
+            LoadImm
+                | Insert
+                | AluI
+                | AluShift
+                | CmpI
+                | CmpSetI
+                | Probe
+                | VShift
+                | VConst
+                | VLaneOut
+                | VLaneIn
+        )
     }
 
     /// Whether an instruction of this form carries an addressing mode.
@@ -759,6 +790,77 @@ pub static INSTS: &[(&str, Form)] = &[
     // A vector register cleared in front of a `ret` under `-fzero-call-used-regs=`, and nothing
     // else. See `rucc_codegen::zero`.
     ("movi_zero", FMove),
+    // Sixteen bytes of the other register file as a vector of integer lanes, which is how a
+    // GNU vector or a NEON type is kept when the machine has the vector unit. The name is the
+    // arrangement of the lanes, and the bitwise ones have none because the lanes do not matter.
+    ("ldr_q", LoadFp),
+    ("str_q", StoreFp),
+    ("add_16b", FAlu),
+    ("add_8h", FAlu),
+    ("add_4s", FAlu),
+    ("add_2d", FAlu),
+    ("sub_16b", FAlu),
+    ("sub_8h", FAlu),
+    ("sub_4s", FAlu),
+    ("sub_2d", FAlu),
+    ("and_v", FAlu),
+    ("orr_v", FAlu),
+    ("eor_v", FAlu),
+    ("not_v", FUnary),
+    ("neg_16b", FUnary),
+    ("neg_8h", FUnary),
+    ("neg_4s", FUnary),
+    ("neg_2d", FUnary),
+    // Lane by lane comparisons, each lane all ones where it held and zero where it did not.
+    ("cmeq_16b", FAlu),
+    ("cmeq_8h", FAlu),
+    ("cmeq_4s", FAlu),
+    ("cmeq_2d", FAlu),
+    ("cmgt_16b", FAlu),
+    ("cmgt_8h", FAlu),
+    ("cmgt_4s", FAlu),
+    ("cmgt_2d", FAlu),
+    ("cmge_16b", FAlu),
+    ("cmge_8h", FAlu),
+    ("cmge_4s", FAlu),
+    ("cmge_2d", FAlu),
+    ("cmhi_16b", FAlu),
+    ("cmhi_8h", FAlu),
+    ("cmhi_4s", FAlu),
+    ("cmhi_2d", FAlu),
+    ("cmhs_16b", FAlu),
+    ("cmhs_8h", FAlu),
+    ("cmhs_4s", FAlu),
+    ("cmhs_2d", FAlu),
+    // Every lane shifted by the same constant, which is between zero and the lane's width less
+    // one for a left shift and between one and the width for a right shift.
+    ("shl_16b", VShift),
+    ("shl_8h", VShift),
+    ("shl_4s", VShift),
+    ("shl_2d", VShift),
+    ("ushr_16b", VShift),
+    ("ushr_8h", VShift),
+    ("ushr_4s", VShift),
+    ("ushr_2d", VShift),
+    ("sshr_16b", VShift),
+    ("sshr_8h", VShift),
+    ("sshr_4s", VShift),
+    ("sshr_2d", VShift),
+    // A general register copied into every lane, a constant into every byte, and one lane out
+    // of a vector register or into one.
+    ("dup_16b", IntToFp),
+    ("dup_8h", IntToFp),
+    ("dup_4s", IntToFp),
+    ("dup_2d", IntToFp),
+    ("movi_16b", VConst),
+    ("umov_b", VLaneOut),
+    ("umov_h", VLaneOut),
+    ("umov_s", VLaneOut),
+    ("umov_d", VLaneOut),
+    ("ins_b", VLaneIn),
+    ("ins_h", VLaneIn),
+    ("ins_s", VLaneIn),
+    ("ins_d", VLaneIn),
     // Between the two floating point widths.
     ("fcvt_f64_f32", FConvert),
     ("fcvt_f32_f64", FConvert),

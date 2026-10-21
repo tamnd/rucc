@@ -84,7 +84,8 @@ use rucc_cost::heuristics;
 use rucc_diag::Span;
 use rucc_ir::{
     Abi, AsmOperand, AsmOperands, AttrSet, Block, Def, Extra, Flags, FloatPred, Func, Inst,
-    Linkage, MemOrder, Opcode, Param, PrefetchHint, RmwOp, TlsModel, Type, Value, Visibility,
+    IntPred, Linkage, MemOrder, Opcode, Param, PrefetchHint, RmwOp, TlsModel, Type, Value,
+    Visibility,
 };
 use rucc_mir as mir;
 use rucc_target::template::{template_name, template_reg};
@@ -1663,7 +1664,8 @@ struct Lowering<'a> {
     /// [`rucc_ir::Func::declare_value_from`].
     marks: Map<Block, Vec<Mark>>,
     /// Each constant splat every reader of which is a vector shift that takes it as the count
-    /// in its byte, so that nothing is written for it. See [`Self::shifted_by_splat`].
+    /// in its byte, or on AArch64 a `neg` or `not` that needs no constant, so that nothing is
+    /// written for it. See [`Self::only_counts`].
     counts: Set<Inst>,
     /// The last `insertlane` of each chain that writes one value into every lane of a vector of
     /// four `int` or two `long`, with the value. See [`Self::broadcast_chains`].
@@ -2443,6 +2445,25 @@ impl<'a> Lowering<'a> {
                     if !self.on_aarch64() =>
                 {
                     self.lanes(inst)?;
+                    continue;
+                }
+                // The same on AArch64, where each of the four integer shapes of sixteen bytes is
+                // in one `v` register, along with the comparisons whose masks they are and the
+                // shifts by a constant. See `Self::neon`.
+                Opcode::ExtractLane
+                | Opcode::InsertLane
+                | Opcode::Splat
+                | Opcode::ICmp
+                | Opcode::SExt
+                | Opcode::Bitcast
+                | Opcode::Shl
+                | Opcode::LShr
+                | Opcode::AShr
+                | Opcode::Sub
+                | Opcode::Xor
+                    if self.on_aarch64() && self.neon_by_name(inst) =>
+                {
+                    self.neon(inst)?;
                     continue;
                 }
                 // Every lane shifted by one constant count, for the same reason: the count is a
@@ -5269,9 +5290,9 @@ impl<'a> Lowering<'a> {
         self.pshufd(inst, into, across, if quad { [0, 1, 0, 1] } else { [0, 0, 0, 0] });
     }
 
-    /// The chains of `insertlane` that write one value into every lane of a vector of four `int`
-    /// or two `long`, by the last insert of each with the value, and what is under them that
-    /// nothing else reads.
+    /// The chains of `insertlane` that write one value into every lane of a vector held in one
+    /// register, by the last insert of each with the value, and what is under them that nothing
+    /// else reads. See [`Self::held_lanes`].
     ///
     /// That is what `_mm_set1_epi32` and `(__v2di){a, a}` are, the vector written lane by lane
     /// over a splat of zero. Done one lane at a time, four `int` is sixteen instructions, where gcc
@@ -5279,23 +5300,17 @@ impl<'a> Lowering<'a> {
     /// last insert of a chain is written that way by [`Self::lanes`]. The inserts below it are
     /// read by the next one up and nothing else, and what the first one was built on is written
     /// over in every lane, so a constant splat there that nothing else reads is not written
-    /// either.
+    /// either. On AArch64 the last insert is one `dup` from the general register, written by
+    /// [`Self::neon`].
     fn broadcast_chains(&self) -> (Map<Inst, Value>, Set<Inst>) {
         let mut broadcasts = Map::default();
         let mut beneath = Set::default();
-        if self.on_aarch64() {
-            return (broadcasts, beneath);
-        }
         for block in self.source.blocks() {
             for inst in self.source.insts(block) {
                 let Some(value) = self.inserted(inst) else { continue };
                 let Some(result) = self.source[inst].first_result else { continue };
-                let lanes = match crate::term::vector_slot(self.source[result].ty) {
-                    Some(0) => 4,
-                    Some(1) => 2,
-                    _ => continue,
-                };
-                let mut written = 0u8;
+                let Some(lanes) = self.held_lanes(self.source[result].ty) else { continue };
+                let mut written = 0u32;
                 let mut below = Vec::new();
                 let mut at = inst;
                 let base = loop {
@@ -5305,7 +5320,7 @@ impl<'a> Lowering<'a> {
                     }
                     written |= 1 << lane;
                     let vector = self.source[self.source[at].args][0];
-                    if written == (1 << lanes) - 1 {
+                    if written == (1u32 << lanes) - 1 {
                         break Some(vector);
                     }
                     let Def::Result { inst: under, .. } = self.source[vector].def else {
@@ -5330,6 +5345,17 @@ impl<'a> Lowering<'a> {
         (broadcasts, beneath)
     }
 
+    /// How many lanes a vector of that type has when it is one this machine holds in one vector
+    /// register: four `int` or two `long` on x86-64, and any of the four integer shapes of sixteen
+    /// bytes on AArch64.
+    fn held_lanes(&self, ty: Type) -> Option<u8> {
+        let slot = crate::term::vector_slot(ty)?;
+        if !self.on_aarch64() && slot > 1 {
+            return None;
+        }
+        u8::try_from(ty.lanes()).ok()
+    }
+
     /// The value an `insertlane` writes into its lane, when that is what the instruction is.
     fn inserted(&self, inst: Inst) -> Option<Value> {
         let data = &self.source[inst];
@@ -5342,46 +5368,67 @@ impl<'a> Lowering<'a> {
         }
     }
 
-    /// The count a shift of a vector of four `int` or two `long` moves every lane by, when it is
-    /// the same constant in every lane and less than the width of a lane.
+    /// The count a shift of a vector held in one register moves every lane by, when it is the
+    /// same constant in every lane and less than the width of a lane. See [`Self::held_lanes`].
     ///
     /// A count as wide as the lane or wider is left alone, because C gives no answer for it and
     /// the instruction gives zero, so there is nothing to agree with.
     fn shifted_by_splat(&self, inst: Inst) -> Option<u8> {
         let data = &self.source[inst];
         let result = data.first_result?;
-        let bits = match crate::term::vector_slot(self.source[result].ty)? {
-            0 => 32,
-            1 => 64,
-            _ => return None,
-        };
+        let ty = self.source[result].ty;
+        self.held_lanes(ty)?;
+        let bits = u128::from(ty.lane().bits());
         let &[_, count] = &self.source[data.args] else { return None };
-        let Def::Result { inst: made, .. } = self.source[count].def else { return None };
-        let made = &self.source[made];
-        let Extra::Imm(imm) = made.extra else { return None };
-        if made.opcode != Opcode::Splat {
-            return None;
-        }
-        let by = self.source[imm].bits();
+        let by = self.splat_bits(count)?;
         (by < bits).then(|| u8::try_from(by).ok()).flatten()
     }
 
-    /// The constant splats only ever read as the count of a shift [`Self::vector_shift`] takes,
-    /// which is a number in the instruction's byte and never a register.
-    fn only_counts(&self) -> Set<Inst> {
-        if self.on_aarch64() {
-            return Set::default();
+    /// The constant a value is a `splat` of, when it is one.
+    fn splat_bits(&self, value: Value) -> Option<u128> {
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        let made = &self.source[inst];
+        let Extra::Imm(imm) = made.extra else { return None };
+        (made.opcode == Opcode::Splat).then(|| self.source[imm].bits())
+    }
+
+    /// The operand and the constant of a `sub` from zero or an `xor` with all ones on a vector
+    /// held in one register, which is how the front end writes `-v` and `~v` and what AArch64
+    /// does in one `neg` or one `not` with no constant at all.
+    fn negated(&self, inst: Inst) -> Option<(Value, Value)> {
+        let data = &self.source[inst];
+        let ty = self.source[data.first_result?].ty;
+        self.held_lanes(ty)?;
+        let &[a, b] = &self.source[data.args] else { return None };
+        let ones = u128::MAX >> (128 - ty.lane().bits());
+        let lanes = |value| self.splat_bits(value).map(|bits| bits & ones);
+        match data.opcode {
+            Opcode::Sub if lanes(a) == Some(0) => Some((b, a)),
+            Opcode::Xor if lanes(b) == Some(ones) => Some((a, b)),
+            Opcode::Xor if lanes(a) == Some(ones) => Some((b, a)),
+            _ => None,
         }
+    }
+
+    /// The constant splats only ever read as the count of a shift [`Self::vector_shift`] takes,
+    /// which is a number in the instruction's byte and never a register. On AArch64 also the
+    /// zero and the all ones of a `neg` or a `not` (see [`Self::negated`]), which read no
+    /// constant at all.
+    fn only_counts(&self) -> Set<Inst> {
         let mut read: Map<Value, u32> = Map::default();
         for block in self.source.blocks() {
             for inst in self.source.insts(block) {
                 let data = &self.source[inst];
                 let shift = matches!(data.opcode, Opcode::Shl | Opcode::LShr | Opcode::AShr);
-                if !shift || self.shifted_by_splat(inst).is_none() {
-                    continue;
-                }
-                if let &[_, count] = &self.source[data.args] {
-                    *read.entry(count).or_default() += 1;
+                let constant = if shift && self.shifted_by_splat(inst).is_some() {
+                    self.source[data.args].get(1).copied()
+                } else if self.on_aarch64() {
+                    self.negated(inst).map(|(_, constant)| constant)
+                } else {
+                    None
+                };
+                if let Some(constant) = constant {
+                    *read.entry(constant).or_default() += 1;
                 }
             }
         }
@@ -5432,6 +5479,283 @@ impl<'a> Lowering<'a> {
     fn four_ints(&self, inst: Inst) -> bool {
         let result = self.source[inst].first_result;
         result.is_some_and(|result| crate::term::vector_slot(self.source[result].ty) == Some(0))
+    }
+
+    /// Whether an instruction on a vector of sixteen bytes is one AArch64 writes by name, which
+    /// is what [`Self::neon`] takes.
+    fn neon_by_name(&self, inst: Inst) -> bool {
+        let data = &self.source[inst];
+        let held = |value: Value| crate::term::vector_slot(self.source[value].ty).is_some();
+        let first = self.source[data.args].first().copied();
+        let result = data.first_result;
+        match data.opcode {
+            Opcode::Splat => result.is_some_and(held) && matches!(data.extra, Extra::Imm(_)),
+            Opcode::ExtractLane | Opcode::InsertLane => first.is_some_and(held),
+            Opcode::ICmp => first.is_some_and(held) && self.only_masks(inst),
+            Opcode::SExt => {
+                let (Some(first), Some(result)) = (first, result) else { return false };
+                held(result) && self.vector_compare(first).is_some_and(|c| self.only_masks(c))
+            }
+            Opcode::Bitcast => {
+                let (Some(first), Some(result)) = (first, result) else { return false };
+                held(first) && held(result)
+            }
+            Opcode::Shl | Opcode::LShr | Opcode::AShr => self.shifted_by_splat(inst).is_some(),
+            Opcode::Sub | Opcode::Xor => self.negated(inst).is_some(),
+            _ => false,
+        }
+    }
+
+    /// Whether every read of a comparison of two vectors is a `sext` in its own block to lanes as
+    /// wide as the ones compared, which is the mask a C comparison of vectors gives.
+    ///
+    /// [`Self::neon`] leaves the answer in a vector register as that mask and lets the `sext` be
+    /// no instruction, which is only right when nothing else reads the answer. A comparison read
+    /// any other way, or by a `sext` in another block, is left to the rules.
+    fn only_masks(&self, compare: Inst) -> bool {
+        let data = &self.source[compare];
+        let (Some(answer), Some(&operand)) = (data.first_result, self.source[data.args].first())
+        else {
+            return false;
+        };
+        let Some(block) = self.source.block_of(compare) else { return false };
+        let bits = self.source[operand].ty.lane().bits();
+        let masks = self
+            .source
+            .insts(block)
+            .filter(|&user| {
+                let user = &self.source[user];
+                user.opcode == Opcode::SExt
+                    && self.source[user.args] == [answer]
+                    && user.first_result.is_some_and(|mask| {
+                        let ty = self.source[mask].ty;
+                        crate::term::vector_slot(ty).is_some() && ty.lane().bits() == bits
+                    })
+            })
+            .count();
+        u32::try_from(masks).is_ok_and(|masks| masks == self.uses[answer.index()])
+    }
+
+    /// The comparison of two vectors held in one register each that a value is the answer of.
+    fn vector_compare(&self, value: Value) -> Option<Inst> {
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        let data = &self.source[inst];
+        let &operand = self.source[data.args].first()?;
+        let held = crate::term::vector_slot(self.source[operand].ty).is_some();
+        (data.opcode == Opcode::ICmp && held).then_some(inst)
+    }
+
+    /// One instruction on a vector of sixteen bytes in a `v` register, which is what gcc writes
+    /// for a GNU vector or a NEON type on AArch64.
+    ///
+    /// A `splat` of a constant whose bytes are all the same is one `movi`, and any other is the
+    /// constant built in a general register and copied into every lane with `dup`. A lane is read
+    /// with `umov` and replaced with `ins`, and the last insert of a chain that writes one value
+    /// into every lane is one `dup` (see [`Self::broadcast_chains`]). A comparison is `cmeq`,
+    /// `cmgt`, `cmge`, `cmhi` or `cmhs`, with the operands the other way round for less than and
+    /// a `not` after an equality for not equal, and it is written where it stands, into a vector
+    /// register: the `sext` that makes it a mask is then no instruction, because the machine's
+    /// answer is already all ones or all zeros in each lane. A bitcast between two shapes is no
+    /// instruction either, since both are the same register. A shift by a constant is `shl`,
+    /// `ushr` or `sshr`, and a right shift by nothing, which those cannot say, is the register
+    /// itself. A subtraction from zero is one `neg` and an `xor` with all ones is one `not`,
+    /// with nothing written for the constant.
+    fn neon(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let opcode = data.opcode;
+        let extra = data.extra;
+        let args: Vec<Value> = self.source[data.args].to_vec();
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        let (fpr, gpr) = (self.conv.sse_class, self.gpr);
+        let span = self.source.span(inst);
+        let block = self.at.expect("a block is being filled");
+        let shape = |ty: Type| match ty.lane().bits() {
+            8 => Some(("16b", "b")),
+            16 => Some(("8h", "h")),
+            32 => Some(("4s", "s")),
+            64 => Some(("2d", "d")),
+            _ => None,
+        };
+        // A `splat` of a constant reads no value, and everything else reads at least one.
+        let first = args.first().copied();
+        let first = |this: &Self| first.ok_or_else(|| this.unsupported(inst));
+        match opcode {
+            Opcode::Splat => {
+                let Extra::Imm(imm) = extra else { return Err(self.unsupported(inst)) };
+                let ty = self.source[result].ty;
+                let (arrangement, _) = shape(ty).ok_or_else(|| self.unsupported(inst))?;
+                let bytes = ty.lane().bits() / 8;
+                let mask = u128::MAX >> (128 - 8 * bytes);
+                let lane = u64::try_from(self.source[imm].bits() & mask).unwrap_or(0);
+                let low = lane & 0xff;
+                let same = (1..bytes).all(|at| (lane >> (8 * at)) & 0xff == low);
+                let into = self.new_reg(result);
+                if same {
+                    let movi = self.named("movi_16b");
+                    let byte = i64::try_from(low).unwrap_or(0);
+                    self.out.build(block, movi).at(span).def(into, fpr).imm(byte).finish();
+                } else {
+                    let held = self.wide_constant(block, span, lane);
+                    let dup = self.named(&format!("dup_{arrangement}"));
+                    self.out.build(block, dup).at(span).def(into, fpr).uses(held, gpr).finish();
+                }
+            }
+            Opcode::InsertLane if self.broadcasts.contains_key(&inst) => {
+                let value = self.broadcasts[&inst];
+                let ty = self.source[result].ty;
+                let (arrangement, _) = shape(ty).ok_or_else(|| self.unsupported(inst))?;
+                let held = self.reg_of(value)?;
+                let into = self.new_reg(result);
+                let dup = self.named(&format!("dup_{arrangement}"));
+                self.out.build(block, dup).at(span).def(into, fpr).uses(held, gpr).finish();
+            }
+            Opcode::ExtractLane | Opcode::InsertLane => {
+                let Extra::Lane(lane) = extra else { return Err(self.unsupported(inst)) };
+                let first = first(self)?;
+                let (_, letter) =
+                    shape(self.source[first].ty).ok_or_else(|| self.unsupported(inst))?;
+                let vector = self.reg_of(first)?;
+                if opcode == Opcode::ExtractLane {
+                    let into = self.new_reg(result);
+                    let umov = self.named(&format!("umov_{letter}"));
+                    self.out
+                        .build(block, umov)
+                        .at(span)
+                        .def(into, gpr)
+                        .uses(vector, fpr)
+                        .imm(i64::from(lane))
+                        .finish();
+                } else {
+                    let &[_, value] = &args[..] else { return Err(self.unsupported(inst)) };
+                    let scalar = self.reg_of(value)?;
+                    let into = self.new_reg(result);
+                    // The other lanes are the ones the source holds, so the answer is said to be
+                    // written over it, the way `movk` is.
+                    let ins = self.named(&format!("ins_{letter}"));
+                    self.out
+                        .build(block, ins)
+                        .at(span)
+                        .operand(mir::Operand::write(into, fpr).with(Constraint::Reuse(1)))
+                        .operand(mir::Operand::read(vector, fpr))
+                        .operand(mir::Operand::read(scalar, gpr))
+                        .imm(i64::from(lane))
+                        .finish();
+                }
+            }
+            Opcode::ICmp => {
+                let Extra::IntPred(pred) = extra else { return Err(self.unsupported(inst)) };
+                let &[lhs, rhs] = &args[..] else { return Err(self.unsupported(inst)) };
+                let (arrangement, _) =
+                    shape(self.source[lhs].ty).ok_or_else(|| self.unsupported(inst))?;
+                let (name, swapped, negated) = match pred {
+                    IntPred::Eq => ("cmeq", false, false),
+                    IntPred::Ne => ("cmeq", false, true),
+                    IntPred::Sgt => ("cmgt", false, false),
+                    IntPred::Sge => ("cmge", false, false),
+                    IntPred::Slt => ("cmgt", true, false),
+                    IntPred::Sle => ("cmge", true, false),
+                    IntPred::Ugt => ("cmhi", false, false),
+                    IntPred::Uge => ("cmhs", false, false),
+                    IntPred::Ult => ("cmhi", true, false),
+                    IntPred::Ule => ("cmhs", true, false),
+                };
+                let (a, b) = if swapped { (rhs, lhs) } else { (lhs, rhs) };
+                let (a, b) = (self.reg_of(a)?, self.reg_of(b)?);
+                let fresh = |this: &mut Self| {
+                    let reg = this.out.new_vreg(fpr);
+                    this.out.set_width(reg, 16);
+                    reg
+                };
+                let mask = fresh(self);
+                let compare = self.named(&format!("{name}_{arrangement}"));
+                self.out
+                    .build(block, compare)
+                    .at(span)
+                    .def(mask, fpr)
+                    .uses(a, fpr)
+                    .uses(b, fpr)
+                    .finish();
+                let answer = if negated {
+                    let not = fresh(self);
+                    let opcode = self.named("not_v");
+                    self.out.build(block, opcode).at(span).def(not, fpr).uses(mask, fpr).finish();
+                    not
+                } else {
+                    mask
+                };
+                self.regs[result.index()] = Some(answer);
+            }
+            Opcode::SExt | Opcode::Bitcast => {
+                let reg = self.reg_of(first(self)?)?;
+                self.regs[result.index()] = Some(reg);
+            }
+            Opcode::Shl | Opcode::LShr | Opcode::AShr => {
+                let by = self.shifted_by_splat(inst).ok_or_else(|| self.unsupported(inst))?;
+                let (arrangement, _) =
+                    shape(self.source[result].ty).ok_or_else(|| self.unsupported(inst))?;
+                let from = self.reg_of(first(self)?)?;
+                if by == 0 && opcode != Opcode::Shl {
+                    self.regs[result.index()] = Some(from);
+                    return Ok(());
+                }
+                let stem = match opcode {
+                    Opcode::Shl => "shl",
+                    Opcode::LShr => "ushr",
+                    _ => "sshr",
+                };
+                let into = self.new_reg(result);
+                let shift = self.named(&format!("{stem}_{arrangement}"));
+                self.out
+                    .build(block, shift)
+                    .at(span)
+                    .def(into, fpr)
+                    .uses(from, fpr)
+                    .imm(i64::from(by))
+                    .finish();
+            }
+            Opcode::Sub | Opcode::Xor => {
+                let (operand, _) = self.negated(inst).ok_or_else(|| self.unsupported(inst))?;
+                let name = if opcode == Opcode::Sub {
+                    let (arrangement, _) =
+                        shape(self.source[result].ty).ok_or_else(|| self.unsupported(inst))?;
+                    format!("neg_{arrangement}")
+                } else {
+                    "not_v".to_owned()
+                };
+                let from = self.reg_of(operand)?;
+                let into = self.new_reg(result);
+                let unary = self.named(&name);
+                self.out.build(block, unary).at(span).def(into, fpr).uses(from, fpr).finish();
+            }
+            _ => return Err(self.unsupported(inst)),
+        }
+        Ok(())
+    }
+
+    /// A constant of up to sixty four bits in a new general register, as a `mov` of its low
+    /// sixteen bits and a `movk` for each piece above them that is not zero.
+    fn wide_constant(&mut self, block: mir::Block, span: Span, value: u64) -> mir::Reg {
+        let gpr = self.gpr;
+        let mut held = self.out.new_vreg(gpr);
+        let put = self.named("mov_ri_64");
+        let piece = |shift: u32| i64::try_from((value >> shift) & 0xffff).unwrap_or(0);
+        self.out.build(block, put).at(span).def(held, gpr).imm(piece(0)).finish();
+        for (shift, name) in [(16, "movk_ri_16_64"), (32, "movk_ri_32_64"), (48, "movk_ri_48_64")] {
+            if piece(shift) == 0 {
+                continue;
+            }
+            let next = self.out.new_vreg(gpr);
+            let opcode = self.named(name);
+            self.out
+                .build(block, opcode)
+                .at(span)
+                .operand(mir::Operand::write(next, gpr).with(Constraint::Reuse(1)))
+                .operand(mir::Operand::read(held, gpr))
+                .imm(piece(shift))
+                .finish();
+            held = next;
+        }
+        held
     }
 
     /// Whether a value is a `splat`, which has the same number in every lane.
@@ -10132,7 +10456,7 @@ mod tests {
         let five = build.iconst(i64, 5);
         let zero = build.iconst(i64, 0);
         let moved = build.binary(Opcode::Add, args[0], less, Flags::default());
-        build.icmp(rucc_ir::IntPred::Eq, moved, zero);
+        build.icmp(IntPred::Eq, moved, zero);
 
         // Extracted as an addition of minus five, which the comparison has no rule to take, so
         // the addition is written and compared against zero.
@@ -10620,7 +10944,7 @@ mod tests {
         let ptr = cast(&mut source, late, Opcode::IntToPtr, args[0], Type::PTR);
         Builder::new(&mut source, early).ret(&[ptr]);
         let mut build = Builder::new(&mut source, late);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.br_if(cond, early, &[], exit, &[]);
         Builder::new(&mut source, exit).ret(&[args[1]]);
 
@@ -10644,7 +10968,7 @@ mod tests {
 
         let mut build = Builder::new(&mut source, entry);
         let seven = build.iconst(i32, 7);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.br_if(cond, then, &[], other, &[]);
         // Both arms want the seven in a register, because a block argument is never an immediate,
         // and neither arm dominates the other.
@@ -10669,7 +10993,7 @@ mod tests {
 
         let mut build = Builder::new(&mut source, entry);
         let nine = build.iconst(i32, 9);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.br_if(cond, then, &[], join, &[nine]);
         Builder::new(&mut source, then).jump(join, &[args[0]]);
         Builder::new(&mut source, join).ret(&[got]);
@@ -10695,7 +11019,7 @@ mod tests {
         let then = source.create_block();
         let other = source.create_block();
         let mut build = Builder::new(&mut source, entry);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.br_if(cond, then, &[], other, &[]);
         Builder::new(&mut source, then).ret(&[args[0]]);
         Builder::new(&mut source, other).ret(&[args[1]]);
@@ -10724,7 +11048,7 @@ mod tests {
         let i32 = Type::int(32);
         let (mut names, mut source, entry, args) = blank(&[i32, i32]);
         let mut build = Builder::new(&mut source, entry);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         let picked = build.select(cond, args[0], args[1]);
         build.ret(&[picked]);
 
@@ -10746,7 +11070,7 @@ mod tests {
         let join = source.create_block();
         let got = source.append_param(join, i32);
         let mut build = Builder::new(&mut source, entry);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.br_if(cond, then, &[], other, &[]);
         let mut build = Builder::new(&mut source, then);
         let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
@@ -10794,7 +11118,7 @@ mod tests {
         let join = source.create_block();
         let got = source.append_param(join, i32);
         let mut build = Builder::new(&mut source, entry);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.br_if(cond, then, &[], join, &[args[1]]);
         Builder::new(&mut source, then).jump(join, &[args[0]]);
         let mut build = Builder::new(&mut source, join);
@@ -11248,7 +11572,7 @@ mod tests {
 
         let mut build = Builder::new(&mut source, entry);
         let seven = build.iconst(i32, 7);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.func().declare_value(seven, 41);
         build.br_if(cond, then, &[], other, &[]);
         Builder::new(&mut source, then).jump(join, &[seven]);
@@ -11486,7 +11810,7 @@ mod tests {
         let join = source.create_block();
 
         let mut build = Builder::new(&mut source, entry);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.br_if(cond, then, &[], other, &[]);
         let mut build = Builder::new(&mut source, then);
         build.store(args[0], local, plain(), Flags::default());
@@ -11519,7 +11843,7 @@ mod tests {
         let got = source.append_param(join, i32);
 
         let mut build = Builder::new(&mut source, entry);
-        let cond = build.icmp(rucc_ir::IntPred::Slt, args[0], args[1]);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
         build.br_if(cond, then, &[], other, &[]);
         let mut build = Builder::new(&mut source, then);
         let first = build.load(i32, counter, plain(), Flags::default());

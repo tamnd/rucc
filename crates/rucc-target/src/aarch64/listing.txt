@@ -373,6 +373,69 @@ ad008921	stp q1, q2, [x9, #16]	stp_f128
 1e604041	fmov d1, d2	fmov_rr_f64
 4ea21c41	mov v1.16b, v2.16b	mov_rr_f128
 6f00e401	movi v1.2d, #0	movi_zero
+3dc00521	ldr q1, [x9, #16]	ldr_q
+3d800521	str q1, [x9, #16]	str_q
+4e238441	add v1.16b, v2.16b, v3.16b	add_16b
+4e638441	add v1.8h, v2.8h, v3.8h	add_8h
+4ea38441	add v1.4s, v2.4s, v3.4s	add_4s
+4ee38441	add v1.2d, v2.2d, v3.2d	add_2d
+6e238441	sub v1.16b, v2.16b, v3.16b	sub_16b
+6e638441	sub v1.8h, v2.8h, v3.8h	sub_8h
+6ea38441	sub v1.4s, v2.4s, v3.4s	sub_4s
+6ee38441	sub v1.2d, v2.2d, v3.2d	sub_2d
+4e231c41	and v1.16b, v2.16b, v3.16b	and_v
+4ea31c41	orr v1.16b, v2.16b, v3.16b	orr_v
+6e231c41	eor v1.16b, v2.16b, v3.16b	eor_v
+6e205841	not v1.16b, v2.16b	not_v
+6e20b841	neg v1.16b, v2.16b	neg_16b
+6e60b841	neg v1.8h, v2.8h	neg_8h
+6ea0b841	neg v1.4s, v2.4s	neg_4s
+6ee0b841	neg v1.2d, v2.2d	neg_2d
+6e238c41	cmeq v1.16b, v2.16b, v3.16b	cmeq_16b
+6e638c41	cmeq v1.8h, v2.8h, v3.8h	cmeq_8h
+6ea38c41	cmeq v1.4s, v2.4s, v3.4s	cmeq_4s
+6ee38c41	cmeq v1.2d, v2.2d, v3.2d	cmeq_2d
+4e233441	cmgt v1.16b, v2.16b, v3.16b	cmgt_16b
+4e633441	cmgt v1.8h, v2.8h, v3.8h	cmgt_8h
+4ea33441	cmgt v1.4s, v2.4s, v3.4s	cmgt_4s
+4ee33441	cmgt v1.2d, v2.2d, v3.2d	cmgt_2d
+4e233c41	cmge v1.16b, v2.16b, v3.16b	cmge_16b
+4e633c41	cmge v1.8h, v2.8h, v3.8h	cmge_8h
+4ea33c41	cmge v1.4s, v2.4s, v3.4s	cmge_4s
+4ee33c41	cmge v1.2d, v2.2d, v3.2d	cmge_2d
+6e233441	cmhi v1.16b, v2.16b, v3.16b	cmhi_16b
+6e633441	cmhi v1.8h, v2.8h, v3.8h	cmhi_8h
+6ea33441	cmhi v1.4s, v2.4s, v3.4s	cmhi_4s
+6ee33441	cmhi v1.2d, v2.2d, v3.2d	cmhi_2d
+6e233c41	cmhs v1.16b, v2.16b, v3.16b	cmhs_16b
+6e633c41	cmhs v1.8h, v2.8h, v3.8h	cmhs_8h
+6ea33c41	cmhs v1.4s, v2.4s, v3.4s	cmhs_4s
+6ee33c41	cmhs v1.2d, v2.2d, v3.2d	cmhs_2d
+4f095441	shl v1.16b, v2.16b, #1	shl_16b
+4f115441	shl v1.8h, v2.8h, #1	shl_8h
+4f215441	shl v1.4s, v2.4s, #1	shl_4s
+4f415441	shl v1.2d, v2.2d, #1	shl_2d
+6f0f0441	ushr v1.16b, v2.16b, #1	ushr_16b
+6f1f0441	ushr v1.8h, v2.8h, #1	ushr_8h
+6f3f0441	ushr v1.4s, v2.4s, #1	ushr_4s
+6f7f0441	ushr v1.2d, v2.2d, #1	ushr_2d
+4f0f0441	sshr v1.16b, v2.16b, #1	sshr_16b
+4f1f0441	sshr v1.8h, v2.8h, #1	sshr_8h
+4f3f0441	sshr v1.4s, v2.4s, #1	sshr_4s
+4f7f0441	sshr v1.2d, v2.2d, #1	sshr_2d
+4e010c41	dup v1.16b, w2	dup_16b
+4e020c41	dup v1.8h, w2	dup_8h
+4e040c41	dup v1.4s, w2	dup_4s
+4e080c41	dup v1.2d, x2	dup_2d
+4f00e421	movi v1.16b, #1	movi_16b
+0e033c41	umov w1, v2.b[1]	umov_b
+0e063c41	umov w1, v2.h[1]	umov_h
+0e0c3c41	umov w1, v2.s[1]	umov_s
+4e183c41	umov x1, v2.d[1]	umov_d
+4e031c61	ins v1.b[1], w3	ins_b
+4e061c61	ins v1.h[1], w3	ins_h
+4e0c1c61	ins v1.s[1], w3	ins_s
+4e181c61	ins v1.d[1], x3	ins_d
 1e624041	fcvt s1, d2	fcvt_f64_f32
 1e22c041	fcvt d1, s2	fcvt_f32_f64
 1e220041	scvtf s1, w2	scvtf_32_f32
