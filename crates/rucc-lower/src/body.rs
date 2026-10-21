@@ -5111,6 +5111,9 @@ impl<'u> Body<'_, 'u> {
         if self.target().simd128 {
             return self.whole_simd128(opcode, lane, lanes, rhs, at, left, right, span);
         }
+        if self.on_neon() {
+            return self.whole_neon(opcode, lane, lanes, rhs, at, left, right, span);
+        }
         if self.target().tuple.arch() != Arch::X86_64
             || matches!(opcode, Opcode::FDiv | Opcode::Shl | Opcode::AShr | Opcode::LShr)
         {
@@ -5141,9 +5144,87 @@ impl<'u> Body<'_, 'u> {
         true
     }
 
+    /// Whether a vector of sixteen bytes of integer lanes may be one `v` register, which is
+    /// AArch64 unless `-mgeneral-regs-only` took the vector registers away.
+    ///
+    /// The calling convention is not part of it: a vector still arrives and leaves in a pair of
+    /// general registers, and it is only between the two that it is a vector.
+    fn on_neon(&self) -> bool {
+        self.target().tuple.arch() == Arch::Aarch64 && self.unit.vector
+    }
+
+    /// The AArch64 case of [`Self::whole_vector`], with `opcode` the operation on integer lanes.
+    ///
+    /// Each of the four integer shapes of sixteen bytes, under an add, a subtract or a bitwise
+    /// operator, which is one NEON instruction each, and a shift by a constant the same in every
+    /// lane and less than the lane's width, which is one `shl`, `ushr` or `sshr` with the count
+    /// in the instruction. The count is a `splat` of the constant, which is the form the back end
+    /// reads it in. A shift by anything else stays a lane at a time, because NEON shifts right
+    /// only by a constant, and so does a multiply.
+    #[allow(clippy::too_many_arguments)]
+    fn whole_neon(
+        &mut self,
+        opcode: Opcode,
+        lane: TypeId,
+        lanes: u64,
+        rhs: ExprId,
+        at: Value,
+        left: Value,
+        right: Value,
+        span: Span,
+    ) -> bool {
+        let one = self.value_type(lane, span);
+        if !one.is_int() || !matches!(one.bits(), 8 | 16 | 32 | 64) {
+            return false;
+        }
+        if u64::from(one.bits()) * lanes != 128 {
+            return false;
+        }
+        let shift = matches!(opcode, Opcode::Shl | Opcode::AShr | Opcode::LShr);
+        if !shift
+            && !matches!(opcode, Opcode::Add | Opcode::Sub | Opcode::And | Opcode::Or | Opcode::Xor)
+        {
+            return false;
+        }
+        let count = if shift {
+            let ExprKind::Convert { kind: Conversion::Broadcast, operand } = self.tast()[rhs].kind
+            else {
+                return false;
+            };
+            let mut eval = Eval::new(self.tast(), self.types(), self.target(), self.unit.names);
+            let folded = eval.integer(operand);
+            if eval.addressed() || !eval.finish().is_empty() {
+                return false;
+            }
+            match folded {
+                Ok(by) if (0..i128::from(one.bits())).contains(&by) => {
+                    Some(self.func.add_imm(Imm::int(by, one)))
+                }
+                _ => return false,
+            }
+        } else {
+            None
+        };
+        let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));
+        let info = untyped(repr::align_of(self.types(), self.target(), lane));
+        let mut build = self.build(span);
+        let a = build.load(whole, left, info, Flags::NONE);
+        let b = match count {
+            Some(by) => {
+                let data = InstData { extra: Extra::Imm(by), ..InstData::new(Opcode::Splat) };
+                build.value(data, whole)
+            }
+            None => build.load(whole, right, info, Flags::NONE),
+        };
+        let value = build.binary(opcode, a, b, Flags::NONE);
+        build.store(value, at, info, Flags::NONE);
+        true
+    }
+
     /// A comparison of two vectors of sixteen bytes done on the whole vectors at once, on wasm32
-    /// with `-msimd128`, and whether it was. The compare gives one bit for each lane, and its
-    /// `sext` is the mask, which is one SIMD compare in the back end.
+    /// with `-msimd128` and on AArch64 for integer lanes, and whether it was. The compare gives
+    /// one bit for each lane, and its `sext` is the mask, which is one SIMD compare in the back
+    /// end.
     #[allow(clippy::too_many_arguments)]
     fn whole_compare(
         &mut self,
@@ -5156,12 +5237,13 @@ impl<'u> Body<'_, 'u> {
         right: Value,
         span: Span,
     ) -> bool {
-        if !self.target().simd128 {
+        let neon = self.on_neon();
+        if !self.target().simd128 && !neon {
             return false;
         }
         let one = self.value_type(from, span);
         let fits = if one.is_float() {
-            matches!(one.bits(), 32 | 64)
+            !neon && matches!(one.bits(), 32 | 64)
         } else {
             one.is_int() && matches!(one.bits(), 8 | 16 | 32 | 64)
         };
@@ -5251,9 +5333,10 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// The scalar beside a vector of sixteen bytes of integer lanes written as one vector, on
-    /// wasm32 with `-msimd128`, and whether it was. A write of each lane is sixteen writes for
-    /// lanes of one byte, which is more pieces than sroa takes, so the local stays in memory. The
-    /// one vector is a piece that sroa takes, and the back end writes it as one `splat`.
+    /// wasm32 with `-msimd128` and on AArch64, and whether it was. A write of each lane is
+    /// sixteen writes for lanes of one byte, which is more pieces than sroa takes, so the local
+    /// stays in memory. The one vector is a piece that sroa takes, and the back end writes it as
+    /// one `splat` on wasm and one `dup` on AArch64.
     fn whole_broadcast(
         &mut self,
         value: Value,
@@ -5262,7 +5345,7 @@ impl<'u> Body<'_, 'u> {
         at: Value,
         span: Span,
     ) -> bool {
-        if !self.target().simd128 {
+        if !self.target().simd128 && !self.on_neon() {
             return false;
         }
         let one = self.value_type(lane, span);
@@ -5284,9 +5367,10 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// `-v` or `~v` on a vector of sixteen bytes done on the whole vector at once, on wasm32 with
-    /// `-msimd128`, and whether it was. A negation is a subtraction from zero, or an `fneg` for
-    /// float lanes, and `~v` is an `xor` with all ones, which the back end writes as one `neg` or
-    /// one `v128.not`.
+    /// `-msimd128` and on AArch64 for integer lanes, and whether it was. A negation is a
+    /// subtraction from zero, or an `fneg` for float lanes, and `~v` is an `xor` with all ones,
+    /// which the back end writes as one `neg` or one `v128.not` on wasm and as one `neg` or one
+    /// `not` on AArch64.
     fn whole_unary(
         &mut self,
         op: UnaryOp,
@@ -5296,12 +5380,13 @@ impl<'u> Body<'_, 'u> {
         from: Value,
         span: Span,
     ) -> bool {
-        if !self.target().simd128 || !matches!(op, UnaryOp::Minus | UnaryOp::BitNot) {
+        let neon = self.on_neon();
+        if (!self.target().simd128 && !neon) || !matches!(op, UnaryOp::Minus | UnaryOp::BitNot) {
             return false;
         }
         let one = self.value_type(lane, span);
         let int = one.is_int() && matches!(one.bits(), 8 | 16 | 32 | 64);
-        let float = one.is_float() && matches!(one.bits(), 32 | 64);
+        let float = !neon && one.is_float() && matches!(one.bits(), 32 | 64);
         if u64::from(one.bits()) * lanes != 128 || !(int || float && op == UnaryOp::Minus) {
             return false;
         }

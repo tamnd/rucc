@@ -548,6 +548,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 && sess.target.object_format != rucc_target::ObjectFormat::MachO,
                             for_size: opts.opt_level.is_size(),
                             isa: opts.isa,
+                            vector: opts.vector,
                             read: &mut read,
                         },
                     );
@@ -1133,6 +1134,9 @@ fn optimize(
     settings.isa = opts.isa;
     // On wasm32 with `-msimd128` a vector of sixteen bytes may be a `v128` value.
     settings.simd128 = target.simd128;
+    // On AArch64 a vector of sixteen bytes of integer lanes may be a value in a `v` register,
+    // unless `-mgeneral-regs-only` took those away.
+    settings.neon = target.tuple.arch() == Arch::Aarch64 && opts.vector;
     settings.conserve_stack = opts.conserve_stack;
     settings.stack_reuse = shares_slots(opts);
     settings.rewriter = rucc_opt::pipeline::Rewriter::from_name(&opts.rewriter).unwrap_or_default();

@@ -105,6 +105,10 @@ fn plain(form: Form) -> Timing {
         FMulAdd => (4, Unit::Float),
         FUnary | FConvert => (2, Unit::Float),
         FMove => (2, Unit::Float),
+        // A vector shifted by a constant, a constant built in one, and a lane moved into or out of
+        // one. The moves between the files cost what a move across does.
+        VShift | VConst => (2, Unit::Float),
+        VLaneIn | VLaneOut => (3, Unit::Float),
         // A general register into the other file and back, as a number or as bits. Both go across
         // the machine and the conversion rounds on the way, which the guide prices the same.
         IntToFp => (3, Unit::Float),

@@ -47,6 +47,8 @@
 //! keeps the local in memory, as a narrower lane or a lane read across two would. On wasm with
 //! SIMD128, a read or a write of one or two bytes at a lane is a lane as well, because wasm has
 //! lanes of `i8` and `i16`, and a float read or written at a lane of its width is a float lane.
+//! AArch64 with the vector registers is the same for integers: any of the four integer shapes of
+//! sixteen bytes is one piece, and a lane of any of their widths is a lane (tamnd/rucc#3775).
 //!
 //! This is what `<emmintrin.h>` code looks like after inlining: every intrinsic is a vector
 //! operator on copies of its operands, or a walk over the lanes of one, and tamnd/rucc#2320 is the
@@ -133,6 +135,7 @@ impl Pass for Sroa {
             little: an.outside().little_endian() == Some(true),
             vectors: an.outside().vectors() && an.outside().little_endian() == Some(true),
             simd128: an.outside().simd128() && an.outside().little_endian() == Some(true),
+            neon: an.outside().neon() && an.outside().little_endian() == Some(true),
         };
         let an = &*an;
         let cfg = an.cfg(func);
@@ -235,6 +238,7 @@ pub(crate) fn scalarizable(func: &Func, layout: DataLayout) -> Set<Value> {
         little: layout.little_endian,
         vectors: false,
         simd128: false,
+        neon: false,
     };
     let mut rpo = vec![0; func.counts().blocks];
     for (rank, block) in cfg.reverse_postorder().enumerate() {
@@ -265,6 +269,9 @@ struct Target {
     vectors: bool,
     /// Whether any vector of sixteen bytes may be one value, which is wasm32 with `-msimd128`.
     simd128: bool,
+    /// Whether a vector of sixteen bytes of integer lanes may be one value, which is AArch64 with
+    /// the vector registers.
+    neon: bool,
 }
 
 /// The analyses the rewrite reads, none of which it changes.
@@ -772,8 +779,10 @@ fn bulk(func: &Func, inst: Inst, offsets: &Map<Value, u64>, size: u64) -> Option
 /// How many bytes a value of the type is in memory, for the types the pass splits.
 fn width(ty: Type, target: Target) -> Option<u64> {
     if ty.is_vector() {
-        let sse2 = target.vectors && rucc_ir::term::vector_slot(ty).is_some();
-        return (sse2 || target.simd128 && is_v128(ty)).then_some(16);
+        let slot = rucc_ir::term::vector_slot(ty);
+        let sse2 = target.vectors && matches!(slot, Some(0 | 1));
+        let neon = target.neon && slot.is_some();
+        return (sse2 || neon || target.simd128 && is_v128(ty)).then_some(16);
     }
     if is_quad(ty) {
         return target.vectors.then_some(16);
@@ -826,11 +835,11 @@ fn convertible(from: Type, to: Type, pointer: Option<u64>) -> bool {
 }
 
 /// The one vector piece of a local that is read or written whole as a vector, or why it has to
-/// stay in memory. wasm has lanes of one and two bytes as well, so there a read or a write of a
-/// `char` or a `short` lane is a lane too.
+/// stay in memory. wasm and AArch64 have lanes of one and two bytes as well, so there a read or a
+/// write of a `char` or a `short` lane is a lane too.
 fn whole(uses: &[(Inst, Use)], size: u64, target: Target) -> Result<Vec<Piece>, &'static str> {
-    let lane_width =
-        |width: u64| matches!(width, 4 | 8) || target.simd128 && matches!(width, 1 | 2);
+    let narrow = target.simd128 || target.neon;
+    let lane_width = |width: u64| matches!(width, 4 | 8) || narrow && matches!(width, 1 | 2);
     let mut ty = None;
     let mut lane = None;
     for (_, found) in uses {
