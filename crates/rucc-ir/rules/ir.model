@@ -45,6 +45,8 @@
 ;; And the integer vectors, in the same register, as the bitvector of their lanes end to end.
 (semantics (value.i32x4 v) v)
 (semantics (value.i64x2 v) v)
+(semantics (value.i16x8 v) v)
+(semantics (value.i8x16 v) v)
 
 ;; Integer arithmetic. Two's complement in every case, which is what a bitvector is.
 (semantics (add.i8 l r) (bvadd l r))
@@ -93,6 +95,43 @@
 (semantics (or.i64x2 l r) (bvor l r))
 (semantics (xor.i32x4 l r) (bvxor l r))
 (semantics (xor.i64x2 l r) (bvxor l r))
+
+;; The other two shapes, which NEON computes in and SSE2 does too though nothing on x86-64 asks
+;; for them yet. The same lanes end to end, only narrower and more of them.
+(semantics (add.i16x8 l r)
+           (concat (bvadd (extract 127 112 l) (extract 127 112 r)) (bvadd (extract 111 96 l) (extract 111 96 r))
+                   (bvadd (extract 95 80 l) (extract 95 80 r)) (bvadd (extract 79 64 l) (extract 79 64 r))
+                   (bvadd (extract 63 48 l) (extract 63 48 r)) (bvadd (extract 47 32 l) (extract 47 32 r))
+                   (bvadd (extract 31 16 l) (extract 31 16 r)) (bvadd (extract 15 0 l) (extract 15 0 r))))
+(semantics (add.i8x16 l r)
+           (concat (bvadd (extract 127 120 l) (extract 127 120 r)) (bvadd (extract 119 112 l) (extract 119 112 r))
+                   (bvadd (extract 111 104 l) (extract 111 104 r)) (bvadd (extract 103 96 l) (extract 103 96 r))
+                   (bvadd (extract 95 88 l) (extract 95 88 r)) (bvadd (extract 87 80 l) (extract 87 80 r))
+                   (bvadd (extract 79 72 l) (extract 79 72 r)) (bvadd (extract 71 64 l) (extract 71 64 r))
+                   (bvadd (extract 63 56 l) (extract 63 56 r)) (bvadd (extract 55 48 l) (extract 55 48 r))
+                   (bvadd (extract 47 40 l) (extract 47 40 r)) (bvadd (extract 39 32 l) (extract 39 32 r))
+                   (bvadd (extract 31 24 l) (extract 31 24 r)) (bvadd (extract 23 16 l) (extract 23 16 r))
+                   (bvadd (extract 15 8 l) (extract 15 8 r)) (bvadd (extract 7 0 l) (extract 7 0 r))))
+(semantics (sub.i16x8 l r)
+           (concat (bvsub (extract 127 112 l) (extract 127 112 r)) (bvsub (extract 111 96 l) (extract 111 96 r))
+                   (bvsub (extract 95 80 l) (extract 95 80 r)) (bvsub (extract 79 64 l) (extract 79 64 r))
+                   (bvsub (extract 63 48 l) (extract 63 48 r)) (bvsub (extract 47 32 l) (extract 47 32 r))
+                   (bvsub (extract 31 16 l) (extract 31 16 r)) (bvsub (extract 15 0 l) (extract 15 0 r))))
+(semantics (sub.i8x16 l r)
+           (concat (bvsub (extract 127 120 l) (extract 127 120 r)) (bvsub (extract 119 112 l) (extract 119 112 r))
+                   (bvsub (extract 111 104 l) (extract 111 104 r)) (bvsub (extract 103 96 l) (extract 103 96 r))
+                   (bvsub (extract 95 88 l) (extract 95 88 r)) (bvsub (extract 87 80 l) (extract 87 80 r))
+                   (bvsub (extract 79 72 l) (extract 79 72 r)) (bvsub (extract 71 64 l) (extract 71 64 r))
+                   (bvsub (extract 63 56 l) (extract 63 56 r)) (bvsub (extract 55 48 l) (extract 55 48 r))
+                   (bvsub (extract 47 40 l) (extract 47 40 r)) (bvsub (extract 39 32 l) (extract 39 32 r))
+                   (bvsub (extract 31 24 l) (extract 31 24 r)) (bvsub (extract 23 16 l) (extract 23 16 r))
+                   (bvsub (extract 15 8 l) (extract 15 8 r)) (bvsub (extract 7 0 l) (extract 7 0 r))))
+(semantics (and.i16x8 l r) (bvand l r))
+(semantics (and.i8x16 l r) (bvand l r))
+(semantics (or.i16x8 l r) (bvor l r))
+(semantics (or.i8x16 l r) (bvor l r))
+(semantics (xor.i16x8 l r) (bvxor l r))
+(semantics (xor.i8x16 l r) (bvxor l r))
 
 ;; Float arithmetic. Not two's complement and not a bitvector: these are the operations the
 ;; floating point standard defines, and `fp.add` is the solver's own name for the one the
