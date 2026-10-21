@@ -5986,3 +5986,166 @@ kind = "builtin"
 gcc_version = "4.3"
 status = "implemented"
 tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_says_it_is_done"]
+
+[[feature]]
+name = "__builtin_sadd_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(int, int, int *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+notes = "The eighteen typed forms of the three generic checks. The signature converts the two operands to the type the name says and checks that the third argument points to it, and then the call is the same node as the generic form. The kernel uses the unsigned long long forms in crypto/ecc.c from 7.3."
+
+[[feature]]
+name = "__builtin_saddl_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(long, long, long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_saddll_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(long long, long long, long long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_uadd_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned int, unsigned int, unsigned int *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_uaddl_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned long, unsigned long, unsigned long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_uaddll_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned long long, unsigned long long, unsigned long long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_ssub_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(int, int, int *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_ssubl_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(long, long, long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_ssubll_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(long long, long long, long long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_usub_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned int, unsigned int, unsigned int *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_usubl_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned long, unsigned long, unsigned long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_usubll_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned long long, unsigned long long, unsigned long long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_smul_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(int, int, int *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_smull_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(long, long, long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_smulll_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(long long, long long, long long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_umul_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned int, unsigned int, unsigned int *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_umull_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned long, unsigned long, unsigned long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]
+
+[[feature]]
+name = "__builtin_umulll_overflow"
+kind = "builtin"
+gcc_version = "5.0"
+status = "implemented"
+signature = "_Bool(unsigned long long, unsigned long long, unsigned long long *)"
+used_by = ["linux"]
+tests = ["rucc-driver::a_typed_overflow_check_is_done_at_the_type_its_name_says"]

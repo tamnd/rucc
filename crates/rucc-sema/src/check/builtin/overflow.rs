@@ -63,6 +63,7 @@
 //! makes no difference to the answer: the type below picks something at least as wide as `int`
 //! anyway, so a promotion would have been undone by the widening that follows it.
 
+use rucc_base::Symbol;
 use rucc_diag::Span;
 use rucc_target::TargetInfo;
 use rucc_types::{IntKind, IntegerInfo, TypeId, integer_info, pointee};
@@ -118,6 +119,26 @@ pub(in crate::check) fn operation(spelled: &str) -> Option<Asked> {
         None => (spelled, true),
     };
     FAMILY.iter().find(|&&(name, _)| name == stem).map(|&(_, op)| Asked { op, stores })
+}
+
+/// Which arithmetic a typed form asks for, if a name is one of them.
+///
+/// The eighteen typed forms, `__builtin_uaddll_overflow` and the rest, are the generic three with
+/// the type written into the name: `s` or `u` for the sign, and nothing, `l` or `ll` for the
+/// width. Each is a row of `features.toml` with a signature, so the ordinary call checking converts
+/// the operands to that type and checks the pointer before this sees the call. After that the call
+/// is the generic form with three types that agree. The width suffix is tried longest first, for
+/// the reason `check/builtin/count.rs` gives.
+fn typed(spelled: &str) -> Option<Asked> {
+    let stem = spelled.strip_prefix("__builtin_")?.strip_suffix("_overflow")?;
+    let stem = stem.strip_prefix('s').or_else(|| stem.strip_prefix('u'))?;
+    let op = ["ll", "l", ""].iter().find_map(|width| match stem.strip_suffix(width)? {
+        "add" => Some(OverflowOp::Add),
+        "sub" => Some(OverflowOp::Sub),
+        "mul" => Some(OverflowOp::Mul),
+        _ => None,
+    })?;
+    Some(Asked { op, stores: true })
 }
 
 /// The shape of the type the arithmetic has to happen at, given the three types in the call.
@@ -195,6 +216,28 @@ impl Checker<'_> {
         self.tast.expr(Expr::new(kind, ty, Category::Rvalue), span)
     }
 
+    /// The node for a call to one of the eighteen typed forms, if the call is one.
+    ///
+    /// The arguments arrive converted to the types of the signature, so the three types agree and
+    /// the generic rule gives back the type the name says. A call with the wrong count of
+    /// arguments has been reported already, and is left as the ordinary call it was.
+    pub(in crate::check) fn typed_overflow_builtin_value(
+        &mut self,
+        function: Option<Symbol>,
+        args: &[ExprId],
+        span: Span,
+    ) -> Option<ExprId> {
+        let name = function?;
+        let asked = typed(self.text(name))?;
+        if args.len() != 3 {
+            return None;
+        }
+        if args.iter().any(|&arg| self.is_poisoned(arg)) {
+            return Some(self.poison(span));
+        }
+        Some(self.overflow_builtin(asked, args, span))
+    }
+
     /// A standard integer type of the given shape.
     ///
     /// Only three widths ever reach this, and all three have a type of their own on every target
@@ -235,6 +278,30 @@ mod tests {
                 });
                 assert!(feature.signature.is_empty(), "{name} has a signature and is type generic");
             }
+        }
+    }
+
+    /// The eighteen typed forms are rows of the table with a signature, because the signature is
+    /// what converts the operands before the call becomes the generic node.
+    #[test]
+    fn all_eighteen_typed_names_are_rows_of_the_table_that_carry_a_signature() {
+        let ops = [("add", OverflowOp::Add), ("sub", OverflowOp::Sub), ("mul", OverflowOp::Mul)];
+        for (stem, op) in ops {
+            for sign in ["s", "u"] {
+                for width in ["", "l", "ll"] {
+                    let name = format!("__builtin_{sign}{stem}{width}_overflow");
+                    let feature = rucc_gnu::lookup(Kind::Builtin, &name).unwrap_or_else(|| {
+                        panic!("{name} is not a row of features.toml");
+                    });
+                    assert!(!feature.signature.is_empty(), "{name} has no signature");
+                    assert_eq!(typed(&name), Some(Asked { op, stores: true }), "{name}");
+                }
+            }
+        }
+        for name in
+            ["__builtin_add_overflow", "__builtin_xaddll_overflow", "__builtin_uaddlll_overflow"]
+        {
+            assert_eq!(typed(name), None, "{name}");
         }
     }
 
