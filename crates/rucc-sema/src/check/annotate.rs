@@ -5,7 +5,8 @@
 //! Most attributes are read once, where they are written, and turned into whatever they change: a
 //! section, a flag, an alignment in the layout. Two builtins need them again later.
 //! `__builtin_has_attribute` asks whether a declaration or a type was written with one, and
-//! `__builtin_counted_by_ref` asks which member a flexible array member's `counted_by` named. So
+//! `__builtin_counted_by_ref` asks which member a flexible array member's or a pointer member's
+//! `counted_by` named. So
 //! the lists are kept here, against the declaration, the member or the record they were written
 //! on, and both builtins read them from here.
 //!
@@ -34,7 +35,8 @@ use rucc_base::hash::Map;
 use rucc_diag::{Diagnostic, Span};
 use rucc_gnu::Kind;
 use rucc_types::{
-    ArrayLen, FieldDecl, IntKind, RecordId, TypeId, TypeKind, is_array, is_integer, layout,
+    ArrayLen, Field, FieldDecl, IntKind, RecordId, RecordKind, TypeId, TypeKind, is_array,
+    is_function, is_integer, is_pointer, layout, pointee,
 };
 
 use crate::check::Checker;
@@ -62,7 +64,8 @@ pub(in crate::check) struct Annotations {
     members: Map<(RecordId, Symbol), [AttrList; 2]>,
     /// The list written on a record's definition.
     records: Map<RecordId, AttrList>,
-    /// The member a flexible array member's `counted_by` named, by record and array.
+    /// The member a flexible array member's or a pointer member's `counted_by` named, by record
+    /// and member.
     counters: Map<(RecordId, Symbol), Symbol>,
     /// The `-fstrict-flex-arrays` level a member's own `strict_flex_array` asked for, by record
     /// and array.
@@ -162,7 +165,8 @@ impl Checker<'_> {
     /// Keeps the list a record was defined with, and checks each `counted_by` among its members.
     ///
     /// Run once the members have been through the rule about where a flexible array member may
-    /// sit, so a member still here with no length is one. The messages are gcc 15's.
+    /// sit, so a member still here with no length is one. The messages are those of the gcc the
+    /// persona claims, 15 or 16.
     pub(in crate::check) fn annotate_record(
         &mut self,
         record: RecordId,
@@ -290,6 +294,32 @@ impl Checker<'_> {
         }
     }
 
+    /// What gcc says about `counted_by` on something that is not a member: an error, whatever
+    /// the type. Before gcc 15 the attribute is not known, and is ignored with a warning elsewhere.
+    /// `name` is the declaration's, if it has one.
+    pub(in crate::check) fn counted_by_refused(
+        &mut self,
+        lists: &[AttrList],
+        name: Option<Symbol>,
+    ) {
+        if self.cx.gnuc < 15 {
+            return;
+        }
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if self.gnu_name(&attr) != "counted_by" {
+                    continue;
+                }
+                let name = name.map_or("({anonymous})", |name| self.text(name));
+                let what = format!(
+                    "'counted_by' attribute is not allowed for a non-field declaration '{name}'"
+                );
+                self.report(Diagnostic::error(what, attr.span).with_code("E0765"));
+            }
+        }
+    }
+
     /// The `-fstrict-flex-arrays` level a member is measured at, which is its own
     /// `strict_flex_array` if it said one and the command line's if not.
     pub(in crate::check) fn strict_flex_of(&self, record: RecordId, name: Option<Symbol>) -> u8 {
@@ -310,15 +340,32 @@ impl Checker<'_> {
             None
         };
         let canonical = self.types.canonical(decl.ty);
-        if !is_array(&self.types, canonical) {
-            return refuse(
-                self,
-                "'counted_by' attribute is not allowed for a non-array field".into(),
-            );
+        // gcc 16 also takes a pointer member, which counts the objects it points to and may sit
+        // anywhere in the record. The kernel writes it as `__counted_by_ptr` once Kconfig sees
+        // gcc 16.
+        let pointer = self.cx.gnuc >= 16 && is_pointer(&self.types, canonical);
+        if pointer {
+            let pointee = pointee(&self.types, canonical)?;
+            if is_function(&self.types, pointee) {
+                let what = "'counted_by' attribute is not allowed for a pointer to function";
+                return refuse(self, what.into());
+            }
+            if self.includes_flexible(pointee) {
+                let what = "'counted_by' attribute is not allowed for a pointer to structure or \
+                            union with flexible array member";
+                return refuse(self, what.into());
+            }
+        } else if !is_array(&self.types, canonical) {
+            let what = if self.cx.gnuc >= 16 {
+                "'counted_by' attribute is not allowed for a non-array or non-pointer field"
+            } else {
+                "'counted_by' attribute is not allowed for a non-array field"
+            };
+            return refuse(self, what.into());
         }
         let flexible =
             matches!(self.types.kind(canonical), TypeKind::Array { len: ArrayLen::Unknown, .. });
-        if !flexible || at + 1 != fields.len() {
+        if !pointer && (!flexible || at + 1 != fields.len()) {
             let what =
                 "'counted_by' attribute is not allowed for a non-flexible array member field";
             return refuse(self, what.into());
@@ -344,6 +391,25 @@ impl Checker<'_> {
             return refuse(self, what);
         }
         Some(counter)
+    }
+
+    /// Whether a type is a record that ends in a flexible array member, which gcc calls one that
+    /// includes a flexible array. A `struct` does when its last member is one or is a record that
+    /// does, and a `union` does when any of its members does. A record not yet complete does not.
+    fn includes_flexible(&self, ty: TypeId) -> bool {
+        let TypeKind::Record(record) = self.types.kind(self.types.canonical(ty)) else {
+            return false;
+        };
+        let info = self.types.record_info(record);
+        let ends_in = |field: &Field| {
+            let ty = self.types.canonical(field.ty);
+            matches!(self.types.kind(ty), TypeKind::Array { len: ArrayLen::Unknown, .. })
+                || self.includes_flexible(ty)
+        };
+        match info.kind {
+            RecordKind::Union => info.fields.iter().any(ends_in),
+            RecordKind::Struct => info.fields.last().is_some_and(ends_in),
+        }
     }
 
     /// Whether an attribute is the one named, armour and the `gnu` namespace allowed.
@@ -521,7 +587,8 @@ impl Checker<'_> {
     /// `__builtin_counted_by_ref(array)`, if that is the name called.
     ///
     /// A pointer to the member a flexible array member's `counted_by` names, reached through the
-    /// same object the array was, or a null `void *` for an array with no counter. Checked before
+    /// same object the array was, or a null `void *` for an array with no counter. gcc 16 also
+    /// takes a pointer member, and refuses an argument that is not a member at all. Checked before
     /// the argument is turned into a value, since an array that has decayed is a pointer and the
     /// argument has to be the array.
     pub(in crate::check) fn counted_by_ref_call(
@@ -544,8 +611,16 @@ impl Checker<'_> {
             return Some(self.poison(span));
         }
         let ty = self.types.canonical(self.tast[operand].ty);
-        if !is_array(&self.types, ty) {
-            let what = format!("the argument to '{COUNTED_BY_REF}' must be an array");
+        let wrong = if self.cx.gnuc < 16 {
+            (!is_array(&self.types, ty)).then_some("must be an array")
+        } else if !is_array(&self.types, ty) && !is_pointer(&self.types, ty) {
+            Some("must be an array or pointer")
+        } else {
+            let member = matches!(self.tast[operand].kind, ExprKind::Member { .. });
+            (!member).then_some("must be a field of a structure")
+        };
+        if let Some(wrong) = wrong {
+            let what = format!("the argument to '{COUNTED_BY_REF}' {wrong}");
             self.report(Diagnostic::error(what, span).with_code("E0767"));
             return Some(self.poison(span));
         }

@@ -2,7 +2,7 @@
 //!
 //! Design: tamnd/rucc-kernel#6, the K5 item for the two builtins.
 //!
-//! Every answer here is one gcc 15 gave for the same question, measured one at a time. The
+//! Every answer here is one gcc 15 or gcc 16 gave for the same question, measured one at a time. The
 //! kernel's `__is_cstr` is the reason the `nonstring` answers matter: it asks about every buffer
 //! handed to a string copy and stops the build on a wrong yes or a wrong no.
 
@@ -145,7 +145,7 @@ fn the_counter_is_reached_through_the_array() {
     assert!(!uncounted.contains("(%rdi)"), "the object is written without a counter:\n{out}");
 }
 
-/// What gcc 15 refuses, in its words.
+/// What gcc 16 refuses, in its words.
 #[test]
 fn what_gcc_refuses_is_refused() {
     let cases = [
@@ -165,16 +165,102 @@ fn what_gcc_refuses_is_refused() {
         ),
         (
             "struct D { int n; int x __attribute__((counted_by(n))); };",
-            "'counted_by' attribute is not allowed for a non-array field",
+            "'counted_by' attribute is not allowed for a non-array or non-pointer field",
+        ),
+        (
+            "struct E { int n; void (*f)(void) __attribute__((counted_by(n))); };",
+            "'counted_by' attribute is not allowed for a pointer to function",
+        ),
+        (
+            "struct F { int n; int fam[]; };\n\
+             struct G { int n; struct F *p __attribute__((counted_by(n))); };",
+            "'counted_by' attribute is not allowed for a pointer to structure or union with \
+             flexible array member",
+        ),
+        (
+            "struct F { int n; int fam[]; };\n\
+             union U { int i; struct F f; };\n\
+             struct G { int n; union U *p __attribute__((counted_by(n))); };",
+            "'counted_by' attribute is not allowed for a pointer to structure or union with \
+             flexible array member",
+        ),
+        (
+            "int n; int *k __attribute__((counted_by(n)));",
+            "'counted_by' attribute is not allowed for a non-field declaration 'k'",
+        ),
+        (
+            "void f(int n, int *p __attribute__((counted_by(n))));",
+            "'counted_by' attribute is not allowed for a non-field declaration 'p'",
+        ),
+        (
+            "struct H { int n; long x; };\n\
+             void *h(struct H *p) { return __builtin_counted_by_ref(p->x); }",
+            "the argument to '__builtin_counted_by_ref' must be an array or pointer",
         ),
         (
             "int *q; void *h(void) { return __builtin_counted_by_ref(q); }",
-            "the argument to '__builtin_counted_by_ref' must be an array",
+            "the argument to '__builtin_counted_by_ref' must be a field of a structure",
         ),
         ("int g; int k = __builtin_has_attribute(g, nonsuch);", "unknown attribute 'nonsuch'"),
     ];
     for (index, (source, message)) in cases.into_iter().enumerate() {
         let err = refused(&format!("refused{index}"), &format!("{source}\n"));
+        assert!(err.contains(message), "no `{message}` in:\n{err}");
+    }
+}
+
+/// gcc 16 takes `counted_by` on a pointer member, anywhere in the record, and
+/// `__builtin_counted_by_ref` of that member is its counter. The kernel writes `__counted_by_ptr`
+/// once Kconfig sees gcc 16, in `struct sched_domain` among others.
+#[test]
+fn a_pointer_member_is_counted_as_gcc_16_counts_it() {
+    let out = listing(
+        "pointer",
+        "struct incomplete;\n\
+         struct F { int n; int fam[]; };\n\
+         struct M { struct F f; int after; };\n\
+         struct S { int n; short cnt;\n\
+           int *p __attribute__((counted_by(cnt)));\n\
+           void *v __attribute__((counted_by(n)));\n\
+           struct incomplete *i __attribute__((counted_by(n)));\n\
+           struct M *m __attribute__((counted_by(n)));\n\
+           char **pp __attribute__((counted_by(n)));\n\
+           int (*row)[4] __attribute__((counted_by(n)));\n\
+           int *plain; };\n\
+         _Static_assert(_Generic(__builtin_counted_by_ref(((struct S *)0)->p), short *: 1, \
+                                 default: 0), \"short\");\n\
+         _Static_assert(_Generic(__builtin_counted_by_ref(((struct S *)0)->plain), void *: 1, \
+                                 default: 0), \"void\");\n\
+         void set(struct S *s) { *__builtin_counted_by_ref(s->p) = 5; }\n",
+    );
+    assert!(out.contains(", 4(%rdi)"), "the counter is not written:\n{out}");
+}
+
+/// Under a gcc 15 persona a pointer member is refused, and the messages are gcc 15's.
+#[test]
+fn a_gcc_15_persona_counts_only_a_flexible_array() {
+    let cases = [
+        (
+            "struct D { int n; int *p __attribute__((counted_by(n))); };",
+            "'counted_by' attribute is not allowed for a non-array field",
+        ),
+        (
+            "struct H { int n; int *p; };\n\
+             void *h(struct H *s) { return __builtin_counted_by_ref(s->p); }",
+            "the argument to '__builtin_counted_by_ref' must be an array",
+        ),
+    ];
+    for (index, (source, message)) in cases.into_iter().enumerate() {
+        let path = fixture(&format!("gcc15-{index}"), &format!("{source}\n"));
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=x86_64-unknown-linux-gnu", "-fgnuc-version=15.2.0", "-c"])
+            .args(["-o", "/dev/null"])
+            .arg(&path)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "gcc 15 refuses `{source}`");
         assert!(err.contains(message), "no `{message}` in:\n{err}");
     }
 }

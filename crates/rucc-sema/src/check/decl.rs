@@ -471,6 +471,7 @@ impl Checker<'_> {
         self.force_aligned(&[specs.attrs], ty);
         self.no_reordered(&[specs.attrs], true);
         self.strict_flex_refused(&[specs.attrs], Some(name));
+        self.counted_by_refused(&[specs.attrs], Some(name));
         self.ms_hooked(&[specs.attrs], true);
         self.warn_unused_misplaced(&[specs.attrs], false);
         self.reset_kept(&[specs.attrs], None, span);
@@ -1126,6 +1127,9 @@ impl Checker<'_> {
         if may!(carried, "strict_flex_array") {
             self.strict_flex_refused(&lists, Some(name));
         }
+        if may!(carried, "counted_by") {
+            self.counted_by_refused(&lists, Some(name));
+        }
         if may!(carried, "ms_hook_prologue") {
             self.ms_hooked(&lists, kind == DeclKind::Function);
         }
@@ -1312,6 +1316,7 @@ impl Checker<'_> {
         self.force_aligned(&[specs.attrs, item.attrs], ty);
         self.no_reordered(&[specs.attrs, item.attrs], false);
         self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
+        self.counted_by_refused(&[specs.attrs, item.attrs], Some(name));
         self.ms_hooked(&[specs.attrs, item.attrs], false);
         self.warn_unused_misplaced(&[specs.attrs, item.attrs], false);
         self.reset_kept(&[specs.attrs, item.attrs], None, span);

@@ -1234,7 +1234,7 @@ gcc_version = "15.0"
 status = "implemented"
 used_by = ["linux"]
 tests = ["rucc/tests/annotations.rs"]
-notes = "Checked with gcc 15's rules and messages: on a flexible array member only, naming an integer member of the same structure. `__builtin_counted_by_ref` reads it. `__builtin_dynamic_object_size` does not yet, so a fortified copy into the array is checked against what the layout says rather than against the count, which is the answer an unannotated array gets."
+notes = "Checked with the rules and messages of the gcc the persona claims. gcc 15 takes it on a flexible array member only, naming an integer member of the same structure. gcc 16 also takes it on a pointer member anywhere in the record, except a pointer to a function or to a structure or union that includes a flexible array member, and the kernel writes that as `__counted_by_ptr` once Kconfig sees gcc 16. On a declaration that is not a member it is an error. `__builtin_counted_by_ref` reads it. `__builtin_dynamic_object_size` does not yet, so a fortified copy into the array or through the pointer is checked against what the layout says rather than against the count, which is the answer an unannotated member gets."
 
 [[feature]]
 name = "btf_decl_tag"
