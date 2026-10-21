@@ -1024,7 +1024,7 @@ fn counted(func: &mut Func, inst: Inst) {
 /// once, after every instruction has been rewritten.
 ///
 /// `register` is how many bits a register holds, which decides how a multiply finds the high half
-/// of its product. See [`product_high`].
+/// of its product. See `product_high`.
 pub fn overflows(func: &mut Func, register: u32) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     let mut forward = Map::default();
