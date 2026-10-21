@@ -1179,6 +1179,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     ))
                 })?;
                 link.compress = opts.compress;
+                // zstd came in gcc 13, and 6.12's Kconfig asks for it with `cc-option`.
+                if opts.compress == rucc_session::Compress::Zstd {
+                    newer.push((13, format!("unrecognized argument to `-gz=`: `{how}`")));
+                }
             }
             "-Werror" => opts.warnings_are_errors = true,
             // Takes back an earlier `-Werror`, the way gcc reads it, which is how a build that has
@@ -10743,6 +10747,10 @@ mod tests {
             assert_eq!(refused(&[KERNEL_X86, "-fgnuc-version=12.2.0", flag, "-c", "a.c"]), why);
             compile(&[KERNEL_X86, "-fgnuc-version=13", flag, "-c", "a.c"]);
         }
+        let why = "unrecognized argument to `-gz=`: `zstd`";
+        assert_eq!(refused(&[KERNEL_X86, "-fgnuc-version=12.2.0", "-gz=zstd", "-c", "a.c"]), why);
+        compile(&[KERNEL_X86, "-fgnuc-version=13", "-gz=zstd", "-c", "a.c"]);
+        compile(&[KERNEL_X86, "-fgnuc-version=12.2.0", "-gz=zlib", "-c", "a.c"]);
         let flag = "-fmin-function-alignment=16";
         let why = format!("unknown option `{flag}`");
         assert_eq!(refused(&[KERNEL_X86, "-fgnuc-version=13.3.0", flag, "-c", "a.c"]), why);
