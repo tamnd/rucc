@@ -1129,19 +1129,31 @@ jobs:
       # declares a type behind that macro. Ubuntu 24.04 ships 13, so this comes from the
       # toolchain PPA. Alpine has no equivalent and keeps its own, which is fine there: the
       # musl job is about musl's headers rather than about the reference's version.
-      # The PPA has two hosts that serve the same signed archive, and the newer one is down for
-      # hours at a time. apt checks the signature, so the plain http host is as good as the other.
+      # The PPA has two hosts that serve the same signed archive. The https one is down for hours
+      # at a time and the http one is slow when it is, so the packages are kept in the cache and
+      # Launchpad is asked only when the cache is empty or the packages no longer install.
+      - name: the reference compiler packages
+        if: matrix.libc == 'glibc'
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/gcc-16-debs
+          key: gcc-16-noble-${{ runner.arch }}-v1
       - name: the reference compiler
         if: matrix.libc == 'glibc'
         run: |
-          sudo add-apt-repository -y -n ppa:ubuntu-toolchain-r/test
-          for host in https://ppa.launchpadcontent.net http://ppa.launchpad.net; do
-            sudo sed -i -E "s|https?://ppa\.launchpad[a-z]*\.net|$host|" \
-              /etc/apt/sources.list.d/ubuntu-toolchain-r-ubuntu-test-*
-            sudo apt-get update -q || true
-            apt-cache show gcc-16 > /dev/null 2>&1 && break
-          done
-          sudo apt-get install -y gcc-16
+          if ! { ls ~/gcc-16-debs/*.deb > /dev/null 2>&1 \
+                 && sudo apt-get install -y --no-download ~/gcc-16-debs/*.deb; }; then
+            sudo add-apt-repository -y -n ppa:ubuntu-toolchain-r/test
+            for host in https://ppa.launchpadcontent.net http://ppa.launchpad.net; do
+              sudo sed -i -E "s|https?://ppa\.launchpad[a-z]*\.net|$host|" \
+                /etc/apt/sources.list.d/ubuntu-toolchain-r-ubuntu-test-*
+              sudo apt-get update -q || true
+              apt-cache show gcc-16 > /dev/null 2>&1 && break
+            done
+            sudo apt-get install -y -o Acquire::Retries=10 -o Acquire::http::Timeout=120 gcc-16
+            mkdir -p ~/gcc-16-debs
+            cp /var/cache/apt/archives/*.deb ~/gcc-16-debs/
+          fi
           gcc-16 --version | head -1
       - uses: actions/checkout@v7.0.1
       - name: check out the harness
