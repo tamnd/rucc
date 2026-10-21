@@ -465,6 +465,7 @@ pub fn heads() -> Vec<(Opcode, &'static str)> {
         Type::vector(Type::int(32), 4),
         Type::vector(Type::int(64), 2),
         Type::vector(Type::int(16), 8),
+        Type::vector(Type::int(8), 16),
     ];
 
     let mut found = Vec::new();
@@ -558,14 +559,17 @@ pub fn float_slot(ty: Type) -> Option<usize> {
     }
 }
 
-/// Which of the two whole register integer vectors a type is, or nothing for any other type.
+/// Which of the four whole register integer vectors a type is, or nothing for any other type.
 ///
 /// Four lanes of thirty two bits and two of sixty four, the two shapes SSE2 adds, subtracts and
-/// does bitwise work on in one instruction each, and the two `emmintrin.h` is written in. A lane
-/// count is a table of its own rather than more entries in [`slot`]'s, because an add of four
-/// lanes and an add of one are different instructions and a rule at a width says nothing about
-/// how many lanes it acts on. Any other vector is none of them and finds no name, which is a
-/// report rather than a lowering to an instruction that acts on the wrong number of lanes.
+/// does bitwise work on in one instruction each, and the two `emmintrin.h` is written in. Then
+/// eight lanes of sixteen bits and sixteen of eight, which NEON computes in as well and
+/// `arm_neon.h` is mostly written in. Those two come after the first two so that the index of a
+/// shape SSE2 has means the same thing it did before AArch64 had any. A lane count is a table of
+/// its own rather than more entries in [`slot`]'s, because an add of four lanes and an add of one
+/// are different instructions and a rule at a width says nothing about how many lanes it acts on.
+/// Any other vector is none of them and finds no name, which is a report rather than a lowering
+/// to an instruction that acts on the wrong number of lanes.
 pub fn vector_slot(ty: Type) -> Option<usize> {
     if !ty.is_vector() || !ty.lane().is_int() {
         return None;
@@ -573,6 +577,8 @@ pub fn vector_slot(ty: Type) -> Option<usize> {
     match (ty.lane().bits(), ty.lanes()) {
         (32, 4) => Some(0),
         (64, 2) => Some(1),
+        (16, 8) => Some(2),
+        (8, 16) => Some(3),
         _ => None,
     }
 }
@@ -669,7 +675,7 @@ fn value_head(ty: Type, address: u32) -> Option<&'static str> {
         return Some(["value.f32", "value.f64"][at]);
     }
     if let Some(at) = vector_slot(ty) {
-        return Some(["value.i32x4", "value.i64x2"][at]);
+        return Some(["value.i32x4", "value.i64x2", "value.i16x8", "value.i8x16"][at]);
     }
     Some(["value.i8", "value.i16", "value.i32", "value.i64"][slot(ty, address)?])
 }
@@ -702,7 +708,7 @@ fn load_head(ty: Type, address: u32) -> Option<&'static str> {
         return Some(["load.f32", "load.f64"][at]);
     }
     if let Some(at) = vector_slot(ty) {
-        return Some(["load.i32x4", "load.i64x2"][at]);
+        return Some(["load.i32x4", "load.i64x2", "load.i16x8", "load.i8x16"][at]);
     }
     if is_bit(ty) {
         return Some("load.i1");
@@ -720,7 +726,7 @@ fn store_head(ty: Type, address: u32) -> Option<&'static str> {
         return Some(["store.f32", "store.f64"][at]);
     }
     if let Some(at) = vector_slot(ty) {
-        return Some(["store.i32x4", "store.i64x2"][at]);
+        return Some(["store.i32x4", "store.i64x2", "store.i16x8", "store.i8x16"][at]);
     }
     if is_bit(ty) {
         return Some("store.i1");
@@ -974,12 +980,12 @@ fn binary_head(opcode: Opcode, ty: Type, address: u32) -> Option<&'static str> {
     if let Some(at) = vector_slot(ty) {
         // Lane by lane, and the three bitwise ones are the same instruction at either lane count
         // since no bit of the answer looks at a bit in another lane.
-        let names: &[&'static str; 2] = match opcode {
-            Opcode::Add => &["add.i32x4", "add.i64x2"],
-            Opcode::Sub => &["sub.i32x4", "sub.i64x2"],
-            Opcode::And => &["and.i32x4", "and.i64x2"],
-            Opcode::Or => &["or.i32x4", "or.i64x2"],
-            Opcode::Xor => &["xor.i32x4", "xor.i64x2"],
+        let names: &[&'static str; 4] = match opcode {
+            Opcode::Add => &["add.i32x4", "add.i64x2", "add.i16x8", "add.i8x16"],
+            Opcode::Sub => &["sub.i32x4", "sub.i64x2", "sub.i16x8", "sub.i8x16"],
+            Opcode::And => &["and.i32x4", "and.i64x2", "and.i16x8", "and.i8x16"],
+            Opcode::Or => &["or.i32x4", "or.i64x2", "or.i16x8", "or.i8x16"],
+            Opcode::Xor => &["xor.i32x4", "xor.i64x2", "xor.i16x8", "xor.i8x16"],
             _ => return None,
         };
         return Some(names[at]);
@@ -1425,9 +1431,18 @@ mod tests {
         assert_eq!(binary_head(Opcode::Xor, i64x2, 64), Some("xor.i64x2"));
 
         let i16x8 = Type::vector(Type::int(16), 8);
-        assert_eq!(value_head(i16x8, 64), None);
-        assert_eq!(binary_head(Opcode::Add, i16x8, 64), None);
-        assert!(!in_vector_file(i16x8));
+        assert_eq!(value_head(i16x8, 64), Some("value.i16x8"));
+        assert_eq!(binary_head(Opcode::Add, i16x8, 64), Some("add.i16x8"));
+        assert!(in_vector_file(i16x8));
+
+        let i8x16 = Type::vector(Type::int(8), 16);
+        assert_eq!(binary_head(Opcode::Xor, i8x16, 64), Some("xor.i8x16"));
+        assert_eq!(binary_head(Opcode::Mul, i8x16, 64), None);
+
+        let i8x8 = Type::vector(Type::int(8), 8);
+        assert_eq!(value_head(i8x8, 64), None);
+        assert_eq!(binary_head(Opcode::Add, i8x8, 64), None);
+        assert!(!in_vector_file(i8x8));
     }
 
     /// The sweep says the same thing about an instruction that looking the instruction up does,
