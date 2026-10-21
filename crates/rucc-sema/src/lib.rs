@@ -123,7 +123,7 @@ pub use crate::scope::{Binding, Scopes, Tag, TagKind};
 pub use crate::stmt::{Case, CaseId, CaseList, Stmt, StmtId, StmtList, StmtRef};
 pub use crate::tast::{
     Address, AllocSize, Base, Branches, Const, ConstId, Counts, Label, LabelId, Notices, SimdClone,
-    StrId, Tast, TypeTags, Used, Version, WasmNames,
+    StrId, Tast, TypeTags, Used, Version, WasmNames, flexible_at,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
