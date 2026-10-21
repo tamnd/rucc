@@ -331,9 +331,15 @@ impl Checker<'_> {
             ExprKind::Subscript { base, index } => {
                 // The closest object is the array and not the element, which is gcc's rule and is
                 // what makes `__builtin_object_size(&v.a[1], 1)` the rest of `a`.
-                let count = self.eval().integer(index).ok()?;
                 let array = self.decayed(base)?;
                 let reach = self.inside(array)?;
+                // A subscript the program works out says nothing about how far into the array the
+                // element is, but a member taken from the element is still as long as its type
+                // says, whichever element it is in. That is `cpu_topology[cpu].core_sibling`,
+                // which gcc measures as the 64 bytes of a `struct cpumask` whatever `cpu` is.
+                let Ok(count) = self.eval().integer(index) else {
+                    return Some(Reach::UNSEEN);
+                };
                 let element = i128::from(self.bytes_of(self.tast[expr].ty)?);
                 let into = u64::try_from(count.checked_mul(element)?).ok()?;
                 // An array the member walk left without a size has none as an array either.
@@ -462,26 +468,10 @@ impl Checker<'_> {
 
     /// Whether an array at the end of a record reached through a pointer may run past its type,
     /// at the level `-fstrict-flex-arrays` set or the member's own `strict_flex_array` asked for,
-    /// which gcc 13 lets take the place of the command line's in either direction.
-    ///
-    /// Zero takes every trailing array, one takes `[]`, `[0]` and `[1]`, two takes `[]` and `[0]`
-    /// and three takes only `[]`, which are gcc 15's four levels as measured through a pointer at
-    /// `-O2`. Something that is not an array is not flexible at any level.
+    /// which gcc 13 lets take the place of the command line's in either direction. See
+    /// [`crate::flexible_at`] for the levels.
     fn flexible(&self, ty: TypeId, level: u8) -> bool {
-        let TypeKind::Array { len, .. } = bare(&self.types, ty) else {
-            return false;
-        };
-        let count = match len {
-            ArrayLen::Unknown | ArrayLen::Star => return true,
-            ArrayLen::Fixed(count) => count,
-            ArrayLen::Variable(_) => return false,
-        };
-        match level {
-            0 => true,
-            1 => count <= 1,
-            2 => count == 0,
-            _ => false,
-        }
+        crate::flexible_at(&self.types, ty, level)
     }
 
     /// The lvalue an array to pointer conversion was applied to, if that is what this is.

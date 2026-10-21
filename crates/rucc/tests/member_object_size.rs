@@ -16,6 +16,11 @@
 //! fortified `memset` refused the build. pm8001 casts the address of a pointer member to a structure
 //! and copies into the flexible array at its end, which is the same question.
 //!
+//! How far a trailing array may run is what `-fstrict-flex-arrays` says. At level three only `[]`
+//! runs past its end, so the `bits` of a `struct cpumask` is its 64 bytes, and the kernel's
+//! fortified `bitmap_copy` checks the copy against that. A member taken from an element whose index
+//! is only known when the program runs is as long as its type says too, whichever element it is in.
+//!
 //! Every answer below is what gcc 16 gives at `-O2` for the same source. Each one is checked by a
 //! call to a function declared with `error`, under a test the right answer makes false, so a
 //! wrong answer is a refused build that names it.
@@ -101,13 +106,44 @@ const char large_src[32] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 void f(void) { strncpy(instance.buf, large_src, sizeof(instance.buf) + 1); }
 "#;
 
+/// Trailing arrays of a fixed length, asked about through a parameter, a local and a variable
+/// subscript. `STRICT` is one when the build passes `-fstrict-flex-arrays=3`.
+const TRAILING: &str = r#"
+typedef unsigned long size_t;
+struct m { unsigned long bits[8]; };
+struct n { long x; unsigned long bits[8]; };
+struct topo { int id; struct m core_sibling; struct m llc_sibling; } def[4];
+#define I static inline __attribute__((always_inline))
+I size_t d1(const void *p) { return __builtin_dynamic_object_size(p, 1); }
+#define WANT(name, got, want) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if ((got) != (size_t)(want)) name(); \
+    } while (0)
+void f(struct m *mp, struct n *np, int i) {
+    WANT(wrong_strict_whole, d1(mp->bits), STRICT ? 64 : -1);
+    WANT(wrong_strict_param, d1(np->bits), STRICT ? 64 : -1);
+    struct n *local = np;
+    WANT(wrong_strict_local, d1(local->bits), STRICT ? 64 : -1);
+    WANT(wrong_strict_index, d1(&np->bits[1]), STRICT ? 56 : -1);
+    WANT(wrong_variable, d1(def[i].core_sibling.bits), 64);
+    WANT(wrong_variable_direct, __builtin_dynamic_object_size(def[i].core_sibling.bits, 1), 64);
+}
+"#;
+
 fn compile(name: &str, source: &str, level: &str) -> Output {
+    compile_with(name, source, &[level])
+}
+
+fn compile_with(name: &str, source: &str, flags: &[&str]) -> Output {
     let dir = std::env::temp_dir().join(format!("rucc-member-size-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path: PathBuf = dir.join("one.c");
     std::fs::write(&path, source).expect("the fixture can be written");
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
-        .args(["--target=x86_64-unknown-linux-gnu", level, "-c", "-o"])
+        .arg("--target=x86_64-unknown-linux-gnu")
+        .args(flags)
+        .args(["-c", "-o"])
         .arg(dir.join("one.o"))
         .arg(&path)
         .output()
@@ -130,4 +166,15 @@ fn a_fortified_copy_past_the_member_is_refused() {
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "the overflow went through");
     assert!(said.contains("detected write beyond size of object"), "{said}");
+}
+
+#[test]
+fn a_trailing_array_is_as_long_as_strict_flex_arrays_says() {
+    for level in ["-O1", "-O2", "-Os"] {
+        let strict = ["-DSTRICT=1", "-fstrict-flex-arrays=3", level];
+        let out = compile_with(&format!("strict{level}"), TRAILING, &strict);
+        assert!(out.status.success(), "strict {level}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = compile_with(&format!("open{level}"), TRAILING, &["-DSTRICT=0", level]);
+        assert!(out.status.success(), "open {level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
 }
