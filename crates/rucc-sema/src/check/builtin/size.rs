@@ -52,6 +52,7 @@
 //! is where the guessing the high bit asks for happens. A pointer read out of a parameter or a
 //! global is answered here as not known, because the IR has no more of where it came from, and
 //! answering it now is what lets lowering make a checking call over one the plain call at `-O0`.
+//! The exception is a `static` above `-O0`, which the IR may find nothing writes.
 //!
 //! # Where this parts company with gcc
 //!
@@ -79,7 +80,7 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_types::{ArrayLen, Qualifiers, RecordKind, TypeId, TypeKind, integer_info, layout};
 
 use crate::check::Checker;
-use crate::decl::{DeclKind, StorageDuration};
+use crate::decl::{DeclKind, Linkage, StorageDuration};
 use crate::eval::bare;
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::Const;
@@ -198,7 +199,8 @@ impl Checker<'_> {
         // argument is in front of the walk. Only where lowering the address does nothing a
         // program could notice, since the pointer is not evaluated, and never in a static
         // initializer, which has to be a constant by the time this is done. A pointer read out of
-        // a global came from somewhere the IR cannot see either, so it is answered here and now,
+        // a global came from somewhere the IR cannot see either, unless it is a `static` nothing
+        // in the file writes, so it is answered here and now,
         // and so is one read out of a parameter at `-O0`, which is what lets a `_chk` call over
         // one be the plain call there. Above that a parameter waits, because once the function is
         // inlined the IR can see what the caller passed, and that is when gcc answers it:
@@ -405,8 +407,16 @@ impl Checker<'_> {
             ExprKind::Decl(id) => {
                 let decl = &self.tast[id];
                 decl.kind == DeclKind::Object
-                    && decl.duration == StorageDuration::Automatic
-                    && (self.cx.optimizing || !self.is_parameter(id))
+                    && match decl.duration {
+                        StorageDuration::Automatic => self.cx.optimizing || !self.is_parameter(id),
+                        // A `static` nothing in the file writes is read only once the IR has
+                        // looked at all of it, and what it points at is known then.
+                        // fortify_kunit's `ptr_of_11` is one, and gcc answers 12 for it.
+                        StorageDuration::Static => {
+                            self.cx.optimizing && decl.linkage != Linkage::External
+                        }
+                        _ => false,
+                    }
             }
             ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.local(inner),
             ExprKind::Binary { lhs, rhs, .. } => self.local(lhs) || self.local(rhs),

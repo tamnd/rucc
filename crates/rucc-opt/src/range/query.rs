@@ -750,29 +750,64 @@ impl<'a> Ranges<'a> {
             // is a select of `count` where `count < 66` holds and of 66 where it does not, so it
             // is `[0, 66]`. That is what lets the kernel's `copy_from_user` of a clamped length
             // drop its `WARN_ON_ONCE(bytes > INT_MAX)`, as gcc's ranges drop it.
-            Opcode::Select => {
-                let (Some(&cond), Some(block)) = (args.first(), block) else {
-                    return Range::of(ty);
-                };
-                let depth = self.options.logical_depth;
-                let arm = |this: &mut Self, index: usize, taken: bool| {
-                    let range = operand(this, index);
-                    let fact = args
-                        .get(index)
-                        .and_then(|&arg| this.condition_fact(cond, taken, arg, block, depth));
-                    fact.map_or(range, |fact| range.intersect(fact))
-                };
-                // A condition the ranges settle picks its arm, which is how the saturating
-                // `size_add` of two sizes that cannot overflow loses its all-ones arm.
-                match operand(self, 0).singleton() {
-                    Some(1) => return arm(self, 1, true),
-                    Some(0) => return arm(self, 2, false),
-                    _ => {}
-                }
-                let (a, b) = (arm(self, 1, true), arm(self, 2, false));
-                if a.width() != b.width() { Range::of(ty) } else { a.union(b) }
-            }
+            Opcode::Select => match block {
+                Some(block) => self.select(&args, block, ty),
+                None => Range::of(ty),
+            },
             _ => Range::of(ty),
+        }
+    }
+
+    /// A select's range with its arms asked for where a block stands, each narrowed by what the
+    /// condition says on its side.
+    fn select(&mut self, args: &[Value], block: Block, ty: rucc_ir::Type) -> Range {
+        let Some(&cond) = args.first() else { return Range::of(ty) };
+        let depth = self.options.logical_depth;
+        let arm = |this: &mut Self, index: usize, taken: bool| {
+            let Some(&arg) = args.get(index) else { return Range::of(ty) };
+            let range = this.refined(arg, block);
+            let fact = this
+                .condition_fact(cond, taken, arg, block, depth)
+                .or_else(|| this.widened_fact(cond, taken, arg, block, depth));
+            match fact {
+                Some(fact) if fact.width() == range.width() => range.intersect(fact),
+                _ => range,
+            }
+        };
+        // A condition the ranges settle picks its arm, which is how the saturating `size_add` of
+        // two sizes that cannot overflow loses its all-ones arm.
+        match self.refined(cond, block).singleton() {
+            Some(1) => return arm(self, 1, true),
+            Some(0) => return arm(self, 2, false),
+            _ => {}
+        }
+        let (a, b) = (arm(self, 1, true), arm(self, 2, false));
+        if a.width() != b.width() { Range::of(ty) } else { a.union(b) }
+    }
+
+    /// What a condition says about a widening when it tests the narrow value, widened.
+    ///
+    /// `min_t(size_t, ucmd->user_size, sizeof(*argp))` in `luo_ucmd_respond` widens the 32 bit
+    /// size for the select, and the compare is narrowed back to 32 bits, so the condition tests
+    /// the narrow size and not the arm. gcc knows the copy is at most the size of the argument
+    /// and drops the `WARN_ON_ONCE(bytes > INT_MAX)` in `check_copy_size`.
+    fn widened_fact(
+        &mut self,
+        cond: Value,
+        taken: bool,
+        value: Value,
+        block: Block,
+        depth: u32,
+    ) -> Option<Range> {
+        let Def::Result { inst, .. } = self.func[value].def else { return None };
+        let data = self.func[inst];
+        let &narrow = self.func[data.args].first()?;
+        let width = self.func[value].ty.bits();
+        let fact = self.condition_fact(cond, taken, narrow, block, depth)?;
+        match data.opcode {
+            Opcode::ZExt => Some(ops::zext(fact, width)),
+            Opcode::SExt => Some(ops::sext(fact, width)),
+            _ => None,
         }
     }
 
@@ -973,6 +1008,18 @@ impl<'a> Ranges<'a> {
                 };
                 if wide.width() == width {
                     range = range.intersect(wide);
+                }
+            }
+            // A select made above a test on one of its arms is the same: the test says nothing
+            // about the select, and the arm asked for down here does. `copy_struct_from_user`
+            // takes `min(ksize, usize)` and only then checks `ksize` against the size of the
+            // object, so below that check the copy is at most that long and gcc drops the
+            // `WARN_ON_ONCE(bytes > INT_MAX)` in `check_copy_size`, which iommufd's ioctl inlines.
+            if data.opcode == Opcode::Select && stop != Some(block) {
+                let args: Vec<Value> = self.func[data.args].to_vec();
+                let found = self.select(&args, block, self.func[value].ty);
+                if found.width() == range.width() {
+                    range = range.intersect(found);
                 }
             }
         }
@@ -1658,6 +1705,45 @@ mod tests {
         let mut ranges = asked.ranges();
         assert_eq!(bounds(ranges.of(least)), Some((0, 66)));
         assert!(!ranges.of(either).signed_bounds().is_some_and(|(_, most)| most <= 66));
+    }
+
+    /// `min(k, u)` made before `k` is tested is as small as `k` is below the test, which is the
+    /// shape of `copy_struct_from_user`, and says nothing new above it.
+    #[test]
+    fn a_select_made_above_a_test_on_its_arm_is_narrowed_below_it() {
+        let (mut func, args, blocks) = shape(2, 3);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let below = build.icmp(IntPred::Ult, args[0], args[1]);
+        let least = build.select(below, args[0], args[1]);
+        let limit = build.iconst(I32, 72);
+        let test = build.icmp(IntPred::Ugt, args[0], limit);
+        build.br_if(test, blocks[1], &[], blocks[2], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(bounds(ranges.at(least, blocks[2])), Some((0, 72)));
+        assert!(ranges.of(least).is_full());
+        assert!(ranges.at(least, blocks[1]).is_full());
+    }
+
+    /// `min_t(size_t, size, 72)` of a 32 bit size, with the compare made on the narrow size and
+    /// the select on the widened one, is at most 72.
+    #[test]
+    fn a_select_of_a_widened_arm_tested_narrow_is_bounded() {
+        let (mut func, args, blocks) = shape(1, 2);
+        let wide = Type::int(64);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let limit = build.iconst(I32, 72);
+        let below = build.icmp(IntPred::Ult, args[0], limit);
+        let size = build.unary(Opcode::ZExt, args[0], wide);
+        let most = build.iconst(wide, 72);
+        let least = build.select(below, size, most);
+        build.jump(blocks[1], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(bounds(ranges.at(least, blocks[1])), Some((0, 72)));
     }
 
     /// `(int)(x & 1)` tested once, handed through a block parameter the way an inlined body
