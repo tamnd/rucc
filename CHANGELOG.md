@@ -61,6 +61,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `__builtin_object_size` and `__builtin_dynamic_object_size` now give gcc's answers for the shapes in the 6.12 fortify KUnit suite: a pointer read out of a `static` nothing writes, `kvcalloc` and `kvmalloc_array` behind a `__builtin_mul_overflow`, `kmalloc` before its `__builtin_constant_p` is settled, `kmemdup`, `devm_kmalloc` with `alloc_size` beside the star, and a local whose only store is a buffer address. `strlen` of a read only pointer folds as well, so `__compiletime_strlen (ptr_of_11)` is 11 (#3784).
 - The value ranges narrow a select by what its condition says on each side when the condition tests the narrow value before it was widened, and narrow a select made above a test on one of its arms below that test. The `WARN_ON_ONCE (bytes > INT_MAX)` in `check_copy_size` is gone where gcc drops it, in liveupdate's `luo_ucmd_respond` and in iommufd's `copy_struct_from_user` (#3785).
 - The aarch64 assembler takes a whole number as the immediate of a scalar or vector `fmov`, as GNU as does, so `fmov s0, #1` in the arm64 `hwcap` selftest assembles (#3786).
+- On aarch64, two saves or restores off the frame pointer that become one `stp` or `ldp` now keep their unwind rows on the pair, and they are only paired when nothing between them has rows of its own. A function with a variable length array and an early return no longer loses its `.cfi_remember_state`, so LTP's `matrix_mult.c` assembles (#3787).
 
 ### Added
 
