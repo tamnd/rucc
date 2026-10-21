@@ -9896,8 +9896,9 @@ mod tests {
             assert_eq!(fields[0], format!("{at}:{function}"), "{text}");
             let bytes: u32 = fields[1].parse().expect("the bytes should be a number");
             // A leaf can have no frame at all. On AArch64 the frame pointer is left out of a leaf
-            // since #3759, and `helper` keeps its argument in a register, so it takes 0 bytes.
-            let least = if function == "helper" { 0 } else { 8 };
+            // since #3759, and `helper` and `twice` keep their argument in a register, so each
+            // takes 0 bytes there.
+            let least = if matches!(function, "helper" | "twice") { 0 } else { 8 };
             assert!(bytes >= least && bytes % 8 == 0, "{function} takes {bytes} bytes");
             assert_eq!(fields[2], qualifier, "{text}");
         };
