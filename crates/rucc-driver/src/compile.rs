@@ -1031,11 +1031,21 @@ fn instrument(
 /// target, the `.gcda` name being the driver's.
 fn coverage(opts: &Options, target: &TargetInfo, counts: &str) -> rucc_opt::coverage::Coverage {
     let (ctor, dtor) = match target.object_format {
-        rucc_target::ObjectFormat::Elf => (Some(".init_array.00101"), Some(".fini_array.00101")),
+        rucc_target::ObjectFormat::Elf => (Some(".init_array.00100"), Some(".fini_array.00100")),
         rucc_target::ObjectFormat::Coff => (Some(".CRT$XCU"), None),
         rucc_target::ObjectFormat::MachO => (Some("__DATA,__mod_init_func,mod_init_funcs"), None),
         rucc_target::ObjectFormat::Wasm => (None, None),
     };
+    // With `-freorder-functions` gcc puts the constructor in `.text.startup` and the destructor in
+    // `.text.exit`, which the kernel's linker script keeps with its init and exit code.
+    let reorder = opts.reorder_functions.unwrap_or_else(|| opts.opt_level.schedules());
+    let text = (target.object_format == rucc_target::ObjectFormat::Elf && reorder).then(|| {
+        if opts.function_sections {
+            (".text.startup._sub_I_00100_0".to_owned(), ".text.exit._sub_D_00100_1".to_owned())
+        } else {
+            (".text.startup".to_owned(), ".text.exit".to_owned())
+        }
+    });
     let (major, minor, phase) = opts.gcov.unwrap_or((opts.gnuc.major, opts.gnuc.minor, b'*'));
     rucc_opt::coverage::Coverage {
         counts: counts.to_owned(),
@@ -1047,6 +1057,7 @@ fn coverage(opts: &Options, target: &TargetInfo, counts: &str) -> rucc_opt::cove
         phase,
         ctor: ctor.map(str::to_owned),
         dtor: dtor.map(str::to_owned),
+        text,
     }
 }
 

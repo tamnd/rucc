@@ -61,6 +61,9 @@ pub struct Coverage {
     /// The section the pointer to the destructor goes in. Where this is `None` and the constructor
     /// has one, the constructor hands `__gcov_exit` to `atexit` instead.
     pub dtor: Option<String>,
+    /// The sections the constructor and the destructor themselves go in, or `None` for wherever
+    /// the object writer puts code.
+    pub text: Option<(String, String)>,
 }
 
 impl Coverage {
@@ -618,9 +621,10 @@ fn record(module: &mut Module, names: &mut Interner, coverage: &Coverage, counte
     let takes = Signature::new().with_params(&[Type::PTR]);
     let init = declare(module, names, "__gcov_init", takes.clone());
     let exit = declare(module, names, "__gcov_exit", Signature::new());
-    let ctor = names.intern("_sub_I_00101_0");
+    let ctor = names.intern("_sub_I_00100_0");
     let mut func = Func::new(ctor, Signature::new());
     func.linkage = Linkage::Internal;
+    func.section = coverage.text.as_ref().map(|(startup, _)| names.intern(startup));
     func.attrs.set |= AttrSet::NO_PROFILE;
     let entry = func.create_block();
     let sig = func.add_signature(takes.clone());
@@ -640,9 +644,10 @@ fn record(module: &mut Module, names: &mut Interner, coverage: &Coverage, counte
     module.add_func(func);
     entry_in(module, names, ctor, section, pointer);
     let Some(section) = &coverage.dtor else { return };
-    let dtor = names.intern("_sub_D_00101_1");
+    let dtor = names.intern("_sub_D_00100_1");
     let mut func = Func::new(dtor, Signature::new());
     func.linkage = Linkage::Internal;
+    func.section = coverage.text.as_ref().map(|(_, exit)| names.intern(exit));
     func.attrs.set |= AttrSet::NO_PROFILE;
     let entry = func.create_block();
     let sig = func.add_signature(Signature::new());
@@ -852,6 +857,7 @@ mod tests {
             phase: b'*',
             ctor: None,
             dtor: None,
+            text: None,
         }
     }
 
