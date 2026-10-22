@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A call through a pointer that becomes a direct call to a function that never comes back now ends its block, the same as a call written by name. Linux 7.3's `revert_lock` and five other functions in fs/dlm/lock.c call `unhold_lkb_assert` through `kref_put`, and rucc wrote a `jmp` after the call. objtool reported each one as a call to a function with no `__noreturn`.
 - A `switch` default that does only work with no effect and then reaches `__builtin_unreachable()` is now never taken, and one of the cases becomes the default. In Linux 7.3's lib/zstd/compress/zstd_lazy.c the default of `switch (mls)` jumped past the end of the function, and objtool reported 27 functions as falling through to the next one.
+- A `static` marked `used` in the arm of an `if` that a constant condition never takes is emitted again, along with what its initializer names, as gcc does. The kernel's `if (0) printk(...)` under a debug mask of 0, such as `hfs_dbg` in fs/hfs, lost its printk index entry, so about 25 objects in the 6.12 arm64 allmodconfig build had fewer `.printk_index` entries than gcc's. A `static` in the untaken arm of a `?:` or a `&&` is still not kept, which also matches gcc (#3807).
 
 ## 0.30.11
 
