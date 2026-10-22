@@ -1078,3 +1078,56 @@ int fn(struct s *x, u32 y) { return x->x + y; }
     let subroutines = all.iter().filter(|entry| entry.tag == DW_TAG_SUBROUTINE).count();
     assert_eq!(subroutines, 2, "u32 (struct s *) and struct s *(u32)");
 }
+
+/// A qualifier or an address space written over an array typedef name keeps the name, as gcc does.
+/// C puts the qualifier on the elements, and gcc writes it over the name all the same. The x86
+/// kernel's `DECLARE_PER_CPU(mce_banks_t, mce_banks_owned)` is `__seg_gs mce_banks_t`, and its BTF
+/// has `mce_banks_owned` over `mce_banks_t`.
+#[test]
+fn a_qualified_array_typedef_keeps_its_name() {
+    let source = "\
+typedef unsigned long banks_t[2];
+__seg_gs banks_t owned;
+const banks_t fixed = {1, 2};
+int f(void) { return fixed[0]; }
+";
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "qualified-array", source));
+    let variable = |name: &str| {
+        let variable = named(&all, DW_TAG_VARIABLE, name).expect("the variable is described");
+        at(&all, variable.ty.expect("a variable has a type"))
+    };
+    let owned = variable("owned");
+    assert_eq!((owned.tag, owned.name.as_deref()), (DW_TAG_TYPEDEF, Some("banks_t")));
+    let fixed = variable("fixed");
+    assert_eq!(fixed.tag, DW_TAG_CONST);
+    let name = at(&all, fixed.ty.expect("the const has a type"));
+    assert_eq!((name.tag, name.name.as_deref()), (DW_TAG_TYPEDEF, Some("banks_t")));
+}
+
+/// A function under `ms_abi` keeps the typedef names it was written with, for itself and for its
+/// parameters. The kernel's `efi_get_time_t __efiapi *get_time` is a pointer to `efi_get_time_t` in
+/// gcc's BTF, and `efi_status_t (__efiapi *handler_addr)(u64, void *)` has a `u64` parameter.
+#[test]
+fn a_function_under_another_convention_keeps_its_names() {
+    let source = "\
+typedef unsigned long long u64;
+typedef struct { int y; } tm_t;
+typedef long get_time_t(tm_t *t);
+struct svc { get_time_t __attribute__((ms_abi)) *get_time; long (__attribute__((ms_abi)) *h)(u64); } v;
+";
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "convention", source));
+    let member = |name: &str| {
+        let member = named(&all, DW_TAG_MEMBER, name).expect("the member is described");
+        at(&all, member.ty.expect("a member has a type"))
+    };
+    let get_time = member("get_time");
+    assert_eq!(get_time.tag, DW_TAG_POINTER);
+    let name = at(&all, get_time.ty.expect("a pointer has a type"));
+    assert_eq!((name.tag, name.name.as_deref()), (DW_TAG_TYPEDEF, Some("get_time_t")));
+    let h = member("h");
+    let function = at(&all, h.ty.expect("a pointer has a type"));
+    assert_eq!(function.tag, DW_TAG_SUBROUTINE);
+    let param = &all[function.children[0]];
+    let u64 = at(&all, param.ty.expect("a parameter has a type"));
+    assert_eq!((u64.tag, u64.name.as_deref()), (DW_TAG_TYPEDEF, Some("u64")));
+}

@@ -196,7 +196,16 @@ impl Checker<'_> {
             return Some(self.poison(span));
         };
         let ty = self.size_type();
-        let answer = self.behind(address).and_then(|reach| reach.left(kind & 1 == 1));
+        let reach = self.behind(address);
+        let answer = reach.and_then(|reach| reach.left(kind & 1 == 1));
+        // A member of what a pointer points at, asked about for the largest closest answer above
+        // `-O0`, which gcc answers with what is left of the member or of the whole object,
+        // whichever is less. The whole object is a fact about where the pointer came from, so the
+        // IR answers it, and where it finds nothing the member stands.
+        let capped = kind == 1
+            && self.cx.optimizing
+            && reach.is_some_and(|reach| reach.whole.is_none())
+            && self.read_pointer(address);
         // Inside a function, an address read out of a local is asked about again once the function
         // is IR, where a pointer chosen by a branch or a loop is a block parameter whose every
         // argument is in front of the walk. Only where lowering the address does nothing a
@@ -209,7 +218,10 @@ impl Checker<'_> {
         // inlined the IR can see what the caller passed, and that is when gcc answers it:
         // `check_copy_size` inside `copy_from_user` asks about its `addr` and gets the size of
         // the buffer the caller of the caller passed.
-        if answer.is_none() && self.body.is_some() && self.quiet(address) && self.local(address) {
+        if ((answer.is_none() && self.local(address)) || capped)
+            && self.body.is_some()
+            && self.quiet(address)
+        {
             // The dynamic spelling is carried down as a third bit, because the IR is where an
             // answer computed while the program runs can be built, and only that spelling may
             // have one. See `rucc_opt::objsize`.
@@ -483,6 +495,37 @@ impl Checker<'_> {
             _ => return false,
         };
         self.cx.optimizing && self.eval().integer(count).is_err()
+    }
+
+    /// Whether the object behind this address is what a pointer read out of a local or a parameter
+    /// of the function points at, as in `p->name`, `&p->name[3]` and `p[2].name`.
+    fn read_pointer(&self, expr: ExprId) -> bool {
+        let automatic = |expr: ExprId| {
+            let mut expr = expr;
+            while let ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } =
+                self.tast[expr].kind
+            {
+                expr = inner;
+            }
+            let ExprKind::Decl(id) = self.tast[expr].kind else { return false };
+            let decl = &self.tast[id];
+            decl.kind == DeclKind::Object && decl.duration == StorageDuration::Automatic
+        };
+        match self.tast[expr].kind {
+            ExprKind::Cast(inner)
+            | ExprKind::Convert { operand: inner, .. }
+            | ExprKind::Unary { op: UnaryOp::AddrOf, operand: inner }
+            | ExprKind::Member { base: inner, .. } => self.read_pointer(inner),
+            ExprKind::Binary { op: BinaryOp::Add | BinaryOp::Sub, lhs, rhs } => {
+                self.read_pointer(lhs) || self.read_pointer(rhs)
+            }
+            ExprKind::Subscript { base, .. } => match self.decayed(base) {
+                Some(array) => self.read_pointer(array),
+                None => automatic(base),
+            },
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => automatic(operand),
+            _ => false,
+        }
     }
 
     /// Whether this pointer is a local of the function, not a parameter, read as it is.

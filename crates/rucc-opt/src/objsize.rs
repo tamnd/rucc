@@ -145,6 +145,7 @@ pub fn answer(
                 numbers: RefCell::default(),
                 answered: Map::default(),
                 moved: Cell::new(false),
+                through: Cell::new(false),
                 ways: Cell::new(WAYS),
                 places: OnceCell::new(),
             };
@@ -184,8 +185,7 @@ pub fn answer(
         for (inst, answer) in answers {
             match answer {
                 Answer::Known(number) => write(func, inst, number),
-                Answer::Running(running) => build(func, inst, &running),
-                Answer::Within(object, size) => measure(func, inst, object, size),
+                answer => put(func, inst, &answer),
             }
             answered += 1;
         }
@@ -242,6 +242,9 @@ enum Answer {
     /// The size of the object the address is in, less how far in the address is, worked out where
     /// the question is.
     Within(Object, u64),
+    /// What is left of the whole object, worked out where the question is, or what is left of the
+    /// member where that is less.
+    Capped(Box<Answer>, u64),
 }
 
 /// The object an address is in, as [`Walk::within`] found it.
@@ -310,17 +313,52 @@ fn write(func: &mut Func, inst: Inst, number: i128) {
     func.remove_inst(inst);
 }
 
-/// Puts the size an allocator was asked for in place of the question, less how far in the address
-/// is and never below zero, which is what gcc 16 answers `__builtin_dynamic_object_size(p + 2, 0)`
-/// with for a `p` that came out of `malloc(n)`.
-fn build(func: &mut Func, inst: Inst, running: &Running) {
+/// Puts an answer that is not a constant in place of the question and takes the question away.
+fn put(func: &mut Func, inst: Inst, answer: &Answer) {
+    let result = func[inst].results().next().expect("an object size is one value");
+    let value = worked(func, inst, answer);
+    let forward: Map<_, _> = [(result, value)].into_iter().collect();
+    crate::uses::substitute(func, &forward);
+    func.remove_inst(inst);
+}
+
+/// The answer worked out in front of the question, which is not a constant.
+///
+/// The size an allocator was asked for is less how far in the address is and never below zero,
+/// which is what gcc 16 answers `__builtin_dynamic_object_size(p + 2, 0)` with for a `p` that came
+/// out of `malloc(n)`. A capped answer is the smaller of the two, which is gcc's `MIN_EXPR`.
+fn worked(func: &mut Func, inst: Inst, answer: &Answer) -> Value {
     let result = func[inst].results().next().expect("an object size is one value");
     let ty = func[result].ty;
     let span = func.span(inst);
-    let size = room(func, inst, span, running, ty);
-    let forward: Map<_, _> = [(result, size)].into_iter().collect();
-    crate::uses::substitute(func, &forward);
-    func.remove_inst(inst);
+    let made = |func: &mut Func, data: InstData, ty: Type| {
+        let at = func.create_inst(data, &[ty], span);
+        func.insert_before(at, inst);
+        func[at].results().next().expect("one result was asked for")
+    };
+    match answer {
+        &Answer::Known(number) => {
+            let imm = func.add_imm(Imm::int(number, ty.lane()));
+            made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty)
+        }
+        Answer::Running(running) => room(func, inst, span, running, ty),
+        &Answer::Within(object, size) => measure(func, inst, object, size),
+        Answer::Capped(whole, member) => {
+            let whole = worked(func, inst, whole);
+            let imm = func.add_imm(Imm::int(i128::from(*member), ty.lane()));
+            let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+            let member = made(func, data, ty);
+            let args = func.push_values(&[whole, member]);
+            let test = InstData {
+                args,
+                extra: Extra::IntPred(IntPred::Ugt),
+                ..InstData::new(Opcode::ICmp)
+            };
+            let more = made(func, test, ty.with_lane(Type::I1));
+            let args = func.push_values(&[more, member, whole]);
+            made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty)
+        }
+    }
 }
 
 /// What is left behind a [`Running`] address, worked out in front of `inst`.
@@ -382,10 +420,10 @@ fn room(func: &mut Func, inst: Inst, span: Span, running: &Running, ty: Type) ->
     size
 }
 
-/// Puts the size of the object less how far into it the address is in place of the question, and
-/// never below zero, which is what gcc 16 answers `__builtin_dynamic_object_size (p, 1)` with for
-/// a `p` that a loop moves through a local array.
-fn measure(func: &mut Func, inst: Inst, object: Object, size: u64) {
+/// The size of the object less how far into it the address is, worked out in front of the
+/// question and never below zero, which is what gcc 16 answers `__builtin_dynamic_object_size (p,
+/// 1)` with for a `p` that a loop moves through a local array.
+fn measure(func: &mut Func, inst: Inst, object: Object, size: u64) -> Value {
     let result = func[inst].results().next().expect("an object size is one value");
     let ty = func[result].ty;
     let address = func[func[inst].args][0];
@@ -438,10 +476,7 @@ fn measure(func: &mut Func, inst: Inst, object: Object, size: u64) {
     let args = func.push_values(&[size, offset]);
     let left = made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty);
     let args = func.push_values(&[room, left, zero]);
-    let answer = made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty);
-    let forward: Map<_, _> = [(result, answer)].into_iter().collect();
-    crate::uses::substitute(func, &forward);
-    func.remove_inst(inst);
+    made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty)
 }
 
 /// The most `ptr_add`s [`steps`] follows from an address back to the start of its object.
@@ -499,6 +534,9 @@ struct Walk<'a> {
     /// Whether the last walk for the largest answer went round a loop that moves the pointer, so
     /// that what it found is only where the pointer starts.
     moved: Cell<bool>,
+    /// Whether the last walk for the closest member stopped at a member of an object it reached
+    /// through a pointer, rather than one of a local or a global it stepped into.
+    through: Cell<bool>,
     /// How many more ways into a join [`Walk::running`] may follow for the question it is on, so
     /// that joins one after another, each followed on every way into it, are not followed for a
     /// time that grows as a power of how many there are.
@@ -548,6 +586,7 @@ impl Walk<'_> {
         let ask = Ask { largest: kind & 2 == 0, closest: kind & 1 == 1 };
         let largest = ask.largest;
         self.moved.set(false);
+        self.through.set(false);
         self.ways.set(WAYS);
         let known = match look {
             false => None,
@@ -561,6 +600,9 @@ impl Walk<'_> {
             // `p_addr++` after each entry, and keeps the field spanning WARN that checks it.
             Some(known) if look && dynamic && self.moved.get() => {
                 self.within(address, inst, ask).unwrap_or(Answer::Known(i128::from(known)))
+            }
+            Some(known) if look && ask.closest && largest && self.through.get() => {
+                self.capped(address, inst, known, dynamic)
             }
             Some(known) => Answer::Known(i128::from(known)),
             // Only the dynamic spelling may be answered with something worked out while the
@@ -576,6 +618,57 @@ impl Walk<'_> {
                 .unwrap_or(Answer::Known(unknown)),
             None => Answer::Known(unknown),
         }
+    }
+
+    /// The closest member of an object reached through a pointer, which gcc answers with what is
+    /// left of the member or what is left of the whole object, whichever is less. Its
+    /// `addr_object_size` takes that `MIN_EXPR` where the address is in a `MEM_REF` and not where
+    /// it is in a declared object. Where the whole object is only known when the program runs, so
+    /// is the answer: cxgb4's `t4_alloc_mac_filt` copies each address with `memcpy
+    /// (p->macaddr, ...)` at a `p` its loop moves through a command on the stack, and gcc keeps the
+    /// field spanning WARN that checks it. The same holds for a structure from `kmalloc (n)`.
+    fn capped(&self, address: Value, inst: Inst, member: u64, dynamic: bool) -> Answer {
+        let whole = Ask { largest: true, closest: false };
+        let known = Answer::Known(i128::from(member));
+        self.moved.set(false);
+        self.ways.set(WAYS);
+        match self.left(address, whole, DEPTH, &mut Vec::new()) {
+            Ok(Some(left)) if dynamic && self.moved.get() => {
+                match self.within(address, inst, whole) {
+                    Some(within) => Answer::Capped(Box::new(within), member),
+                    None => Answer::Known(i128::from(member.min(left))),
+                }
+            }
+            Ok(Some(left)) => Answer::Known(i128::from(member.min(left))),
+            _ if !dynamic => known,
+            _ => {
+                let Some(result) = self.func[inst].results().next() else { return known };
+                let ty = self.func[result].ty;
+                self.ways.set(WAYS);
+                match self.running(address, whole, ty, DEPTH, &mut Vec::new()) {
+                    Some(running) => Answer::Capped(Box::new(Answer::Running(running)), member),
+                    None => match self.within(address, inst, whole) {
+                        Some(within) => Answer::Capped(Box::new(within), member),
+                        None => known,
+                    },
+                }
+            }
+        }
+    }
+
+    /// Whether an address is a constant or a counted number of steps into a local or a global,
+    /// which is a declared object to gcc, rather than into one a pointer points at.
+    fn declared(&self, mut value: Value) -> bool {
+        for _ in 0..STEPS {
+            let Def::Result { inst, .. } = self.func[value].def else { return false };
+            let data = &self.func[inst];
+            match data.opcode {
+                Opcode::Alloca | Opcode::GlobalAddr => return true,
+                Opcode::PtrAdd => value = self.func[data.args][0],
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// How many bytes there are from this address to the end of its object.
@@ -630,6 +723,9 @@ impl Walk<'_> {
                         if ask.closest && data.extra.member().is_some_and(|size| size != 0) =>
                     {
                         let Some(size) = data.extra.member() else { return Err(()) };
+                        if !self.declared(*args.first().ok_or(())?) {
+                            self.through.set(true);
+                        }
                         Ok(Some(u64::from(size)))
                     }
                     // A member that may run past its end is in the member under it where that
@@ -2274,6 +2370,82 @@ block0:
         answer(&mut module, &names, Some(&[]), Pic::Executable, true);
         let text = rucc_ir::print(&module, &names);
         assert!(!text.contains("member"), "{text}");
+    }
+
+    /// A member of an object reached through a pointer has what is left of the member or what is
+    /// left of the whole object, whichever is less, and the dynamic spelling works the whole
+    /// object out when the program runs where it has to. A member of a local stepped into has the
+    /// member alone. gcc 15 answers `c->name` with `c` from `malloc (10)` with 6, `b->name` with
+    /// `b` from `malloc (n)` with the smaller of 16 and `n - 4`, and `p->mac` at a `p` a loop moves
+    /// through a local with the smaller of 6 and what is left of the local.
+    #[test]
+    fn a_member_through_a_pointer_has_no_more_than_the_whole_object_has_left() {
+        let body = "
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+
+func @f(i64, ptr), linkage(external) {
+block0(%0: i64, %1: ptr):
+    %2 = iconst.i64 10
+    %3 = call @my(%2) : (i64) -> ptr
+    %4 = iconst.i64 4
+    %5 = ptr_add %3, %4, array 16
+    %6 = object_size.i64 %5, kind 5
+    call @use(%6) : (i64)
+    %7 = object_size.i64 %5, kind 1
+    call @use(%7) : (i64)
+    %8 = ptr_add %1, %4, array 16
+    %9 = object_size.i64 %8, kind 5
+    call @use(%9) : (i64)
+    %10 = alloca, size 24, align 8
+    %11 = ptr_add %10, %4, array 16
+    %12 = object_size.i64 %11, kind 5
+    call @use(%12) : (i64)
+    %13 = call @my(%0) : (i64) -> ptr
+    %14 = ptr_add %13, %4, array 16
+    %15 = object_size.i64 %14, kind 5
+    call @use(%15) : (i64)
+    %16 = object_size.i64 %14, kind 1
+    call @use(%16) : (i64)
+    return
+}
+";
+        // The call given ten is read back too.
+        assert_eq!(answers(body, true), [10, 6, 6, 16, 16, 16]);
+        let text = printed(body, Some(&[]));
+        assert_eq!(text.matches("icmp ugt").count(), 2, "{text}");
+        assert_eq!(text.matches("select").count(), 2, "{text}");
+        let looped = "
+func @g(i32), linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 64, align 16
+    %2 = iconst.i64 8
+    %3 = ptr_add %1, %2, member 56
+    %4 = iconst.i32 0
+    jump block1(%3, %4)
+
+block1(%5: ptr, %6: i32):
+    %7 = iconst.i64 2
+    %8 = ptr_add %5, %7, array 6
+    %9 = object_size.i64 %8, kind 5
+    call @use(%9) : (i64)
+    %10 = object_size.i64 %8, kind 1
+    call @use(%10) : (i64)
+    %11 = iconst.i64 8
+    %12 = ptr_add %5, %11
+    %13 = iconst.i32 1
+    %14 = add %6, %13
+    %15 = icmp slt %14, %0
+    br_if %15, block1(%12, %14), block2
+
+block2:
+    return
+}
+";
+        assert_eq!(answers(looped, true), [6]);
+        let text = printed(looped, Some(&[]));
+        assert_eq!(text.matches("ptrtoint").count(), 2, "{text}");
+        assert!(text.contains("iconst.i64 64"), "{text}");
+        assert_eq!(text.matches("icmp ugt").count(), 2, "{text}");
     }
 
     /// A member of zero may run past its end. Where the member under it has no room left for it
