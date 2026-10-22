@@ -55,6 +55,12 @@
 //! Two more things are done with bits short of a constant. An access whose address is proved more
 //! aligned than it says takes the larger alignment, and an extension of a truncation is what was
 //! truncated when the bits the truncation dropped are known to be what the extension puts back.
+//!
+//! The low bits of an address come from where it started. A local's are zero up to the alignment
+//! the `alloca` asks for, and a global's up to the one the module gives it, which
+//! `crate::outside` copies out for the pass. The kernel's `instrument_atomic_check_alignment` warns
+//! when `(unsigned long)v & 7` is not zero, and for `set_bit` on a bit of a global bitmap gcc folds
+//! the test away where a warning that can never fire used to be left behind here.
 
 use std::cell::RefCell;
 
@@ -64,6 +70,7 @@ use rucc_ir::{
     Value, ValueList,
 };
 
+use crate::outside::Outside;
 use crate::range::ops::{self, Truth};
 use crate::range::{Bits, Range};
 use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, uses};
@@ -113,7 +120,8 @@ const POINTER_KNOWN: u32 = 32;
 /// buys nothing and only makes the IR say more than anything reads.
 const ALIGN_LIMIT: u32 = 16;
 
-/// The pass. It holds nothing, because everything it knows it works out from the function.
+/// The pass. It holds nothing, because everything it knows it works out from the function and
+/// from how aligned the module's globals are, which the analysis cache brings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sccp;
 
@@ -138,9 +146,9 @@ impl Pass for Sccp {
         Preserved::ALL.without(Analysis::Liveness).without(Analysis::Frequencies)
     }
 
-    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
-        let Some(solved) = Solver::solve(func, &mut stats) else { return stats };
+        let Some(solved) = Solver::solve(func, an.outside(), &mut stats) else { return stats };
         replace(func, &solved, fuel, &mut stats);
         align(func, &solved, fuel, &mut stats);
         unextend(func, &solved, fuel, &mut stats);
@@ -239,6 +247,8 @@ enum Arms {
 /// The fixpoint while it runs.
 struct Solver<'a> {
     func: &'a Func,
+    /// What the module says of the globals the function takes the address of.
+    outside: &'a Outside,
     /// What is known about each value, by [`Value::index`].
     facts: Vec<Fact>,
     /// Whether each block is reachable, by [`Block::index`].
@@ -260,7 +270,7 @@ struct Solver<'a> {
 
 impl<'a> Solver<'a> {
     /// Runs the fixpoint over the function, or nothing for a declaration.
-    fn solve(func: &'a Func, stats: &mut Stats) -> Option<Solved> {
+    fn solve(func: &'a Func, outside: &'a Outside, stats: &mut Stats) -> Option<Solved> {
         let entry = func.entry()?;
         let counts = func.counts();
         let mut readers = vec![Vec::new(); counts.values];
@@ -286,6 +296,7 @@ impl<'a> Solver<'a> {
         }
         let mut solver = Self {
             func,
+            outside,
             facts: vec![Fact::Undefined; counts.values],
             reached: vec![false; counts.blocks],
             readers,
@@ -485,16 +496,23 @@ impl<'a> Solver<'a> {
         let args = &self.func[data.args];
         let width = followed(ty);
         // A local is at an address that is a multiple of its alignment, which is what the frame
-        // promises when it places one.
-        if data.opcode == Opcode::Alloca {
-            let Extra::Mem(mem) = data.extra else { return nothing(ty) };
-            let align = self.func[mem].align.max(1);
+        // promises when it places one, and a global is at one that is a multiple of what
+        // `Outside::align` says, which is what the object that defines it promises.
+        let align = match (data.opcode, data.extra) {
+            (Opcode::Alloca, Extra::Mem(mem)) => Some(self.func[mem].align.max(1)),
+            (Opcode::GlobalAddr, Extra::Symbol(name)) => self.outside.align(name),
+            _ => None,
+        };
+        if let Some(align) = align {
             if !align.is_power_of_two() {
                 return nothing(ty);
             }
             let low = u128::from(align - 1);
             let all = (1u128 << POINTER) - 1;
             return Fact::Known(Bits::from_parts(0, all & !low, POINTER));
+        }
+        if matches!(data.opcode, Opcode::Alloca | Opcode::GlobalAddr) {
+            return nothing(ty);
         }
         if data.opcode == Opcode::IConst {
             let Extra::Imm(at) = data.extra else { return nothing(ty) };
@@ -881,9 +899,12 @@ const fn mask(width: u32) -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rucc_base::Interner;
 
     use super::Sccp;
+    use crate::outside::Outside;
     use crate::{Fuel, Pass};
 
     const HEAD: &str = r#"; ModuleID = 't.c'
@@ -898,12 +919,13 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let outside = Arc::new(Outside::of(&module));
         let ids: Vec<_> = module.funcs().collect();
         for id in ids {
             if module[id].is_declaration() {
                 continue;
             }
-            let mut an = crate::machine::fixtures::analyses();
+            let mut an = crate::machine::fixtures::analyses().about(Arc::clone(&outside));
             Sccp.run(&mut module[id], &mut an, fuel);
         }
         if let Err(errors) = rucc_ir::verify(&module, &names) {
@@ -1332,5 +1354,56 @@ block5:
     fn fuel_stops_the_raising() {
         let out = run(INTO_LOCAL, &mut Fuel::of(0));
         assert!(out.contains("align 1"), "{out}");
+    }
+
+    /// `node_set(node, numa_nodes_parsed)` in the kernel with `CONFIG_DEBUG_ATOMIC`, which asks
+    /// whether the word of the bitmap the bit is in is aligned to eight. The bitmap is a global
+    /// declared here and defined somewhere else.
+    const BIT_OF_GLOBAL: &str = "
+global @nodes : bytes 8, align 8, linkage(external)
+
+func @f(i64) -> i64, linkage(external) {
+block0(%0: i64):
+    %1 = global_addr @nodes
+    %2 = iconst.i64 3
+    %3 = shl %0, %2
+    %4 = ptr_add %1, %3
+    %5 = ptrtoint.i64 %4
+    %6 = iconst.i64 7
+    %7 = and %5, %6
+    return %7
+}
+";
+
+    #[test]
+    fn a_word_of_a_declared_global_is_as_aligned_as_the_global() {
+        let out = solved(BIT_OF_GLOBAL);
+        assert!(out.contains("%7 = iconst.i64 0"), "{out}");
+    }
+
+    #[test]
+    fn a_defined_global_is_as_aligned_as_the_module_placed_it() {
+        let defined = BIT_OF_GLOBAL.replace(
+            "bytes 8, align 8, linkage(external)",
+            "bytes 64 = { zero 64 }, align 8, linkage(internal)",
+        );
+        let out = solved(&defined);
+        assert!(out.contains("%7 = iconst.i64 0"), "{out}");
+    }
+
+    #[test]
+    fn a_weak_global_proves_nothing_since_another_definition_can_win() {
+        let weak = BIT_OF_GLOBAL.replace(
+            "bytes 8, align 8, linkage(external)",
+            "bytes 8 = { zero 8 }, align 8, linkage(weak)",
+        );
+        let out = solved(&weak);
+        assert!(out.contains("%7 = and %5, %6"), "{out}");
+    }
+
+    #[test]
+    fn a_global_less_aligned_than_the_mask_leaves_the_test() {
+        let out = solved(&BIT_OF_GLOBAL.replace("align 8, linkage", "align 4, linkage"));
+        assert!(out.contains("%7 = and %5, %6"), "{out}");
     }
 }
