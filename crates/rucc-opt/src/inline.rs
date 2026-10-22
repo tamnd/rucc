@@ -1518,13 +1518,20 @@ fn specialized_size(
     // `reassoc` stands for gcc's `forwprop`, which puts the constants of a chain of adds together
     // before the early inliner weighs the body, so sixteen lines adding a constant each are one
     // add to gcc. Without it a helper like that grows `main` by fourteen and stays a call there,
-    // where gcc copies it (tamnd/rucc#3224).
-    let passes: [&dyn Pass; 7] = [
+    // where gcc copies it (tamnd/rucc#3224). `switch-conv` is in gcc's early passes too, so a
+    // switch whose arms give constants is a range check and arithmetic to the inliner there, and
+    // gcc has no `expect` instruction for a constant to get stuck behind. `crypto_mldsa_key_size`
+    // in crypto/mldsa.c is a switch of three lengths and a `WARN_ON_ONCE` in the default, which is
+    // seventeen to gcc. It was twenty one here as a switch of four labels, and nineteen with the
+    // branch on the `unlikely(1)` the warning tests.
+    let passes: [&dyn Pass; 9] = [
+        &crate::expect::Expect,
         &crate::fold::Fold,
         &crate::simplify::Simplify,
         &crate::reassoc::Reassoc,
         &crate::constant_p::ConstantYes,
         &crate::sccp::Sccp,
+        &crate::switch_conv::SwitchConv,
         &crate::simplify_cfg::SimplifyCfg,
         &crate::dce::Dce,
     ];
@@ -2130,14 +2137,14 @@ impl Pool {
 /// more than gcc lets a call that is not hot grow it.
 ///
 /// The copy costs the body less the call it replaces, a call being one instruction and one more
-/// for each argument. gcc's early inliner takes a copy that grows the caller by no more than
+/// for each argument and for the result. gcc's early inliner takes a copy that grows the caller by no more than
 /// [`INLINE_EARLY_INSNS`], or [`INLINE_EARLY_INSNS_O3`] at `-O3`, before it has worked out which functions are cold, holding a body that
 /// makes calls of its own to that for each of them and itself together. What it leaves, the later
 /// inliner takes into a caller that is not hot only when the program does not grow, which is
 /// `growth_positive_p`. A `static` body nothing reaches but its calls goes away once every call
 /// has its copy, so what it costs then is a copy for every call less the body it no longer needs.
 fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> bool {
-    let cost = 1 + func[func[call].args].len();
+    let cost = 1 + func[func[call].args].len() + usize::from(func[call].results > 0);
     let growth = size.saturating_sub(cost);
     let calls = callee
         .blocks()

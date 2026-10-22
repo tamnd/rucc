@@ -538,14 +538,18 @@ impl Heap<'_> {
                 (body, copied, hints, cut)
             }
         };
-        let growth = as_i64(body) - as_i64(1 + args);
+        // The call it replaces is a move for each argument and one for the result, as gcc's
+        // `call_stmt_size` counts it. `crypto_mldsa_key_size` in crypto/mldsa.c is seventeen and
+        // grows its caller by fourteen to gcc, under the limit of fifteen, and with the result
+        // left out it was fifteen here and the check on the length it returns stayed in.
+        let reads = usize::from(func[call].results > 0);
+        let growth = as_i64(body) - as_i64(1 + args + reads);
         self.learn(module, caller);
         self.learn(module, callee);
         let time = self.spent.get(&callee).copied().unwrap_or(0.0);
         let (frequency, depth) = self.at.get(&(caller, call)).copied().unwrap_or((1.0, 0));
         let spent = self.spent.get(&caller).copied().unwrap_or(0.0);
         // gcc's `eni_time_weights`: the call, a move for each argument and one for the result.
-        let reads = usize::from(func[call].results > 0);
         let call_time = f64::from(rucc_cost::param!(INLINE_CALL_TIME)) + (args + reads) as f64;
         let saved = call_time + (time - copied).max(0.0);
         let removable = target.linkage == Linkage::Internal
