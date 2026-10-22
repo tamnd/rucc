@@ -95,6 +95,7 @@ const MEMBER: &str = r#"
 
 struct desc { char flit[16]; char after[48]; };
 struct cat { long n; char buf[2][100]; int idx; };
+struct at { int n; char flit[16]; char after[48]; };
 
 static inline __attribute__((always_inline)) size_t d1(const void *p) {
     return __builtin_dynamic_object_size(p, 1);
@@ -109,11 +110,22 @@ __attribute__((noinline)) void put(struct desc *d, int i, const char *src) {
     strcpy(&d->flit[i], src);
 }
 
+__attribute__((noinline)) void put_at(struct at *a, const char *src) {
+    strcpy(&a->flit[a->n], src);
+}
+
 int main(int argc, char **argv) {
     int i = atoi(argv[1]), n = atoi(argv[2]);
     char big[64];
     memset(big, 'x', sizeof big - 1);
     big[63] = 0;
+    if (argc > 3) {
+        struct at *a = malloc(sizeof *a);
+        a->n = i;
+        put_at(a, big + 63 - n);
+        printf("ran %d\n", a->flit[i]);
+        return 0;
+    }
     struct cat *c = malloc(sizeof *c);
     show(c, 1, 10);
     struct desc *d = malloc(sizeof *d);
@@ -240,6 +252,11 @@ fn level_3_checks_a_member_at_an_index_known_at_run_time() {
     let (ok, said) = run(&three, &["4", "11"]);
     assert!(ok && said.contains("90 88 90\nran"), "{said}");
     let (ok, said) = run(&three, &["4", "12"]);
+    assert!(!ok && said.contains(OVERFLOWED), "{said}");
+    // The same with the index read through the pointer, as venus's `&cap->pl[cap->num_pl]` is.
+    let (ok, said) = run(&three, &["4", "11", "at"]);
+    assert!(ok && said.contains("ran"), "{said}");
+    let (ok, said) = run(&three, &["4", "12", "at"]);
     assert!(!ok && said.contains(OVERFLOWED), "{said}");
     let _ = std::fs::remove_dir_all(&dir);
 }
