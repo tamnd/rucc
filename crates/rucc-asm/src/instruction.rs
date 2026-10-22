@@ -1482,7 +1482,7 @@ fn operand(text: &str, mode: Mode) -> Result<Operand, String> {
     if text.starts_with('%') && !text.contains('(') && !text.contains(':') {
         return register(&text[1..]);
     }
-    if text.starts_with('%') || text.contains('(') {
+    if text.starts_with('%') || (text.contains('(') && !reckoned(text)) {
         return address(text, mode);
     }
     // What is left is a bare name, which in an instruction is somewhere to go. An address written
@@ -1503,6 +1503,35 @@ fn operand(text: &str, mode: Mode) -> Result<Operand, String> {
         Err(_) => {}
     }
     Err(format!("'{text}' is not an operand this compiler reads"))
+}
+
+/// Whether brackets in an operand are only arithmetic, so that the operand is an expression and
+/// not an address with registers in it.
+///
+/// gas reads an operand as base and index only when it ends in a bracket whose inside starts with
+/// a register or a comma. Linux 7.3's arch/x86/xen/xen-asm.S writes
+/// `jmp early_idt_handler_array + i*(9 + (4*1))` for each entry of `xen_early_idt_handler_array`.
+/// That is a jump to a name, and rucc wrote a jump through memory at that address, which objtool
+/// reported as an indirect jump with no `int3` after it.
+fn reckoned(text: &str) -> bool {
+    if text.contains('%') {
+        return false;
+    }
+    let Some(inside) = text.strip_suffix(')') else { return true };
+    let mut depth = 0usize;
+    let open = inside.char_indices().rev().find_map(|(at, ch)| match ch {
+        ')' => {
+            depth += 1;
+            None
+        }
+        '(' if depth == 0 => Some(at),
+        '(' => {
+            depth -= 1;
+            None
+        }
+        _ => None,
+    });
+    open.is_some_and(|at| !inside[at + 1..].trim_start().starts_with(','))
 }
 
 /// The depth of a place on the x87 stack, for `%st` and `%st(N)`.
@@ -2450,6 +2479,23 @@ mod tests {
         // `8(%rip)` is a distance the machine works out and there is nothing for a linker to do.
         let written = one("movq", &["8(%rip)".to_owned(), "%rax".to_owned()]).expect("read");
         assert!(written.holes.is_empty(), "{:?}", written.holes);
+    }
+
+    /// Brackets with no register in them are arithmetic, so a jump to a name with a bracketed
+    /// count added is a jump to that name, as xen-asm.S in Linux 7.3 writes for each entry of
+    /// `xen_early_idt_handler_array`, and a bracketed address with no register reads memory.
+    #[test]
+    fn brackets_with_no_register_are_arithmetic() {
+        for line in ["jmp early + 2*(9 + (4*1))", "jmp (early + 26)", "call early+(26)"] {
+            let (word, rest) = line.split_once(' ').expect("two words");
+            let written = one(word, &[rest.to_owned()]).expect("read");
+            assert_eq!(written.bytes.len(), 5, "{line}");
+            assert!(matches!(written.bytes[0], 0xe8 | 0xe9), "{line}");
+            assert_eq!(written.holes[0].name, "early", "{line}");
+        }
+        let read = written("movl (counter+8), %eax");
+        assert_eq!(read.bytes[..3], [0x8b, 0x04, 0x25]);
+        assert_eq!((read.holes[0].name.as_str(), read.holes[0].addend), ("counter", 8));
     }
 
     #[test]
