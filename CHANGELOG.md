@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A `static` marked `used` in the arm of an `if` that a constant condition never takes is emitted again, along with what its initializer names, as gcc does. The kernel's `if (0) printk(...)` under a debug mask of 0, such as `hfs_dbg` in fs/hfs, lost its printk index entry, so about 25 objects in the 6.12 arm64 allmodconfig build had fewer `.printk_index` entries than gcc's. A `static` in the untaken arm of a `?:` or a `&&` is still not kept, which also matches gcc (#3807).
+
 ## 0.30.11
 
 This is a patch release with the same compiler as 0.30.10. The tag check of 0.30.10 failed on a false report of the threshold check, so 0.30.10 has a tag and no release. 0.30.11 is the release of that compiler.
