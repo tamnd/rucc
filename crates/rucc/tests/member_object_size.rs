@@ -148,6 +148,33 @@ void f(unsigned i) {
 }
 "#;
 
+/// An array in a union, which is as long as its type says unless the union is what the pointer
+/// points at. crypto/vmac's `vmac_update` copies into `&dctx->partial[dctx->partial_size]`, where
+/// `partial` shares a union with the words it is read as, and gcc checks the copy against what is
+/// left of the 128 bytes of `partial`.
+const UNION: &str = r#"
+typedef unsigned long size_t;
+struct ctx { union { unsigned char partial[128]; unsigned long words[16]; }; unsigned int size; };
+union both { unsigned char bytes[16]; unsigned long words[2]; };
+#define I static inline __attribute__((always_inline))
+I size_t d1(const void *p) { return __builtin_dynamic_object_size(p, 1); }
+#define WANT(name, got, want) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if ((got) != (size_t)(want)) name(); \
+    } while (0)
+void f(struct ctx *c, union both *u, unsigned i) {
+    WANT(wrong_union_array, d1(c->partial), 128);
+    WANT(wrong_union_array_at, d1(&c->partial[4]), 124);
+    WANT(wrong_union_words, d1(c->words), 128);
+    WANT(wrong_pointed_union, d1(u->bytes), -1);
+    if (i < 128 && d1(&c->partial[i]) > 128) {
+        extern void wrong_union_index(void) __attribute__((error("wrong_union_index")));
+        wrong_union_index();
+    }
+}
+"#;
+
 fn compile(name: &str, source: &str, level: &str) -> Output {
     compile_with(name, source, &[level])
 }
@@ -200,6 +227,14 @@ fn a_trailing_array_is_as_long_as_strict_flex_arrays_says() {
 fn what_is_left_of_a_member_at_a_bounded_index_is_at_least_one_element() {
     for level in ["-O1", "-O2", "-Os", "-O3"] {
         let out = compile(&format!("bounded{level}"), BOUNDED, level);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn an_array_in_a_union_inside_a_structure_is_as_long_as_its_type() {
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let out = compile(&format!("union{level}"), UNION, level);
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }
