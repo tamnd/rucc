@@ -73,6 +73,30 @@ void g(int x) { if (x) panic(\"x\"); }
     assert_eq!(call + 1, g.len(), "{text}");
 }
 
+/// fs/dlm/lock.c in Linux 7.3 hands `unhold_lkb_assert`, which ends in `panic`, to `kref_put`, and
+/// the call through the pointer becomes a call by name only after `kref_put` is inlined.
+#[test]
+fn a_call_made_direct_to_a_function_that_does_not_come_back_is_the_last_thing_on_its_path() {
+    let source = "\
+struct kref { int count; };
+__attribute__((noreturn)) void panic(const char *);
+static inline int put(struct kref *k, void (*release)(struct kref *))
+{
+	if (--k->count == 0) {
+		release(k);
+		return 1;
+	}
+	return 0;
+}
+static void gone(struct kref *k) { (void)k; panic(\"put\"); }
+int f(struct kref *k, int a) { int rv = 0; if (a) { put(k, gone); rv = -1; } return rv; }
+";
+    let text = assembly("direct", source);
+    let f = body(&text, "f");
+    let call = f.iter().position(|line| line == "call\tgone").expect("f calls gone");
+    assert_eq!(call + 1, f.len(), "{text}");
+}
+
 #[test]
 fn a_branch_to_where_control_never_arrives_is_not_written() {
     let source = "\

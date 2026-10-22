@@ -607,8 +607,16 @@ fn stops(func: &Func, inst: Inst) -> bool {
 
 /// Whether a block is only the place control does not reach, so that a branch to it is a branch
 /// that is never taken.
+///
+/// Work with no effect in front of the `unreachable` does not change that. [`cut`] leaves what
+/// came before the hint, and Linux 7.3's `ZSTD_searchMax` in lib/zstd/compress/zstd_lazy.c is a
+/// `switch (mls)` on 4, 5 and 6 whose default was a constant and then the `unreachable`. The
+/// default stayed, so the lowering wrote a compare against 6 that jumped past the end of
+/// `ZSTD_compressBlock_greedy`, where gcc lets 6 be the default. objtool reported 27 functions of
+/// that file as falling through to the next one.
 fn dead_end(func: &Func, block: Block) -> bool {
-    func.insts(block).next().is_some_and(|inst| func[inst].opcode == Opcode::Unreachable)
+    let mut insts = func.insts(block).skip_while(|&inst| !func[inst].opcode.has_effects());
+    insts.next().is_some_and(|inst| func[inst].opcode == Opcode::Unreachable)
 }
 
 /// What a block's parameters hold along one particular edge into it.
@@ -1523,8 +1531,8 @@ fn numbered(func: &Func, value: Value) -> Option<(Imm, Type)> {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Def, Extra, Flags, Func, Hint, Inst, IntPred, MemInfo, MemOrder, Module,
-        Opcode, Restrict, Signature, Type, Value,
+        Block, Builder, Def, Extra, Flags, Func, Hint, Inst, InstData, IntPred, MemInfo, MemOrder,
+        Module, Opcode, Restrict, Signature, Type, Value,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -1988,6 +1996,33 @@ block2:
         Builder::new(&mut func, miss).ret(&[]);
         let stats = simplify(&mut func);
         (func, stats)
+    }
+
+    /// `switch (mls)` on 4, 5 and 6 with a default that is a constant nothing reads and then the
+    /// `unreachable`, which is what `ZSTD_searchMax` left in Linux 7.3's zstd_lazy.c.
+    #[test]
+    fn a_default_with_only_dead_work_before_the_end_is_never_taken() {
+        let mut names = Interner::new();
+        let ty = Type::int(32);
+        let signature = Signature::new().with_params(&[ty]).with_returns(&[ty]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let miss = func.create_block();
+        let arms: Vec<Block> = (0..3).map(|_| func.create_block()).collect();
+        let value = func.append_param(entry, ty);
+        let cases: Vec<(i128, Block)> = (4..).zip(arms.iter().copied()).collect();
+        Builder::new(&mut func, entry).switch(value, miss, &cases);
+        let mut build = Builder::new(&mut func, miss);
+        build.iconst(ty, 0);
+        build.inst(InstData::new(Opcode::Unreachable), &[]);
+        for (at, &arm) in (10..).zip(&arms) {
+            let mut build = Builder::new(&mut func, arm);
+            let answer = build.iconst(ty, at);
+            build.ret(&[answer]);
+        }
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::UNDEFAULTED), 1);
+        assert!(!goes_to(&func, 0).contains(&miss.index()));
     }
 
     /// The opcodes of the entry block, and the predicate of the compare in it if it has one.

@@ -4,6 +4,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A call through a pointer that becomes a direct call to a function that never comes back now ends its block, the same as a call written by name. Linux 7.3's `revert_lock` and five other functions in fs/dlm/lock.c call `unhold_lkb_assert` through `kref_put`, and rucc wrote a `jmp` after the call. objtool reported each one as a call to a function with no `__noreturn`.
+- A `switch` default that does only work with no effect and then reaches `__builtin_unreachable()` is now never taken, and one of the cases becomes the default. In Linux 7.3's lib/zstd/compress/zstd_lazy.c the default of `switch (mls)` jumped past the end of the function, and objtool reported 27 functions as falling through to the next one.
+
 ## 0.30.11
 
 This is a patch release with the same compiler as 0.30.10. The tag check of 0.30.10 failed on a false report of the threshold check, so 0.30.10 has a tag and no release. 0.30.11 is the release of that compiler.
