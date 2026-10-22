@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - The debug information keeps a typedef name in more places where gcc keeps it. These were the differences in the BTF of a 7.3 X64 kernel built with rucc. A qualifier or an address space written over an array typedef name, as in the kernel's per CPU `mce_banks_t`, `vector_irq_t` and `note_buf_t`, is now a const or a plain entry over the name and no longer an anonymous array. A function under `ms_abi`, as in the kernel's `efi_get_time_t __efiapi *get_time`, now points at `efi_get_time_t`, and its parameters keep the names they were written with, so `efi_call_acpi_prm_handler` has a `u64` parameter and not `long long unsigned int`.
+- A `static` marked `used` in the arm of an `if` that a constant condition never takes is emitted again, along with what its initializer names, as gcc does. The kernel's `if (0) printk(...)` under a debug mask of 0, such as `hfs_dbg` in fs/hfs, lost its printk index entry, so about 25 objects in the 6.12 arm64 allmodconfig build had fewer `.printk_index` entries than gcc's. A `static` in the untaken arm of a `?:` or a `&&` is still not kept, which also matches gcc (#3807).
 
 ## 0.30.11
 
