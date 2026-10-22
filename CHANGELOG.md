@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler reads an operand whose brackets hold no register as an expression, the same as gas. `jmp early_idt_handler_array + i*(9 + (4*1))` in Linux 7.3's arch/x86/xen/xen-asm.S was assembled as a jump through memory at that address, so each entry of `xen_early_idt_handler_array` jumped through whatever was stored there. objtool reported it as an indirect jump with no `int3` after it.
 - A `static` marked `used` in the arm of an `if` that a constant condition never takes is emitted again, along with what its initializer names, as gcc does. The kernel's `if (0) printk(...)` under a debug mask of 0, such as `hfs_dbg` in fs/hfs, lost its printk index entry, so about 25 objects in the 6.12 arm64 allmodconfig build had fewer `.printk_index` entries than gcc's. A `static` in the untaken arm of a `?:` or a `&&` is still not kept, which also matches gcc (#3807).
 
 ## 0.30.11
