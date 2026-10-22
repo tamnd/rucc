@@ -1022,6 +1022,26 @@ impl<'a> Ranges<'a> {
                     range = range.intersect(found);
                 }
             }
+            // And so is a compare. `fortify_memcpy_chk` panics when the object is smaller than
+            // the copy and then warns when the member, the lesser of its size and the object's,
+            // is smaller too. Value numbering puts the second compare above the first test, and
+            // asked where it is made it can be either way. Asked below the test, the member is
+            // the whole member, and gcc drops the warning in `brcmf_config_wowl_pattern`.
+            if data.opcode == Opcode::ICmp && stop != Some(block) {
+                let args: Vec<Value> = self.func[data.args].to_vec();
+                if let (Extra::IntPred(pred), &[a, b]) = (data.extra, args.as_slice()) {
+                    let (a, b) = (self.refined(a, block), self.refined(b, block));
+                    let width = range.width();
+                    let found = match (a.width() == b.width()).then(|| ops::compare(pred, a, b)) {
+                        Some(Truth::Always) => Some(Range::exactly(1, width)),
+                        Some(Truth::Never) => Some(Range::exactly(0, width)),
+                        _ => None,
+                    };
+                    if let Some(found) = found {
+                        range = range.intersect(found);
+                    }
+                }
+            }
         }
         range
     }
@@ -1725,6 +1745,28 @@ mod tests {
         assert_eq!(bounds(ranges.at(least, blocks[2])), Some((0, 72)));
         assert!(ranges.of(least).is_full());
         assert!(ranges.at(least, blocks[1]).is_full());
+    }
+
+    /// `min(size, 4) < 4` worked out before `size < 4` is tested, which is the shape value
+    /// numbering leaves of `fortify_memcpy_chk`'s two checks, never holds below the test and can
+    /// still hold above it.
+    #[test]
+    fn a_compare_made_above_a_test_on_what_it_compares_is_settled_below_it() {
+        let (mut func, args, blocks) = shape(1, 3);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let four = build.iconst(I32, 4);
+        let more = build.icmp(IntPred::Ugt, args[0], four);
+        let member = build.select(more, four, args[0]);
+        let short = build.icmp(IntPred::Ult, member, four);
+        let test = build.icmp(IntPred::Ult, args[0], four);
+        build.br_if(test, blocks[1], &[], blocks[2], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(short, blocks[2]).singleton(), Some(0));
+        assert_eq!(ranges.at(short, blocks[1]).singleton(), Some(1));
+        assert!(ranges.of(short).singleton().is_none());
     }
 
     /// `min_t(size_t, size, 72)` of a 32 bit size, with the compare made on the narrow size and
