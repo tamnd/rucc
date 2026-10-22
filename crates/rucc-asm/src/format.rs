@@ -389,10 +389,11 @@ impl Directives {
             (Directives::Coff | Directives::CoffI386, Place::NoInit | Place::Persistent) => {
                 out.push_str("\t.data\n");
             }
-            // `M` and `S` with an entry a byte wide, which is the line gcc writes for its literals.
-            (Directives::Elf, Place::Strings { align }) => {
-                let name = Place::strings(*align);
-                let _ = writeln!(out, "\t.section\t{name},\"aMS\",@progbits,1");
+            // `M` and `S` with an entry a character wide, which is the line gcc writes for its
+            // literals.
+            (Directives::Elf, Place::Strings { align, width }) => {
+                let name = Place::strings(*width, *align);
+                let _ = writeln!(out, "\t.section\t{name},\"aMS\",@progbits,{width}");
             }
             (Directives::Elf, Place::RelocReadOnly { local }) => {
                 let name = if *local { ".data.rel.ro.local" } else { ".data.rel.ro" };

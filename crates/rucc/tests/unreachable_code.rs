@@ -207,6 +207,30 @@ fn a_static_table_nothing_names_any_more_is_not_emitted() {
     }
 }
 
+/// A `used` object in the body of a function only an unused `static` table names goes with the
+/// function, as it does under gcc. The kernel's `CLK_OF_DECLARE` in a module is that table, and
+/// each `pr_err` in the init function it names has a `used` entry for the printk index. One in a
+/// function the code calls stays, and so does one in a function every call to which was inlined.
+#[test]
+fn a_used_object_in_a_function_nothing_has_to_keep_goes_with_it() {
+    let source = "struct pi { const char *fmt; };\nvoid printk(const char *);\n\
+                  #define ENTRY(name, f) static const struct pi name __attribute__((used)) = { f }\n\
+                  static void dead(void) { ENTRY(dead_entry, \"dead\"); printk(\"dead\"); }\n\
+                  static void dead_too(void) { dead(); }\n\
+                  static const void *table __attribute__((unused)) = dead_too;\n\
+                  static inline void folded(void) { ENTRY(folded_entry, \"in\"); printk(\"in\"); }\n\
+                  void live(void) { ENTRY(live_entry, \"live\"); printk(\"live\"); folded(); }\n";
+    for level in &LEVELS[1..] {
+        let asm = emit_of(level, "asm", "used-in-dead", source);
+        assert!(!asm.contains("dead_entry"), "{level}:\n{asm}");
+        assert!(!asm.contains("dead_too"), "{level}:\n{asm}");
+        assert!(asm.contains("live_entry"), "{level}:\n{asm}");
+        assert!(asm.contains("folded_entry"), "{level}:\n{asm}");
+    }
+    let asm = emit_of("-O0", "asm", "used-in-dead", source);
+    assert!(asm.contains("dead_entry"), "-O0:\n{asm}");
+}
+
 /// A flag that is only a constant once the caller has been folded still reaches the callee, when
 /// the callee is too large to inline. This is the kernel's `fpu__restore_sig`, whose flag goes
 /// false through `ia32_frame &= 0`, and a call left in the arm it guards is a function a kernel

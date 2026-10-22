@@ -582,8 +582,11 @@ fn variable(
         _ if format == ObjectFormat::Elf && global.persistent => Place::Persistent,
         // A literal the linker can merge with every other copy of the same string, on the one
         // format that has a section for it. See [`Place::Strings`].
-        Place::ReadOnly if format == ObjectFormat::Elf && global.literal && one_string(&pieces) => {
-            Place::Strings { align: u64::from(global.align) }
+        Place::ReadOnly if format == ObjectFormat::Elf && global.literal => {
+            match string_width(&pieces, global.align) {
+                Some(width) => Place::Strings { align: u64::from(global.align), width },
+                None => Place::ReadOnly,
+            }
         }
         place => place,
     };
@@ -595,14 +598,30 @@ fn variable(
     Ok(Variable { name, size, align, place, binding, visibility, retain, pieces })
 }
 
-/// Whether an image is one string of bytes and nothing after it, which is a run of bytes whose
-/// first zero is its last byte. A linker merging strings reads up to the first zero, so one with a
-/// zero inside it would be two strings to the linker and half of it would be lost.
-fn one_string(pieces: &[Piece]) -> bool {
-    match pieces {
-        [Piece::Bytes(bytes)] => bytes.iter().position(|&byte| byte == 0) == Some(bytes.len() - 1),
-        _ => false,
-    }
+/// How wide a character is in an image that is one string and nothing after it, and nothing for
+/// an image that is not one.
+///
+/// A wide literal is aligned to its character, so a literal aligned to two or four is tried at
+/// that width first. Anything else, or one that is not a string at that width, is tried a byte at
+/// a time.
+fn string_width(pieces: &[Piece], align: u32) -> Option<u64> {
+    let [Piece::Bytes(bytes)] = pieces else { return None };
+    [align, 1]
+        .into_iter()
+        .filter(|width| matches!(width, 1 | 2 | 4))
+        .find(|&width| one_string(bytes, width as usize))
+        .map(u64::from)
+}
+
+/// Whether bytes are one string of characters that wide and nothing after it, which is a run of
+/// characters whose first zero is its last one. A linker merging strings reads up to the first
+/// zero, so one with a zero inside it would be two strings to the linker and half of it would be
+/// lost.
+fn one_string(bytes: &[u8], width: usize) -> bool {
+    !bytes.is_empty()
+        && bytes.len() % width == 0
+        && bytes.chunks(width).position(|unit| unit.iter().all(|&byte| byte == 0))
+            == Some(bytes.len() / width - 1)
 }
 
 /// What the linker is told about a name, from the linkage the module gave it.
@@ -802,30 +821,37 @@ mod tests {
     fn a_literal_goes_where_the_linker_merges_strings_when_it_is_one_string() {
         let mut names = Interner::new();
         let mut module = module(&mut names);
-        let mut literal = |module: &mut Module, name: &str, bytes: &[u8]| {
+        let mut literal = |module: &mut Module, name: &str, bytes: &[u8], align: u32| {
             let range = module.push_bytes(bytes);
             let id = defined(module, &mut names, name, &[Datum::Bytes(range)]);
             module[id].size = bytes.len() as u64;
-            module[id].align = 1;
+            module[id].align = align;
             module[id].constant = true;
             module[id].literal = true;
         };
-        literal(&mut module, "hi", b"hi\0");
-        literal(&mut module, "two", b"a\0b\0");
-        literal(&mut module, "wide", &[b'a', 0, 0, 0, 0, 0, 0, 0]);
+        literal(&mut module, "hi", b"hi\0", 1);
+        literal(&mut module, "two", b"a\0b\0", 1);
+        literal(&mut module, "wide", &[b'a', 0, 0, 0, 0, 0, 0, 0], 1);
+        literal(&mut module, "u", &[b'h', 0, b'i', 0, 0, 0], 2);
+        literal(&mut module, "U", &[b'a', 0, 0, 0, 0, 0, 0, 0], 4);
+        literal(&mut module, "u_two", &[b'a', 0, 0, 0, b'b', 0, 0, 0], 2);
         let places = |format| -> Vec<Place> {
             let vars =
-                globals(&module, &names, format, ir::Pic::Executable).expect("three literals").vars;
+                globals(&module, &names, format, ir::Pic::Executable).expect("six literals").vars;
             vars.into_iter().map(|var| var.place).collect()
         };
         assert_eq!(
             places(ObjectFormat::Elf),
-            [Place::Strings { align: 1 }, Place::ReadOnly, Place::ReadOnly]
+            [
+                Place::Strings { align: 1, width: 1 },
+                Place::ReadOnly,
+                Place::ReadOnly,
+                Place::Strings { align: 2, width: 2 },
+                Place::Strings { align: 4, width: 4 },
+                Place::ReadOnly,
+            ]
         );
-        assert_eq!(
-            places(ObjectFormat::MachO),
-            [Place::ReadOnly, Place::ReadOnly, Place::ReadOnly]
-        );
+        assert_eq!(places(ObjectFormat::MachO), vec![Place::ReadOnly; 6]);
     }
 
     #[test]

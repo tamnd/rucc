@@ -677,17 +677,21 @@ pub enum Place {
     /// merely read only: the runtime unprotects the page for that one write.
     Pointer,
     /// A string literal, in the section of them the linker keeps one copy of each string in,
-    /// whichever objects it came from. `.rodata.str1.` and the alignment, which is where gcc puts
-    /// one, flagged `SHF_MERGE` and `SHF_STRINGS` with entries a byte wide.
+    /// whichever objects it came from. `.rodata.str`, how wide a character is, a dot and the
+    /// alignment, which is where gcc puts one, flagged `SHF_MERGE` and `SHF_STRINGS` with entries
+    /// as wide as a character.
     ///
-    /// Only for a literal of one byte characters whose first zero is its last byte. The linker
-    /// reads the section as a run of strings each ended by a zero, so one with a zero inside it
-    /// would be cut in two, and a wide one is entries of a different width, which goes in a
-    /// section of its own name that nothing here writes yet.
+    /// Only for a literal whose first character that is zero is its last. The linker reads the
+    /// section as a run of strings each ended by a zero character, so one with a zero inside it
+    /// would be cut in two.
     Strings {
         /// What it is aligned to, which is in the name because two literals aligned differently
         /// cannot be in one run the linker merges.
         align: u64,
+        /// How many bytes a character is, which is one for a plain literal and two or four for a
+        /// wide one. In the name and in the header, since the linker compares strings a character
+        /// at a time and a run of two byte strings is not a run of one byte strings.
+        width: u64,
     },
     /// A variable written `noinit` with no initializer, in the section the startup code never
     /// clears, so what a program left in it is still there after a warm reset. `.noinit`, with no
@@ -780,10 +784,10 @@ impl Place {
         })
     }
 
-    /// The section a string literal of that alignment goes in.
+    /// The section a string literal of that character width and alignment goes in.
     #[must_use]
-    pub fn strings(align: u64) -> String {
-        format!(".rodata.str1.{align}")
+    pub fn strings(width: u64, align: u64) -> String {
+        format!(".rodata.str{width}.{align}")
     }
 }
 
