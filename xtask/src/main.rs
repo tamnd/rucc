@@ -684,10 +684,14 @@ fn compared_literals(code: &str) -> Vec<String> {
     found
 }
 
-/// The token ending just before `at`, if it is a bare integer literal.
+/// The token ending just before `at`, if it is a bare integer literal. A number after a dot is a
+/// tuple field, as in `pair.1 < other.1`, and not a literal.
 fn token_before(code: &str, at: usize) -> Option<String> {
     let head = code[..at].trim_end();
     let start = head.rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_').map_or(0, |i| i + 1);
+    if head[..start].ends_with('.') {
+        return None;
+    }
     bare_integer(&head[start..])
 }
 
@@ -1823,6 +1827,7 @@ mod tests {
         assert!(compared_literals("match n { 4 => 5, _ => 6 }").is_empty());
         assert!(compared_literals("fn f() -> Option<u32> { None }").is_empty());
         assert!(compared_literals("let v: Vec<[u8; 4]> = Vec::new();").is_empty());
+        assert!(compared_literals("let (low, high) = if one.3 < two.3 { (one, two) };").is_empty());
     }
 
     #[test]
