@@ -131,6 +131,23 @@ void f(struct m *mp, struct n *np, int i) {
 }
 "#;
 
+/// A member reached at an index a branch has bounded, the way acpi's `flatten_lpi_states` takes
+/// `&pr->power.lpi_states[flat_state_cnt]` once it has given up at eight states. At least one
+/// element of the array is left there, and gcc 16 folds the fortified `memcpy`'s test on that.
+const BOUNDED: &str = r#"
+typedef unsigned long size_t;
+struct state { char b[72]; };
+struct power { int count; union { int c[4]; struct state s[8]; }; };
+struct proc { long id; struct power power; } *pp;
+void f(unsigned i) {
+    extern void wrong_bounded(void) __attribute__((error("wrong_bounded")));
+    if (i >= 8)
+        return;
+    if (__builtin_dynamic_object_size(&pp->power.s[i], 1) < sizeof(struct state))
+        wrong_bounded();
+}
+"#;
+
 fn compile(name: &str, source: &str, level: &str) -> Output {
     compile_with(name, source, &[level])
 }
@@ -176,5 +193,13 @@ fn a_trailing_array_is_as_long_as_strict_flex_arrays_says() {
         assert!(out.status.success(), "strict {level}: {}", String::from_utf8_lossy(&out.stderr));
         let out = compile_with(&format!("open{level}"), TRAILING, &["-DSTRICT=0", level]);
         assert!(out.status.success(), "open {level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn what_is_left_of_a_member_at_a_bounded_index_is_at_least_one_element() {
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let out = compile(&format!("bounded{level}"), BOUNDED, level);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }

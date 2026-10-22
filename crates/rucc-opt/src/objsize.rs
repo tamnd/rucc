@@ -341,22 +341,38 @@ fn measure(func: &mut Func, inst: Inst, object: Object, size: u64) {
         func.insert_before(at, inst);
         func[at].results().next().expect("one result was asked for")
     };
-    let start = match object {
-        Object::Local(start) | Object::Member(start, _) => start,
-        // The address of a global is taken again here, since the one the walk passed may be in a
-        // block that does not come before the question.
-        Object::Global(name) => made(
-            func,
-            InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) },
-            Type::PTR,
-        ),
+    let offset = match steps(func, address, object, ty) {
+        // The steps themselves, added up, rather than the difference of two addresses, because
+        // the ranges see through an `add` and a `mul` and not through a `ptrtoint`. A branch on
+        // `i < 8` in front of `&pr->power.lpi_states[i]` is what proves the room left is at least
+        // one element, and gcc folds the fortify check in processor_idle.c on that.
+        Some(steps) if !steps.is_empty() => {
+            let mut offset = steps[0];
+            for &step in &steps[1..] {
+                let args = func.push_values(&[offset, step]);
+                offset = made(func, InstData { args, ..InstData::new(Opcode::Add) }, ty);
+            }
+            offset
+        }
+        _ => {
+            let start = match object {
+                Object::Local(start) | Object::Member(start, _) => start,
+                // The address of a global is taken again here, since the one the walk passed may
+                // be in a block that does not come before the question.
+                Object::Global(name) => made(
+                    func,
+                    InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) },
+                    Type::PTR,
+                ),
+            };
+            let args = func.push_values(&[address]);
+            let at = made(func, InstData { args, ..InstData::new(Opcode::PtrToInt) }, ty);
+            let args = func.push_values(&[start]);
+            let from = made(func, InstData { args, ..InstData::new(Opcode::PtrToInt) }, ty);
+            let args = func.push_values(&[at, from]);
+            made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty)
+        }
     };
-    let args = func.push_values(&[address]);
-    let at = made(func, InstData { args, ..InstData::new(Opcode::PtrToInt) }, ty);
-    let args = func.push_values(&[start]);
-    let from = made(func, InstData { args, ..InstData::new(Opcode::PtrToInt) }, ty);
-    let args = func.push_values(&[at, from]);
-    let offset = made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty);
     let imm = func.add_imm(Imm::int(i128::from(size), ty.lane()));
     let size = made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
     let imm = func.add_imm(Imm::int(0, ty.lane()));
@@ -372,6 +388,39 @@ fn measure(func: &mut Func, inst: Inst, object: Object, size: u64) {
     let forward: Map<_, _> = [(result, answer)].into_iter().collect();
     crate::uses::substitute(func, &forward);
     func.remove_inst(inst);
+}
+
+/// The most `ptr_add`s [`steps`] follows from an address back to the start of its object.
+const STEPS: usize = 8;
+
+/// The steps of the `ptr_add`s that make the address out of the start of the object, nearest the
+/// address first, where it is made that way and every step is of the type the answer is.
+///
+/// Their sum is how far in the address is, the same number as the difference of the two read as
+/// integers, since both wrap at the width of a pointer.
+fn steps(func: &Func, address: Value, object: Object, ty: Type) -> Option<Vec<Value>> {
+    let mut steps = Vec::new();
+    let mut value = address;
+    loop {
+        if matches!(object, Object::Local(start) | Object::Member(start, _) if value == start) {
+            return Some(steps);
+        }
+        let Def::Result { inst, .. } = func[value].def else { return None };
+        let data = &func[inst];
+        let started = match (data.opcode, data.extra) {
+            (Opcode::GlobalAddr, Extra::Symbol(name)) => object == Object::Global(name),
+            _ => false,
+        };
+        if started {
+            return Some(steps);
+        }
+        let &[base, step] = &func[data.args][..] else { return None };
+        if data.opcode != Opcode::PtrAdd || func[step].ty != ty || steps.len() == STEPS {
+            return None;
+        }
+        steps.push(step);
+        value = base;
+    }
 }
 
 /// What a walk over one function reads.
@@ -1721,7 +1770,9 @@ block2:
         assert_eq!(answers(body, true), [-1]);
         assert_eq!(answers(body, false), [-1, -1, -1]);
         let text = printed(body, Some(&[]));
-        assert_eq!(text.matches("ptrtoint").count(), 4, "{text}");
+        // The local's offset is the difference of two addresses, since the loop is in the way, and
+        // the global's is the one step from it.
+        assert_eq!(text.matches("ptrtoint").count(), 2, "{text}");
         assert_eq!(text.matches("icmp ugt").count(), 2, "{text}");
         assert!(text.contains("iconst.i64 1000") && text.contains("iconst.i64 32"), "{text}");
     }
@@ -2011,7 +2062,9 @@ block0(%0: ptr, %1: i64):
 ";
         assert_eq!(answers(body, true), [-1, -1, -1]);
         let text = printed(body, Some(&[]));
-        assert_eq!(text.matches("ptrtoint").count(), 2, "{text}");
+        assert_eq!(text.matches("ptrtoint").count(), 0, "{text}");
+        let taken = text.lines().any(|line| line.contains(" = sub ") && line.ends_with(", %1"));
+        assert!(taken, "the step is taken off the length, {text}");
         assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
         assert!(text.contains("iconst.i64 128"), "{text}");
     }
