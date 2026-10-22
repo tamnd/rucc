@@ -114,6 +114,10 @@ __attribute__((noinline)) void put_at(struct at *a, const char *src) {
     strcpy(&a->flit[a->n], src);
 }
 
+__attribute__((noinline)) void put_plus(struct at *a, const char *src) {
+    strcpy(a->flit + a->n, src);
+}
+
 int main(int argc, char **argv) {
     int i = atoi(argv[1]), n = atoi(argv[2]);
     char big[64];
@@ -122,7 +126,8 @@ int main(int argc, char **argv) {
     if (argc > 3) {
         struct at *a = malloc(sizeof *a);
         a->n = i;
-        put_at(a, big + 63 - n);
+        if (!strcmp(argv[3], "plus")) put_plus(a, big + 63 - n);
+        else put_at(a, big + 63 - n);
         printf("ran %d\n", a->flit[i]);
         return 0;
     }
@@ -257,6 +262,11 @@ fn level_3_checks_a_member_at_an_index_known_at_run_time() {
     let (ok, said) = run(&three, &["4", "11", "at"]);
     assert!(ok && said.contains("ran"), "{said}");
     let (ok, said) = run(&three, &["4", "12", "at"]);
+    assert!(!ok && said.contains(OVERFLOWED), "{said}");
+    // And with the index added to the member, as poly1305's `dctx->buf + dctx->buflen` is.
+    let (ok, said) = run(&three, &["4", "11", "plus"]);
+    assert!(ok && said.contains("ran"), "{said}");
+    let (ok, said) = run(&three, &["4", "12", "plus"]);
     assert!(!ok && said.contains(OVERFLOWED), "{said}");
     let _ = std::fs::remove_dir_all(&dir);
 }

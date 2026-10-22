@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - The threshold check no longer reads a tuple field such as `one.3 < two.3` as a comparison against the number 3. This false report stopped the tag check of 0.30.10, so 0.30.10 has a tag and no release. Pull request CI now runs the threshold, interposition and version checks that the release gate runs on the tree.
+- `__builtin_dynamic_object_size` of a member array plus a count the program works out, as in `memcpy(dctx->buf + dctx->buflen, ...)`, is now answered when the program runs, with what is left of the member, the same way `&dctx->buf[dctx->buflen]` already was. rucc answered it with "unknown" when neither side read a local, so the fortified copy lost its check, and arm64 `poly1305-glue.o` in Linux 6.12 had no `WARN` at lines 87 and 131 where gcc has one (#3800).
 
 ## 0.30.10
 
