@@ -1309,6 +1309,7 @@ impl Checker<'_> {
             if let Some(specs) = param.specs.filter(|_| attributed) {
                 self.no_reordered(&[ast[specs].attrs, param.attrs], false);
                 self.strict_flex_refused(&[ast[specs].attrs, param.attrs], declarator.name);
+                self.counted_by_refused(&[ast[specs].attrs, param.attrs], declarator.name);
                 self.ms_hooked(&[ast[specs].attrs, param.attrs], false);
                 self.warn_unused_misplaced(&[ast[specs].attrs, param.attrs], false);
                 self.reset_kept(&[ast[specs].attrs, param.attrs], None, span);
