@@ -2445,7 +2445,10 @@ impl Checker<'_> {
         let mut pointee = pointee;
         if let Some((convention, name, span)) = self.convention_in(attrs) {
             match self.types.kind(self.types.canonical(pointee)) {
-                TypeKind::Function(function) => pointee = self.function_under(function, convention),
+                TypeKind::Function(function) => {
+                    let function = self.spelled_function(pointee).unwrap_or(function);
+                    pointee = self.function_under(function, convention);
+                }
                 _ => self.not_a_function(&name, span),
             }
         }
@@ -3128,13 +3131,22 @@ impl Checker<'_> {
             {
                 ty
             }
-            TypeKind::Function(function) => self.function_under(function, convention),
+            TypeKind::Function(function) => {
+                let function = self.spelled_function(ty).unwrap_or(function);
+                self.function_under(function, convention)
+            }
             TypeKind::Pointer(pointee) => {
                 let pointee = self.types.canonical(pointee);
                 let TypeKind::Function(function) = self.types.kind(pointee) else {
                     self.not_a_function(name, span);
                     return ty;
                 };
+                // The pointee as written, where the parameters still have their typedef names.
+                let written = match self.types.kind(ty) {
+                    TypeKind::Pointer(written) => written,
+                    _ => pointee,
+                };
+                let function = self.spelled_function(written).unwrap_or(function);
                 let quals = self.types.quals(canonical);
                 let function = self.function_under(function, convention);
                 let pointer = self.types.pointer(function);
@@ -3199,7 +3211,26 @@ impl Checker<'_> {
             convention
         };
         let signature = FunctionType { convention, ..current.clone() };
-        self.types.function(signature)
+        let ty = self.types.function(signature);
+        // The parameters keep the names they were written with, which is what the debug
+        // information describes them by: `efi_time_t *` and not the structure under it.
+        if let TypeKind::Function(under) = self.types.kind(ty) {
+            self.types.carry_params_written(function, under);
+        }
+        ty
+    }
+
+    /// The function type `ty` names as written, through any typedef names and not through
+    /// [`Types::canonical`], so the parameters keep the names they were written with.
+    fn spelled_function(&self, ty: TypeId) -> Option<FunctionId> {
+        let mut at = ty;
+        loop {
+            match self.types.kind(at) {
+                TypeKind::Typedef { underlying, .. } => at = underlying,
+                TypeKind::Function(function) => return Some(function),
+                _ => return None,
+            }
+        }
     }
 
     /// gcc's warning for a convention written on something that is not a function.

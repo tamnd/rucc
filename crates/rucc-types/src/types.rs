@@ -759,6 +759,14 @@ impl Types {
         self.params_written.entry(function).or_insert(written);
     }
 
+    /// Gives `to` what `from`'s parameters were written as, where `to` is the same prototype under
+    /// another convention or flag and was not written itself.
+    pub fn carry_params_written(&mut self, from: FunctionId, to: FunctionId) {
+        if let Some(written) = self.params_written.get(&from).cloned() {
+            self.params_written.entry(to).or_insert(written);
+        }
+    }
+
     /// Records how one prototype's parameters were written, for the declaration being read.
     pub fn record_prototype(&mut self, function: FunctionId, written: Vec<Written>) {
         self.pending.push((function, written));
