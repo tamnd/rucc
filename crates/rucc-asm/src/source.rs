@@ -3955,6 +3955,7 @@ impl Reader {
                         || self.declared.contains(&at))
             })
             .collect();
+        let elf = self.elf();
         let mut moved = vec![0usize; self.parts.len()];
         let mut parts = Vec::with_capacity(self.parts.len());
         for (at, part) in self.parts.into_iter().enumerate() {
@@ -3963,6 +3964,7 @@ impl Reader {
                 parts.push(part);
             }
         }
+        let mut spelled = Map::default();
         let mut names = Vec::with_capacity(self.syms.len() + self.files.len());
         // In front, which is where gas puts them and where a reader expects the name of the file to
         // be before anything that is in it.
@@ -4006,14 +4008,36 @@ impl Reader {
                 }
                 _ => sym.sort,
             };
+            // One a relocation needs is written under the name gas gives it, `.L1` and a `\u{2}`
+            // and which writing of it this is. The linker leaves a `.L` name out of what it
+            // links and `kallsyms` skips one, so the string of every `WARN` in a kernel's bug
+            // table does not end up as a name in `System.map`.
+            let name = match sym.name.split_once('\u{1}') {
+                Some((number, nth))
+                    if elf
+                        && sym.numbered
+                        && !number.is_empty()
+                        && number.bytes().all(|byte| byte.is_ascii_digit()) =>
+                {
+                    let gas = format!(".L{number}\u{2}{nth}");
+                    spelled.insert(sym.name, gas.clone());
+                    gas
+                }
+                _ => sym.name,
+            };
             names.push(Name {
-                name: sym.name,
+                name,
                 at,
                 size: sym.size,
                 sort,
                 binding,
                 visibility: sym.visibility,
             });
+        }
+        for reloc in parts.iter_mut().flat_map(|part| part.relocs.iter_mut()) {
+            if let Some(gas) = spelled.get(&reloc.symbol) {
+                reloc.symbol.clone_from(gas);
+            }
         }
         Ok(Ok(Assembled { parts, names, subsections: self.subsections }))
     }
@@ -5937,16 +5961,16 @@ fn carries_on(byte: u8) -> bool {
 /// A file writes `1:` over and over and each one is a different place, so what goes in the table has
 /// to say which of them this is. The byte in the middle is one no name in a source file can hold, so
 /// nothing a file writes its own way can collide with one of these, and none of them reaches the
-/// symbol table at the end.
+/// symbol table under it. One a relocation needs is written there the way gas names it.
+fn counted(number: &str, nth: usize) -> String {
+    format!("{number}\u{1}{nth}")
+}
+
 /// How much padding an alignment takes at `at`, which is none when it would be more than `most`.
 fn padding(at: u64, boundary: u64, most: Option<u64>) -> u64 {
     let over = at % boundary;
     let need = if over == 0 { 0 } else { boundary - over };
     if most.is_some_and(|most| need > most) { 0 } else { need }
-}
-
-fn counted(number: &str, nth: usize) -> String {
-    format!("{number}\u{1}{nth}")
 }
 
 /// The quoted strings `arg` is made of when it is nothing but quoted strings with blanks between,
@@ -7409,6 +7433,22 @@ _tls$tlv$init:
             })
             .collect();
         assert_eq!(relocs, [(0, 0), (4, 1), (8, 2), (12, 3)]);
+    }
+
+    /// The file string of an arm64 `WARN` sits at `14472:` in a string section, and the bug table
+    /// reaches it with `14472b - .`. A string section may be merged, so the relocation names the
+    /// place and the place is kept, under the name gas gives it.
+    #[test]
+    fn a_numbered_label_a_relocation_needs_has_the_name_gas_gives_it() {
+        let out = assembled(
+            "\t.pushsection .rodata.str,\"aMS\",@progbits,1\n14472:\t.string \"f\"\n\
+             \t.popsection\n\t.pushsection __bug_table,\"aw\"\n\t.long 14472b - .\n\
+             \t.popsection\n",
+        );
+        let table = out.parts.iter().find(|part| part.name == "__bug_table").unwrap();
+        assert_eq!(table.relocs[0].symbol, ".L14472\u{2}1");
+        assert!(out.names.iter().any(|name| name.name == ".L14472\u{2}1"));
+        assert!(!out.names.iter().any(|name| name.name.contains('\u{1}')));
     }
 
     #[test]

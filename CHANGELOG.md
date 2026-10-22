@@ -66,6 +66,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The value ranges narrow a select by what its condition says on each side when the condition tests the narrow value before it was widened, and narrow a select made above a test on one of its arms below that test. The `WARN_ON_ONCE (bytes > INT_MAX)` in `check_copy_size` is gone where gcc drops it, in liveupdate's `luo_ucmd_respond` and in iommufd's `copy_struct_from_user` (#3785).
 - The aarch64 assembler takes a whole number as the immediate of a scalar or vector `fmov`, as GNU as does, so `fmov s0, #1` in the arm64 `hwcap` selftest assembles (#3786).
 - On aarch64, two saves or restores off the frame pointer that become one `stp` or `ldp` now keep their unwind rows on the pair, and they are only paired when nothing between them has rows of its own. A function with a variable length array and an early return no longer loses its `.cfi_remember_state`, so LTP's `matrix_mult.c` assembles (#3787).
+- The assembler writes a numbered local label that a relocation needs under the name gas gives it, `.L14472` with a `\002` and which writing of it this is, where it used to write `14472` with a `\001`. The linker drops a `.L` name and `kallsyms` skips one, so the file string of every arm64 `WARN` no longer shows up as a symbol, and a rucc 6.12 arm64 `System.map` loses 26,849 entries named `14472^A1` that gcc's does not have (#3791)
 
 ### Added
 
