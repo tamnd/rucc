@@ -217,6 +217,31 @@ void f(size_t n, struct big *param, int count) {
 }
 "#;
 
+const STORED: &str = r#"
+typedef unsigned long size_t;
+struct inode { long a; char *link; long size; };
+struct info { union { int data[15]; char sym[60]; } u; int x; struct inode vfs; };
+struct pair { char *one; char *two; };
+extern void touch(void);
+#define container_of(p, T, m) ((T *)((char *)(p) - __builtin_offsetof(T, m)))
+#define D1(p) __builtin_dynamic_object_size(p, 1)
+#define WANT(name, got, want) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if ((got) != (size_t)(want)) name(); \
+    } while (0)
+void f(struct inode *inode, struct pair *pair, char *other) {
+    inode->link = container_of(inode, struct info, vfs)->u.sym;
+    WANT(wrong_stored, D1(inode->link), 60);
+    WANT(wrong_stored_static, __builtin_object_size(inode->link, 1), -1);
+    pair->one = container_of(inode, struct info, vfs)->u.sym;
+    pair->two = other;
+    WANT(wrong_beside, D1(pair->one), 60);
+    touch();
+    WANT(wrong_call, D1(pair->one), -1);
+}
+"#;
+
 fn compile(name: &str, source: &str, level: &str) -> Output {
     compile_with(name, source, &[level])
 }
@@ -286,6 +311,14 @@ fn a_member_through_a_pointer_has_no_more_than_the_whole_object_has_left() {
     for level in ["-O1", "-O2", "-Os", "-O3"] {
         let flags = ["-fstrict-flex-arrays=3", level];
         let out = compile_with(&format!("capped{level}"), CAPPED, &flags);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn a_pointer_stored_just_before_it_is_read_back_is_measured() {
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let out = compile(&format!("stored{level}"), STORED, level);
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }
