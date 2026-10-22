@@ -435,6 +435,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
     } = cx;
     let module = Module::new(names.intern(name), target);
     let (reachable, named) = reach::reachable(reach::Decide::new(tast, types, target, names));
+    let live = reach::live(reach::Decide::new(tast, types, target, names));
     let mut unit = Unit {
         tast,
         types,
@@ -485,6 +486,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         starts: Vec::new(),
         renamed: Map::default(),
         reachable,
+        live,
         named,
         used: Set::default(),
         nest: Nest::default(),
@@ -631,6 +633,9 @@ pub(crate) struct Unit<'a> {
     /// What something in the file reaches, which is what decides whether a function with
     /// internal linkage is emitted at all.
     reachable: Set<DeclId>,
+    /// What something the file has to keep reaches, which is what decides whether a `used`
+    /// object in a function body is kept. See [`reach::live`].
+    live: Set<DeclId>,
     /// What an expression in something reached names, which is what a use of a name is. Only a
     /// weakref asks this directly, since whether its target stays weak is whether anything uses
     /// it by name. The rest ask [`Unit::used`].
@@ -1148,9 +1153,11 @@ impl Unit<'_> {
         // gcc does, unless an attribute asked for it to be kept. The kernel's table of operations
         // for a feature it was built without is one: the call that took its address was to a stub
         // that ignores it, and the functions the table names call what the kernel never defined.
+        // An attribute only keeps one that something the file has to keep reaches, which a `used`
+        // object in the body of a function only an unused table names is not. See [`reach::live`].
         global.droppable = global.linkage == IrLinkage::Internal
             && state != Definition::Declared
-            && !node.flags.contains(DeclFlags::RETAINED);
+            && (!node.flags.contains(DeclFlags::RETAINED) || !self.live.contains(&decl));
         global.retain = node.flags.contains(DeclFlags::RETAIN);
         // gcc places a `noinit` object only when the definition has no initializer and a
         // `persistent` one only when it has one, asking of the definition rather than of the
