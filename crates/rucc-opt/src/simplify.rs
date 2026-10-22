@@ -264,11 +264,13 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::sync::OnceLock;
 
+use rucc_base::Idx;
 use rucc_base::float::Float;
 use rucc_base::hash::Map;
 use rucc_ir::term::{PLAIN, Plan, Shown, Term, Terms};
 use rucc_ir::{
-    Block, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
+    Block, BlockCall, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred, Opcode,
+    Type, Value,
 };
 
 use crate::cfg::Cfg;
@@ -304,12 +306,19 @@ const LANE: &str = "lane read back out of a pair packed into a wider integer";
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_LANE: &str = "lane read out of a packed pair left alone, the pass ran out of fuel";
 
-/// Recorded once for each bitcast that gives back the type its operand was cast from.
-const ROUND_TRIP: &str = "bitcast back to the type of the value it was cast from";
+/// Recorded once for each bitcast that gives back the type its operand was cast from, and each
+/// number cast to a pointer and back.
+const ROUND_TRIP: &str = "cast back to the type of the value it was cast from";
 
 /// Recorded for one of those that would have folded if there had been fuel for it.
-const NO_FUEL_ROUND_TRIP: &str =
-    "bitcast back to the first type left alone, the pass ran out of fuel";
+const NO_FUEL_ROUND_TRIP: &str = "cast back to the first type left alone, the pass ran out of fuel";
+
+/// Recorded once for each pointer a join takes that was a number on every way in and is read back
+/// as one.
+const JOINED: &str = "number joined as a pointer read through the join";
+
+/// Recorded for one of those that would have been read through if there had been fuel for it.
+const NO_FUEL_JOINED: &str = "number joined as a pointer left alone, the pass ran out of fuel";
 
 /// Recorded once for each choice between what a compare and exchange expected and what it found.
 const EXCHANGED: &str =
@@ -571,6 +580,12 @@ impl Pass for Simplify {
         // rewrite, and there is nothing to be gained by it: what a pattern asks about is the
         // instruction and its operands, and neither changes under a redirection.
         let mut forward: Map<Value, Value> = Map::default();
+        // A number read back through a join is put right first, so the rules below see the number
+        // where the pointer was read.
+        let joined = joined_numbers(func, address_bits(an), fuel, &mut stats);
+        if !joined.is_empty() {
+            substitute(func, &joined);
+        }
         // Who reads what, so that an instruction nothing reads is left alone. A rule that fires
         // on one changes no program, because what it does is point the readers somewhere else and
         // there are none, and it would still spend fuel and still report having optimized
@@ -630,6 +645,107 @@ impl Pass for Simplify {
     }
 }
 
+/// How wide an address is. A module that does not say is one written for a test, and those are all
+/// sixty four bit ones.
+fn address_bits(an: &Analyses) -> u32 {
+    an.outside().pointer_bytes().and_then(|bytes| u32::try_from(bytes * 8).ok()).unwrap_or(64)
+}
+
+/// A pointer a join takes, read back as a number, when every way into the join made the pointer
+/// out of a number. The join is given a parameter for the number as well, and what read the
+/// pointer back reads that parameter, so the number is seen through the join.
+///
+/// This is the [`round_trip`] of a number cast to a pointer and back, with a join between the two
+/// casts. arm64's `access_ok` is the shape: under `CONFIG_ARM64_TAGGED_ADDR_ABI` the pointer is
+/// untagged on one path and passed as it is on the other, and only then compared as a number
+/// against the top of the user space. gcc's ranges see through the join, so `access_ok` of a 32
+/// bit address the SWP emulation in `armv8_deprecated.c` makes is always true there, and the
+/// `pr_debug` behind the failed check is gone. In rucc the range stopped at the pointer, and the
+/// `pr_debug` stayed with its `__dyndbg` entry and its static branch.
+///
+/// Only a number as wide as an address, for the reason [`round_trip`] gives, and only when every
+/// way in is a cast. The pointer parameter stays for whatever else reads it, and goes with dead
+/// code when nothing does.
+fn joined_numbers(
+    func: &mut Func,
+    address: u32,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+) -> Map<Value, Value> {
+    let mut joined = Map::default();
+    // Who reads a pointer parameter back as a number, grouped by the parameter.
+    let mut read: Map<Value, Vec<Value>> = Map::default();
+    let entry = func.entry();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            if data.opcode != Opcode::PtrToInt {
+                continue;
+            }
+            let (Some(result), &[pointer]) = (data.first_result, &func[data.args]) else {
+                continue;
+            };
+            let ty = func[result].ty;
+            let Def::Param { block: at, .. } = func[pointer].def else { continue };
+            if Some(at) != entry && ty.is_int() && ty.is_scalar() && ty.bits() == address {
+                read.entry(pointer).or_default().push(result);
+            }
+        }
+    }
+    let mut pointers: Vec<Value> = read.keys().copied().collect();
+    pointers.sort_unstable();
+    for pointer in pointers {
+        let ty = func[read[&pointer][0]].ty;
+        let Def::Param { block, index } = func[pointer].def else { continue };
+        let Some(numbers) = numbers_in(func, block, index as usize, ty) else { continue };
+        if !fuel.take() {
+            stats.missed(NO_FUEL_JOINED);
+            continue;
+        }
+        let number = func.append_param(block, ty);
+        for (at, from) in numbers {
+            let call = func[at];
+            let args = func.append_arg(call.args, from);
+            func.set_block_call(at, BlockCall { args, ..call });
+        }
+        for &result in &read[&pointer] {
+            if func[result].ty == ty {
+                joined.insert(result, number);
+            }
+        }
+        stats.optimized(JOINED);
+    }
+    joined
+}
+
+/// Every edge into a block, with the number each of them casts to a pointer for the parameter at
+/// this index, if each of them does and the number is of this type.
+fn numbers_in(
+    func: &Func,
+    block: Block,
+    index: usize,
+    ty: Type,
+) -> Option<Vec<(Idx<BlockCall>, Value)>> {
+    let mut numbers = Vec::new();
+    for from in func.blocks() {
+        let Some(term) = func.terminator(from) else { continue };
+        for at in func.target_list(term).iter() {
+            let call = func[at];
+            if call.block != block {
+                continue;
+            }
+            let &arg = func[call.args].get(index)?;
+            let Def::Result { inst, .. } = func[arg].def else { return None };
+            let &[number] = &func[func[inst].args] else { return None };
+            if func[inst].opcode != Opcode::IntToPtr || func[number].ty != ty {
+                return None;
+            }
+            numbers.push((at, number));
+        }
+    }
+    (!numbers.is_empty()).then_some(numbers)
+}
+
 /// What one of the rewrites found to do to an instruction, before anything is done to it.
 ///
 /// Finding and doing are two steps so that the fuel is asked for in between, and so that
@@ -668,13 +784,7 @@ impl<'a> Finder<'a> {
     /// are the cache's, which the manager hands over built on the function as it is, rather than
     /// a graph of this walk's own built again beside it. tamnd/rucc#3052.
     pub(crate) fn new(func: &Func, an: &'a Analyses) -> Self {
-        // A module that does not say how wide an address is is one written for a test, and those
-        // are all sixty four bit ones.
-        let address = an
-            .outside()
-            .pointer_bytes()
-            .and_then(|bytes| u32::try_from(bytes * 8).ok())
-            .unwrap_or(64);
+        let address = address_bits(an);
         let stacks = (Vec::with_capacity(16), Match { rule: 0, bindings: Vec::with_capacity(8) });
         Self { address, cfg: an.cfg(func), stacks, uses: count(func) }
     }
@@ -1407,8 +1517,25 @@ fn packed_lane(func: &Func, inst: Inst) -> Option<Value> {
 /// shape: each lane goes in through a bitcast to the shape of the write and comes back through a
 /// bitcast to the shape of the local. Without this, the back end sees a chain of lane writes cut
 /// into pieces and cannot see the vector that the chain builds.
+///
+/// A number cast to a pointer and back to an integer of its own type is that number too. Lowering
+/// builds every cast to a pointer from an integer as wide as an address and every cast back into
+/// one, so the type being the same on both sides means nothing was cut, which is what
+/// [`crate::fold`] already takes as given for a constant. gcc folds the pair for any value. The
+/// kernel's `access_ok ((void __user *)(unsigned long)(address & ~3), 4)` in the arm64 SWP
+/// emulation is this, and with the number seen through the casts the range of a 32 bit address is
+/// known to be inside the user space, so the check and the `pr_debug` behind it go as they do
+/// under gcc. Only the integer is replaced: a pointer made back from a number is not the pointer
+/// it was made from as far as aliasing goes, so the other order is left alone.
 fn round_trip(func: &Func, inst: Inst) -> Option<Value> {
     let data = &func[inst];
+    if data.opcode == Opcode::PtrToInt {
+        let ty = func[data.first_result?].ty;
+        let &[pointer] = &func[data.args] else { return None };
+        let Def::Result { inst, .. } = func[pointer].def else { return None };
+        let &[number] = &func[func[inst].args] else { return None };
+        return (func[inst].opcode == Opcode::IntToPtr && func[number].ty == ty).then_some(number);
+    }
     if data.opcode != Opcode::Bitcast {
         return None;
     }
@@ -3090,6 +3217,78 @@ mod tests {
         simplify(&mut func);
         assert_ne!(returned(&func, block), x);
         assert_eq!(came_from(&func, returned(&func, block)).0, Opcode::Bitcast);
+    }
+
+    /// A number cast to a pointer and back to its own type is the number. Back to an integer of
+    /// another width it is a different value and stays.
+    #[test]
+    fn a_number_cast_to_a_pointer_and_back_is_the_number() {
+        let cast = |back: Type| {
+            let mut names = Interner::new();
+            let name = names.intern("f");
+            let i64 = Type::int(64);
+            let signature = Signature::new().with_params(&[i64]).with_returns(&[back]);
+            let mut func = Func::new(name, signature);
+            let block = func.create_block();
+            let x = func.append_param(block, i64);
+            let mut build = Builder::new(&mut func, block);
+            let pointer = build.unary(Opcode::IntToPtr, x, Type::PTR);
+            let number = build.unary(Opcode::PtrToInt, pointer, back);
+            build.ret(&[number]);
+            (func, block, x)
+        };
+        let (mut func, block, x) = cast(Type::int(64));
+        assert!(simplify(&mut func));
+        assert_eq!(returned(&func, block), x);
+        let (mut func, block, x) = cast(Type::int(32));
+        simplify(&mut func);
+        assert_ne!(returned(&func, block), x);
+        assert_eq!(came_from(&func, returned(&func, block)).0, Opcode::PtrToInt);
+    }
+
+    /// A pointer a join takes, made from a number on both ways in and read back as one, is read as
+    /// a number the join takes. This is `access_ok` on arm64, untagged on one way in and not on the
+    /// other. With one way in passing a pointer that was never a number it stays.
+    #[test]
+    fn a_number_joined_as_a_pointer_is_read_through_the_join() {
+        let joined = |cast: bool| {
+            let mut names = Interner::new();
+            let name = names.intern("f");
+            let i64 = Type::int(64);
+            let signature = Signature::new().with_params(&[i64, Type::PTR]).with_returns(&[i64]);
+            let mut func = Func::new(name, signature);
+            let entry = func.create_block();
+            let x = func.append_param(entry, i64);
+            let p = func.append_param(entry, Type::PTR);
+            let [then, other, join] = [(); 3].map(|()| func.create_block());
+            let at = func.append_param(join, Type::PTR);
+            let mut build = Builder::new(&mut func, entry);
+            let top = build.iconst(i64, 1 << 55);
+            let tag = build.binary(Opcode::And, x, top, Flags::NONE);
+            let zero = build.iconst(i64, 0);
+            let tagged = build.icmp(IntPred::Ne, tag, zero);
+            build.br_if(tagged, then, &[], other, &[]);
+            let mut build = Builder::new(&mut func, then);
+            let low = build.iconst(i64, 0xff);
+            let untagged = build.binary(Opcode::And, x, low, Flags::NONE);
+            let pointer = build.unary(Opcode::IntToPtr, untagged, Type::PTR);
+            build.jump(join, &[pointer]);
+            let mut build = Builder::new(&mut func, other);
+            let pointer = if cast { build.unary(Opcode::IntToPtr, x, Type::PTR) } else { p };
+            build.jump(join, &[pointer]);
+            let mut build = Builder::new(&mut func, join);
+            let number = build.unary(Opcode::PtrToInt, at, i64);
+            build.ret(&[number]);
+            (func, join)
+        };
+        let (mut func, join) = joined(true);
+        assert!(simplify(&mut func));
+        let back = returned(&func, join);
+        assert!(matches!(func[back].def, rucc_ir::Def::Param { block, .. } if block == join));
+        assert_eq!(func[back].ty, Type::int(64));
+        let (mut func, join) = joined(false);
+        simplify(&mut func);
+        assert_eq!(came_from(&func, returned(&func, join)).0, Opcode::PtrToInt);
     }
 
     /// A choice on whether a compare and exchange went through, between what it expected and what
