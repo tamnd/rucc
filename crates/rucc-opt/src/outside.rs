@@ -29,6 +29,9 @@
 //! the names as well as the module, because `setjmp` is known by its name, so it is added by
 //! [`Outside::knowing_twice`] rather than by [`Outside::of`].
 //!
+//! And what the address of each global is a multiple of, which `crate::sccp` asks so that
+//! `(unsigned long)&x & 7` is known to be zero the way it is for a local.
+//!
 //! # Why a copy and not a borrow
 //!
 //! The same argument `crate::image` makes, and the pipeline does the same thing with the result: one
@@ -49,15 +52,16 @@
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{Attrs, DataLayout, Meta, Module};
+use rucc_ir::{Attrs, DataLayout, Linkage, Meta, Module};
 
 /// What one name in the module refers to, as much of it as the oracle asks about.
 #[derive(Clone, Copy, Debug)]
 enum Named {
     /// A function, and what it is declared to do to memory.
     Func(Attrs),
-    /// A global variable.
-    Global,
+    /// A global variable, and the alignment its address can be trusted to have. See
+    /// [`Outside::align`].
+    Global(Option<u32>),
     /// An alias or an ifunc, which is a second name for an object that has another one.
     Second,
 }
@@ -93,7 +97,13 @@ impl Outside {
             names.insert(module[id].name, Named::Func(module[id].attrs));
         }
         for id in module.globals() {
-            names.insert(module[id].name, Named::Global);
+            let global = &module[id];
+            // A weak or common definition, or a linkonce one, may not be the object the linker
+            // keeps, and the one it keeps elsewhere need only be as aligned as its type, which is
+            // less than what this module may have given its own copy.
+            let trusted = matches!(global.linkage, Linkage::External | Linkage::Internal)
+                && global.align.is_power_of_two();
+            names.insert(global.name, Named::Global(trusted.then_some(global.align)));
         }
         for id in module.aliases() {
             names.insert(module[id].name, Named::Second);
@@ -182,7 +192,7 @@ impl Outside {
     /// wrong and the conservative answer is the one to be wrong in the direction of.
     #[must_use]
     pub fn one_object(&self, name: Symbol) -> bool {
-        matches!(self.names.get(&name), Some(Named::Func(_) | Named::Global))
+        matches!(self.names.get(&name), Some(Named::Func(_) | Named::Global(_)))
     }
 
     /// What a function of that name is declared to do to memory.
@@ -193,7 +203,22 @@ impl Outside {
     pub fn attrs(&self, name: Symbol) -> Option<Attrs> {
         match self.names.get(&name)? {
             Named::Func(attrs) => Some(*attrs),
-            Named::Global | Named::Second => None,
+            Named::Global(_) | Named::Second => None,
+        }
+    }
+
+    /// What the address of the global of that name is a multiple of, in bytes.
+    ///
+    /// The alignment the module gives a global it defines is the one it places the object at, and
+    /// the one it gives a declaration is the type's, which whatever defines the object has to
+    /// meet. gcc trusts `DECL_ALIGN` of both the same way when it folds `(unsigned long)&x & 7`.
+    /// Nothing for a function, an alias, a name the module does not have, and a weak, common or
+    /// linkonce global, for the reason [`Outside::of`] gives.
+    #[must_use]
+    pub fn align(&self, name: Symbol) -> Option<u32> {
+        match self.names.get(&name)? {
+            Named::Global(align) => *align,
+            Named::Func(_) | Named::Second => None,
         }
     }
 
