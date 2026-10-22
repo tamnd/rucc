@@ -1781,7 +1781,7 @@ fn generate(
             {
                 let word = u64::from(target.pointer_width / 8);
                 for var in &mut globals.vars {
-                    if let rucc_object::Place::Strings { align } = &mut var.place {
+                    if let rucc_object::Place::Strings { align, .. } = &mut var.place {
                         if var.size >= 31 && *align < word {
                             *align = word;
                             var.align = word;
@@ -6587,6 +6587,23 @@ decl #0 x : int object external static defined
         opts.opt_level = rucc_session::OptLevel::Os;
         let small = run(&opts, source).text().to_owned();
         assert!(!small.contains(".rodata.str1.8"), "{small}");
+    }
+
+    /// A wide literal is in a section of strings too, with entries as wide as its characters, as
+    /// gcc has it. The EFI stub's `L"..."` messages are in `.rodata.str2.2` under gcc.
+    #[test]
+    fn a_wide_literal_is_in_the_section_of_strings_as_wide_as_its_characters() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::Os;
+        let source = "const void *u(void) { return u\"two\"; }\n\
+                      const void *w(void) { return U\"four\"; }\n\
+                      const void *z(void) { return u\"a\\0b\"; }\n";
+        let text = run(&opts, source).text().to_owned();
+        assert!(text.contains("\t.section\t.rodata.str2.2,\"aMS\",@progbits,2\n"), "{text}");
+        assert!(text.contains("\t.section\t.rodata.str4.4,\"aMS\",@progbits,4\n"), "{text}");
+        // A zero inside it would be the end of the string to the linker.
+        assert_eq!(text.matches(".rodata.str2.2").count(), 1, "{text}");
     }
 
     /// gcc's hot and cold split. A path that calls a function written `cold` goes in
