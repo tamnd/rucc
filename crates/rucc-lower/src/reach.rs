@@ -64,12 +64,29 @@ use rucc_types::{Qualifiers, Types};
 /// anything does. See [`crate::unit`]'s `weak_references`.
 #[must_use]
 pub(crate) fn reachable(decide: Decide<'_>) -> (Set<DeclId>, Set<DeclId>) {
-    walk(decide, false)
+    walk(decide, false, true)
 }
 
-/// The walk [`reachable`] and [`referred`] share, which for the second leaves out what follows a
-/// statement control never comes out of. See [`Reach::pruned`].
-fn walk(decide: Decide<'_>, pruned: bool) -> (Set<DeclId>, Set<DeclId>) {
+/// The declarations something the file has to keep reaches, which is [`reachable`] with an
+/// internal object a root only when an attribute asks for it to be kept.
+///
+/// This is the walk gcc makes over its call graph when it optimizes. An unused `static` object is
+/// not something it has to emit, so neither is a function only that object names, nor a `static`
+/// in the body of that function, even one written `used`. The kernel's `CLK_OF_DECLARE` in a
+/// module is an unused `static const` table naming the init function, and each `pr_err` in that
+/// function has a `used` entry for the printk index. gcc's object has none of them, and rucc's had
+/// the entries after the functions were dropped. A function that is reached here and later has
+/// every call inlined is still reached, which is why this is asked before the optimizer runs and
+/// not after.
+#[must_use]
+pub(crate) fn live(decide: Decide<'_>) -> Set<DeclId> {
+    walk(decide, false, false).0
+}
+
+/// The walk [`reachable`], [`live`] and [`referred`] share, which for the third leaves out what
+/// follows a statement control never comes out of. See [`Reach::pruned`]. `objects` is whether
+/// every object with static storage is a root.
+fn walk(decide: Decide<'_>, pruned: bool, objects: bool) -> (Set<DeclId>, Set<DeclId>) {
     let tast = decide.tast;
     let mut walk = Reach {
         tast,
@@ -82,7 +99,7 @@ fn walk(decide: Decide<'_>, pruned: bool) -> (Set<DeclId>, Set<DeclId>) {
     };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
-        if is_root(&tast[decl]) {
+        if is_root(&tast[decl], objects) {
             walk.mark(decl);
         }
     }
@@ -116,7 +133,7 @@ fn walk(decide: Decide<'_>, pruned: bool) -> (Set<DeclId>, Set<DeclId>) {
 /// folded away still has one and a call the compiler made up on its own does not.
 #[must_use]
 pub fn referred(tast: &Tast, types: &Types, target: &TargetInfo, names: &Interner) -> Set<DeclId> {
-    walk(Decide::new(tast, types, target, names), true).1
+    walk(Decide::new(tast, types, target, names), true, true).1
 }
 
 /// The declarations an `alias` attribute in the file names, found by the symbol each is emitted
@@ -183,8 +200,9 @@ fn weakly_referred(tast: &Tast, names: &Interner) -> Vec<DeclId> {
         .collect()
 }
 
-/// Whether the file has a reason to emit this declaration without anything having named it.
-fn is_root(node: &Decl) -> bool {
+/// Whether the file has a reason to emit this declaration without anything having named it, with
+/// `objects` saying whether an internal object is one. See [`live`].
+fn is_root(node: &Decl, objects: bool) -> bool {
     if node.flags.contains(DeclFlags::RETAINED) {
         return true;
     }
@@ -192,7 +210,8 @@ fn is_root(node: &Decl) -> bool {
         // An object with static storage is emitted whether or not it is read, so whatever its
         // image names is reached. Dropping the ones nothing reads is a separate question with an
         // answer of its own, and until it is asked this has to assume every one of them is there.
-        DeclKind::Object => true,
+        // [`live`] asks it the way gcc does, where an internal one is only kept when named.
+        DeclKind::Object => objects || node.linkage != Linkage::Internal,
         // And not an inline definition, which is external and is still not something another
         // unit can reach, because this one emits nothing under the name for it to reach.
         DeclKind::Function => node.linkage == Linkage::External && node.inline.emits(),
