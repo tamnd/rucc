@@ -80,7 +80,7 @@ use rucc_ir::{
     Module, Opcode, Pic, SymbolRef, Type, Value,
 };
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Interner, Symbol};
@@ -147,6 +147,7 @@ pub fn answer(
                 moved: Cell::new(false),
                 through: Cell::new(false),
                 ways: Cell::new(WAYS),
+                places: OnceCell::new(),
             };
             // Twice, since the first round reads every store and every way into a block, and
             // what it rules out can settle a branch the second round reads.
@@ -540,6 +541,27 @@ struct Walk<'a> {
     /// that joins one after another, each followed on every way into it, are not followed for a
     /// time that grows as a power of how many there are.
     ways: Cell<u32>,
+    /// Where each address into a fixed local is used, worked out on the first question that
+    /// needs it, as [`Places`] says.
+    places: OnceCell<Places>,
+}
+
+/// The addresses a function makes into its fixed locals and every place they are used, found in
+/// one pass over the function.
+///
+/// [`Walk::only_store`] looks at every use of a local for each load from it, and a pass over the
+/// whole function for each load is a time that grows as the square of its size. Linux 7.3's
+/// lib/tests/fortify_kunit.c inlines many checks into each test, and its `allmodconfig` build
+/// spent 157 s of CPU in that pass against 25 s for all of gcc-16. What is in a local and where
+/// its addresses go do not change while the function is walked, so they are found once.
+#[derive(Default)]
+struct Places {
+    /// The local each address is in and how far in, for the local itself and for each constant
+    /// step forward from it.
+    within: Map<Value, (Value, u64)>,
+    /// For each local, the instructions that take one of its addresses as an argument, with which
+    /// argument it is and how far into the local the address is, in the order of the function.
+    uses: Map<Value, Vec<(Inst, usize, u64)>>,
 }
 
 /// How many ways into joins [`Walk::running`] follows for one question.
@@ -1033,39 +1055,38 @@ impl Walk<'_> {
         let (local, at) = self.slot(slot)?;
         let read = self.func[load].first_result?;
         let width = most_bytes(self.func[read].ty);
-        let views = self.views(local);
+        let places = self.places.get_or_init(|| self.places());
         let mut stores = Vec::new();
         let mut away = Vec::new();
-        for inst in self.func.blocks().flat_map(|block| self.func.insts(block)) {
+        for &(inst, index, from) in places.uses.get(&local).map_or(&[][..], Vec::as_slice) {
             let data = &self.func[inst];
             let args = &self.func[data.args];
-            for (index, &arg) in args.iter().enumerate() {
-                let Some(&from) = views.get(&arg) else { continue };
-                match (data.opcode, index) {
-                    // A read, a question or a comparison of the address hands it to nobody, and
-                    // the slot shares its address with other inlined locals that a guard's
-                    // cleanup compares.
-                    (Opcode::Load | Opcode::ObjectSize, 0)
-                    | (Opcode::Memcpy | Opcode::Memmove, 1)
-                    | (Opcode::LifetimeEnd | Opcode::ICmp, _) => {}
-                    // A step to another part of the local, whose uses are looked at in turn.
-                    (Opcode::PtrAdd, 0)
-                        if data.first_result.is_some_and(|step| views.contains_key(&step)) => {}
-                    // Something on a way through the function that cannot be taken never runs.
-                    _ if !self.reached(self.func.block_of(inst)?) => {}
-                    (Opcode::Store, 1) => {
-                        let wrote = most_bytes(self.func[args[0]].ty);
-                        if from < at.saturating_add(width) && at < from.saturating_add(wrote) {
-                            stores.push((inst, from));
-                        }
+            match (data.opcode, index) {
+                // A read, a question or a comparison of the address hands it to nobody, and
+                // the slot shares its address with other inlined locals that a guard's
+                // cleanup compares.
+                (Opcode::Load | Opcode::ObjectSize, 0)
+                | (Opcode::Memcpy | Opcode::Memmove, 1)
+                | (Opcode::LifetimeEnd | Opcode::ICmp, _) => {}
+                // A step to another part of the local, whose uses are looked at in turn.
+                (Opcode::PtrAdd, 0)
+                    if data.first_result.is_some_and(|step| {
+                        places.within.get(&step).is_some_and(|&(other, _)| other == local)
+                    }) => {}
+                // Something on a way through the function that cannot be taken never runs.
+                _ if !self.reached(self.func.block_of(inst)?) => {}
+                (Opcode::Store, 1) => {
+                    let wrote = most_bytes(self.func[args[0]].ty);
+                    if from < at.saturating_add(width) && at < from.saturating_add(wrote) {
+                        stores.push((inst, from));
                     }
-                    // `-ftrivial-auto-var-init=zero` clears a local before the program writes
-                    // it, which the kernel builds with. The clearing is a store as well, one this
-                    // walk cannot read, and it is fine for as long as a later one is the one the
-                    // load sees.
-                    (Opcode::Memset, 0) => stores.push((inst, from)),
-                    _ => away.push(inst),
                 }
+                // `-ftrivial-auto-var-init=zero` clears a local before the program writes
+                // it, which the kernel builds with. The clearing is a store as well, one this
+                // walk cannot read, and it is fine for as long as a later one is the one the
+                // load sees.
+                (Opcode::Memset, 0) => stores.push((inst, from)),
+                _ => away.push(inst),
             }
         }
         // The stores before the load on every way to it are one after another, so the last of
@@ -1112,31 +1133,53 @@ impl Walk<'_> {
     }
 
     /// Each address the function makes by constant steps forward from the start of a local, with
-    /// how far in it is.
-    fn views(&self, local: Value) -> Map<Value, u64> {
-        let mut views: Map<Value, u64> = Map::default();
-        views.insert(local, 0);
+    /// the local and how far in it is, and where each of them is used.
+    fn places(&self) -> Places {
+        let mut places = Places::default();
+        let insts: Vec<Inst> =
+            self.func.blocks().flat_map(|block| self.func.insts(block)).collect();
         let mut grew = true;
         while grew {
             grew = false;
-            for inst in self.func.blocks().flat_map(|block| self.func.insts(block)) {
+            for &inst in &insts {
                 let data = &self.func[inst];
                 let Some(value) = data.first_result else { continue };
-                if data.opcode != Opcode::PtrAdd || views.contains_key(&value) {
+                if places.within.contains_key(&value) {
                     continue;
                 }
                 let args = &self.func[data.args];
-                let Some(&from) = args.first().and_then(|base| views.get(base)) else { continue };
-                let Some((imm, ty)) = crate::fold::constant(self.func, args[1]) else { continue };
-                let Some(at) = u64::try_from(imm.signed(ty)).ok().and_then(|n| from.checked_add(n))
-                else {
-                    continue;
+                let place = match data.opcode {
+                    Opcode::Alloca if args.is_empty() => (value, 0),
+                    Opcode::PtrAdd => {
+                        let Some(&(local, from)) =
+                            args.first().and_then(|base| places.within.get(base))
+                        else {
+                            continue;
+                        };
+                        let Some((imm, ty)) = crate::fold::constant(self.func, args[1]) else {
+                            continue;
+                        };
+                        let Some(at) =
+                            u64::try_from(imm.signed(ty)).ok().and_then(|n| from.checked_add(n))
+                        else {
+                            continue;
+                        };
+                        (local, at)
+                    }
+                    _ => continue,
                 };
-                views.insert(value, at);
+                places.within.insert(value, place);
                 grew = true;
             }
         }
-        views
+        for &inst in &insts {
+            for (index, arg) in self.func[self.func[inst].args].iter().enumerate() {
+                if let Some(&(local, from)) = places.within.get(arg) {
+                    places.uses.entry(local).or_default().push((inst, index, from));
+                }
+            }
+        }
+        places
     }
 
     /// Whether one instruction comes before another on every way to the second.
