@@ -231,6 +231,33 @@ fn a_used_object_in_a_function_nothing_has_to_keep_goes_with_it() {
     assert!(asm.contains("dead_entry"), "-O0:\n{asm}");
 }
 
+/// A `used` object in an arm a constant `if` never takes is still emitted, as gcc emits it, and so
+/// is the function its initializer names. The kernel's `pr_debug` under a debug mask of 0 is
+/// `if (0) printk(...)`, and the printk index entry in it is in gcc's object. The arm of a `?:` or
+/// of a `&&` that never runs keeps nothing from `-O1`, since gcc folds those before the declaration
+/// is seen, and the optimizer takes them away the way it takes away any `static` nothing reaches.
+#[test]
+fn a_used_object_in_an_arm_never_taken_is_emitted() {
+    let source = "struct pi { const char *fmt; };\nvoid printk(const char *);\n\
+                  #define ENTRY(name, f) ({ static const struct pi name __attribute__((used)) = { f }; 0; })\n\
+                  static void helper(void) { }\n\
+                  void mask(void) { if (0) { ENTRY(mask_entry, \"mask\"); printk(\"mask\"); } }\n\
+                  void kept(void) { if (0) { static void (*p)(void) __attribute__((used)) = helper; } }\n\
+                  int cond(int x) { return 0 ? ENTRY(cond_entry, \"cond\") : x; }\n\
+                  int chain(int x) { return 0 && ENTRY(chain_entry, \"chain\"); }\n";
+    for level in LEVELS {
+        let asm = emit_of(level, "asm", "used-in-arm", source);
+        assert!(asm.contains("mask_entry"), "{level}:\n{asm}");
+        assert!(asm.contains("helper:"), "{level}:\n{asm}");
+        assert!(!asm.contains("printk"), "the call in the arm was made at {level}:\n{asm}");
+    }
+    for level in &LEVELS[1..] {
+        let asm = emit_of(level, "asm", "used-in-arm", source);
+        assert!(!asm.contains("cond_entry"), "{level}:\n{asm}");
+        assert!(!asm.contains("chain_entry"), "{level}:\n{asm}");
+    }
+}
+
 /// A flag that is only a constant once the caller has been folded still reaches the callee, when
 /// the callee is too large to inline. This is the kernel's `fpu__restore_sig`, whose flag goes
 /// false through `ia32_frame &= 0`, and a call left in the arm it guards is a function a kernel
