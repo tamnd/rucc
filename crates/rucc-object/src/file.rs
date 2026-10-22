@@ -1000,6 +1000,19 @@ pub fn write(
     flavour.marker(&mut obj);
 
     let mut bytes = obj.write().map_err(|why| Error::Refused { why: why.to_string() })?;
+    // The writer gives a section of strings entries a byte wide, which is right for every one but
+    // a section of wide literals. Strings are only made on ELF.
+    let wide: Set<(u64, u64)> = data
+        .objects
+        .iter()
+        .filter_map(|object| match object.place {
+            Place::Strings { align, width } if width > 1 => Some((width, align)),
+            _ => None,
+        })
+        .collect();
+    for (width, align) in wide {
+        crate::source::entry_size(&mut bytes, &Place::strings(width, align), width);
+    }
     flavour.finish(&mut bytes, &ordered);
     Ok(bytes)
 }
@@ -1178,9 +1191,10 @@ fn put(
         },
         Place::Zero => obj.section_id(StandardSection::UninitializedData),
         // The writer's kind for these is the one that flags the section for merging as strings a
-        // byte wide, and the name is ours, since the alignment is part of it.
-        Place::Strings { align } => {
-            made(obj, named, &Place::strings(*align), SectionKind::ReadOnlyString)
+        // byte wide, and the name is ours, since the width and the alignment are part of it. A
+        // wider character is put in the header once the file is written.
+        Place::Strings { align, width } => {
+            made(obj, named, &Place::strings(*width, *align), SectionKind::ReadOnlyString)
         }
         Place::Thread { zero: false } => obj.section_id(StandardSection::Tls),
         Place::Thread { zero: true } => obj.section_id(StandardSection::UninitializedTls),
@@ -2672,6 +2686,28 @@ mod tests {
         // when asked for the address of one, so this is the field itself.
         assert_eq!(x.address(), 0);
         assert_eq!(x.elf_symbol().st_value(Endianness::Little), 8);
+    }
+
+    /// A wide literal is in a section of strings whose entries are as wide as its characters, under
+    /// the name gcc gives it, and a plain one is still in one whose entries are a byte.
+    #[test]
+    fn a_section_of_wide_strings_has_entries_as_wide_as_a_character() {
+        use object::read::elf::SectionHeader as _;
+        for (width, bytes, name) in [
+            (1, b"hi\0\0".to_vec(), ".rodata.str1.4"),
+            (2, vec![b'h', 0, 0, 0], ".rodata.str2.4"),
+            (4, vec![0; 4], ".rodata.str4.4"),
+        ] {
+            let place = Place::Strings { align: 4, width };
+            let bytes = holding(Object { bytes, ..variable("s", place) });
+            let file =
+                object::read::elf::ElfFile64::<Endianness>::parse(&bytes[..]).expect("readable");
+            let section = file.section_by_name(name).unwrap_or_else(|| panic!("{name}"));
+            let header = section.elf_section_header();
+            assert_eq!(header.sh_entsize(Endianness::Little), width, "{name}");
+            let flags = header.sh_flags(Endianness::Little);
+            assert!(flags.contains(elf::SHF_MERGE) && flags.contains(elf::SHF_STRINGS), "{name}");
+        }
     }
 
     #[test]

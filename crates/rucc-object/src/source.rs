@@ -929,7 +929,7 @@ fn linked(bytes: &mut [u8], input: &Assembled, defined: &Map<&str, &Name>) -> Re
 /// the writer underneath has no field for. It writes one only for a section of strings it made
 /// itself. The section is found by its name, which is unique because the assembler gave every name
 /// one section.
-fn entry_size(bytes: &mut [u8], name: &str, size: u64) {
+pub(crate) fn entry_size(bytes: &mut [u8], name: &str, size: u64) {
     let headers = crate::elf::Headers::read(bytes);
     let (field, width) = headers.entry_size();
     for header in headers.list.iter().filter(|header| header.name == name) {
