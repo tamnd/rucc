@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The debug information keeps a typedef name in more places where gcc keeps it. These were the differences in the BTF of a 7.3 X64 kernel built with rucc. A qualifier or an address space written over an array typedef name, as in the kernel's per CPU `mce_banks_t`, `vector_irq_t` and `note_buf_t`, is now a const or a plain entry over the name and no longer an anonymous array. A function under `ms_abi`, as in the kernel's `efi_get_time_t __efiapi *get_time`, now points at `efi_get_time_t`, and its parameters keep the names they were written with, so `efi_call_acpi_prm_handler` has a `u64` parameter and not `long long unsigned int`.
+
 ## 0.30.11
 
 This is a patch release with the same compiler as 0.30.10. The tag check of 0.30.10 failed on a false report of the threshold check, so 0.30.10 has a tag and no release. 0.30.11 is the release of that compiler.
