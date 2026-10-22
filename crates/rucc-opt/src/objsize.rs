@@ -40,7 +40,9 @@
 //! `__builtin_dynamic_object_size` sets a third bit on the kind, and where the walk finds no
 //! constant for one of those, an address that is an allocator's result with constant offsets on it
 //! is answered with the size the call asked for, multiplied out and less the offset in front of the
-//! question, as gcc 16 answers it from `-O1` up. See `Walk::running` for which shapes.
+//! question, as gcc 16 answers it from `-O1` up. Where the ways into a join bring sizes that are
+//! not the same, the join is given a parameter for the size and each way passes its own, which is
+//! the PHI gcc builds. See `Walk::running` for which shapes.
 //!
 //! The dynamic spelling of a kind that asks for the largest answer has one more way to an answer.
 //! Where every way to the address starts at the same fixed local or the same global, the answer is
@@ -81,8 +83,9 @@ use rucc_ir::{
 use std::cell::{Cell, RefCell};
 
 use rucc_base::hash::{Map, Set};
-use rucc_base::{Interner, Symbol};
-use rucc_ir::Block;
+use rucc_base::{Idx, Interner, Symbol};
+use rucc_diag::Span;
+use rucc_ir::{Block, BlockCall};
 
 use crate::Cfg;
 use crate::dom::Dominators;
@@ -142,6 +145,7 @@ pub fn answer(
                 numbers: RefCell::default(),
                 answered: Map::default(),
                 moved: Cell::new(false),
+                ways: Cell::new(WAYS),
             };
             // Twice, since the first round reads every store and every way into a block, and
             // what it rules out can settle a branch the second round reads.
@@ -179,7 +183,7 @@ pub fn answer(
         for (inst, answer) in answers {
             match answer {
                 Answer::Known(number) => write(func, inst, number),
-                Answer::Running(running) => build(func, inst, running),
+                Answer::Running(running) => build(func, inst, &running),
                 Answer::Within(object, size) => measure(func, inst, object, size),
             }
             answered += 1;
@@ -252,11 +256,25 @@ enum Object {
 
 /// An address that is what an allocator gave back with a constant number of bytes added, as
 /// [`Walk::running`] found it.
+#[derive(Clone, PartialEq, Eq)]
 struct Running {
-    /// The arguments that multiply to the size, one or two of them.
-    factors: Vec<Value>,
+    /// What the size is made of.
+    size: Size,
     /// How far into the object the address is.
     offset: u64,
+}
+
+/// The size of the object behind a [`Running`] address.
+#[derive(Clone, PartialEq, Eq)]
+enum Size {
+    /// The arguments of the allocator that multiply to the size, one or two of them.
+    Asked(Vec<Value>),
+    /// A number the walk found, on one way into a join.
+    Fixed(u64),
+    /// A block parameter each way into which brings a size of its own, with every edge into the
+    /// block and what is left behind the address it passes. An edge that cannot be taken has
+    /// nothing.
+    Joined(Block, Vec<(Inst, Idx<BlockCall>, Option<Running>)>),
 }
 
 /// Every `object_size` in the function.
@@ -294,39 +312,73 @@ fn write(func: &mut Func, inst: Inst, number: i128) {
 /// Puts the size an allocator was asked for in place of the question, less how far in the address
 /// is and never below zero, which is what gcc 16 answers `__builtin_dynamic_object_size(p + 2, 0)`
 /// with for a `p` that came out of `malloc(n)`.
-fn build(func: &mut Func, inst: Inst, running: Running) {
+fn build(func: &mut Func, inst: Inst, running: &Running) {
     let result = func[inst].results().next().expect("an object size is one value");
     let ty = func[result].ty;
     let span = func.span(inst);
+    let size = room(func, inst, span, running, ty);
+    let forward: Map<_, _> = [(result, size)].into_iter().collect();
+    crate::uses::substitute(func, &forward);
+    func.remove_inst(inst);
+}
+
+/// What is left behind a [`Running`] address, worked out in front of `inst`.
+///
+/// A join is given a new parameter, and each edge into it passes what is left behind the address
+/// it brings, worked out in front of the branch. This is the size gcc 16 builds a PHI for, as in
+/// fortify_kunit's `kmemdup ("hello there", len, gfp)`, where the inlined `kmemdup_noprof` gives
+/// back `__real_kmemdup (p, 0, gfp)` on the way the check fails and `__real_kmemdup (p, size,
+/// gfp)` on the other, and the test wants the answer to be `size`.
+fn room(func: &mut Func, inst: Inst, span: Span, running: &Running, ty: Type) -> Value {
     let made = |func: &mut Func, data: InstData, ty: Type| {
         let at = func.create_inst(data, &[ty], span);
         func.insert_before(at, inst);
         func[at].results().next().expect("one result was asked for")
     };
-    let mut size = running.factors[0];
-    for &factor in &running.factors[1..] {
-        let args = func.push_values(&[size, factor]);
-        size = made(func, InstData { args, ..InstData::new(Opcode::Mul) }, ty);
-    }
+    let number = |func: &mut Func, number: u64| {
+        let imm = func.add_imm(Imm::int(i128::from(number), ty.lane()));
+        made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty)
+    };
+    let mut size = match &running.size {
+        Size::Asked(factors) => {
+            let mut size = factors[0];
+            for &factor in &factors[1..] {
+                let args = func.push_values(&[size, factor]);
+                size = made(func, InstData { args, ..InstData::new(Opcode::Mul) }, ty);
+            }
+            size
+        }
+        &Size::Fixed(left) => number(func, left),
+        Size::Joined(block, ways) => {
+            let brought: Vec<(Idx<BlockCall>, Value)> = ways
+                .iter()
+                .map(|(term, at, way)| {
+                    let nothing = Running { size: Size::Fixed(0), offset: 0 };
+                    (*at, room(func, *term, span, way.as_ref().unwrap_or(&nothing), ty))
+                })
+                .collect();
+            let size = func.append_param(*block, ty);
+            for (at, value) in brought {
+                let call = func[at];
+                let args = func.append_arg(call.args, value);
+                func.set_block_call(at, BlockCall { args, ..call });
+            }
+            size
+        }
+    };
     if running.offset != 0 {
-        let imm = func.add_imm(Imm::int(i128::from(running.offset), ty.lane()));
-        let offset =
-            made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
-        let imm = func.add_imm(Imm::int(0, ty.lane()));
-        let zero =
-            made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
+        let offset = number(func, running.offset);
+        let zero = number(func, 0);
         let args = func.push_values(&[size, offset]);
         let test =
             InstData { args, extra: Extra::IntPred(IntPred::Ugt), ..InstData::new(Opcode::ICmp) };
-        let room = made(func, test, ty.with_lane(Type::I1));
+        let some = made(func, test, ty.with_lane(Type::I1));
         let args = func.push_values(&[size, offset]);
         let left = made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty);
-        let args = func.push_values(&[room, left, zero]);
+        let args = func.push_values(&[some, left, zero]);
         size = made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty);
     }
-    let forward: Map<_, _> = [(result, size)].into_iter().collect();
-    crate::uses::substitute(func, &forward);
-    func.remove_inst(inst);
+    size
 }
 
 /// Puts the size of the object less how far into it the address is in place of the question, and
@@ -446,7 +498,14 @@ struct Walk<'a> {
     /// Whether the last walk for the largest answer went round a loop that moves the pointer, so
     /// that what it found is only where the pointer starts.
     moved: Cell<bool>,
+    /// How many more ways into a join [`Walk::running`] may follow for the question it is on, so
+    /// that joins one after another, each followed on every way into it, are not followed for a
+    /// time that grows as a power of how many there are.
+    ways: Cell<u32>,
 }
+
+/// How many ways into joins [`Walk::running`] follows for one question.
+const WAYS: u32 = 64;
 
 /// A number [`Walk::number`] found, with its type, or `None` where it found none.
 type Number = Option<(Imm, Type)>;
@@ -467,6 +526,7 @@ impl Walk<'_> {
         let ask = Ask { largest: kind & 2 == 0, closest: kind & 1 == 1 };
         let largest = ask.largest;
         self.moved.set(false);
+        self.ways.set(WAYS);
         let known = match look {
             false => None,
             true => self.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten(),
@@ -486,7 +546,9 @@ impl Walk<'_> {
             None if look && dynamic && kind != SMALLEST_MEMBER => func[inst]
                 .results()
                 .next()
-                .and_then(|result| self.running(address, func[result].ty, DEPTH))
+                .and_then(|result| {
+                    self.running(address, ask, func[result].ty, DEPTH, &mut Vec::new())
+                })
                 .map(Answer::Running)
                 .or_else(|| largest.then(|| self.within(address, inst, ask)).flatten())
                 .unwrap_or(Answer::Known(unknown)),
@@ -1034,16 +1096,32 @@ impl Walk<'_> {
     /// The address as what an allocator gave back with a constant number of bytes added, for an
     /// answer worked out at run time from the arguments of the call.
     ///
-    /// Only a straight line back to the call is followed, with no choice in it, since a choice
-    /// would need the answer built on every path into it. The arguments have to be as wide as the
-    /// answer already, which `size_t` is in `malloc` and `kmalloc` and every allocator written
-    /// in its terms. A narrower one has a signedness the IR does not remember, and widening it
-    /// the wrong way would give a size that is not the one the program asked for, so that is
-    /// answered as not known instead.
-    fn running(&self, value: Value, size: Type, depth: u32) -> Option<Running> {
+    /// A choice is a block parameter, and each way into it is followed the same way, or is a
+    /// number the walk finds where it is not an allocator's result. A select is not followed.
+    /// The arguments have to be as wide as the answer already, which `size_t` is in `malloc` and
+    /// `kmalloc` and every allocator written in its terms. A narrower one has a signedness the IR
+    /// does not remember, and widening it the wrong way would give a size that is not the one the
+    /// program asked for, so that is answered as not known instead.
+    ///
+    /// `on` is the blocks whose parameter is being followed, which is how a loop is seen. A loop
+    /// moving the address is not followed, since nothing could be passed round it.
+    fn running(
+        &self,
+        value: Value,
+        ask: Ask,
+        size: Type,
+        depth: u32,
+        on: &mut Vec<Block>,
+    ) -> Option<Running> {
         let depth = depth.checked_sub(1)?;
         if let Def::Param { block, index } = self.func[value].def {
-            return self.joined(block, index, size, depth);
+            if on.contains(&block) {
+                return None;
+            }
+            on.push(block);
+            let joined = self.joined(block, index, ask, size, depth, on);
+            on.pop();
+            return joined;
         }
         let Def::Result { inst, .. } = self.func[value].def else { return None };
         let data = &self.func[inst];
@@ -1052,7 +1130,7 @@ impl Walk<'_> {
                 let args = &self.func[data.args];
                 let (imm, ty) = self.number(*args.get(1)?, NUMBER)?;
                 let step = u64::try_from(imm.signed(ty)).ok()?;
-                let mut running = self.running(args[0], size, depth)?;
+                let mut running = self.running(args[0], ask, size, depth, on)?;
                 running.offset = running.offset.checked_add(step)?;
                 Some(running)
             }
@@ -1063,7 +1141,7 @@ impl Walk<'_> {
                 if factors.iter().any(|&factor| self.func[factor].ty != size) {
                     return None;
                 }
-                Some(Running { factors, offset: 0 })
+                Some(Running { size: Size::Asked(factors), offset: 0 })
             }
             _ => None,
         }
@@ -1092,44 +1170,93 @@ impl Walk<'_> {
         value
     }
 
-    /// The size worked out when the program runs for a block parameter, which is the one every
-    /// way in that can be taken agrees on.
+    /// The size worked out when the program runs for a block parameter.
     ///
     /// `kmalloc_noprof` calls one of three allocators, and which one depends on a
     /// `__builtin_constant_p` of the size that is only settled after the questions are answered.
     /// All three are asked for the same size, so `kmalloc (size++, gfp)` in fortify_kunit's
-    /// `fortify_test_alloc_size_kmalloc_dynamic` has that size, which is what gcc answers. The
-    /// arguments have to be there before the block, so that the question can read them.
-    fn joined(&self, block: Block, index: u32, size: Type, depth: u32) -> Option<Running> {
-        let mut all: Option<Running> = None;
-        for &pred in self.cfg.predecessors(block) {
-            if !self.taken(pred, block) {
-                continue;
-            }
+    /// `fortify_test_alloc_size_kmalloc_dynamic` has that size, which is what gcc answers. Where
+    /// every way in that can be taken agrees like that, and the arguments are there before the
+    /// block, that is the size. Otherwise each way brings its own, and the arguments of each have
+    /// to be there before the branch that brings it.
+    fn joined(
+        &self,
+        block: Block,
+        index: u32,
+        ask: Ask,
+        size: Type,
+        depth: u32,
+        on: &mut Vec<Block>,
+    ) -> Option<Running> {
+        let mut preds = self.cfg.predecessors(block).to_vec();
+        preds.sort_unstable();
+        preds.dedup();
+        let mut ways = Vec::new();
+        for pred in preds {
             let term = self.func.terminator(pred)?;
-            for call in self.func.successors(term).collect::<Vec<_>>() {
+            let taken = self.taken(pred, block);
+            for at in self.func.target_list(term).iter() {
+                let call = self.func[at];
                 if call.block != block {
                     continue;
                 }
-                let arg = *self.func[call.args].get(index as usize)?;
-                let one = self.running(arg, size, depth)?;
-                match &all {
-                    Some(seen) if seen.factors != one.factors || seen.offset != one.offset => {
-                        return None;
+                let way = match taken {
+                    false => None,
+                    true => {
+                        self.ways.set(self.ways.get().checked_sub(1)?);
+                        let arg = *self.func[call.args].get(index as usize)?;
+                        Some(self.way(arg, pred, ask, size, depth, on)?)
                     }
-                    Some(_) => {}
-                    None => all = Some(one),
-                }
+                };
+                ways.push((term, at, way));
             }
         }
-        let all = all?;
-        let before = |factor: Value| match self.func[factor].def {
+        let mut brought = ways.iter().filter_map(|(_, _, way)| way.as_ref());
+        let first = brought.next()?;
+        let before = |factor: &Value| match self.func[*factor].def {
             Def::Param { block: at, .. } => self.dom.dominates(at, block),
             Def::Result { inst, .. } => {
                 self.func.block_of(inst).is_some_and(|at| self.dom.strictly_dominates(at, block))
             }
         };
-        all.factors.iter().all(|&factor| before(factor)).then_some(all)
+        let agreed = match &first.size {
+            Size::Asked(factors) => factors.iter().all(before),
+            Size::Fixed(_) => true,
+            Size::Joined(..) => false,
+        };
+        if agreed && brought.all(|way| way == first) {
+            return Some(first.clone());
+        }
+        Some(Running { size: Size::Joined(block, ways), offset: 0 })
+    }
+
+    /// The size one way into a join brings, from the edge out of `pred`.
+    fn way(
+        &self,
+        arg: Value,
+        pred: Block,
+        ask: Ask,
+        size: Type,
+        depth: u32,
+        on: &mut Vec<Block>,
+    ) -> Option<Running> {
+        let way = match self.running(arg, ask, size, depth, on) {
+            Some(way) => way,
+            None => {
+                let left = self.left(arg, ask, depth, &mut Vec::new()).ok().flatten()?;
+                Running { size: Size::Fixed(left), offset: 0 }
+            }
+        };
+        let there = |factor: &Value| match self.func[*factor].def {
+            Def::Param { block: at, .. } => self.dom.dominates(at, pred),
+            Def::Result { inst, .. } => {
+                self.func.block_of(inst).is_some_and(|at| self.dom.dominates(at, pred))
+            }
+        };
+        match &way.size {
+            Size::Asked(factors) if !factors.iter().all(there) => None,
+            _ => Some(way),
+        }
     }
 
     /// The object every way to the address starts in, with its size, for an answer worked out
@@ -1406,7 +1533,7 @@ block0(%0: i64):
 
     /// A choice of two allocators asked for the same size has that size when the program runs,
     /// which is what `kmalloc_noprof` is before its `__builtin_constant_p` is settled. Two asked
-    /// for different sizes are not known.
+    /// for different sizes each pass their own to the join, through a parameter it is given.
     #[test]
     fn a_choice_of_allocators_given_one_size_has_that_size() {
         let body = "
@@ -1447,17 +1574,20 @@ block6(%11: ptr):
     return
 }
 ";
-        assert_eq!(answers(body, true), [-1]);
+        assert_eq!(answers(body, true), []);
         let mut names = Interner::new();
         let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
         answer(&mut module, &names, Some(&[]), Pic::Executable, true);
         let text = rucc_ir::print(&module, &names);
         assert!(text.contains("call @use(%0)"), "{text}");
+        assert!(text.contains("jump block6(%9, %1)"), "{text}");
+        assert!(text.contains("jump block6(%8, %0)"), "{text}");
     }
 
     /// A branch on a question already answered `(size_t)-1` is settled by that answer, the way
     /// `p_size < size` is in 6.12's `kmemdup_noprof`, so only the allocation on the way it is
-    /// false is what comes back. The other way round the comparison could go either way.
+    /// false is what comes back. The other way round the comparison could go either way, and each
+    /// way brings the size it asked for, which is what gcc answers.
     #[test]
     fn a_comparison_with_an_answer_as_large_as_it_goes_is_settled() {
         let body = |test: &str| {
@@ -1496,7 +1626,63 @@ block3(%7: ptr):
         };
         let text = print(&body("ult %2, %1"));
         assert!(text.contains("call @use(%1)"), "{text}");
-        assert_eq!(answers(&body("ult %1, %2"), true), [-1]);
+        let text = print(&body("ult %1, %2"));
+        assert!(text.contains("jump block3(%5, %4)"), "{text}");
+        assert!(text.contains("jump block3(%6, %1)"), "{text}");
+    }
+
+    /// The ways into a join may bring an allocation and a local, and what is added to the address
+    /// after the join is taken off what either brought, as gcc 15 answers it at `-O2` for
+    /// `p = c ? malloc (n) : buf + 8` with a 32 byte `buf`. A way that brings nothing known, which
+    /// is a step the walk cannot count or a call to something that is not an allocator, leaves the
+    /// whole join not known.
+    #[test]
+    fn each_way_into_a_join_brings_its_own_size() {
+        let body = |other: &str| {
+            format!(
+                "
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+func @plain(i64) -> ptr, linkage(external);
+
+func @f(i64, i32), linkage(external) {{
+block0(%0: i64, %1: i32):
+    %2 = alloca, size 32, align 8
+    %3 = iconst.i32 0
+    %4 = icmp ne %1, %3
+    %5 = iconst.i64 8
+    br_if %4, block1, block2
+
+block1:
+    %6 = call @my(%0) : (i64) -> ptr
+    jump block3(%6)
+
+block2:
+    %7 = {other}
+    jump block3(%7)
+
+block3(%8: ptr):
+    %9 = iconst.i64 4
+    %10 = ptr_add %8, %9
+    %11 = object_size.i64 %10, kind 4
+    call @use(%11) : (i64)
+    %12 = object_size.i64 %10, kind 0
+    call @use(%12) : (i64)
+    return
+}}
+"
+            )
+        };
+        let mut names = Interner::new();
+        let text = format!("{HEAD}{}", body("ptr_add %2, %5"));
+        let mut module = rucc_ir::parse(&text, &mut names).expect("parses");
+        answer(&mut module, &names, Some(&[]), Pic::Executable, true);
+        let text = rucc_ir::print(&module, &names);
+        assert!(text.contains("jump block3(%6, %0)"), "{text}");
+        assert!(text.contains("iconst.i64 24"), "{text}");
+        assert!(text.contains("icmp ugt"), "{text}");
+        assert_eq!(answers(&body("ptr_add %2, %5"), true), [-1]);
+        assert_eq!(answers(&body("ptr_add %2, %0"), true), [-1, -1]);
+        assert_eq!(answers(&body("call @plain(%0) : (i64) -> ptr"), true), [-1, -1]);
     }
 
     /// An allocator's result put in a local once and read back is what the allocator gave, which
