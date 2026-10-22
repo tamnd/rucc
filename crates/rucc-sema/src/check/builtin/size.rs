@@ -396,7 +396,8 @@ impl Checker<'_> {
     /// object is the one `p` was set to. The walk has no answer for a flexible array reached that
     /// way, and gcc's at `-O2` is what is left of that object, which the IR can work out. The
     /// kernel's nouveau sizes a request on the stack with `__member_size(args->data)`. A place
-    /// whose index reads a local goes to the IR too, as [`Self::indexed_here`] says.
+    /// whose index is worked out when the program runs goes to the IR too, as
+    /// [`Self::indexed_here`] says.
     fn local(&self, expr: ExprId) -> bool {
         match self.tast[expr].kind {
             ExprKind::Member { .. }
@@ -442,15 +443,18 @@ impl Checker<'_> {
     }
 
     /// Whether a subscript on the way to this place has an index that reads a local, the way the
-    /// count of `p + i` does. How far into the array the element is is then known only when the
-    /// program runs, and the dynamic spelling has an answer the IR can work out from it. That is
-    /// cxgb3's `memcpy (&d->flit[flits], ...)`, which gcc checks against what is left of `flit`.
+    /// count of `p + i` does, or above `-O0` any index the program works out. How far into the
+    /// array the element is is then known only when the program runs, and the dynamic spelling has
+    /// an answer the IR can work out from it. That is cxgb3's `memcpy (&d->flit[flits], ...)`,
+    /// which gcc checks against what is left of `flit`, and venus's
+    /// `memcpy (&cap->pl[cap->num_pl], ...)`, whose index is read through the pointer itself.
     fn indexed_here(&self, expr: ExprId) -> bool {
         match self.tast[expr].kind {
             ExprKind::Member { base, .. }
             | ExprKind::Unary { op: UnaryOp::AddrOf, operand: base } => self.indexed_here(base),
             ExprKind::Subscript { base, index } => {
                 self.local(index)
+                    || self.cx.optimizing && self.eval().integer(index).is_err()
                     || self.decayed(base).is_some_and(|array| self.indexed_here(array))
             }
             _ => false,
