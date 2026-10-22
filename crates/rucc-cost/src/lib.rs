@@ -31,7 +31,7 @@
 //! IR, so they belong with the analyses rather than with the target description. This crate is
 //! below the IR on purpose.
 
-#![doc(html_root_url = "https://docs.rs/rucc-cost/0.30.10")]
+#![doc(html_root_url = "https://docs.rs/rucc-cost/0.30.11")]
 
 pub mod badness;
 pub mod cost;

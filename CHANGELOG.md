@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.11
+
+This is a patch release with the same compiler as 0.30.10. The tag check of 0.30.10 failed on a false report of the threshold check, so 0.30.10 has a tag and no release. 0.30.11 is the release of that compiler.
+
 ### Fixed
 
 - The threshold check no longer reads a tuple field such as `one.3 < two.3` as a comparison against the number 3. This false report stopped the tag check of 0.30.10, so 0.30.10 has a tag and no release. Pull request CI now runs the threshold, interposition and version checks that the release gate runs on the tree.
