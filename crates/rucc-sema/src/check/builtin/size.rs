@@ -36,9 +36,12 @@
 //! size is in its type, and the kinds that ask about the closest object have that answer. The
 //! exception is a trailing array, which a program may allocate past the end of, and which ones
 //! count is `-fstrict-flex-arrays`: at the default every trailing array does, and at three, which
-//! the kernel builds with, only one written `[]`. A member of a union reached through a pointer
-//! gets no answer at any level, which is gcc 15 at `-O2`. Only the record the pointer points at
-//! is looked at this way, since a record nested in it is followed by the rest of the outer one.
+//! the kernel builds with, only one written `[]`. Only the record the pointer points at is looked
+//! at this way, since a record nested in it is followed by the rest of the outer one. A union is
+//! looked through, so an array in a union that is a member of a structure is as long as its type
+//! says unless the union is at the end of the structure and the array counts as flexible, and an
+//! array in the union the pointer points at has no answer at any level. That is gcc 13 and gcc 15
+//! at `-O2`, and [`unbounded_member`] is the rule.
 //!
 //! The storage duration does not matter. A local is as knowable as a global here, unlike in a
 //! constant expression, where the difference is the whole question.
@@ -77,13 +80,13 @@
 use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
-use rucc_types::{ArrayLen, Qualifiers, RecordKind, TypeId, TypeKind, integer_info, layout};
+use rucc_types::{ArrayLen, Qualifiers, RecordKind, TypeId, TypeKind, Types, integer_info, layout};
 
 use crate::check::Checker;
 use crate::decl::{DeclKind, Linkage, StorageDuration};
 use crate::eval::bare;
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
-use crate::tast::Const;
+use crate::tast::{Const, Tast};
 
 /// The two names, which ask the same question.
 ///
@@ -304,8 +307,6 @@ impl Checker<'_> {
                     return None;
                 };
                 let info = self.types.record_info(record);
-                let last = info.fields.len().checked_sub(1) == Some(index as usize);
-                let union = info.kind == RecordKind::Union;
                 let field = info.fields.get(index as usize).copied()?;
                 // A bit-field has no address, so nothing may ask this about one, and the member
                 // is skipped rather than measured in bytes it does not own.
@@ -314,12 +315,10 @@ impl Checker<'_> {
                 }
                 // Through a pointer the record may be longer than its type says, when its last
                 // member is an array the program allocates more of. Which arrays count is what
-                // `-fstrict-flex-arrays` says, and a member of a union has no size gcc will
-                // answer with at any level. Only the record the pointer points at, since a
-                // record inside it is followed by the rest of the outer one.
+                // `-fstrict-flex-arrays` says, and which records is what `unbounded_member` says.
                 let size = self.bytes_of(field.ty);
                 let level = self.strict_flex_of(record, field.name);
-                if self.through_pointer(base) && (union || last && self.flexible(field.ty, level)) {
+                if unbounded_member(&self.tast, &self.types, base, index, level) {
                     return Some(reach.member(field.offset, None));
                 }
                 // A record ending in a flexible array goes on past its type, and so does every
@@ -517,19 +516,7 @@ impl Checker<'_> {
 
     /// Whether this lvalue is what a pointer points at, written `*p` or `p[i]`.
     fn through_pointer(&self, expr: ExprId) -> bool {
-        match self.tast[expr].kind {
-            ExprKind::Unary { op: UnaryOp::Deref, .. } => true,
-            ExprKind::Subscript { base, .. } => self.decayed(base).is_none(),
-            _ => false,
-        }
-    }
-
-    /// Whether an array at the end of a record reached through a pointer may run past its type,
-    /// at the level `-fstrict-flex-arrays` set or the member's own `strict_flex_array` asked for,
-    /// which gcc 13 lets take the place of the command line's in either direction. See
-    /// [`crate::flexible_at`] for the levels.
-    fn flexible(&self, ty: TypeId, level: u8) -> bool {
-        crate::flexible_at(&self.types, ty, level)
+        pointed_at(&self.tast, &self.types, expr)
     }
 
     /// The lvalue an array to pointer conversion was applied to, if that is what this is.
@@ -537,15 +524,7 @@ impl Checker<'_> {
     /// A subscript whose base is a real pointer rather than a decayed array stops the walk, since
     /// where that pointer came from is not a fact about the expression.
     fn decayed(&self, base: ExprId) -> Option<ExprId> {
-        let mut expr = base;
-        loop {
-            match self.tast[expr].kind {
-                ExprKind::Cast(inner) => expr = inner,
-                ExprKind::Convert { kind, operand } if through(kind) => expr = operand,
-                _ => break,
-            }
-        }
-        matches!(bare(&self.types, self.tast[expr].ty), TypeKind::Array { .. }).then_some(expr)
+        decayed_in(&self.tast, &self.types, base)
     }
 
     /// The object behind `lhs op rhs`, where one side is the pointer and the other is a count.
@@ -586,6 +565,91 @@ impl Checker<'_> {
         }
         layout(&self.types, ty, self.cx.target).ok().map(|it| it.size)
     }
+}
+
+/// Whether gcc has no size for member `field` of what `base` names when asked about the closest
+/// object, because the member is an array that may run on past its type through a pointer.
+///
+/// gcc 13 and gcc 15 at `-O2` agree on this, measured on twenty two shapes at every
+/// `-fstrict-flex-arrays` level. A member that is not an array is always as long as its type
+/// says. For an array the unions holding it are looked through: if one of them is what the
+/// pointer points at there is no answer. Otherwise the record holding the outermost of them, or
+/// the array itself when there is none, decides. The array is bounded unless it counts as
+/// flexible at its level and what holds it is the last member of that record. If it is, the
+/// answer is lost only when that record is what the pointer points at, or is a member of unions
+/// that are. So `p->a` for `struct { union { char a[8]; int k; }; int z; } *p` is eight at every
+/// level, as the kernel's `struct vmac_desc_ctx` has it, and `u->a` for a `union` pointer is not
+/// known at any.
+///
+/// `level` is the `-fstrict-flex-arrays` level the member is measured at, which is the command
+/// line's unless the member said `strict_flex_array`, as [`crate::flexible_at`] takes it. The IR
+/// asks the same question of a member of a union when lowering marks where it starts.
+#[must_use]
+pub fn unbounded_member(tast: &Tast, types: &Types, base: ExprId, field: u32, level: u8) -> bool {
+    let record_of = |expr: ExprId| match bare(types, tast[expr].ty) {
+        TypeKind::Record(id) => Some(id),
+        _ => None,
+    };
+    let union = |expr: ExprId| {
+        record_of(expr).is_some_and(|id| types.record_info(id).kind == RecordKind::Union)
+    };
+    let Some(record) = record_of(base) else {
+        return false;
+    };
+    let Some(member) = types.record_info(record).fields.get(field as usize).copied() else {
+        return false;
+    };
+    if !matches!(bare(types, member.ty), TypeKind::Array { .. }) {
+        return false;
+    }
+    let flexible = crate::flexible_at(types, member.ty, level);
+    let (mut holder, mut index) = (base, field);
+    while union(holder) {
+        if pointed_at(tast, types, holder) {
+            return true;
+        }
+        let ExprKind::Member { base, field } = tast[holder].kind else {
+            return false;
+        };
+        (holder, index) = (base, field);
+    }
+    let Some(record) = record_of(holder) else {
+        return false;
+    };
+    if !flexible || types.record_info(record).fields.len() != index as usize + 1 {
+        return false;
+    }
+    loop {
+        if pointed_at(tast, types, holder) {
+            return true;
+        }
+        match tast[holder].kind {
+            ExprKind::Member { base, .. } if union(base) => holder = base,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether this lvalue is what a pointer points at, written `*p` or `p[i]`.
+fn pointed_at(tast: &Tast, types: &Types, expr: ExprId) -> bool {
+    match tast[expr].kind {
+        ExprKind::Unary { op: UnaryOp::Deref, .. } => true,
+        ExprKind::Subscript { base, .. } => decayed_in(tast, types, base).is_none(),
+        _ => false,
+    }
+}
+
+/// The lvalue an array to pointer conversion was applied to, if that is what `base` is.
+fn decayed_in(tast: &Tast, types: &Types, base: ExprId) -> Option<ExprId> {
+    let mut expr = base;
+    loop {
+        match tast[expr].kind {
+            ExprKind::Cast(inner) => expr = inner,
+            ExprKind::Convert { kind, operand } if through(kind) => expr = operand,
+            _ => break,
+        }
+    }
+    matches!(bare(types, tast[expr].ty), TypeKind::Array { .. }).then_some(expr)
 }
 
 /// Whether the walk can see through this conversion to the object underneath it.

@@ -23,6 +23,12 @@ struct E { int n; char fam[]; };
 struct F { struct B inner; };
 union U { int n; char tail[8]; };
 struct N { int n; struct { int k; char t[4]; }; };
+struct S1 { union { char a[8]; int k; }; int z; };
+struct S2 { int z; union { char a[8]; int k; }; };
+struct S5 { int z; union { char a[1]; int k; }; };
+struct S6 { int z; struct S2 in; };
+union V { struct { int k; char t[4]; } s; int x; };
+union W { union { char a[8]; int k; } in; int x; };
 ";
 
 /// Each question and gcc's answer at levels zero to three, with -1 standing for `(size_t) -1`.
@@ -43,6 +49,15 @@ const TABLE: &[(&str, [i64; 4])] = &[
     ("f->inner.tail, 1", [8, 8, 8, 8]),
     ("u->tail, 1", [-1, -1, -1, -1]),
     ("q->t, 1", [4, 4, 4, 4]),
+    ("&u->n, 1", [4, 4, 4, 4]),
+    ("s1->a, 1", [8, 8, 8, 8]),
+    ("&s1->a[3], 1", [5, 5, 5, 5]),
+    ("s2->a, 1", [-1, 8, 8, 8]),
+    ("&s2->a[2], 1", [-1, 6, 6, 6]),
+    ("s5->a, 1", [-1, -1, 1, 1]),
+    ("s6->in.a, 1", [8, 8, 8, 8]),
+    ("v->s.t, 1", [-1, 4, 4, 4]),
+    ("w->in.a, 1", [-1, -1, -1, -1]),
 ];
 
 fn fixture(what: &str, source: &str) -> PathBuf {
@@ -82,7 +97,8 @@ fn source(level: usize) -> String {
     }
     format!(
         "{TYPES}\nvoid f(struct A *a, struct B *b, struct C *c, struct D *d, struct E *e, \
-         struct F *f, union U *u, struct N *q) {{\n{body}}}\n"
+         struct F *f, union U *u, struct N *q, struct S1 *s1, struct S2 *s2, struct S5 *s5, \
+         struct S6 *s6, union V *v, union W *w) {{\n{body}}}\n"
     )
 }
 

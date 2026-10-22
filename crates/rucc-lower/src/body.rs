@@ -6443,10 +6443,10 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// `base.field`, which is the base's address plus the member's offset.
-    fn member(&mut self, base: ExprId, field: u32, ty: TypeId, span: Span) -> Place {
-        let place = self.place(base);
+    fn member(&mut self, holder: ExprId, field: u32, ty: TypeId, span: Span) -> Place {
+        let place = self.place(holder);
         let addr = self.address_of(place, span);
-        let record = self.types().canonical(self.tast()[base].ty);
+        let record = self.types().canonical(self.tast()[holder].ty);
         let TypeKind::Record(id) = self.types().kind(record) else {
             return Place {
                 punned: place.punned,
@@ -6527,8 +6527,17 @@ impl<'u> Body<'_, 'u> {
         let addr = self.offset(addr, byte, span);
         let last = self.types().record_info(id).fields.len() == field as usize + 1;
         let level = self.tast().strict_flex(id, member.name);
-        let closest =
-            self.closest(kind, last && rucc_sema::flexible_at(self.types(), ty, level), ty);
+        // A member of a union is measured where gcc measures it, which is what the unions holding
+        // it and the record holding them say, and is left to whatever holds the union where gcc
+        // has no answer. Every member of a union is at its start, so this is only ever a mark
+        // written when its address is taken.
+        let closest = if kind == RecordKind::Union {
+            let unbounded =
+                rucc_sema::unbounded_member(self.tast(), self.types(), holder, field, level);
+            if unbounded { None } else { self.closest(false, ty) }
+        } else {
+            self.closest(last && rucc_sema::flexible_at(self.types(), ty, level), ty)
+        };
         if byte != 0 {
             if let Some(size) = closest {
                 let array = is_array(self.types(), ty);
@@ -6549,8 +6558,7 @@ impl<'u> Body<'_, 'u> {
 
     /// How long a member is for the questions about the closest member, where its type says.
     ///
-    /// Nothing for a member of a union, which leaves the question to whatever holds the union, and
-    /// nothing for a member with no bytes, since the kernel puts those in the middle of a structure
+    /// Nothing for a member with no bytes, since the kernel puts those in the middle of a structure
     /// as markers to copy from and up to. An array at the end of a structure that a program may
     /// allocate past the end of, which `flexible` says under `-fstrict-flex-arrays` and the
     /// member's own `strict_flex_array`, is zero, so the IR is told only that the member does not
@@ -6560,10 +6568,7 @@ impl<'u> Body<'_, 'u> {
     /// it. A zero is in the member under it where that has room for it and is the whole object
     /// where it has none, which is what bcachefs's `bkey_xattr_init` clears `v` through after
     /// `container_of` on the member before it.
-    fn closest(&self, kind: RecordKind, flexible: bool, ty: TypeId) -> Option<u32> {
-        if kind == RecordKind::Union {
-            return None;
-        }
+    fn closest(&self, flexible: bool, ty: TypeId) -> Option<u32> {
         if flexible || self.types().ends_flexible(ty) {
             return Some(0);
         }

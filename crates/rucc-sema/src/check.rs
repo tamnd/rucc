@@ -96,7 +96,9 @@ mod tls;
 mod ty;
 mod weak;
 
-pub use crate::check::builtin::{library_name, unchecked_name, unimplemented_builtin};
+pub use crate::check::builtin::{
+    library_name, unbounded_member, unchecked_name, unimplemented_builtin,
+};
 
 /// What the checking needs and does not change.
 #[derive(Debug, Clone, Copy)]
