@@ -27,11 +27,15 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
 }
 
 /// Checks one source under those flags, and what was said.
+///
+/// At `-O0`, where the front end answers the closest member through a pointer as its type says.
+/// Above that the answer is the member or what is left of the object the pointer points at,
+/// whichever is less, which only the IR can work out, so it is no constant here.
 fn check(what: &str, flags: &[&str], source: &str) -> (bool, String) {
     let dir = dir(what);
     std::fs::write(dir.join("a.c"), source).expect("the fixture can be written");
     let target = format!("--target={TARGET}");
-    let mut args = vec![target.as_str(), "-O2", "-fsyntax-only"];
+    let mut args = vec![target.as_str(), "-O0", "-fsyntax-only"];
     args.extend_from_slice(flags);
     args.push("a.c");
     let said = run(&dir, &args);

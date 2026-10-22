@@ -175,6 +175,48 @@ void f(struct ctx *c, union both *u, unsigned i) {
 }
 "#;
 
+/// A member of what a pointer points at, which gcc answers with what is left of the member or of
+/// the whole object, whichever is less. cxgb4's `t4_alloc_mac_filt` copies each address into
+/// `p->macaddr` at a `p` its loop moves through a command on the stack, and gcc works the answer
+/// out when the program runs and keeps the field spanning WARN that checks the copy. A parameter
+/// whose object nothing says is the member, and so is a member of a local named as it is.
+const CAPPED: &str = r#"
+typedef unsigned long size_t;
+struct big { int x; char name[16]; int y; };
+struct ex { unsigned short v; unsigned char mac[6]; };
+struct cmd { int a, b; union { struct ex exact[7]; long h; } u; };
+extern void *grab(size_t) __attribute__((alloc_size(1)));
+extern void take(const void *);
+#define D1(p) __builtin_dynamic_object_size(p, 1)
+#define WANT(name, got, want) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if ((got) != (size_t)(want)) name(); \
+    } while (0)
+#define RUNS(name, got) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if (__builtin_constant_p(got)) name(); \
+    } while (0)
+void f(size_t n, struct big *param, int count) {
+    struct big *c = grab(10);
+    WANT(wrong_small, D1(c->name), 6);
+    WANT(wrong_small_static, __builtin_object_size(c->name, 1), 6);
+    WANT(wrong_param, D1(param->name), 16);
+    struct big *b = grab(64);
+    WANT(wrong_room, D1(b->name), 16);
+    struct big *r = grab(n);
+    RUNS(folded_alloc, D1(r->name));
+    struct cmd cmd;
+    struct ex *p = cmd.u.exact;
+    for (int i = 0; i < count; i++, p++)
+        RUNS(folded_loop, D1(p->mac));
+    struct big local;
+    WANT(wrong_local, D1(local.name), 16);
+    take(c); take(b); take(r); take(&cmd); take(&local);
+}
+"#;
+
 fn compile(name: &str, source: &str, level: &str) -> Output {
     compile_with(name, source, &[level])
 }
@@ -235,6 +277,15 @@ fn what_is_left_of_a_member_at_a_bounded_index_is_at_least_one_element() {
 fn an_array_in_a_union_inside_a_structure_is_as_long_as_its_type() {
     for level in ["-O1", "-O2", "-Os", "-O3"] {
         let out = compile(&format!("union{level}"), UNION, level);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn a_member_through_a_pointer_has_no_more_than_the_whole_object_has_left() {
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let flags = ["-fstrict-flex-arrays=3", level];
+        let out = compile_with(&format!("capped{level}"), CAPPED, &flags);
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }

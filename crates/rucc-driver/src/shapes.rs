@@ -75,8 +75,8 @@ use rucc_diag::{SourceMap, Span};
 use rucc_sema::{DeclId, DeclKind, Definition, Linkage, Stmt, StmtId, StorageDuration, Tast, Used};
 use rucc_target::{Lane, TargetInfo, TypeName};
 use rucc_types::{
-    ArrayLen, FunctionId, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type, TypeId,
-    TypeKind, Types,
+    ArrayLen, FunctionId, FunctionType, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type,
+    TypeId, TypeKind, Types,
 };
 
 /// Everything the debug information says about what a unit's addresses mean.
@@ -955,8 +955,24 @@ impl Walk<'_> {
     /// One level of [`Walk::walked`].
     fn layered_over(&mut self, ty: Type, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
         let base = spaceless(self.types.get(of));
-        if ty == base {
+        if ty == base || self.reconvened(ty, base) {
             return self.alias(name, of);
+        }
+        // `const name` for an array name is an array of const elements, since C puts the
+        // qualifier on the elements, and gcc writes it as a const over the name all the same.
+        if let (TypeKind::Array { .. }, Some(pushed)) = (ty.kind, self.pushed(id, of)) {
+            let mut at = self.alias(name, of)?;
+            for (mask, which) in [
+                (Qualifiers::RESTRICT, Qualifier::Restrict),
+                (Qualifiers::VOLATILE, Qualifier::Volatile),
+                (Qualifiers::CONST, Qualifier::Const),
+            ] {
+                if pushed.has(mask) {
+                    self.out.push(Shape::Qualified { which, of: Some(at) });
+                    at = self.out.len() - 1;
+                }
+            }
+            return Some(at);
         }
         // The qualifiers the name had are part of its entry and the rest were written beside it.
         // A type of the same kind with fewer than the name had is not built on the name at all.
@@ -996,6 +1012,36 @@ impl Walk<'_> {
         let at = self.out.len();
         self.out.push(shape);
         Some(at)
+    }
+
+    /// Whether `ty` is the function `base` under another calling convention, as
+    /// `efi_get_time_t __efiapi *get_time` makes of it. gcc keeps the name for it and says nothing
+    /// in the debug information about the convention.
+    fn reconvened(&self, ty: Type, base: Type) -> bool {
+        let (TypeKind::Function(which), TypeKind::Function(was)) = (ty.kind, base.kind) else {
+            return false;
+        };
+        let (now, then) = (self.types.signature(which), self.types.signature(was));
+        ty.quals == base.quals
+            && *now == FunctionType { convention: now.convention, ..then.clone() }
+    }
+
+    /// The qualifiers `id` has over `of` on its elements, where the two are the same array apart
+    /// from those, and nothing where they are not. An address space is not counted, as
+    /// [`spaceless`] does not count it.
+    fn pushed(&self, id: TypeId, of: TypeId) -> Option<Qualifiers> {
+        let (ty, base) = (spaceless(self.types.get(id)), spaceless(self.types.get(of)));
+        match (ty.kind, base.kind) {
+            (TypeKind::Array { elem, len }, TypeKind::Array { elem: was, len: had })
+                if len == had && ty.quals == base.quals =>
+            {
+                self.pushed(elem, was)
+            }
+            _ if ty.kind == base.kind && ty.quals.has(base.quals) => {
+                Some(ty.quals.without(base.quals))
+            }
+            _ => None,
+        }
     }
 
     /// Which entry a typedef name is, adding it the first time it is asked for.

@@ -373,6 +373,11 @@ impl Checker<'_> {
         }
         match self.tast[expr].kind {
             ExprKind::Const(_) => true,
+            // A question about the size of an object the IR answers, which reads nothing, so the
+            // answer is a constant where the IR finds one. gcc answers one for
+            // `__builtin_constant_p (__builtin_dynamic_object_size (p->name, 1))` with `p` from
+            // `malloc (10)`.
+            ExprKind::ObjectSize { .. } => true,
             ExprKind::Decl(id) => self.tast[id].kind == DeclKind::Object,
             ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.quietly(inner),
             ExprKind::Member { base, .. } => {
