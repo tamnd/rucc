@@ -887,6 +887,12 @@ impl Checker<'_> {
         if let Some(value) = self.count_builtin_value(function, &args, span) {
             return value;
         }
+        // The typed overflow checks, `__builtin_uaddll_overflow` and the rest, which become the
+        // node the generic three do once the signature has converted the operands. In
+        // `check/builtin/overflow.rs`.
+        if let Some(value) = self.typed_overflow_builtin_value(function, &args, span) {
+            return value;
+        }
         // The full barrier of the older atomic family, which is the one member of it with a
         // prototype and so the one that gets here. In `check/builtin/atomic.rs`.
         if let Some(value) = self.sync_builtin_value(function, span) {

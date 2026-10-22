@@ -10009,6 +10009,29 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("uadd_overflow.(i32, i1) %0, %1"), "{text}");
     }
 
+    /// The typed forms are the generic check at the type their name says. Linux 7.3 writes the
+    /// unsigned long long forms in `crypto/ecc.c`, where a call left standing would not link.
+    #[test]
+    fn a_typed_overflow_check_is_done_at_the_type_its_name_says() {
+        let text = body(
+            "int f(unsigned long long a, unsigned long long b, unsigned long long *r) { return __builtin_uaddll_overflow(a, b, r); }\n",
+        );
+        assert!(text.contains("uadd_overflow.(i64, i1) %0, %1"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text =
+            body("int f(int a, int b, int *r) { return __builtin_ssub_overflow(a, b, r); }\n");
+        assert!(text.contains("ssub_overflow.(i32, i1) %0, %1"), "{text}");
+
+        // The operands are converted to the type of the name first, as a call to a prototype
+        // converts them, so a wide value is narrowed and the check is done at thirty two bits.
+        let text = body(
+            "int f(long long a, long long b, unsigned *r) { return __builtin_umul_overflow(a, b, r); }\n",
+        );
+        assert!(text.contains("umul_overflow.(i32, i1)"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+    }
+
     /// The arithmetic happens at a type that holds every value all three written types can hold.
     ///
     /// That is what makes the check exact. `unsigned int` and `int` in one call need thirty three
