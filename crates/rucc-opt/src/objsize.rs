@@ -697,12 +697,24 @@ impl Walk<'_> {
             Opcode::Load => self.number(self.only_store(*args.first()?, inst)?, next),
             Opcode::Expect => self.number(*args.first()?, next),
             _ if data.results == 2 => {
-                let (a, _) = self.number(*args.first()?, next)?;
-                let (b, _) = self.number(*args.get(1)?, next)?;
+                let a = self.number(*args.first()?, next);
+                let b = self.number(*args.get(1)?, next);
                 let at = self.func[data.results().next()?].ty;
-                let (sum, over) = crate::fold::overflowing(data.opcode, a, b, at)?;
-                let found = if index == 0 { sum } else { Imm::from_bits(u128::from(over)) };
-                Some((found, ty))
+                if let (Some((a, _)), Some((b, _))) = (a, b) {
+                    let (sum, over) = crate::fold::overflowing(data.opcode, a, b, at)?;
+                    let found = if index == 0 { sum } else { Imm::from_bits(u128::from(over)) };
+                    return Some((found, ty));
+                }
+                // A product with 0 or 1 in it fits whatever the other side is, as long as both
+                // sides are as wide as the result. `kcalloc (1, size, gfp)` checks `1 * size` in
+                // the `kmalloc_array` it calls, and gcc has folded that check away by the time it
+                // answers about what came back, so the way out with a null pointer is gone.
+                let small =
+                    |found: Option<(Imm, Type)>| found.is_some_and(|(imm, _)| imm.unsigned() <= 1);
+                let product = matches!(data.opcode, Opcode::UMulOverflow | Opcode::SMulOverflow);
+                let wide = args.iter().all(|&arg| self.func[arg].ty == at);
+                (index == 1 && product && wide && (small(a) || small(b)))
+                    .then(|| (Imm::from_bits(0), ty))
             }
             _ if data.results == 1 => {
                 let found = crate::fold::arithmetic(data, args, ty, &|arg| self.number(arg, next))
@@ -1030,7 +1042,8 @@ impl Walk<'_> {
             }
             Opcode::Call => {
                 let (alloc, args) = self.allocation(inst)?;
-                let factors = factors(alloc, args)?;
+                let factors = factors(alloc, args)?.into_iter().map(|factor| self.put(factor));
+                let factors: Vec<Value> = factors.collect();
                 if factors.iter().any(|&factor| self.func[factor].ty != size) {
                     return None;
                 }
@@ -1038,6 +1051,29 @@ impl Walk<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The value a load reads back out of the local it was stored in, followed for as long as
+    /// that is another such load, or the value itself where it is not one.
+    ///
+    /// An inlined `kmalloc_array_noprof` puts the size into `bytes` with `__builtin_mul_overflow`
+    /// and reads it back on each of the two ways to `kmalloc_noprof`, so the two calls are asked
+    /// for two loads. Both read what the one store put there, and that is the size the two ways
+    /// agree on, as they do in gcc, which has no local by the time it answers.
+    fn put(&self, value: Value) -> Value {
+        let mut value = value;
+        for _ in 0..DEPTH {
+            let Def::Result { inst, .. } = self.func[value].def else { break };
+            if self.func[inst].opcode != Opcode::Load {
+                break;
+            }
+            let Some(&slot) = self.func[self.func[inst].args].first() else { break };
+            match self.only_store(slot, inst) {
+                Some(stored) => value = stored,
+                None => break,
+            }
+        }
+        value
     }
 
     /// The size worked out when the program runs for a block parameter, which is the one every
@@ -2067,5 +2103,60 @@ block0(%0: ptr, %1: i64):
         assert!(taken, "the step is taken off the length, {text}");
         assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
         assert!(text.contains("iconst.i64 128"), "{text}");
+    }
+
+    /// What `kcalloc (1, size, gfp)` is once its `kmalloc_array_noprof` is inlined: a product
+    /// checked for overflow and put into `bytes`, a null pointer on the way it overflowed, and two
+    /// calls that each read `bytes` back. A product with 1 in it cannot overflow, so the null
+    /// pointer never comes back and the answer is the product, as fortify_kunit's
+    /// `fortify_test_alloc_size_kmalloc_dynamic` expects. With 2 the null pointer may come back
+    /// and the answer is not known.
+    #[test]
+    fn a_size_read_back_on_each_way_to_the_allocator_is_the_one_stored() {
+        let body = |by: u32| {
+            format!(
+                "
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+
+func @f(i64, i32), linkage(external) {{
+block0(%0: i64, %1: i32):
+    %2 = alloca, size 8, align 8
+    %3 = iconst.i64 {by}
+    %4, %5 = umul_overflow.(i64, i1) %3, %0
+    store %4 -> %2, align 8
+    br_if %5, block1, block2
+
+block1:
+    %6 = iconst.i64 0
+    %7 = inttoptr.ptr %6
+    jump block5(%7)
+
+block2:
+    %8 = iconst.i32 0
+    %9 = icmp ne %1, %8
+    br_if %9, block3, block4
+
+block3:
+    %10 = load.i64 %2, align 8
+    %11 = call @my(%10) : (i64) -> ptr
+    jump block5(%11)
+
+block4:
+    %12 = load.i64 %2, align 8
+    %13 = call @my(%12) : (i64) -> ptr
+    jump block5(%13)
+
+block5(%14: ptr):
+    %15 = object_size.i64 %14, kind 4
+    call @use(%15) : (i64)
+    return
+}}
+"
+            )
+        };
+        assert_eq!(answers(&body(1), true), [] as [i128; 0]);
+        let text = printed(&body(1), Some(&[]));
+        assert!(text.contains("call @use(%4)"), "{text}");
+        assert_eq!(answers(&body(2), true), [-1]);
     }
 }
