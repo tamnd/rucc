@@ -184,6 +184,7 @@ pub mod sink;
 pub mod speculate;
 pub mod split;
 pub mod sroa;
+pub mod startup;
 pub mod stats;
 pub mod subscript;
 pub mod switch_conv;

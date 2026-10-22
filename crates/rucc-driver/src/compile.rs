@@ -1674,17 +1674,30 @@ fn generate(
     let heat = target.tuple.os().object_format() == Some(ObjectFormat::Elf)
         && opts.reorder_functions.unwrap_or_else(|| opts.opt_level.schedules());
     let unlikely = if heat { rucc_opt::unlikely::functions(module) } else { Default::default() };
+    // `main` and the constructors go in `.text.startup` and the destructors in `.text.exit`, on
+    // the same terms. Cold wins, as it does in gcc's `default_function_section`.
+    let startup =
+        if heat { rucc_opt::startup::functions(module, names) } else { Default::default() };
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
     // The order gcc writes them in, which objtool reads. See `rucc_opt::expand`.
     let reorder = opts.toplevel_reorder.unwrap_or_else(|| opts.opt_level.runs_optimizer());
     for id in rucc_opt::expand::order(module, reorder) {
         let func = &mut module[id];
-        if func.section.is_none() && unlikely.contains(&id) {
+        let base = if unlikely.contains(&id) {
+            Some(".text.unlikely")
+        } else if startup.start.contains(&id) {
+            Some(".text.startup")
+        } else if startup.exit.contains(&id) {
+            Some(".text.exit")
+        } else {
+            None
+        };
+        if let (None, Some(base)) = (func.section, base) {
             let section = if opts.function_sections {
-                format!(".text.unlikely.{}", names.resolve(func.name))
+                format!("{base}.{}", names.resolve(func.name))
             } else {
-                ".text.unlikely".to_owned()
+                base.to_owned()
             };
             func.section = Some(names.intern(&section));
         }
@@ -6657,6 +6670,58 @@ decl #0 x : int object external static defined
         let placed = "__attribute__((cold, section(\".foo\"))) int f(int x) { return x; }\n";
         let text = run(&opts, placed).text().to_owned();
         assert!(text.contains(".foo") && !text.contains(".text.unlikely"), "{text}");
+    }
+
+    /// `main` and a constructor go in `.text.startup` and a destructor in `.text.exit` from `-O2`,
+    /// with the name after it under `-ffunction-sections`, as gcc 16 writes them. Not at `-O1`, not
+    /// when the command line said no, not when the program named a section, and not when the
+    /// function is cold, which wins.
+    #[test]
+    fn main_and_the_constructors_go_in_text_startup() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let source = "int x;\n\
+                      __attribute__((constructor)) static void up(void) { x = 1; }\n\
+                      __attribute__((destructor)) static void down(void) { x = 2; }\n\
+                      int other(void) { return x; }\n\
+                      int main(void) { return x; }\n";
+        let section_of = |text: &str, name: &str| {
+            let at = text.find(&format!("\n{name}:")).expect(text);
+            let section = text[..at].rfind("\t.section\t").expect(text);
+            let text_at = text[..at].rfind("\n\t.text\n");
+            if text_at.is_some_and(|t| t > section) {
+                return ".text".to_owned();
+            }
+            text[section + 10..].split(',').next().unwrap_or_default().to_owned()
+        };
+        let text = run(&opts, source).text().to_owned();
+        assert_eq!(section_of(&text, "main"), ".text.startup", "{text}");
+        assert_eq!(section_of(&text, "up"), ".text.startup", "{text}");
+        assert_eq!(section_of(&text, "down"), ".text.exit", "{text}");
+        assert_eq!(section_of(&text, "other"), ".text", "{text}");
+        opts.function_sections = true;
+        let text = run(&opts, source).text().to_owned();
+        assert_eq!(section_of(&text, "main"), ".text.startup.main", "{text}");
+        assert_eq!(section_of(&text, "up"), ".text.startup.up", "{text}");
+        assert_eq!(section_of(&text, "down"), ".text.exit.down", "{text}");
+        opts.function_sections = false;
+        for (level, asked) in
+            [(rucc_session::OptLevel::O1, None), (rucc_session::OptLevel::O2, Some(false))]
+        {
+            opts.opt_level = level;
+            opts.reorder_functions = asked;
+            let text = run(&opts, source).text().to_owned();
+            assert!(!text.contains(".text.startup") && !text.contains(".text.exit"), "{text}");
+        }
+        opts.opt_level = rucc_session::OptLevel::O2;
+        opts.reorder_functions = None;
+        let placed = "__attribute__((section(\".foo\"))) int main(void) { return 0; }\n";
+        let text = run(&opts, placed).text().to_owned();
+        assert!(text.contains(".foo") && !text.contains(".text.startup"), "{text}");
+        let cold = "__attribute__((cold)) int main(void) { return 0; }\n";
+        let text = run(&opts, cold).text().to_owned();
+        assert_eq!(section_of(&text, "main"), ".text.unlikely", "{text}");
     }
 
     /// tamnd/rucc#2277. With the vector registers taken away a function with a `double` in it is
