@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The assembler reads an operand whose brackets hold no register as an expression, the same as gas. `jmp early_idt_handler_array + i*(9 + (4*1))` in Linux 7.3's arch/x86/xen/xen-asm.S was assembled as a jump through memory at that address, so each entry of `xen_early_idt_handler_array` jumped through whatever was stored there. objtool reported it as an indirect jump with no `int3` after it.
+
 ## 0.30.11
 
 This is a patch release with the same compiler as 0.30.10. The tag check of 0.30.10 failed on a false report of the threshold check, so 0.30.10 has a tag and no release. 0.30.11 is the release of that compiler.
