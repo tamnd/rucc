@@ -93,6 +93,14 @@
 //! to some other type stays what it was. A call made directly is one the inliner can copy, and in
 //! the kernel it is a `call` rather than a call to a retpoline thunk.
 //!
+//! A call made direct to a function that never comes back ends its block, the same as one written
+//! that way. `crate::noreturn` ran before the pipeline and could only end the calls that were
+//! direct then. Linux 7.3's `revert_lock` in fs/dlm/lock.c passes the `static` function
+//! `unhold_lkb_assert`, which ends in `panic`, to `kref_put` and calls it through that pointer,
+//! so the call becomes direct only here. gcc writes nothing after it. rucc wrote the `jmp` back
+//! into the caller, and objtool reported it as an instruction after a call to a function with no
+//! `__noreturn`.
+//!
 //! An access that crosses from one piece of the image into the next, or that reads part of an
 //! integer, is read as the bytes it covers. It is not answered when one of those bytes is part of
 //! a floating point number, an address or something else this cannot say. A `volatile` access or
@@ -110,8 +118,8 @@ use std::collections::hash_map::Entry;
 use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Block, Datum, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Module, Opcode,
-    Pic, Restrict, Signature, SymbolRef, Type, Value,
+    AttrSet, Block, Datum, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Module,
+    Opcode, Pic, Restrict, Signature, SymbolRef, Type, Value,
 };
 
 use crate::extents::vouched;
@@ -288,6 +296,9 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
             data.args = args;
             data.extra = Extra::Call(at);
             stats.optimized(DIRECT);
+            if func[inst].opcode == Opcode::Call && images.gone.contains(&name) {
+                crate::noreturn::end_after(func, inst);
+            }
         }
     }
 }
@@ -513,6 +524,8 @@ pub struct Images {
     /// Every name the module gives a body, a function's or an object's, whose address is never
     /// null.
     bodies: Set<Symbol>,
+    /// Every function that never comes back, by declaration or by `crate::noreturn`.
+    gone: Set<Symbol>,
 }
 
 impl Images {
@@ -547,12 +560,18 @@ impl Images {
             .chain(module.globals().map(|id| module[id].name))
             .filter(|&name| crate::fold::defined(module, name))
             .collect();
+        let gone = module
+            .funcs()
+            .filter(|&id| module[id].attrs.set.contains(AttrSet::NORETURN))
+            .map(|id| module[id].name)
+            .collect();
         Self {
             objects,
             little_endian: module.datalayout.little_endian,
             pointer: u64::from(module.datalayout.pointer_bits.div_ceil(8)),
             signatures,
             bodies,
+            gone,
         }
     }
 

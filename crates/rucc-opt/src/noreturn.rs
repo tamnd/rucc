@@ -88,17 +88,24 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
             if !graph.node(name).is_some_and(|node| answers[node.index()]) {
                 continue;
             }
-            let next = func.next_inst(inst);
-            if next.is_some_and(|next| stops(func, next)) {
-                continue;
+            if end_after(func, inst) {
+                ended += 1;
             }
-            let span = func.span(inst);
-            let hint = func.create_inst(InstData::new(Opcode::UnreachableHint), &[], span);
-            func.insert_after(hint, inst);
-            ended += 1;
         }
     }
     ended
+}
+
+/// Puts an `unreachable_hint` right after a call to a function that never comes back, unless
+/// something there stops control already. Says whether it put one.
+pub(crate) fn end_after(func: &mut Func, inst: Inst) -> bool {
+    if func.next_inst(inst).is_some_and(|next| stops(func, next)) {
+        return false;
+    }
+    let span = func.span(inst);
+    let hint = func.create_inst(InstData::new(Opcode::UnreachableHint), &[], span);
+    func.insert_after(hint, inst);
+    true
 }
 
 /// The name a call goes to, when it goes to one.
