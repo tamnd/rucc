@@ -420,6 +420,11 @@ impl Checker<'_> {
                     }
             }
             ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.local(inner),
+            ExprKind::Binary { op: BinaryOp::Add | BinaryOp::Sub, lhs, rhs }
+                if self.counted_here(lhs, rhs) =>
+            {
+                true
+            }
             ExprKind::Binary { lhs, rhs, .. } => self.local(lhs) || self.local(rhs),
             ExprKind::Cond { then, otherwise, .. } => self.local(then) || self.local(otherwise),
             _ => false,
@@ -459,6 +464,26 @@ impl Checker<'_> {
             }
             _ => false,
         }
+    }
+
+    /// Whether `lhs op rhs` moves a pointer by a count that above `-O0` is worked out when the
+    /// program runs, the way an index is for [`Self::indexed_here`]. `p + n` is `&p[n]`, so the two
+    /// spellings go to the IR alike. That is poly1305's `memcpy(dctx->buf + dctx->buflen, ...)`,
+    /// which gcc checks against what is left of `buf` and which was answered here with nothing
+    /// because neither side reads a local.
+    fn counted_here(&self, lhs: ExprId, rhs: ExprId) -> bool {
+        let pointer = |expr: ExprId| {
+            matches!(
+                bare(&self.types, self.tast[expr].ty),
+                TypeKind::Pointer(_) | TypeKind::Array { .. }
+            )
+        };
+        let count = match (pointer(lhs), pointer(rhs)) {
+            (true, false) => rhs,
+            (false, true) => lhs,
+            _ => return false,
+        };
+        self.cx.optimizing && self.eval().integer(count).is_err()
     }
 
     /// Whether this pointer is a local of the function, not a parameter, read as it is.
