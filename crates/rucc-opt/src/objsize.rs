@@ -78,7 +78,7 @@ use rucc_ir::{
     Module, Opcode, Pic, SymbolRef, Type, Value,
 };
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
@@ -141,6 +141,7 @@ pub fn answer(
                 live: Set::default(),
                 numbers: RefCell::default(),
                 answered: Map::default(),
+                moved: Cell::new(false),
             };
             // Twice, since the first round reads every store and every way into a block, and
             // what it rules out can settle a branch the second round reads.
@@ -442,6 +443,9 @@ struct Walk<'a> {
     numbers: RefCell<Map<Value, (Number, u32)>>,
     /// The questions answered so far with a constant, by the value each one was.
     answered: Map<Value, Imm>,
+    /// Whether the last walk for the largest answer went round a loop that moves the pointer, so
+    /// that what it found is only where the pointer starts.
+    moved: Cell<bool>,
 }
 
 /// A number [`Walk::number`] found, with its type, or `None` where it found none.
@@ -462,12 +466,20 @@ impl Walk<'_> {
         let (kind, dynamic) = (asked & 3, asked & DYNAMIC != 0);
         let ask = Ask { largest: kind & 2 == 0, closest: kind & 1 == 1 };
         let largest = ask.largest;
+        self.moved.set(false);
         let known = match look {
             false => None,
             true => self.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten(),
         };
         let unknown = if largest { -1 } else { 0 };
         match known {
+            // A pointer a loop moves has the most room where it starts, which is what the walk
+            // found, and gcc answers the dynamic spelling with the room it has on the trip the
+            // question is asked. defxx fills its command with `memcpy (p_addr, ...)` and a
+            // `p_addr++` after each entry, and keeps the field spanning WARN that checks it.
+            Some(known) if look && dynamic && self.moved.get() => {
+                self.within(address, inst, ask).unwrap_or(Answer::Known(i128::from(known)))
+            }
             Some(known) => Answer::Known(i128::from(known)),
             // Only the dynamic spelling may be answered with something worked out while the
             // program runs, and only where the walk found no constant.
@@ -618,6 +630,7 @@ impl Walk<'_> {
         // with `i` one and a size that runs into the `csum` after it, and gcc says nothing.
         if ask.closest && largest && data.flags.contains(Flags::COUNTED) {
             let Some(member) = self.left(base, ask, depth, on)? else {
+                self.moved.set(self.moved.get() || step != 0);
                 return Ok(None);
             };
             let whole = Ask { closest: false, ..ask };
@@ -631,7 +644,10 @@ impl Walk<'_> {
             // A pointer moved forward each time round a loop may end up anywhere further along,
             // so there is no smallest.
             None if !largest && step != 0 => Err(()),
-            None => Ok(None),
+            None => {
+                self.moved.set(self.moved.get() || step != 0);
+                Ok(None)
+            }
         }
     }
 
@@ -1750,6 +1766,45 @@ block2:
 ";
         assert_eq!(answers(&forward.replace("STEP", "1"), true), [19, 0]);
         assert_eq!(answers(&forward.replace("STEP", "-1"), true), [-1, 0]);
+    }
+
+    /// The dynamic spelling of the largest answer about a pointer a loop moves forward is the room
+    /// it has on the trip the question is asked, worked out when the program runs, and the static
+    /// spelling stays the room where it starts. Where the loop leaves the pointer alone both are
+    /// what the walk found. gcc 15 answers defxx's `p_addr` this way at `-O2`.
+    #[test]
+    fn a_pointer_a_loop_moves_has_the_room_it_has_on_that_trip() {
+        let body = "
+func @f(i32, ptr), linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = iconst.i64 4
+    %3 = ptr_add %1, %2, member 32
+    %4 = iconst.i32 0
+    jump block1(%3, %4)
+
+block1(%5: ptr, %6: i32):
+    %7 = object_size.i64 %5, kind 5
+    call @use(%7) : (i64)
+    %8 = object_size.i64 %5, kind 1
+    call @use(%8) : (i64)
+    %9 = iconst.i64 STEP
+    %10 = ptr_add %5, %9
+    %11 = iconst.i32 1
+    %12 = add %6, %11
+    %13 = icmp slt %12, %0
+    br_if %13, block1(%10, %12), block2
+
+block2:
+    return
+}
+";
+        let moved = body.replace("STEP", "8");
+        assert_eq!(answers(&moved, true), [32]);
+        let text = printed(&moved, Some(&[]));
+        assert_eq!(text.matches("ptrtoint").count(), 2, "{text}");
+        assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
+        assert!(text.contains("iconst.i64 32"), "{text}");
+        assert_eq!(answers(&body.replace("STEP", "0"), true), [32, 32]);
     }
 
     /// The module once every question is answered, printed, with `library` as [`answer`] takes it.
