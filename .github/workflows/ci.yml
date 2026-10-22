@@ -48,6 +48,14 @@ jobs:
         run: cargo xtask layers
       - name: prose style
         run: cargo xtask style
+      # The rest of the checks the release gate runs on the tree. A pull request that fails one of
+      # them otherwise merges, and the tag check of the next release is the first to say so.
+      - name: bare thresholds
+        run: cargo xtask thresholds
+      - name: interposition table
+        run: cargo xtask interpose
+      - name: crate versions
+        run: cargo xtask version
       - name: malformed forms list
         run: cargo xtask malformed
       - name: target table

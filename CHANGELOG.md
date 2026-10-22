@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The threshold check no longer reads a tuple field such as `one.3 < two.3` as a comparison against the number 3. This false report stopped the tag check of 0.30.10, so 0.30.10 has a tag and no release. Pull request CI now runs the threshold, interposition and version checks that the release gate runs on the tree.
+
 ## 0.30.10
 
 This is a patch release. rucc builds Linux 7.3: a 7.3 X64 defconfig built with rucc boots and passes 1278 of the 1281 boot, smoke, KUnit, kselftest and LTP units the gcc 16 kernel passes, and the three it does not pass are timing tests. On Linux with glibc rucc asks for huge pages for its heap, which takes about 17 percent off the CPU time of the heaviest 7.3 units. Two string literals spelled the same are one object, which takes the sound codec unit cs47l90.c from 1.65 s to 0.38 s, and loop closed form no longer walks the whole function for each repair, which takes `overflow_kunit.c` from 14.9 s to 4.2 s. rucc takes `counted_by` on a pointer member and the 18 typed overflow builtins as gcc 16 does, and puts `main`, the constructors and the destructors in the sections gcc 16 uses. The debug information follows gcc in many more places, the aarch64 assembler takes the memory tagging, pointer authentication and SVE `ptrue` instructions, and AArch64 keeps a whole NEON vector in one register. The glibc differential now runs on Ubuntu 26.04 with its own gcc-16 and no longer depends on the toolchain PPA.
