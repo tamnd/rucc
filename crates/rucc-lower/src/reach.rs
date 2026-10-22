@@ -46,7 +46,7 @@ use rucc_base::Interner;
 use rucc_base::hash::Set;
 use rucc_sema::{
     Const, Conversion, Decl, DeclFlags, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind,
-    InitList, Linkage, Stmt, StmtId, StrId, Tast,
+    InitList, Linkage, Stmt, StmtId, StorageDuration, StrId, Tast,
 };
 use rucc_target::TargetInfo;
 use rucc_types::{Qualifiers, Types};
@@ -96,6 +96,7 @@ fn walk(decide: Decide<'_>, pruned: bool, objects: bool) -> (Set<DeclId>, Set<De
         named: Set::default(),
         work: Vec::new(),
         valued: Set::default(),
+        unlowered: false,
     };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
@@ -240,6 +241,15 @@ struct Reach<'a> {
     /// The statements a statement expression is worth the value of, which are not thrown away
     /// for doing nothing because what they work out is the answer.
     valued: Set<StmtId>,
+    /// Whether the walk is in the arm of an `if` a constant condition never takes, where nothing
+    /// is a reference and the one thing that counts is a `static` an attribute asks to keep.
+    ///
+    /// gcc gives such a `static` to the varpool while it parses the declaration, before it folds
+    /// the `if`, so it is emitted along with what its initializer names. The kernel's `pr_debug`
+    /// under a debug mask of 0 is one: `hfs_dbg` in `fs/hfs` is `if (0) printk(...)`, and the
+    /// printk index entry inside it was in gcc's `.printk_index` and not in rucc's. An arm of a
+    /// `?:` or of a `&&` is folded away before that, so a `static` in one of those is not kept.
+    unlowered: bool,
 }
 
 impl Reach<'_> {
@@ -325,12 +335,24 @@ impl Reach<'_> {
             Stmt::Decls(decls) => {
                 for index in 0..self.tast[decls].len() {
                     let decl = self.tast[decls][index];
-                    self.mark(decl);
+                    if !self.unlowered {
+                        self.mark(decl);
+                        continue;
+                    }
+                    let node = &self.tast[decl];
+                    if node.duration == StorageDuration::Automatic {
+                        if let Some(init) = node.init {
+                            self.init(init);
+                        }
+                    } else if node.flags.contains(DeclFlags::RETAINED) {
+                        self.mark(decl);
+                    }
                 }
             }
             // The arm lowering drops is not a reference, or a `static inline` called only from
             // it is emitted with a call in it to a function nothing defines. Unless a label is in
             // it, since a `goto` from outside reaches that and lowering keeps what follows it.
+            // A `static` an attribute keeps is still emitted from it. See [`Reach::unlowered`].
             Stmt::If { cond, then, otherwise } => {
                 if let Some((effects, taken)) = self.decide.condition(cond) {
                     for effect in effects {
@@ -338,10 +360,14 @@ impl Reach<'_> {
                     }
                     let (live, dead) =
                         if taken { (Some(then), otherwise) } else { (otherwise, Some(then)) };
-                    for arm in
-                        [live, dead.filter(|&dead| self.labelled(dead))].into_iter().flatten()
-                    {
-                        self.stmt(arm);
+                    if let Some(live) = live {
+                        self.stmt(live);
+                    }
+                    if let Some(dead) = dead {
+                        let outer = self.unlowered;
+                        self.unlowered = outer || !self.labelled(dead);
+                        self.stmt(dead);
+                        self.unlowered = outer;
                     }
                     return;
                 }
@@ -406,6 +432,7 @@ impl Reach<'_> {
             }
             // The one node that is a reference. Whether it is a call, an address or a read is
             // not asked, because a definition has to exist for all three.
+            ExprKind::Decl(_) | ExprKind::CompoundLiteral(_) if self.unlowered => {}
             ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => {
                 self.named.insert(decl);
                 self.mark(decl);
