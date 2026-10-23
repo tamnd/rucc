@@ -242,6 +242,35 @@ void f(struct inode *inode, struct pair *pair, char *other) {
 }
 "#;
 
+const IN_LOCAL: &str = r#"
+typedef unsigned long size_t;
+struct block { unsigned char bitmap[27]; unsigned char reserved[3]; unsigned char dentry[2140]; };
+struct ptrs { void *in; int max, nr; void *bitmap; void *dentry; };
+static inline void make(struct ptrs *d, struct block *b) {
+    d->max = 214;
+    d->bitmap = b->bitmap;
+    d->dentry = b->dentry;
+}
+extern struct block *get(void);
+#define WANT(name, got, want) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if ((got) != (size_t)(want)) name(); \
+    } while (0)
+void f(void) {
+    struct ptrs dst;
+    make(&dst, get());
+    WANT(wrong_inlined, __builtin_dynamic_object_size(dst.bitmap, 1), 27);
+    WANT(wrong_inlined_static, __builtin_object_size(dst.bitmap, 1), 27);
+}
+void g(struct block *b) {
+    struct ptrs dst;
+    dst.bitmap = b->bitmap;
+    dst.dentry = b->dentry;
+    WANT(wrong_by_hand, __builtin_dynamic_object_size(dst.bitmap, 1), 27);
+}
+"#;
+
 fn compile(name: &str, source: &str, level: &str) -> Output {
     compile_with(name, source, &[level])
 }
@@ -319,6 +348,14 @@ fn a_member_through_a_pointer_has_no_more_than_the_whole_object_has_left() {
 fn a_pointer_stored_just_before_it_is_read_back_is_measured() {
     for level in ["-O1", "-O2", "-Os", "-O3"] {
         let out = compile(&format!("stored{level}"), STORED, level);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn a_pointer_in_a_member_of_a_local_is_measured_past_the_store_beside_it() {
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let out = compile(&format!("local{level}"), IN_LOCAL, level);
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }

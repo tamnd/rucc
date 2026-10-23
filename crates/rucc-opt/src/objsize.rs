@@ -228,14 +228,6 @@ const DYNAMIC: u8 = 4;
 /// The fourth kind, the smallest answer for the closest member, which the walk cannot give.
 const SMALLEST_MEMBER: u8 = 3;
 
-/// How many bytes a value of the type takes in memory, at the most. An address has no width in
-/// the IR, so it is taken as 16 bytes, more than any target's, which can only make a store next
-/// to one look as if it wrote it.
-fn most_bytes(ty: Type) -> u64 {
-    let bits = u64::from(ty.bits()) * u64::from(ty.lanes());
-    if ty.is_ptr() || bits == 0 { 16 } else { bits.div_ceil(8) }
-}
-
 /// What one question is answered with.
 enum Answer {
     /// A constant, which is every answer the walk finds and every answer that says nothing.
@@ -1064,7 +1056,7 @@ impl Walk<'_> {
     fn only_store(&self, slot: Value, load: Inst) -> Option<Value> {
         let (local, at) = self.slot(slot)?;
         let read = self.func[load].first_result?;
-        let width = most_bytes(self.func[read].ty);
+        let width = self.bytes(self.func[read].ty);
         let places = self.places.get_or_init(|| self.places());
         let mut stores = Vec::new();
         let mut away = Vec::new();
@@ -1086,7 +1078,7 @@ impl Walk<'_> {
                 // Something on a way through the function that cannot be taken never runs.
                 _ if !self.reached(self.func.block_of(inst)?) => {}
                 (Opcode::Store, 1) => {
-                    let wrote = most_bytes(self.func[args[0]].ty);
+                    let wrote = self.bytes(self.func[args[0]].ty);
                     if from < at.saturating_add(width) && at < from.saturating_add(wrote) {
                         stores.push((inst, from));
                     }
@@ -1121,6 +1113,19 @@ impl Walk<'_> {
         (self.func[put].ty == self.func[read].ty).then_some(put)
     }
 
+    /// How many bytes a value of the type takes in memory, an address what the target's take. A
+    /// type with no width in the IR is taken as 16 bytes, which can only make a store next to it
+    /// look as if it wrote it. f2fs's `make_dentry_ptr_block` sets `bitmap` and then `dentry`
+    /// right after it, which as 16 bytes would have run over the first.
+    fn bytes(&self, ty: Type) -> u64 {
+        let bits = u64::from(ty.bits()) * u64::from(ty.lanes());
+        match ty.is_ptr() {
+            true => u64::from(self.module.datalayout.pointer_bits / 8),
+            false if bits == 0 => 16,
+            false => bits.div_ceil(8),
+        }
+    }
+
     /// What a load of an address reads, where a store this walk can see is all it can read: the
     /// one store to a local of [`Walk::only_store`], or the store just above it of
     /// [`Walk::forwarded`].
@@ -1148,11 +1153,7 @@ impl Walk<'_> {
             return None;
         }
         let escapes = self.escapes.get_or_init(|| Escapes::of(self.func));
-        let bytes = |ty: Type| match ty.is_ptr() {
-            true => u64::from(self.module.datalayout.pointer_bits / 8),
-            false => most_bytes(ty),
-        };
-        let width = i64::try_from(bytes(self.func[read].ty)).ok()?;
+        let width = i64::try_from(self.bytes(self.func[read].ty)).ok()?;
         let mut block = self.func.block_of(load)?;
         let mut until = Some(load);
         for _ in 0..DEPTH {
@@ -1184,7 +1185,7 @@ impl Walk<'_> {
                         if from == at {
                             return (self.func[put].ty == self.func[read].ty).then_some(put);
                         }
-                        let wrote = i64::try_from(bytes(self.func[put].ty)).ok()?;
+                        let wrote = i64::try_from(self.bytes(self.func[put].ty)).ok()?;
                         if from < at.saturating_add(width) && at < from.saturating_add(wrote) {
                             return None;
                         }
