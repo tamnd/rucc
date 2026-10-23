@@ -63,6 +63,9 @@ impl AsmQuals {
     pub const INLINE: AsmQuals = AsmQuals(2);
     /// `goto`, which is what makes the label list legal.
     pub const GOTO: AsmQuals = AsmQuals(4);
+    /// No colon at all, which gcc calls basic assembly. Its template is not one the compiler
+    /// can see into, so one that is not empty may read and write any memory.
+    pub const BASIC: AsmQuals = AsmQuals(8);
 
     /// Whether every qualifier in `other` is set here.
     #[inline]
