@@ -5600,7 +5600,7 @@ impl Parser<'_> {
             }
             return self.digits();
         }
-        if starts(first) {
+        if starts(first) || first == b'"' {
             let name = self.word();
             // `.` on its own is where the file has got to, and `.L1` is a name that starts with one.
             if name == "." {
@@ -5708,8 +5708,16 @@ impl Parser<'_> {
     }
 
     /// One name, as far as it runs.
+    ///
+    /// A name in double quotes is the name inside them, as gas reads it. The kernel's
+    /// `STATIC_CALL_TRAMP_STR` writes a static call trampoline as a string, so Linux 7.3's
+    /// arch/x86/hyperv/mshv_vtl_asm.S calls `"__SCT____mshv_vtl_return_hypercall"`.
     fn word(&mut self) -> String {
         let body = &self.text[self.at..];
+        if let Some((name, _)) = body.strip_prefix('"').and_then(|inner| inner.split_once('"')) {
+            self.at += name.len() + 2;
+            return name.to_owned();
+        }
         let end = body.find(|ch: char| !carries_on(ch as u8)).unwrap_or(body.len());
         let word = body[..end].to_owned();
         self.at += end;
@@ -6283,6 +6291,20 @@ mod tests {
         assert!(twice.unwrap_err().why.contains("defined twice"));
         let bare = read(".text\na:\n.symver a, x\n", Arch::X86_64);
         assert!(bare.unwrap_err().why.contains("no '@'"));
+    }
+
+    /// A name in double quotes is the name inside them, in an instruction and in a directive, as
+    /// gas reads it. The kernel's `STATIC_CALL_TRAMP_STR` writes `call "__SCT__name"`, and with the
+    /// quotes kept the link of an x86-64 `allmodconfig` vmlinux could not find the trampoline.
+    #[test]
+    fn a_name_in_double_quotes_is_the_name_inside_them() {
+        let file = assembled(concat!(
+            ".text\ncall \"__SCT__a\"\njmp \"__SCT__b\"\nmovq \"key\"(%rip), %rax\n",
+            "leaq \"table\"+8(%rip), %rax\ncall \"far\"@PLT\n.quad \"word\"\n.long \"here\" - .\n",
+        ));
+        let named: Vec<&str> =
+            file.parts[0].relocs.iter().map(|reloc| reloc.symbol.as_str()).collect();
+        assert_eq!(named, ["__SCT__a", "__SCT__b", "key", "table", "far", "word", "here"]);
     }
 
     /// gcc's `-g` output leaves the line table to the assembler: `.file` and `.loc` say where each
