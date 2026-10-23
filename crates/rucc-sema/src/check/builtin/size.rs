@@ -430,6 +430,15 @@ impl Checker<'_> {
                         _ => false,
                     }
             }
+            // A pointer read out of what another pointer points at, as `inode->i_link` is. ufs
+            // sets it just before it copies the name there, and above `-O0` the IR looks for
+            // that store the way gcc's loads take the value of one. Where there is none the
+            // answer is the one that says nothing, as it would be here.
+            ExprKind::Convert { kind: Conversion::Lvalue, operand }
+                if self.cx.optimizing && self.through_memory(operand) =>
+            {
+                true
+            }
             ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.local(inner),
             ExprKind::Binary { op: BinaryOp::Add | BinaryOp::Sub, lhs, rhs }
                 if self.counted_here(lhs, rhs) =>
@@ -525,6 +534,26 @@ impl Checker<'_> {
             },
             ExprKind::Unary { op: UnaryOp::Deref, operand } => automatic(operand),
             _ => false,
+        }
+    }
+
+    /// Whether this lvalue is a pointer kept in memory a pointer points at, as `p->next` and
+    /// `p[1].buf` are, rather than in a variable.
+    fn through_memory(&self, expr: ExprId) -> bool {
+        if !matches!(bare(&self.types, self.tast[expr].ty), TypeKind::Pointer(_)) {
+            return false;
+        }
+        let mut expr = expr;
+        loop {
+            match self.tast[expr].kind {
+                _ if self.through_pointer(expr) => return true,
+                ExprKind::Member { base, .. } => expr = base,
+                ExprKind::Subscript { base, .. } => match self.decayed(base) {
+                    Some(array) => expr = array,
+                    None => return true,
+                },
+                _ => return false,
+            }
         }
     }
 

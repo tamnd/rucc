@@ -88,6 +88,7 @@ use rucc_diag::Span;
 use rucc_ir::{Block, BlockCall};
 
 use crate::Cfg;
+use crate::alias::{Escapes, Origin, origin};
 use crate::dom::Dominators;
 use crate::extents::vouched;
 
@@ -148,6 +149,8 @@ pub fn answer(
                 through: Cell::new(false),
                 ways: Cell::new(WAYS),
                 places: OnceCell::new(),
+                escapes: OnceCell::new(),
+                dynamic: Cell::new(false),
             };
             // Twice, since the first round reads every store and every way into a block, and
             // what it rules out can settle a branch the second round reads.
@@ -544,6 +547,12 @@ struct Walk<'a> {
     /// Where each address into a fixed local is used, worked out on the first question that
     /// needs it, as [`Places`] says.
     places: OnceCell<Places>,
+    /// Which locals have their address go somewhere, for [`Walk::forwarded`], worked out on the
+    /// first load it looks at.
+    escapes: OnceCell<Escapes>,
+    /// Whether the question is the dynamic spelling, the only one [`Walk::forwarded`] answers.
+    /// gcc answers the other in its early pass, before a load has taken the value of a store.
+    dynamic: Cell<bool>,
 }
 
 /// The addresses a function makes into its fixed locals and every place they are used, found in
@@ -588,6 +597,7 @@ impl Walk<'_> {
         self.moved.set(false);
         self.through.set(false);
         self.ways.set(WAYS);
+        self.dynamic.set(dynamic);
         let known = match look {
             false => None,
             true => self.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten(),
@@ -772,7 +782,7 @@ impl Walk<'_> {
                             }
                             return self.global(name).ok_or(());
                         }
-                        let put = self.only_store(*args.first().ok_or(())?, inst).ok_or(())?;
+                        let put = self.stored(*args.first().ok_or(())?, inst).ok_or(())?;
                         self.left(put, ask, depth, on)
                     }
                     // What an allocator gave back, where the attribute on it says which arguments
@@ -1111,6 +1121,88 @@ impl Walk<'_> {
         (self.func[put].ty == self.func[read].ty).then_some(put)
     }
 
+    /// What a load of an address reads, where a store this walk can see is all it can read: the
+    /// one store to a local of [`Walk::only_store`], or the store just above it of
+    /// [`Walk::forwarded`].
+    fn stored(&self, address: Value, load: Inst) -> Option<Value> {
+        self.only_store(address, load)
+            .or_else(|| self.dynamic.get().then(|| self.forwarded(load)).flatten())
+    }
+
+    /// The value the store just above a load put at its address, where the address is in what a
+    /// pointer points at rather than in a local, and nothing between the two can write it.
+    ///
+    /// ufs's `ufs_symlink` sets `inode->i_link` to the symlink kept in the inode and then copies
+    /// the name to `inode->i_link`. gcc's loads have taken the value of the store in front of
+    /// them by the time it asks, so it measures the copy against the 60 bytes of `i_symlink` and
+    /// keeps the field spanning WARN. The walk goes up the block and on into the one way into it
+    /// that can be taken, for as long as there is only one. It passes what writes no memory, what
+    /// writes a local whose address never leaves the function, and a store a constant step away
+    /// from the load in the same object. Anything else that may write memory stops it, a call or
+    /// a `volatile` store included.
+    fn forwarded(&self, load: Inst) -> Option<Value> {
+        let address = *self.func[self.func[load].args].first()?;
+        let read = self.func[load].first_result?;
+        let (base, Some(at)) = origin(self.func, address) else { return None };
+        if !matches!(base, Origin::Unknown(_)) || self.func[load].flags.contains(Flags::VOLATILE) {
+            return None;
+        }
+        let escapes = self.escapes.get_or_init(|| Escapes::of(self.func));
+        let bytes = |ty: Type| match ty.is_ptr() {
+            true => u64::from(self.module.datalayout.pointer_bits / 8),
+            false => most_bytes(ty),
+        };
+        let width = i64::try_from(bytes(self.func[read].ty)).ok()?;
+        let mut block = self.func.block_of(load)?;
+        let mut until = Some(load);
+        for _ in 0..DEPTH {
+            let insts: Vec<Inst> = self.func.insts(block).collect();
+            let end = until
+                .and_then(|it| insts.iter().position(|&inst| inst == it))
+                .unwrap_or(insts.len());
+            for &inst in insts[..end].iter().rev() {
+                let data = &self.func[inst];
+                if !data.opcode.writes_memory() {
+                    continue;
+                }
+                let args = &self.func[data.args];
+                let to = match data.opcode {
+                    Opcode::Store => args[1],
+                    Opcode::Memset | Opcode::Memcpy | Opcode::Memmove | Opcode::LifetimeEnd => {
+                        *args.first()?
+                    }
+                    _ => return None,
+                };
+                match origin(self.func, to) {
+                    (Origin::Local(local), _) if !escapes.escaped(local) => {}
+                    (other, Some(from))
+                        if other == base
+                            && data.opcode == Opcode::Store
+                            && !data.flags.contains(Flags::VOLATILE) =>
+                    {
+                        let put = args[0];
+                        if from == at {
+                            return (self.func[put].ty == self.func[read].ty).then_some(put);
+                        }
+                        let wrote = i64::try_from(bytes(self.func[put].ty)).ok()?;
+                        if from < at.saturating_add(width) && at < from.saturating_add(wrote) {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            // The way back round a `do { } while (0)` is never taken, and only the ways that
+            // can be count.
+            let mut preds =
+                self.cfg.predecessors(block).iter().filter(|&&pred| self.taken(pred, block));
+            let (Some(&pred), None) = (preds.next(), preds.next()) else { return None };
+            block = pred;
+            until = None;
+        }
+        None
+    }
+
     /// The fixed local an address is in, with how far in, where the address is the local or a
     /// constant step from it.
     fn slot(&self, address: Value) -> Option<(Value, u64)> {
@@ -1301,7 +1393,7 @@ impl Walk<'_> {
                 break;
             }
             let Some(&slot) = self.func[self.func[inst].args].first() else { break };
-            match self.only_store(slot, inst) {
+            match self.stored(slot, inst) {
                 Some(stored) => value = stored,
                 None => break,
             }
@@ -1495,7 +1587,7 @@ impl Walk<'_> {
                         if let Some(name) = self.pointed(inst) {
                             return Ok(Some(Object::Global(name)));
                         }
-                        let put = self.only_store(*args.first().ok_or(())?, inst).ok_or(())?;
+                        let put = self.stored(*args.first().ok_or(())?, inst).ok_or(())?;
                         self.object(put, ask, depth, seen)
                     }
                     Opcode::Call => self.object(self.into(inst).ok_or(())?, ask, depth, seen),
