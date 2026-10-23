@@ -595,13 +595,13 @@ struct Place {
     /// of one swaps the bytes it loaded and a write swaps the bytes before it stores them, and a
     /// bit-field carries the same answer in its [`Run`] instead.
     reverse: bool,
-    /// How long the member at the start of its record is, when this is one, for the questions
-    /// about the closest member that `object_size` asks of its address.
+    /// What the member at the start of its record says for the questions about the closest member
+    /// that `object_size` asks of its address, when this is one, as [`Body::closest`] works it out.
     ///
     /// A member further in has the `ptr_add` that steps to it say so, and one at the start of its
     /// record has no instruction of its own until its address is taken, which is where
     /// [`Body::taken`] writes one.
-    first: Option<u32>,
+    first: Option<Extra>,
 }
 
 impl Place {
@@ -6531,21 +6531,10 @@ impl<'u> Body<'_, 'u> {
         let addr = self.offset(addr, byte, span);
         let last = self.types().record_info(id).fields.len() == field as usize + 1;
         let level = self.tast().strict_flex(id, member.name);
-        // A member of a union is measured where gcc measures it, which is what the unions holding
-        // it and the record holding them say, and is left to whatever holds the union where gcc
-        // has no answer. Every member of a union is at its start, so this is only ever a mark
-        // written when its address is taken.
-        let closest = if kind == RecordKind::Union {
-            let unbounded =
-                rucc_sema::unbounded_member(self.tast(), self.types(), holder, field, level);
-            if unbounded { None } else { self.closest(false, ty) }
-        } else {
-            self.closest(last && rucc_sema::flexible_at(self.types(), ty, level), ty)
-        };
+        let mark = self.closest(holder, field, kind, last, level, ty);
         if byte != 0 {
-            if let Some(size) = closest {
-                let array = is_array(self.types(), ty);
-                self.measured(addr, size, array);
+            if let Some(extra) = mark {
+                self.measured(addr, extra);
             }
         }
         Place {
@@ -6553,40 +6542,73 @@ impl<'u> Body<'_, 'u> {
             owns,
             restrict: place.restrict,
             reverse,
-            // A member that may run past its end at the start of its record has nothing a mark
-            // would change, since what is under it leaves it all the room it has.
-            first: closest.filter(|&size| byte == 0 && size != 0),
+            first: mark.filter(|_| byte == 0),
             ..Place::new(Where::Addr(addr), ty)
         }
     }
 
-    /// How long a member is for the questions about the closest member, where its type says.
+    /// What the `ptr_add` that steps to member `field` of what `holder` names says about it for
+    /// the questions about the closest member, which is how gcc's `addr_object_size` walks the
+    /// reference to it.
     ///
-    /// Nothing for a member with no bytes, since the kernel puts those in the middle of a structure
-    /// as markers to copy from and up to. An array at the end of a structure that a program may
-    /// allocate past the end of, which `flexible` says under `-fstrict-flex-arrays` and the
-    /// member's own `strict_flex_array`, is zero, so the IR is told only that the member does not
-    /// bound the answer. At the kernel's level three that is only one written `[]`, and the
-    /// `bits` of a `struct cpumask` is its 64 bytes, as gcc has it. A record that ends in a
-    /// flexible array is zero for the same reason, since that is how the program reaches past
-    /// it. A zero is in the member under it where that has room for it and is the whole object
-    /// where it has none, which is what bcachefs's `bkey_xattr_init` clears `v` through after
-    /// `container_of` on the member before it.
-    fn closest(&self, flexible: bool, ty: TypeId) -> Option<u32> {
-        if flexible || self.types().ends_flexible(ty, self.tast().gnuc()) {
-            return Some(0);
-        }
+    /// A member is as long as its type says, and one with no bytes says nothing, since the kernel
+    /// puts those in the middle of a structure as markers to copy from and up to. An array at the
+    /// end of a structure that a program may allocate past the end of, which `-fstrict-flex-arrays`
+    /// and the member's own `strict_flex_array` say, is as long as its type says too unless the
+    /// structure is what a pointer points at, or a member of unions that are. At the kernel's
+    /// level three that is only one written `[]`, and the `bits` of a `struct cpumask` is its 64
+    /// bytes, as gcc has it. Through a pointer it is [`Extra::Trailing`], which the IR answers
+    /// with the whole object unless the pointer turns out to be a step into a declared one. One
+    /// written `[]` is the whole object wherever it is, since its type has no length.
+    ///
+    /// A record that ends in a flexible array is the whole object where every record between it
+    /// and a pointer ends in one too, since that is how the program reaches past it. bcachefs's
+    /// `bkey_xattr_init` clears `v` that way after `container_of` on the member before it. A
+    /// member of a union is left to whatever holds the union where gcc has no answer.
+    fn closest(
+        &self,
+        holder: ExprId,
+        field: u32,
+        kind: RecordKind,
+        last: bool,
+        level: u8,
+        ty: TypeId,
+    ) -> Option<Extra> {
+        let array = is_array(self.types(), ty);
+        let whole = if array { Extra::Array(0) } else { Extra::Member(0) };
         let size = repr::size_of(self.types(), self.target(), ty);
-        u32::try_from(size).ok().filter(|&size| size != 0)
+        let size = u32::try_from(size).ok().filter(|&size| size != 0);
+        let sized = |size| if array { Extra::Array(size) } else { Extra::Member(size) };
+        let gnuc = self.tast().gnuc();
+        if self.types().ends_flexible(ty, gnuc) {
+            let open = rucc_sema::open_to_pointer(self.tast(), self.types(), holder, gnuc);
+            return if open { Some(whole) } else { size.map(sized) };
+        }
+        let unbounded =
+            rucc_sema::unbounded_member(self.tast(), self.types(), holder, field, level);
+        if kind == RecordKind::Union {
+            return if unbounded { None } else { size.map(sized) };
+        }
+        if !last || !rucc_sema::flexible_at(self.types(), ty, level) {
+            return size.map(sized);
+        }
+        // Level three takes only an array with no length.
+        if rucc_sema::flexible_at(self.types(), ty, 3) {
+            return Some(whole);
+        }
+        match (unbounded, size) {
+            (true, Some(size)) => Some(Extra::Trailing(size)),
+            (true, None) => Some(whole),
+            (false, size) => size.map(sized),
+        }
     }
 
-    /// Writes on the `ptr_add` that stepped to a member how long the member is, and whether it is
-    /// an array, which is [`Extra::Array`]'s reason to be.
-    fn measured(&mut self, addr: Value, size: u32, array: bool) {
+    /// Writes on the `ptr_add` that stepped to a member what [`Self::closest`] says about it.
+    fn measured(&mut self, addr: Value, extra: Extra) {
         if let Def::Result { inst, .. } = self.func[addr].def {
             let data = &mut self.func[inst];
             if data.opcode == Opcode::PtrAdd && data.extra == Extra::None {
-                data.extra = if array { Extra::Array(size) } else { Extra::Member(size) };
+                data.extra = extra;
             }
         }
     }
@@ -6596,9 +6618,7 @@ impl<'u> Body<'_, 'u> {
     /// the record is the same number and has the record's length.
     fn taken(&mut self, place: Place, span: Span) -> Value {
         let addr = self.address_of(place, span);
-        let Some(size) = place.first else { return addr };
-        let extra =
-            if is_array(self.types(), place.ty) { Extra::Array(size) } else { Extra::Member(size) };
+        let Some(extra) = place.first else { return addr };
         let address = self.address;
         let mut build = self.build(span);
         let zero = build.iconst(address, 0);

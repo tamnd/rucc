@@ -90,7 +90,7 @@ mod trap;
 mod tsc;
 mod unreachable;
 
-pub use size::unbounded_member;
+pub use size::{open_to_pointer, unbounded_member};
 
 /// The name in the object file for a function declared under this spelling, when the two are
 /// not the same name.

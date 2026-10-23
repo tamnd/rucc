@@ -607,6 +607,12 @@ pub enum Extra {
     /// clears a run of members with `memset(&s->first, 0, ...)` on purpose, and copying past the end
     /// of an array into the member after it is the bug `_FORTIFY_SOURCE` was written to catch.
     Array(u32),
+    /// The same as [`Extra::Member`] for an array at the end of a record the program reached
+    /// through a pointer, which may run past its end. The questions about the closest member are
+    /// answered with this many bytes where the pointer is a constant step into a declared object,
+    /// and with the whole object everywhere else, which is how gcc 16 answers `&p->tail` once its
+    /// late pass has folded `p` into `&local`.
+    Trailing(u32),
     /// Which lane, for `extractlane` and `insertlane`.
     Lane(u8),
     /// Which lanes in which order, for `shuffle`. See [`Shuffle`].
@@ -642,6 +648,12 @@ impl Extra {
         }
     }
 
+    /// Whether a `ptr_add` says anything about the member it is the address of.
+    #[must_use]
+    pub const fn marked(self) -> bool {
+        matches!(self, Self::Member(_) | Self::Array(_) | Self::Trailing(_))
+    }
+
     /// Which shape this is, without the payload.
     ///
     /// The verifier compares this with [`Opcode::extra_kind`], because an instruction carrying
@@ -660,7 +672,7 @@ impl Extra {
             Self::Prefetch(_) => ExtraKind::Prefetch,
             Self::Depth(_) => ExtraKind::Depth,
             Self::Question(_) => ExtraKind::Question,
-            Self::Member(_) | Self::Array(_) => ExtraKind::Member,
+            Self::Member(_) | Self::Array(_) | Self::Trailing(_) => ExtraKind::Member,
             Self::Lane(_) => ExtraKind::Lane,
             Self::Shuffle(_) => ExtraKind::Shuffle,
             Self::Targets(_) => ExtraKind::Targets,
