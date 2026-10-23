@@ -97,7 +97,7 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
     return_pointer: ReturnPointer::FirstArgument,
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
-    narrow: Narrow::Unspecified,
+    narrow: Narrow::ArgsToInt,
     bit_ints: BitInts::SpareBits,
     cleanup: Cleanup::Caller,
 };
