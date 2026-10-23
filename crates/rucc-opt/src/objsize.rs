@@ -238,6 +238,9 @@ enum Answer {
     /// The size of the object the address is in, less how far in the address is, worked out where
     /// the question is.
     Within(Object, u64),
+    /// The size an allocator was asked for, less how far into what it gave back the address is,
+    /// worked out where the question is, for an address a loop moves.
+    Allotted(Value, Running),
     /// What is left of the whole object, worked out where the question is, or what is left of the
     /// member where that is less.
     Capped(Box<Answer>, u64),
@@ -245,6 +248,9 @@ enum Answer {
     /// the branch, with every edge into the block and the address it passes. An edge that cannot
     /// be taken has nothing.
     Joined(Block, Vec<Way>),
+    /// An answer less the steps added to the address after it, worked out where the question is
+    /// and never below zero.
+    Less(Box<Answer>, Vec<Value>),
 }
 
 /// One edge into a join of [`Answer::Joined`]: the branch, the edge, and the address it passes
@@ -260,6 +266,8 @@ enum Object {
     Global(Symbol),
     /// The start of a member, which is the `ptr_add` lowering marked, with how long the member is.
     Member(Value, u32),
+    /// What an allocator gave back, or a join every way into which brings that.
+    Allocated(Value),
 }
 
 /// An address that is what an allocator gave back with a constant number of bytes added, as
@@ -345,7 +353,16 @@ fn worked(func: &mut Func, inst: Inst, address: Value, ty: Type, answer: &Answer
             made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty)
         }
         Answer::Running(running) => room(func, inst, span, running, ty),
-        &Answer::Within(object, size) => measure(func, inst, address, ty, object, size),
+        &Answer::Within(object, size) => {
+            let imm = func.add_imm(Imm::int(i128::from(size), ty.lane()));
+            let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+            let size = made(func, data, ty);
+            measure(func, inst, address, ty, object, size)
+        }
+        Answer::Allotted(start, running) => {
+            let size = room(func, inst, span, running, ty);
+            measure(func, inst, address, ty, Object::Allocated(*start), size)
+        }
         Answer::Capped(whole, member) => {
             let whole = worked(func, inst, address, ty, whole);
             let imm = func.add_imm(Imm::int(i128::from(*member), ty.lane()));
@@ -379,6 +396,28 @@ fn worked(func: &mut Func, inst: Inst, address: Value, ty: Type, answer: &Answer
                 func.set_block_call(at, BlockCall { args, ..call });
             }
             size
+        }
+        Answer::Less(whole, steps) => {
+            let size = worked(func, inst, address, ty, whole);
+            let mut offset = steps[0];
+            for &step in &steps[1..] {
+                let args = func.push_values(&[offset, step]);
+                offset = made(func, InstData { args, ..InstData::new(Opcode::Add) }, ty);
+            }
+            let imm = func.add_imm(Imm::int(0, ty.lane()));
+            let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+            let zero = made(func, data, ty);
+            let args = func.push_values(&[size, offset]);
+            let test = InstData {
+                args,
+                extra: Extra::IntPred(IntPred::Ugt),
+                ..InstData::new(Opcode::ICmp)
+            };
+            let room = made(func, test, ty.with_lane(Type::I1));
+            let args = func.push_values(&[size, offset]);
+            let left = made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty);
+            let args = func.push_values(&[room, left, zero]);
+            made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty)
         }
     }
 }
@@ -451,7 +490,7 @@ fn measure(
     address: Value,
     ty: Type,
     object: Object,
-    size: u64,
+    size: Value,
 ) -> Value {
     let span = func.span(inst);
     let made = |func: &mut Func, data: InstData, ty: Type| {
@@ -474,7 +513,7 @@ fn measure(
         }
         _ => {
             let start = match object {
-                Object::Local(start) | Object::Member(start, _) => start,
+                Object::Local(start) | Object::Member(start, _) | Object::Allocated(start) => start,
                 // The address of a global is taken again here, since the one the walk passed may
                 // be in a block that does not come before the question.
                 Object::Global(name) => made(
@@ -491,8 +530,6 @@ fn measure(
             made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty)
         }
     };
-    let imm = func.add_imm(Imm::int(i128::from(size), ty.lane()));
-    let size = made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
     let imm = func.add_imm(Imm::int(0, ty.lane()));
     let zero = made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
     let args = func.push_values(&[size, offset]);
@@ -517,7 +554,8 @@ fn steps(func: &Func, address: Value, object: Object, ty: Type) -> Option<Vec<Va
     let mut steps = Vec::new();
     let mut value = address;
     loop {
-        if matches!(object, Object::Local(start) | Object::Member(start, _) if value == start) {
+        if matches!(object, Object::Local(start) | Object::Member(start, _) | Object::Allocated(start) if value == start)
+        {
             return Some(steps);
         }
         let Def::Result { inst, .. } = func[value].def else { return None };
@@ -643,7 +681,7 @@ impl Walk<'_> {
             // question is asked. defxx fills its command with `memcpy (p_addr, ...)` and a
             // `p_addr++` after each entry, and keeps the field spanning WARN that checks it.
             Some(known) if dynamic && self.moved.get() => {
-                self.within(address, at, ask).unwrap_or(Answer::Known(i128::from(known)))
+                self.within(address, at, ty, ask).unwrap_or(Answer::Known(i128::from(known)))
             }
             Some(known) if ask.closest && largest && self.through.get() => {
                 self.capped(address, at, ty, known, dynamic)
@@ -654,8 +692,8 @@ impl Walk<'_> {
             None if dynamic && kind != SMALLEST_MEMBER => self
                 .running(address, ask, ty, DEPTH, &mut Vec::new())
                 .map(Answer::Running)
-                .or_else(|| largest.then(|| self.within(address, at, ask)).flatten())
-                .or_else(|| self.split(address, ty, asked, depth))
+                .or_else(|| largest.then(|| self.within(address, at, ty, ask)).flatten())
+                .or_else(|| self.split(address, at, ty, asked, depth))
                 .unwrap_or(Answer::Known(unknown)),
             None => Answer::Known(unknown),
         }
@@ -667,9 +705,44 @@ impl Walk<'_> {
     /// wrapped, into `acb->wqbuffer`, and gcc keeps the field spanning WARN that checks the copy
     /// against what is left of the member on the way it came. Every way that can be taken has to
     /// bring something known, and a loop is not followed, since nothing could be passed round it.
-    fn split(&self, address: Value, ty: Type, asked: u8, depth: u32) -> Option<Answer> {
+    ///
+    /// Steps added to the address after the join are taken off what the ways bring, as tscs454's
+    /// `coeff_ram_put` copies to `&coeff_ram[ctl->addr * COEFF_SIZE]` with `coeff_ram` one of
+    /// three caches. For the closest member a step into a member is not, since that member is
+    /// then the one asked about.
+    ///
+    /// A way that brings a null pointer to a question only asked once a branch has found the
+    /// pointer is not null brings nothing, the way gcc has threaded that branch by the time it
+    /// answers. maple_tree's `node_copy` copies to `ma_gaps (dst, d_mt) + d_start` inside `if
+    /// (d_gaps)`, and `ma_gaps` gives back one of two members or `NULL`.
+    fn split(
+        &self,
+        address: Value,
+        question: Inst,
+        ty: Type,
+        asked: u8,
+        depth: u32,
+    ) -> Option<Answer> {
         let depth = depth.checked_sub(1)?;
-        let Def::Param { block, index } = self.func[address].def else { return None };
+        let mut steps = Vec::new();
+        let mut value = address;
+        let (block, index) = loop {
+            let inst = match self.func[value].def {
+                Def::Param { block, index } => break (block, index),
+                Def::Result { inst, .. } => inst,
+            };
+            let data = &self.func[inst];
+            let &[base, step] = &self.func[data.args][..] else { return None };
+            let member = asked & 1 == 1 && data.extra.member().is_some();
+            if data.opcode != Opcode::PtrAdd || member || self.func[step].ty != ty {
+                return None;
+            }
+            if steps.len() == STEPS {
+                return None;
+            }
+            steps.push(step);
+            value = base;
+        };
         let unknown = if asked & 2 == 0 { -1 } else { 0 };
         let mut preds = self.cfg.predecessors(block).to_vec();
         preds.sort_unstable();
@@ -692,6 +765,7 @@ impl Walk<'_> {
                         self.splits.set(self.splits.get().checked_sub(1)?);
                         let arg = *self.func[call.args].get(index as usize)?;
                         match self.reply(arg, term, ty, asked, depth) {
+                            _ if self.null(arg) && self.guarded(value, question) => None,
                             Answer::Known(number) if number == unknown => return None,
                             answer => Some((arg, answer)),
                         }
@@ -700,7 +774,14 @@ impl Walk<'_> {
                 ways.push((term, at, way));
             }
         }
-        ways.iter().any(|(_, _, way)| way.is_some()).then_some(Answer::Joined(block, ways))
+        if ways.iter().all(|(_, _, way)| way.is_none()) {
+            return None;
+        }
+        let joined = Answer::Joined(block, ways);
+        match steps.is_empty() {
+            true => Some(joined),
+            false => Some(Answer::Less(Box::new(joined), steps)),
+        }
     }
 
     /// The closest member of an object reached through a pointer, which gcc answers with what is
@@ -717,7 +798,7 @@ impl Walk<'_> {
         self.ways.set(WAYS);
         match self.left(address, whole, DEPTH, &mut Vec::new()) {
             Ok(Some(left)) if dynamic && self.moved.get() => {
-                match self.within(address, inst, whole) {
+                match self.within(address, inst, ty, whole) {
                     Some(within) => Answer::Capped(Box::new(within), member),
                     None => Answer::Known(i128::from(member.min(left))),
                 }
@@ -728,7 +809,7 @@ impl Walk<'_> {
                 self.ways.set(WAYS);
                 match self.running(address, whole, ty, DEPTH, &mut Vec::new()) {
                     Some(running) => Answer::Capped(Box::new(Answer::Running(running)), member),
-                    None => match self.within(address, inst, whole) {
+                    None => match self.within(address, inst, ty, whole) {
                         Some(within) => Answer::Capped(Box::new(within), member),
                         None => known,
                     },
@@ -1578,9 +1659,29 @@ impl Walk<'_> {
     /// closest member the object is the first member the walk passes the start of, which has to be
     /// worked out before the question in the same way. Where the walk passes none it is the whole
     /// object, which is no smaller than any member the address is in.
-    fn within(&self, value: Value, question: Inst, ask: Ask) -> Option<Answer> {
+    ///
+    /// What an allocator gave back has the size [`Walk::running`] works out for it, and that has
+    /// to be there before the question too. btrfs's `create_chunk` copies each uuid with `memcpy
+    /// (stripe->dev_uuid, ...)` at a `stripe` its loop moves through what `kzalloc (item_size)`
+    /// gave back, and gcc keeps the field spanning WARN that checks it.
+    fn within(&self, value: Value, question: Inst, ty: Type, ask: Ask) -> Option<Answer> {
         let object = self.object(value, ask, DEPTH, &mut Set::default()).ok()??;
         let size = match object {
+            Object::Allocated(start) => {
+                let there = match self.func[start].def {
+                    Def::Param { block, .. } => {
+                        self.func.block_of(question).is_some_and(|at| self.dom.dominates(block, at))
+                    }
+                    Def::Result { inst, .. } => self.precedes(inst, question),
+                };
+                if !there {
+                    return None;
+                }
+                let whole = Ask { largest: true, closest: false };
+                self.ways.set(WAYS);
+                let running = self.running(start, whole, ty, DEPTH, &mut Vec::new())?;
+                return (running.offset == 0).then_some(Answer::Allotted(start, running));
+            }
             Object::Local(start) => {
                 let Def::Result { inst, .. } = self.func[start].def else { return None };
                 if !self.precedes(inst, question) {
@@ -1619,6 +1720,9 @@ impl Walk<'_> {
         let depth = depth.checked_sub(1).ok_or(())?;
         if !seen.insert(value) {
             return Ok(None);
+        }
+        if self.allocated(value, DEPTH) {
+            return Ok(Some(Object::Allocated(value)));
         }
         match self.func[value].def {
             Def::Param { block, index } => {
@@ -1673,6 +1777,98 @@ impl Walk<'_> {
                     Opcode::Call => self.object(self.into(inst).ok_or(())?, ask, depth, seen),
                     _ => Err(()),
                 }
+            }
+        }
+    }
+
+    /// Whether the value is a null pointer.
+    fn null(&self, value: Value) -> bool {
+        let value = match self.func[value].def {
+            Def::Result { inst, .. } if self.func[inst].opcode == Opcode::IntToPtr => {
+                let Some(&int) = self.func[self.func[inst].args].first() else { return false };
+                int
+            }
+            _ => value,
+        };
+        self.number(value, NUMBER).is_some_and(|(imm, _)| imm.unsigned() == 0)
+    }
+
+    /// Whether `at` is only reached on the way out of a branch that has found `value` is not a
+    /// null pointer.
+    fn guarded(&self, value: Value, at: Inst) -> bool {
+        let Some(mut block) = self.func.block_of(at) else { return false };
+        for _ in 0..DEPTH {
+            if let &[pred] = self.cfg.predecessors(block) {
+                if self.not_null(pred, block, value) {
+                    return true;
+                }
+            }
+            match self.dom.immediate_dominator(block) {
+                Some(up) => block = up,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// Whether the edge from `pred` to `block` is the way a branch takes where `value` is not a
+    /// null pointer.
+    fn not_null(&self, pred: Block, block: Block, value: Value) -> bool {
+        let Some(term) = self.func.terminator(pred) else { return false };
+        if self.func[term].opcode != Opcode::BrIf {
+            return false;
+        }
+        let Some(&cond) = self.func[self.func[term].args].first() else { return false };
+        let Def::Result { inst, .. } = self.func[cond].def else { return false };
+        let test = &self.func[inst];
+        let (Opcode::ICmp, Extra::IntPred(pred)) = (test.opcode, test.extra) else { return false };
+        let &[one, other] = &self.func[test.args][..] else { return false };
+        if !(one == value && self.null(other) || other == value && self.null(one)) {
+            return false;
+        }
+        let calls: Vec<Block> = self.func.successors(term).map(|call| call.block).collect();
+        match (pred, calls.as_slice()) {
+            (_, &[then, other]) if then == other => false,
+            (IntPred::Ne, &[then, _]) => then == block,
+            (IntPred::Eq, &[_, other]) => other == block,
+            _ => false,
+        }
+    }
+
+    /// Whether the value is what an allocator gave back, or a join every way into which that can
+    /// be taken brings that. `kmalloc_noprof` calls one of three allocators, and the address a
+    /// loop then moves starts at the join of the three.
+    fn allocated(&self, value: Value, depth: u32) -> bool {
+        let Some(depth) = depth.checked_sub(1) else { return false };
+        match self.func[value].def {
+            Def::Result { inst, .. } => {
+                self.func[inst].opcode == Opcode::Call && self.allocation(inst).is_some()
+            }
+            Def::Param { block, index } => {
+                let preds = self.cfg.predecessors(block);
+                let mut brought = false;
+                for &pred in preds {
+                    if self.dom.dominates(block, pred) {
+                        return false;
+                    }
+                    if !self.taken(pred, block) {
+                        continue;
+                    }
+                    let Some(term) = self.func.terminator(pred) else { return false };
+                    for call in self.func.successors(term).collect::<Vec<_>>() {
+                        if call.block != block {
+                            continue;
+                        }
+                        let Some(&arg) = self.func[call.args].get(index as usize) else {
+                            return false;
+                        };
+                        if !self.allocated(arg, depth) {
+                            return false;
+                        }
+                        brought = true;
+                    }
+                }
+                brought
             }
         }
     }
@@ -1944,9 +2140,9 @@ block3(%7: ptr):
 
     /// The ways into a join may bring an allocation and a local, and what is added to the address
     /// after the join is taken off what either brought, as gcc 15 answers it at `-O2` for
-    /// `p = c ? malloc (n) : buf + 8` with a 32 byte `buf`. A way that brings nothing known, which
-    /// is a step the walk cannot count or a call to something that is not an allocator, leaves the
-    /// whole join not known.
+    /// `p = c ? malloc (n) : buf + 8` with a 32 byte `buf`. A step the walk cannot count is
+    /// measured on its way, as gcc 13 does for `buf + n`. A way that brings nothing known, which is
+    /// a call to something that is not an allocator, leaves the whole join not known.
     #[test]
     fn each_way_into_a_join_brings_its_own_size() {
         let body = |other: &str| {
@@ -1992,7 +2188,7 @@ block3(%8: ptr):
         assert!(text.contains("iconst.i64 24"), "{text}");
         assert!(text.contains("icmp ugt"), "{text}");
         assert_eq!(answers(&body("ptr_add %2, %5"), true), [-1]);
-        assert_eq!(answers(&body("ptr_add %2, %0"), true), [-1, -1]);
+        assert_eq!(answers(&body("ptr_add %2, %0"), true), [-1]);
         assert_eq!(answers(&body("call @plain(%0) : (i64) -> ptr"), true), [-1, -1]);
     }
 
@@ -2302,6 +2498,69 @@ block2:
         assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
         assert!(text.contains("iconst.i64 32"), "{text}");
         assert_eq!(answers(&body.replace("STEP", "0"), true), [32, 32]);
+    }
+
+    /// A pointer a loop moves through what an allocator gave back has, for the dynamic spelling,
+    /// the size the allocator was asked for less how far the loop has moved it, and the closest
+    /// member is no more than that, as gcc 16 answers for btrfs's `stripe` in `create_chunk`.
+    /// Both ways out of a choice of allocators are the start, as `kmalloc_noprof` makes it.
+    #[test]
+    fn a_pointer_a_loop_moves_through_an_allocation_has_what_the_allocator_was_asked_for_left() {
+        let body = |other: &str| {
+            format!(
+                "
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+func @other(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+
+func @f(i32, i64, i1), linkage(external) {{
+block0(%0: i32, %1: i64, %2: i1):
+    br_if %2, block1, block2
+
+block1:
+    %3 = call @my(%1) : (i64) -> ptr
+    jump block3(%3)
+
+block2:
+    %4 = call @{other}(%1) : (i64) -> ptr
+    jump block3(%4)
+
+block3(%5: ptr):
+    %6 = iconst.i64 16
+    %7 = ptr_add %5, %6
+    %8 = iconst.i32 0
+    jump block4(%7, %8)
+
+block4(%9: ptr, %10: i32):
+    %11 = object_size.i64 %9, kind 4
+    call @use(%11) : (i64)
+    %12 = iconst.i64 8
+    %13 = ptr_add %9, %12, member 16
+    %14 = object_size.i64 %13, kind 5
+    call @use(%14) : (i64)
+    %15 = object_size.i64 %9, kind 0
+    call @use(%15) : (i64)
+    %16 = object_size.i64 %13, kind 1
+    call @use(%16) : (i64)
+    %17 = iconst.i64 32
+    %18 = ptr_add %9, %17
+    %19 = iconst.i32 1
+    %20 = add %10, %19
+    %21 = icmp slt %20, %0
+    br_if %21, block4(%18, %20), block5
+
+block5:
+    return
+}}
+"
+            )
+        };
+        for other in ["my", "other"] {
+            let body = body(other);
+            assert_eq!(answers(&body, true), [-1, 16], "{other}");
+            let text = printed(&body, Some(&[]));
+            assert_eq!(text.matches("ptrtoint").count(), 4, "{text}");
+            assert_eq!(text.matches("icmp ugt").count(), 3, "{text}");
+        }
     }
 
     /// The module once every question is answered, printed, with `library` as [`answer`] takes it.
@@ -2736,8 +2995,9 @@ block0(%0: ptr, %1: i64):
     /// Each way into a join may bring an answer of its own for the dynamic spelling, a member with
     /// a step the program works out on one and the start of the member or a local on the other,
     /// and the join is given a parameter each way passes its answer in, as gcc 16 does for arcmsr's
-    /// `&acb->wqbuffer[acb->put]` or `acb->wqbuffer`. A way that brings nothing known leaves the
-    /// whole join not known, and so does the other spelling.
+    /// `&acb->wqbuffer[acb->put]` or `acb->wqbuffer`. A step after the join is taken off that. A
+    /// way that brings nothing known leaves the whole join not known, and so does the other
+    /// spelling.
     #[test]
     fn each_way_into_a_join_brings_its_own_answer() {
         let body = |other: &str| {
@@ -2765,6 +3025,9 @@ block3(%10: ptr):
     call @use(%11) : (i64)
     %12 = object_size.i64 %10, kind 1
     call @use(%12) : (i64)
+    %13 = ptr_add %10, %1
+    %14 = object_size.i64 %13, kind 5
+    call @use(%14) : (i64)
     return
 }}
 "
@@ -2778,9 +3041,59 @@ block3(%10: ptr):
                 text.lines().any(|line| line.starts_with("block3(") && line.ends_with(": i64):"));
             assert!(joined, "the join is given a parameter, {text}");
             assert!(text.contains(&format!("iconst.i64 {brought}")), "{text}");
-            assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
+            // One for the way with a step on each question, and one for the step after the join.
+            assert_eq!(text.matches("icmp ugt").count(), 3, "{text}");
         }
-        assert_eq!(answers(&body("ptr_add %0, %1"), true), [-1, -1]);
+        assert_eq!(answers(&body("ptr_add %0, %1"), true), [-1, -1, -1]);
+    }
+
+    /// A way into a join that brings a null pointer brings nothing to a question only asked once a
+    /// branch has found the pointer is not null, as in maple_tree's `node_copy`. Asked before the
+    /// branch, the join is not known.
+    #[test]
+    fn a_null_pointer_a_branch_has_ruled_out_brings_nothing() {
+        let body = |test: &str| {
+            format!(
+                "
+func @f(ptr, i64, i1), linkage(external) {{
+block0(%0: ptr, %1: i64, %2: i1):
+    br_if %2, block1, block2
+
+block1:
+    %3 = iconst.i64 16
+    %4 = ptr_add %0, %3, array 80
+    jump block3(%4)
+
+block2:
+    %5 = iconst.i64 0
+    %6 = inttoptr.ptr %5
+    jump block3(%6)
+
+block3(%7: ptr):
+    %8 = iconst.i64 0
+    %9 = inttoptr.ptr %8
+    %10 = icmp {test} %7, %9
+    %11 = ptr_add %7, %1
+    %12 = object_size.i64 %11, kind 5
+    call @use(%12) : (i64)
+    br_if %10, block4, block5
+
+block4:
+    %13 = object_size.i64 %11, kind 5
+    call @use(%13) : (i64)
+    return
+
+block5:
+    return
+}}
+"
+            )
+        };
+        let text = printed(&body("ne"), Some(&[]));
+        assert_eq!(text.matches("iconst.i64 -1").count(), 1, "{text}");
+        assert_eq!(text.matches("iconst.i64 80").count(), 1, "{text}");
+        let text = printed(&body("eq"), Some(&[]));
+        assert_eq!(text.matches("iconst.i64 -1").count(), 2, "{text}");
     }
 
     /// What `kcalloc (1, size, gfp)` is once its `kmalloc_array_noprof` is inlined: a product
