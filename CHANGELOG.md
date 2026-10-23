@@ -28,6 +28,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `__builtin_dynamic_object_size` of an address chosen at a join, where each way brings a different object or member, is a block parameter each way passes its own size in, as gcc builds a PHI of the sizes. It was -1, so the field spanning WARN that gcc keeps in arcmsr's `arcmsr_sysfs_iop_message_write` and f2fs's xattr code was missing from the arm64 allmodconfig build. (#3824)
 - objsize: measure what an allocator gave back when a loop moves through it, step back from a join by the offset added after it, and let a null pointer a branch has ruled out bring nothing to a join, so fortified copies keep the same checks gcc does in brcmfmac, maple_tree, tscs454 and btrfs volumes (#3826)
 - objsize: give a trailing array its own length when the pointer is a step into a declared object and the whole object only when it is reached through a pointer, and measure an array with no length in a declared object to the end of that object, so the fortified memset in mwifiex's key material command builds the way gcc builds it (#3827)
+- gcm: count a constant past an address from the pointer under it even when a plain load or store also goes through that address, so `dcn401_mpc_create` on arm64 keeps 768 bytes of frame instead of 1712 (#3828)
 
 ## 0.30.11
 
