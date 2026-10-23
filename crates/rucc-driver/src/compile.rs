@@ -9027,7 +9027,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // A parameter a prototype named arrives as itself and nothing is converted, which is the
         // case this must not have changed.
         let text = compiled("int f(unsigned char c) { return c; }\n");
-        assert!(text.contains("func @f(i8)"), "the declared type arrives: {text}");
+        assert!(text.contains("func @f(i8 zext)"), "the declared type arrives: {text}");
         assert!(!text.contains("trunc"), "so there is nothing to cut down: {text}");
     }
 

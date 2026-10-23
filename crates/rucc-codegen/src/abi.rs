@@ -632,8 +632,21 @@ pub static X86_64: Insts = Insts {
     call_reg: CALL_REG,
     lea: "x64.lea_64",
     small: "x64.mov_ri_32",
-    extend: |_, _| None,
+    extend: extend_of,
 };
+
+/// What the instruction that extends a narrow integer to 32 bits is called, for an argument the
+/// signature says travels extended. See [`rucc_target::Narrow::ArgsToInt`].
+fn extend_of(ty: Type, abi: Abi) -> Option<&'static str> {
+    match (abi, ty.bits()) {
+        (Abi::Zext, 1) => Some("x64.bit_to_32"),
+        (Abi::Sext, 8) => Some("x64.movsx_8_32"),
+        (Abi::Sext, 16) => Some("x64.movsx_16_32"),
+        (Abi::Zext, 8) => Some("x64.movzx_8_32"),
+        (Abi::Zext, 16) => Some("x64.movzx_16_32"),
+        _ => None,
+    }
+}
 
 /// The same instructions for i386, where an address is computed with `leal`.
 ///
