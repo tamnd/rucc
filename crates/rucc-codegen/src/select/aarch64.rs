@@ -440,27 +440,50 @@ mod tests {
         assert_eq!(seen, 24, "the store rules moved and this test did not follow them");
     }
 
-    /// An offset the unscaled form holds goes into the address, and one it does not leaves the
-    /// addition where it is.
+    /// An offset the unscaled form holds goes into the address, and so does one the scaled form
+    /// holds. One that neither does leaves the addition where it is.
     #[test]
-    fn a_small_offset_is_part_of_the_address() {
+    fn an_offset_either_form_holds_is_part_of_the_address() {
         let mut terms = Terms::default();
         let a = terms.value("i64", "v0");
-        let k = terms.constant("iconst.i64", -8);
-        let at = terms.app("add.i64", &[a, k]);
-        let load = terms.app("load.i32", &[at]);
-        let found = TABLE.find(&terms, load).expect("a rule fires");
-        assert_eq!(TABLE.rule(&found).head(), Some("a64.ldr_32"));
-        assert!(
-            TABLE
-                .rule(&found)
+        let mut load = |k: i128| {
+            let k = terms.constant("iconst.i64", k);
+            let at = terms.app("add.i64", &[a, k]);
+            let load = terms.app("load.i32", &[at]);
+            let found = TABLE.find(&terms, load)?;
+            let rule = TABLE.rule(&found);
+            let offset = rule
                 .replacement
                 .iter()
-                .any(|piece| matches!(piece, Piece::App { head: "amode_base_offset", .. }))
-        );
-        let k = terms.constant("iconst.i64", 256);
-        let at = terms.app("add.i64", &[a, k]);
-        let load = terms.app("load.i32", &[at]);
-        assert_eq!(selects(&terms, load), None);
+                .any(|piece| matches!(piece, Piece::App { head: "amode_base_offset", .. }));
+            offset.then(|| rule.head()).flatten()
+        };
+        for k in [-256, -8, 3, 255, 256, 400, 16380] {
+            assert_eq!(load(k), Some("a64.ldr_32"), "{k} fits");
+        }
+        for k in [-260, 257, 402, 16384] {
+            assert_eq!(load(k), None, "{k} does not fit");
+        }
+    }
+
+    /// The scaled form counts in the size of the access, so a byte reaches 4095 and a pair of
+    /// doublewords 65520, and neither takes an offset that is not a multiple of it.
+    #[test]
+    fn the_scaled_offset_follows_the_size() {
+        let mut terms = Terms::default();
+        let a = terms.value("i64", "v0");
+        let mut fits = |ty: &str, k: i128| {
+            let k = terms.constant("iconst.i64", k);
+            let at = terms.app("add.i64", &[a, k]);
+            let load = terms.app(&format!("load.{ty}"), &[at]);
+            selects(&terms, load).is_some()
+        };
+        assert!(fits("i8", 4095));
+        assert!(!fits("i8", 4096));
+        assert!(fits("i64", 32760));
+        assert!(!fits("i64", 404));
+        assert!(fits("i32x4", 65520));
+        assert!(!fits("i32x4", 65536));
+        assert!(!fits("i32x4", 264));
     }
 }
