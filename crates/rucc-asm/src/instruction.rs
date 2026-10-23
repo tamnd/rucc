@@ -2010,7 +2010,7 @@ fn apart(text: &str) -> Result<(i64, Option<String>, Option<String>), String> {
             }
             Ok(())
         }
-        Err(_) => count(term.trim().to_owned(), sign),
+        Err(_) => count(unquoted(term.trim()), sign),
     };
     for (at, ch) in text.char_indices() {
         match ch {
@@ -2029,6 +2029,16 @@ fn apart(text: &str) -> Result<(i64, Option<String>, Option<String>), String> {
     }
     fold(&text[start..], sign)?;
     Ok((total, named, taken))
+}
+
+/// A name with the double quotes gas takes off it taken off, and anything after them, such as
+/// `@PLT`, kept. `call "__SCT__name"` is how the kernel's `STATIC_CALL_TRAMP_STR` calls a static
+/// call trampoline, and the quotes are not part of the name the linker looks for.
+fn unquoted(term: &str) -> String {
+    match term.strip_prefix('"').and_then(|inner| inner.split_once('"')) {
+        Some((name, after)) => format!("{name}{after}"),
+        None => term.to_owned(),
+    }
 }
 
 /// A number written the way an assembler writes one.
