@@ -1253,6 +1253,32 @@ fn eight_early_outputs_and_two_pinned_inputs_fit_with_optimisation() {
 }
 
 #[test]
+fn an_operand_on_the_stack_is_not_carried_in_a_register_the_template_writes() {
+    // Linux 7.3's `cswap2` in lib/crypto/x86/curve25519.h. The template clobbers `r10` and `r11`,
+    // which are the two the allocator holds back to carry a value it keeps on the stack. Twelve
+    // pointers live across the calls put the operands on the stack, and at -O0 the inputs came in
+    // through `r10` and `r11`, which the template may write before it reads them.
+    let mut source = String::from("long *h(int);\nvoid g(long *);\nlong *f(void) {\n");
+    for n in 0..12 {
+        source.push_str(&format!("long *v{n} = h({n});\n"));
+    }
+    source.push_str(
+        "__asm__ __volatile__(\"leaq 7(%1,%2), %0\" : \"+&r\" (v9) : \"r\" (v10), \"r\" (v11) \
+         : \"rax\", \"rdx\", \"r8\", \"r9\", \"r10\", \"r11\", \"memory\");\n",
+    );
+    for n in 0..12 {
+        source.push_str(&format!("g(v{n});\n"));
+    }
+    source.push_str("return v9;\n}\n");
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = run_with("scratch-clobbered", &source, &[level]);
+        assert!(ok, "{level}:\n{said}");
+        let line = text.lines().find(|line| line.contains("leaq 7(")).expect("the template");
+        assert!(!line.contains("%r10") && !line.contains("%r11"), "{level}: {line}");
+    }
+}
+
+#[test]
 fn blocks_at_file_scope_stay_in_the_order_written_when_one_is_kept_as_text() {
     // The kernel's BTF sets. Each id is a block of its own that reads into a global, and the block
     // that ends the set measures it from its start label to where the section has got to, which
