@@ -2898,7 +2898,11 @@ impl<'u> Body<'_, 'u> {
         for index in 0..tast[node.clobbers].len() {
             clobbers.push(self.asm_text(tast[node.clobbers][index]));
         }
-        let memory = clobbers.iter().any(|clobber| clobber.trim() == "memory");
+        // gcc takes a basic asm that says anything to touch memory, as if it had the clobber.
+        // On arm64 every WARN is one, a `brk` the trap handler returns from, and gcc loads again
+        // after it what it loaded before. topology.c checks `sd_llc->parent` that way.
+        let basic = node.quals.has(AsmQuals::BASIC) && !template.trim().is_empty();
+        let memory = basic || clobbers.iter().any(|clobber| clobber.trim() == "memory");
         let clobbers = clobbers.join(",");
         let template = self.unit.names.intern(&template);
         let constraints = self.unit.names.intern(&constraints);

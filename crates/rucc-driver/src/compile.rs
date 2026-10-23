@@ -14186,6 +14186,22 @@ block0:
     }
 
     #[test]
+    fn a_basic_asm_that_says_something_may_touch_memory_and_an_empty_one_may_not() {
+        // gcc's rule: the template of a basic asm is not looked into, so one with anything in
+        // it may read and write memory as if it had the clobber. With the colons written it is
+        // extended, and the clobbers are the whole of what it touches again.
+        let source = "void f(void) { __asm__(\"nop\"); __asm__(\"\"); __asm__(\"nop\" :); }\n";
+        let expected = "\
+block0:
+    inline_asm.volatile \"nop\", \"\", \"\"()
+    inline_asm.volatile.nomem \"\", \"\", \"\"()
+    inline_asm.volatile.nomem \"nop\", \"\", \"\"()
+    return
+";
+        assert_eq!(body(source), expected);
+    }
+
+    #[test]
     fn the_constraints_are_one_list_in_the_order_the_template_counts_the_operands() {
         // The outputs first and then the inputs, which is the numbering `%0` and `%1` use. An
         // output in a register is a result, and one that is read as well is an argument too.

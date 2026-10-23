@@ -556,8 +556,12 @@ impl Parser<'_> {
         // `::` is one token since C23, and `asm("" :: "r" (x))` is how half the kernel writes an
         // input-only statement, so a colon may arrive as half of one.
         let mut half = false;
-        if self.asm_colon(&mut half) && !half {
+        let extended = self.asm_colon(&mut half);
+        if extended && !half {
             outputs = self.asm_operands();
+        }
+        if !extended {
+            quals = quals.with(AsmQuals::BASIC);
         }
         if self.asm_colon(&mut half) && !half {
             inputs = self.asm_operands();
