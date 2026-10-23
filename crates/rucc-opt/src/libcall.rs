@@ -119,8 +119,9 @@ use rucc_ir::{
     SymbolRef, Type, Value,
 };
 
+use crate::alias::{Escapes, Origin, origin};
 use crate::extents::vouched;
-use crate::{Cfg, Fuel, Stats, uses};
+use crate::{Cfg, Dominators, Fuel, Stats, uses};
 
 /// What the pass is called in `-fopt-info` and `-fpass-fuel=`.
 pub const NAME: &str = "libcall";
@@ -144,6 +145,13 @@ const DEPTH: u32 = 4;
 /// loop on top of the loop's own parameter. A parameter already on the walk is not walked again,
 /// so this bounds a chain rather than a loop.
 const CHAIN: u32 = 12;
+
+/// How many blocks the walk back from a call over what was written into a local array goes.
+///
+/// Longer than [`CHAIN`], because every `do { } while (0)` a macro wraps around its statements is
+/// three blocks until the branches are cleaned up, and one `KUNIT_EXPECT_EQ` in front of a
+/// `strlen` is more than ten of them.
+const WALK: u32 = 64;
 
 /// How many times the calls in one function are looked at, which is the longest chain of folds
 /// where each one leaves a call behind that the next one folds. `builtins/strcat.c` nests six
@@ -982,7 +990,9 @@ impl Site<'_> {
         let mut bytes: Map<i128, u8> = Map::default();
         let mut block = self.func.block_of(call)?;
         let mut from = Some(call);
-        'walk: for _ in 0..CHAIN {
+        let mut dominators = None;
+        let private = self.private(base);
+        'walk: for _ in 0..WALK {
             let insts: Vec<Inst> = match from.take() {
                 Some(call) => self
                     .func
@@ -993,14 +1003,46 @@ impl Site<'_> {
                 None => self.func.insts_backwards(block).collect(),
             };
             for inst in insts {
-                if self.wrote(inst, base, size, &mut bytes).is_none() {
+                if self.wrote(inst, base, size, private, &mut bytes).is_none() {
                     break 'walk;
                 }
             }
-            let Some(pred) = self.only_way_in(block) else { break };
+            let Some(pred) = self.way_in(block, &mut dominators) else { break };
             block = pred;
         }
         Some(bytes)
+    }
+
+    /// The block control comes into this one from, or at a join the block every way in starts
+    /// from, where nothing on any of those ways writes memory.
+    ///
+    /// The kernel's `__compiletime_strlen` asks two `__builtin_constant_p` questions joined by
+    /// `&&` in front of its `strlen`, and the join they leave stands in front of the call until
+    /// the questions are answered, which is after this pass. Asking only reads, so the walk goes
+    /// on above the questions to the initializer, which is how gcc 16 answers five for `char
+    /// stack[80] = "Test!"` in `fortify_kunit.c`.
+    fn way_in(&self, block: Block, dominators: &mut Option<Dominators>) -> Option<Block> {
+        if let Some(pred) = self.only_way_in(block) {
+            return Some(pred);
+        }
+        let top = dominators
+            .get_or_insert_with(|| Dominators::new(self.cfg))
+            .immediate_dominator(block)?;
+        let mut seen: rucc_base::hash::Set<Block> = rucc_base::hash::Set::default();
+        let mut stack: Vec<Block> = self.ways_in(block).collect();
+        while let Some(at) = stack.pop() {
+            if at == top || !seen.insert(at) {
+                continue;
+            }
+            // Coming round to the call again is a loop, and what the rest of its block writes is
+            // in front of the call on the next trip.
+            if at == block || self.func.insts(at).any(|inst| self.func[inst].opcode.writes_memory())
+            {
+                return None;
+            }
+            stack.extend(self.ways_in(at));
+        }
+        Some(top)
     }
 
     /// The one block control can have come from into this one, leaving out any that calls a
@@ -1010,14 +1052,32 @@ impl Site<'_> {
     /// branches are cleaned up, which is after this pass, and control reaching the join cannot
     /// have come through the arm that called `abort`, so the walk goes on up the other arm.
     fn only_way_in(&self, block: Block) -> Option<Block> {
-        let mut live = self
-            .cfg
-            .predecessors(block)
-            .iter()
-            .copied()
-            .filter(|&pred| !self.func.insts(pred).any(|inst| self.never_back(inst)));
+        let mut live = self.ways_in(block);
         let first = live.next()?;
         live.next().is_none().then_some(first)
+    }
+
+    /// The blocks control can have come from into this one, leaving out any that calls a function
+    /// that does not come back and any whose branch is on a constant that sends it elsewhere.
+    ///
+    /// The second is the edge back to the top of a `do { } while (0)`, which is still there until
+    /// the branches are cleaned up and would otherwise make every macro written that way a loop.
+    fn ways_in(&self, block: Block) -> impl Iterator<Item = Block> + use<'_> {
+        self.cfg.predecessors(block).iter().copied().filter(move |&pred| {
+            !self.func.insts(pred).any(|inst| self.never_back(inst)) && !self.passed(pred, block)
+        })
+    }
+
+    /// Whether this block ends in a branch on a constant that does not go to that one.
+    fn passed(&self, pred: Block, block: Block) -> bool {
+        let Some(term) = self.func.terminator(pred) else { return false };
+        if self.func[term].opcode != Opcode::BrIf {
+            return false;
+        }
+        let Some(&test) = self.func[self.func[term].args].first() else { return false };
+        let Some((imm, ty)) = crate::fold::evaluated(self.func, test, DEPTH) else { return false };
+        let taken = usize::from(imm.signed(ty) == 0);
+        self.func.successors(term).nth(taken).is_some_and(|to| to.block != block)
     }
 
     /// Whether this is a call control does not come back from, by the callee's own attribute or
@@ -1050,54 +1110,94 @@ impl Site<'_> {
     /// places nothing later wrote, or `None` where it may have written the array in a way this
     /// cannot read.
     ///
-    /// A byte stored, a `memset` of a known byte, a `memcpy` out of an object whose bytes the
+    /// A constant stored, a `memset` of a known byte, a `memcpy` out of an object whose bytes the
     /// module holds and a `strcpy` of a string it holds are read. Anything else that writes memory
     /// ends the walk, apart from one of those into another local, since two locals are two
-    /// objects.
-    fn wrote(&self, inst: Inst, base: Value, size: u64, bytes: &mut Map<i128, u8>) -> Option<()> {
+    /// objects. Where the array's address never left the function, a store through an address
+    /// that is not the array's and a call it was not handed cannot reach it either, so the stores
+    /// KUnit makes through `test` between an initializer and the `strlen` of it go by too.
+    fn wrote(
+        &self,
+        inst: Inst,
+        base: Value,
+        size: u64,
+        private: bool,
+        bytes: &mut Map<i128, u8>,
+    ) -> Option<()> {
         let data = &self.func[inst];
         if !data.opcode.writes_memory() {
             return Some(());
         }
         let args = &self.func[data.args];
         let (to, written) = match data.opcode {
+            // A whole scalar is read as its bytes, which is how an initializer lays a short string
+            // down: `char stack[80] = "Test!"` is zeros, then a four byte store and a two byte one.
             Opcode::Store => {
-                let &[byte, to] = args else { return None };
-                if self.func[byte].ty != Type::int(8) {
+                let &[value, to] = args else { return None };
+                if self.apart(to, base, private) {
+                    return Some(());
+                }
+                let ty = self.func[value].ty;
+                if !ty.is_int() || ty.lanes() != 1 || !matches!(ty.bits(), 8 | 16 | 32 | 64) {
                     return None;
                 }
-                (to, vec![u8::try_from(self.number(byte)?).ok()?])
+                let width = usize::try_from(ty.bits() / 8).ok()?;
+                let mut written = self.number(value)?.to_le_bytes()[..width].to_vec();
+                if !self.module.datalayout.little_endian {
+                    written.reverse();
+                }
+                (to, written)
             }
             Opcode::Call => {
                 let &to = args.first()?;
                 let count =
                     || self.number(*args.get(2)?).filter(|&count| count <= u128::from(size));
-                let written = match self.called(inst)? {
-                    "memset" => {
+                let name = self.called(inst);
+                if matches!(name, Some("memset" | "memcpy" | "strcpy"))
+                    && self.apart(to, base, private)
+                {
+                    return Some(());
+                }
+                let written = match name {
+                    Some("memset") => {
                         vec![self.character(*args.get(1)?)?; usize::try_from(count()?).ok()?]
                     }
-                    "memcpy" => {
+                    Some("memcpy") => {
                         let count = usize::try_from(count()?).ok()?;
                         self.raw(*args.get(1)?)?.get(..count)?.to_vec()
                     }
-                    "strcpy" => {
+                    Some("strcpy") => {
                         let mut text = self.one(*args.get(1)?)?;
                         text.push(0);
                         text
                     }
                     // Calls that only read, which an earlier comparison on the same array is.
-                    "memcmp" | "memchr" | "strcmp" | "strncmp" | "strlen" | "strchr" => {
+                    Some("memcmp" | "memchr" | "strcmp" | "strncmp" | "strlen" | "strchr") => {
                         return Some(());
                     }
+                    _ if private => return Some(()),
                     _ => return None,
                 };
                 (to, written)
+            }
+            // The zeros an initializer starts from, which are the bulk instruction and not the call.
+            Opcode::Memset => {
+                let bulk = self.func.bulk(inst)?;
+                if self.apart(bulk.to, base, private) {
+                    return Some(());
+                }
+                let Extra::Mem(mem) = data.extra else { return None };
+                let count = self.func[mem].size;
+                if bulk.length.is_some() || count > size {
+                    return None;
+                }
+                (bulk.to, vec![self.character(bulk.with)?; usize::try_from(count).ok()?])
             }
             _ => return None,
         };
         let (root, at) = self.address(to)?;
         if root != base {
-            return self.local(root).then_some(());
+            return None;
         }
         let end = at.checked_add(i128::try_from(written.len()).ok()?)?;
         if at < 0 || end > i128::from(size) {
@@ -1107,6 +1207,30 @@ impl Site<'_> {
             bytes.entry(place).or_insert(byte);
         }
         Some(())
+    }
+
+    /// Whether the address of the local array at `base` stayed inside the function, apart from
+    /// calls that only read through it and give back no pointer into it.
+    fn private(&self, base: Value) -> bool {
+        let Def::Result { inst: local, .. } = self.func[base].def else { return false };
+        let kept = |inst: Inst, _: usize| {
+            self.func[inst].opcode == Opcode::Call
+                && matches!(self.called(inst), Some("memcmp" | "strcmp" | "strncmp" | "strlen"))
+        };
+        !Escapes::with(self.func, kept).escaped(local)
+    }
+
+    /// Whether a write to this address cannot be a write to the local array at `base`: it is
+    /// another local, since two locals are two objects, or the array's address stayed inside the
+    /// function and this address does not come from it.
+    fn apart(&self, to: Value, base: Value, private: bool) -> bool {
+        if let Some((root, _)) = self.address(to) {
+            if root != base && self.local(root) {
+                return true;
+            }
+        }
+        let Def::Result { inst: local, .. } = self.func[base].def else { return false };
+        private && !matches!(origin(self.func, to), (Origin::Local(it), _) if it == local)
     }
 
     /// The name of the library function this call is to, where the program has not taken the
@@ -3654,6 +3778,60 @@ block2:
 
         let out = folded(&text.replace("STOP", "other"));
         assert!(out.contains("call @memcmp("), "{out}");
+    }
+
+    /// The shape `KUNIT_EXPECT_EQ(test, __compiletime_strlen(stack), 5)` leaves in front of the
+    /// call: the initializer is a `memset` and two wider stores, the macro's `do { } while (0)`
+    /// still has its edge back, `test->last_seen` is stored through the parameter and the two
+    /// `__builtin_constant_p` questions are a join. None of that can reach an array whose address
+    /// went nowhere, so the length is five, and it stays a call once the array is handed out or
+    /// the edge back is one the program can take.
+    #[test]
+    fn strlen_of_an_initialized_local_is_read_past_what_cannot_reach_it() {
+        let text = r#"
+func @strlen(ptr) -> i64, linkage(external);
+func @touch(ptr), linkage(external);
+func @use(i64), linkage(external);
+
+func @g(ptr, i1), linkage(external) {
+block0(%0: ptr, %1: i1):
+    %2 = alloca, size 80, align 16
+    %3 = iconst.i8 0
+    memset %2, %3, size 80, align 1
+    %4 = iconst.i32 1953719636
+    store %4 -> %2, align 1
+    %5 = iconst.i16 33
+    %6 = iconst.i64 4
+    %7 = ptr_add %2, %6
+    store %5 -> %7, align 1
+    jump block1
+block1:
+    %8 = iconst.i64 480
+    %9 = ptr_add %0, %8
+    %10 = iconst.i32 89
+    store.volatile %10 -> %9, align 4
+    TOUCH
+    %11 = iconst.i1 0
+    br_if AGAIN, block1, block2
+block2:
+    br_if %1, block3, block4
+block3:
+    jump block4
+block4:
+    %12 = call @strlen(%2) : (ptr) -> i64
+    call @use(%12) : (i64)
+    return
+}
+"#;
+        let out = folded(&text.replace("TOUCH", "").replace("AGAIN", "%11"));
+        assert!(!out.contains("call @strlen("), "{out}");
+        assert!(out.contains("iconst.i64 5"), "{out}");
+
+        let out = folded(&text.replace("TOUCH", "call @touch(%2) : (ptr)").replace("AGAIN", "%11"));
+        assert!(out.contains("call @strlen("), "the array was handed out, {out}");
+
+        let out = folded(&text.replace("TOUCH", "").replace("AGAIN", "%1"));
+        assert!(out.contains("call @strlen("), "the edge back can be taken, {out}");
     }
 
     /// `strlen` of a pointer that may be either of two strings is their length where they share

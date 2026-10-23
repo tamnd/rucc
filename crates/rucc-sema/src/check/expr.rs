@@ -608,7 +608,15 @@ impl Checker<'_> {
                 self.value(arg)
             })
             .collect();
-        self.finish_call(callee, function, checked, span)
+        let arguments = checked.clone();
+        let call = self.finish_call(callee, function, checked, span);
+        // A `strlen` of a string gcc can read is a constant there, which `constant.rs` answers.
+        if matches!(self.tast[call].kind, ExprKind::Call { .. }) {
+            if let Some(length) = self.constant_length(function, &arguments, span) {
+                return length;
+            }
+        }
+        call
     }
 
     /// Refuses a call that names an `interrupt` handler, which gcc refuses in the same words.
