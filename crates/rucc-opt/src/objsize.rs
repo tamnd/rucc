@@ -148,6 +148,7 @@ pub fn answer(
                 moved: Cell::new(false),
                 through: Cell::new(false),
                 ways: Cell::new(WAYS),
+                splits: Cell::new(WAYS),
                 places: OnceCell::new(),
                 escapes: OnceCell::new(),
                 dynamic: Cell::new(false),
@@ -240,7 +241,15 @@ enum Answer {
     /// What is left of the whole object, worked out where the question is, or what is left of the
     /// member where that is less.
     Capped(Box<Answer>, u64),
+    /// A block parameter each way into which brings an answer of its own, worked out in front of
+    /// the branch, with every edge into the block and the address it passes. An edge that cannot
+    /// be taken has nothing.
+    Joined(Block, Vec<Way>),
 }
+
+/// One edge into a join of [`Answer::Joined`]: the branch, the edge, and the address it passes
+/// with the answer for it.
+type Way = (Inst, Idx<BlockCall>, Option<(Value, Answer)>);
 
 /// The object an address is in, as [`Walk::within`] found it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -311,20 +320,19 @@ fn write(func: &mut Func, inst: Inst, number: i128) {
 /// Puts an answer that is not a constant in place of the question and takes the question away.
 fn put(func: &mut Func, inst: Inst, answer: &Answer) {
     let result = func[inst].results().next().expect("an object size is one value");
-    let value = worked(func, inst, answer);
+    let address = func[func[inst].args][0];
+    let value = worked(func, inst, address, func[result].ty, answer);
     let forward: Map<_, _> = [(result, value)].into_iter().collect();
     crate::uses::substitute(func, &forward);
     func.remove_inst(inst);
 }
 
-/// The answer worked out in front of the question, which is not a constant.
+/// The answer for an address worked out in front of `inst`, which is not a constant.
 ///
 /// The size an allocator was asked for is less how far in the address is and never below zero,
 /// which is what gcc 16 answers `__builtin_dynamic_object_size(p + 2, 0)` with for a `p` that came
 /// out of `malloc(n)`. A capped answer is the smaller of the two, which is gcc's `MIN_EXPR`.
-fn worked(func: &mut Func, inst: Inst, answer: &Answer) -> Value {
-    let result = func[inst].results().next().expect("an object size is one value");
-    let ty = func[result].ty;
+fn worked(func: &mut Func, inst: Inst, address: Value, ty: Type, answer: &Answer) -> Value {
     let span = func.span(inst);
     let made = |func: &mut Func, data: InstData, ty: Type| {
         let at = func.create_inst(data, &[ty], span);
@@ -337,9 +345,9 @@ fn worked(func: &mut Func, inst: Inst, answer: &Answer) -> Value {
             made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty)
         }
         Answer::Running(running) => room(func, inst, span, running, ty),
-        &Answer::Within(object, size) => measure(func, inst, object, size),
+        &Answer::Within(object, size) => measure(func, inst, address, ty, object, size),
         Answer::Capped(whole, member) => {
-            let whole = worked(func, inst, whole);
+            let whole = worked(func, inst, address, ty, whole);
             let imm = func.add_imm(Imm::int(i128::from(*member), ty.lane()));
             let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
             let member = made(func, data, ty);
@@ -352,6 +360,25 @@ fn worked(func: &mut Func, inst: Inst, answer: &Answer) -> Value {
             let more = made(func, test, ty.with_lane(Type::I1));
             let args = func.push_values(&[more, member, whole]);
             made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty)
+        }
+        Answer::Joined(block, ways) => {
+            let brought: Vec<(Idx<BlockCall>, Value)> = ways
+                .iter()
+                .map(|(term, at, way)| {
+                    let value = match way {
+                        Some((address, answer)) => worked(func, *term, *address, ty, answer),
+                        None => worked(func, *term, address, ty, &Answer::Known(0)),
+                    };
+                    (*at, value)
+                })
+                .collect();
+            let size = func.append_param(*block, ty);
+            for (at, value) in brought {
+                let call = func[at];
+                let args = func.append_arg(call.args, value);
+                func.set_block_call(at, BlockCall { args, ..call });
+            }
+            size
         }
     }
 }
@@ -418,10 +445,14 @@ fn room(func: &mut Func, inst: Inst, span: Span, running: &Running, ty: Type) ->
 /// The size of the object less how far into it the address is, worked out in front of the
 /// question and never below zero, which is what gcc 16 answers `__builtin_dynamic_object_size (p,
 /// 1)` with for a `p` that a loop moves through a local array.
-fn measure(func: &mut Func, inst: Inst, object: Object, size: u64) -> Value {
-    let result = func[inst].results().next().expect("an object size is one value");
-    let ty = func[result].ty;
-    let address = func[func[inst].args][0];
+fn measure(
+    func: &mut Func,
+    inst: Inst,
+    address: Value,
+    ty: Type,
+    object: Object,
+    size: u64,
+) -> Value {
     let span = func.span(inst);
     let made = |func: &mut Func, data: InstData, ty: Type| {
         let at = func.create_inst(data, &[ty], span);
@@ -536,6 +567,9 @@ struct Walk<'a> {
     /// that joins one after another, each followed on every way into it, are not followed for a
     /// time that grows as a power of how many there are.
     ways: Cell<u32>,
+    /// How many more ways into a join [`Walk::split`] may follow for the question it is on, for
+    /// the same reason.
+    splits: Cell<u32>,
     /// Where each address into a fixed local is used, worked out on the first question that
     /// needs it, as [`Places`] says.
     places: OnceCell<Places>,
@@ -582,44 +616,91 @@ impl Walk<'_> {
         let Extra::Question(asked) = func[inst].extra else {
             return Answer::Known(0);
         };
+        let Some(result) = func[inst].results().next() else { return Answer::Known(0) };
         let address = func[func[inst].args][0];
+        let dynamic = asked & DYNAMIC != 0;
+        self.dynamic.set(dynamic);
+        self.splits.set(WAYS);
+        match look {
+            false => Answer::Known(if asked & 2 == 0 { -1 } else { 0 }),
+            true => self.reply(address, inst, func[result].ty, asked, DEPTH),
+        }
+    }
+
+    /// The answer for an address, worked out in front of `at`, to the question `asked` is.
+    fn reply(&self, address: Value, at: Inst, ty: Type, asked: u8, depth: u32) -> Answer {
         let (kind, dynamic) = (asked & 3, asked & DYNAMIC != 0);
         let ask = Ask { largest: kind & 2 == 0, closest: kind & 1 == 1 };
         let largest = ask.largest;
         self.moved.set(false);
         self.through.set(false);
         self.ways.set(WAYS);
-        self.dynamic.set(dynamic);
-        let known = match look {
-            false => None,
-            true => self.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten(),
-        };
+        let known = self.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten();
         let unknown = if largest { -1 } else { 0 };
         match known {
             // A pointer a loop moves has the most room where it starts, which is what the walk
             // found, and gcc answers the dynamic spelling with the room it has on the trip the
             // question is asked. defxx fills its command with `memcpy (p_addr, ...)` and a
             // `p_addr++` after each entry, and keeps the field spanning WARN that checks it.
-            Some(known) if look && dynamic && self.moved.get() => {
-                self.within(address, inst, ask).unwrap_or(Answer::Known(i128::from(known)))
+            Some(known) if dynamic && self.moved.get() => {
+                self.within(address, at, ask).unwrap_or(Answer::Known(i128::from(known)))
             }
-            Some(known) if look && ask.closest && largest && self.through.get() => {
-                self.capped(address, inst, known, dynamic)
+            Some(known) if ask.closest && largest && self.through.get() => {
+                self.capped(address, at, ty, known, dynamic)
             }
             Some(known) => Answer::Known(i128::from(known)),
             // Only the dynamic spelling may be answered with something worked out while the
             // program runs, and only where the walk found no constant.
-            None if look && dynamic && kind != SMALLEST_MEMBER => func[inst]
-                .results()
-                .next()
-                .and_then(|result| {
-                    self.running(address, ask, func[result].ty, DEPTH, &mut Vec::new())
-                })
+            None if dynamic && kind != SMALLEST_MEMBER => self
+                .running(address, ask, ty, DEPTH, &mut Vec::new())
                 .map(Answer::Running)
-                .or_else(|| largest.then(|| self.within(address, inst, ask)).flatten())
+                .or_else(|| largest.then(|| self.within(address, at, ask)).flatten())
+                .or_else(|| self.split(address, ty, asked, depth))
                 .unwrap_or(Answer::Known(unknown)),
             None => Answer::Known(unknown),
         }
+    }
+
+    /// The answer for a block parameter where each way into the block brings one of its own,
+    /// which is the PHI of sizes gcc 16 builds for the dynamic spelling. arcmsr's
+    /// `arcmsr_sysfs_iop_message_write` copies into `&acb->wqbuffer[acb->put]` or, once it has
+    /// wrapped, into `acb->wqbuffer`, and gcc keeps the field spanning WARN that checks the copy
+    /// against what is left of the member on the way it came. Every way that can be taken has to
+    /// bring something known, and a loop is not followed, since nothing could be passed round it.
+    fn split(&self, address: Value, ty: Type, asked: u8, depth: u32) -> Option<Answer> {
+        let depth = depth.checked_sub(1)?;
+        let Def::Param { block, index } = self.func[address].def else { return None };
+        let unknown = if asked & 2 == 0 { -1 } else { 0 };
+        let mut preds = self.cfg.predecessors(block).to_vec();
+        preds.sort_unstable();
+        preds.dedup();
+        if preds.iter().any(|&pred| self.dom.dominates(block, pred)) {
+            return None;
+        }
+        let mut ways = Vec::new();
+        for pred in preds {
+            let term = self.func.terminator(pred)?;
+            let taken = self.taken(pred, block);
+            for at in self.func.target_list(term).iter() {
+                let call = self.func[at];
+                if call.block != block {
+                    continue;
+                }
+                let way = match taken {
+                    false => None,
+                    true => {
+                        self.splits.set(self.splits.get().checked_sub(1)?);
+                        let arg = *self.func[call.args].get(index as usize)?;
+                        match self.reply(arg, term, ty, asked, depth) {
+                            Answer::Known(number) if number == unknown => return None,
+                            answer => Some((arg, answer)),
+                        }
+                    }
+                };
+                ways.push((term, at, way));
+            }
+        }
+        ways.iter().any(|(_, _, way)| way.is_some()).then_some(Answer::Joined(block, ways))
     }
 
     /// The closest member of an object reached through a pointer, which gcc answers with what is
@@ -629,7 +710,7 @@ impl Walk<'_> {
     /// is the answer: cxgb4's `t4_alloc_mac_filt` copies each address with `memcpy
     /// (p->macaddr, ...)` at a `p` its loop moves through a command on the stack, and gcc keeps the
     /// field spanning WARN that checks it. The same holds for a structure from `kmalloc (n)`.
-    fn capped(&self, address: Value, inst: Inst, member: u64, dynamic: bool) -> Answer {
+    fn capped(&self, address: Value, inst: Inst, ty: Type, member: u64, dynamic: bool) -> Answer {
         let whole = Ask { largest: true, closest: false };
         let known = Answer::Known(i128::from(member));
         self.moved.set(false);
@@ -644,8 +725,6 @@ impl Walk<'_> {
             Ok(Some(left)) => Answer::Known(i128::from(member.min(left))),
             _ if !dynamic => known,
             _ => {
-                let Some(result) = self.func[inst].results().next() else { return known };
-                let ty = self.func[result].ty;
                 self.ways.set(WAYS);
                 match self.running(address, whole, ty, DEPTH, &mut Vec::new()) {
                     Some(running) => Answer::Capped(Box::new(Answer::Running(running)), member),
@@ -2652,6 +2731,56 @@ block0(%0: ptr, %1: i64):
         assert!(taken, "the step is taken off the length, {text}");
         assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
         assert!(text.contains("iconst.i64 128"), "{text}");
+    }
+
+    /// Each way into a join may bring an answer of its own for the dynamic spelling, a member with
+    /// a step the program works out on one and the start of the member or a local on the other,
+    /// and the join is given a parameter each way passes its answer in, as gcc 16 does for arcmsr's
+    /// `&acb->wqbuffer[acb->put]` or `acb->wqbuffer`. A way that brings nothing known leaves the
+    /// whole join not known, and so does the other spelling.
+    #[test]
+    fn each_way_into_a_join_brings_its_own_answer() {
+        let body = |other: &str| {
+            format!(
+                "
+func @f(ptr, i64, i64), linkage(external) {{
+block0(%0: ptr, %1: i64, %2: i64):
+    %3 = alloca, size 1, align 1
+    %4 = iconst.i64 16
+    %5 = ptr_add %0, %4, array 4096
+    %6 = ptr_add.counted %5, %1
+    %7 = iconst.i64 0
+    %8 = icmp ne %2, %7
+    br_if %8, block1, block2
+
+block1:
+    %9 = {other}
+    jump block3(%9)
+
+block2:
+    jump block3(%6)
+
+block3(%10: ptr):
+    %11 = object_size.i64 %10, kind 5
+    call @use(%11) : (i64)
+    %12 = object_size.i64 %10, kind 1
+    call @use(%12) : (i64)
+    return
+}}
+"
+            )
+        };
+        for (other, brought) in [("ptr_add %0, %4, array 4096", "4096"), ("ptr_add %3, %7", "1")] {
+            let body = body(other);
+            assert_eq!(answers(&body, true), [-1], "{other}");
+            let text = printed(&body, Some(&[]));
+            let joined =
+                text.lines().any(|line| line.starts_with("block3(") && line.ends_with(": i64):"));
+            assert!(joined, "the join is given a parameter, {text}");
+            assert!(text.contains(&format!("iconst.i64 {brought}")), "{text}");
+            assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
+        }
+        assert_eq!(answers(&body("ptr_add %0, %1"), true), [-1, -1]);
     }
 
     /// What `kcalloc (1, size, gfp)` is once its `kmalloc_array_noprof` is inlined: a product
