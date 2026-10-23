@@ -64,16 +64,19 @@
 //! for stepping to a member says, as `Extra::Member`. An address the walk finds to be one of
 //! those, or one a constant further on, is in that member, which is how `strcpy (inst.buf, s)`
 //! asks about the sixteen bytes of `buf` once the fortified `strcpy` is inlined, where gcc asks
-//! the same. A member of zero is one that may run past its end, an array at the end of a structure
-//! or a record that ends in a flexible array. An address in one is in the member under it where
-//! that leaves any room, and is asked about as the whole object where it leaves none, which is
-//! what `container_of` on one member and a step to another gives. Where the walk gets to an object without passing one, the whole object is an answer
-//! no smaller than the member for the largest, so the first kind's answer stands for the second,
-//! and for the smallest it could be too big, so there the fourth kind is not known. A step whose
-//! count the program worked out, which lowering marks `counted`, is not taken off the member,
-//! since gcc's early pass asks before any constant reaches it, and only what is left of the whole
-//! object can make the answer smaller. Once every question is answered the members and the marks
-//! are taken off, so no pass after this sees one.
+//! the same. A member of zero is one that may run past its end, an array at the end of the record a
+//! pointer points at or a record that ends in a flexible array, and an address in one is asked
+//! about as the whole object, which is what gcc answers for one in a `MEM_REF`. A `trailing` member
+//! is an array of a fixed length that may run past its end in the same way. It is as long as it
+//! says where the pointer is a constant step into a local or a global, which is what gcc's late
+//! pass sees once it has folded the pointer into the address of one, and is the whole object where
+//! it is not. Where the walk gets to an object without passing a member, the whole object is an
+//! answer no smaller than the member for the largest, so the first kind's answer stands for the
+//! second, and for the smallest it could be too big, so there the fourth kind is not known. A step
+//! whose count the program worked out, which lowering marks `counted`, is not taken off the
+//! member, since gcc's early pass asks before any constant reaches it, and only what is left of
+//! the whole object can make the answer smaller. Once every question is answered the members and
+//! the marks are taken off, so no pass after this sees one.
 
 use rucc_ir::{
     AllocSize, AttrSet, Datum, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred,
@@ -200,12 +203,12 @@ pub fn answer(
     answered
 }
 
-/// Takes every `Extra::Member` and `Extra::Array` and every `counted` off, which nothing after
-/// the questions reads.
+/// Takes every `Extra::Member`, `Extra::Array` and `Extra::Trailing` and every `counted` off,
+/// which nothing after the questions reads.
 fn forget(func: &mut Func) {
     for block in func.blocks().collect::<Vec<_>>() {
         for inst in func.insts(block).collect::<Vec<_>>() {
-            if func[inst].extra.member().is_some() {
+            if func[inst].extra.marked() {
                 func[inst].extra = Extra::None;
             }
             func[inst].flags = func[inst].flags.without(Flags::COUNTED);
@@ -733,7 +736,7 @@ impl Walk<'_> {
             };
             let data = &self.func[inst];
             let &[base, step] = &self.func[data.args][..] else { return None };
-            let member = asked & 1 == 1 && data.extra.member().is_some();
+            let member = asked & 1 == 1 && data.extra.marked();
             if data.opcode != Opcode::PtrAdd || member || self.func[step].ty != ty {
                 return None;
             }
@@ -890,14 +893,23 @@ impl Walk<'_> {
                         }
                         Ok(Some(u64::from(size)))
                     }
-                    // A member that may run past its end is in the member under it where that
-                    // has room left for it. One that has none is not in it at all: the program
-                    // reached it from another member, as `container_of` does, and the closest
-                    // object is the whole one.
+                    // A member that may run past its end is asked about as the whole object,
+                    // whatever members the address it is in was worked out from. bcachefs's
+                    // `bkey_xattr_init` clears `&k->v` with `k` from `container_of` on `&_k->k`.
                     Opcode::PtrAdd if ask.closest && data.extra.member() == Some(0) => {
-                        match self.stepped(inst, ask, depth, on) {
-                            Ok(Some(0)) if largest => {
-                                self.stepped(inst, Ask { closest: false, ..ask }, depth, on)
+                        self.stepped(inst, Ask { closest: false, ..ask }, depth, on)
+                    }
+                    // An array at the end of the record a pointer points at, which is as long as
+                    // it says where the pointer is a step into a declared object and is the whole
+                    // object otherwise. mwifiex's `mwifiex_cmd_802_11_key_material_v1` clears the
+                    // `key_param_set` array of the WEP layout it casts `&cmd->params.key_material`
+                    // to, and gcc answers the closest member there with what `cmd` has left.
+                    Opcode::PtrAdd if ask.closest && matches!(data.extra, Extra::Trailing(_)) => {
+                        let Extra::Trailing(size) = data.extra else { return Err(()) };
+                        let whole = self.stepped(inst, Ask { closest: false, ..ask }, depth, on);
+                        match whole {
+                            Ok(Some(left)) if self.declared(*args.first().ok_or(())?) => {
+                                Ok(Some(left.min(u64::from(size))))
                             }
                             other => other,
                         }
@@ -1756,12 +1768,25 @@ impl Walk<'_> {
                         let then = self.object(then, ask, depth, seen);
                         same(then, self.object(other, ask, depth, seen))
                     }
-                    Opcode::PtrAdd => match data.extra.member().filter(|_| ask.closest) {
-                        // A member that may run past its end is as long as nothing says.
-                        Some(0) => Err(()),
-                        Some(size) => Ok(Some(Object::Member(value, size))),
-                        None => self.object(*args.first().ok_or(())?, ask, depth, seen),
-                    },
+                    Opcode::PtrAdd => {
+                        let base = *args.first().ok_or(())?;
+                        let whole = Ask { closest: false, ..ask };
+                        match data.extra {
+                            _ if !ask.closest => self.object(base, ask, depth, seen),
+                            // A member that may run past its end is in the whole object.
+                            Extra::Member(0) | Extra::Array(0) => {
+                                self.object(base, whole, depth, seen)
+                            }
+                            Extra::Member(size) | Extra::Array(size) => {
+                                Ok(Some(Object::Member(value, size)))
+                            }
+                            Extra::Trailing(size) if self.declared(base) => {
+                                Ok(Some(Object::Member(value, size)))
+                            }
+                            Extra::Trailing(_) => self.object(base, whole, depth, seen),
+                            _ => self.object(base, ask, depth, seen),
+                        }
+                    }
                     Opcode::Alloca if args.is_empty() => Ok(Some(Object::Local(value))),
                     Opcode::GlobalAddr => {
                         let Extra::Symbol(name) = data.extra else { return Err(()) };
@@ -2879,11 +2904,9 @@ block2:
         assert_eq!(text.matches("icmp ugt").count(), 2, "{text}");
     }
 
-    /// A member of zero may run past its end. Where the member under it has no room left for it
-    /// the program reached it from another member, and it is asked about as the whole object.
-    /// That is `&k->v` in bcachefs's `bkey_xattr_init`, where `k` is worked out from `&_k->k` and
-    /// `v` ends in a flexible array. Where there is room it is in that member, as an array at the
-    /// end of a nested structure is, and the smallest closest answer stays not known.
+    /// A member of zero may run past its end, and it is asked about as the whole object whatever
+    /// member the address it is in was worked out from. That is `&k->v` in bcachefs's
+    /// `bkey_xattr_init`, where `k` is worked out from `&_k->k` and `v` ends in a flexible array.
     #[test]
     fn a_member_that_may_run_past_its_end_is_the_whole_object() {
         let body = "
@@ -2913,7 +2936,50 @@ block0:
     return
 }
 ";
-        assert_eq!(answers(body, true), [8, 8, 0, 6, 24]);
+        assert_eq!(answers(body, true), [8, 8, 8, 6, 32]);
+    }
+
+    /// A trailing array is as long as it says where the pointer is a constant step into a local
+    /// or a global, and is the whole object behind the pointer anywhere else, whatever member the
+    /// pointer was worked out from. That is gcc 16 at `-O2` on mwifiex's
+    /// `mwifiex_cmd_802_11_key_material_v1`, which casts `&cmd->params.key_material` to another
+    /// layout and clears the array at its end: 240 for a `cmd` on the stack, and not known for one
+    /// passed in, where the member under it would have said 60.
+    #[test]
+    fn a_trailing_array_is_its_own_length_only_in_a_declared_object() {
+        let body = "
+global @g : bytes 304 = { zero 304 }, align 1, linkage(external)
+
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = global_addr @g
+    %2 = iconst.i64 4
+    %3 = ptr_add %1, %2, member 300
+    %4 = iconst.i64 0
+    %5 = ptr_add %3, %4, member 62
+    %6 = iconst.i64 2
+    %7 = ptr_add %5, %6, trailing 240
+    %8 = object_size.i64 %7, kind 1
+    call @use(%8) : (i64)
+    %9 = object_size.i64 %7, kind 0
+    call @use(%9) : (i64)
+    %10 = ptr_add %0, %2, member 300
+    %11 = ptr_add %10, %4, member 62
+    %12 = ptr_add %11, %6, trailing 240
+    %13 = object_size.i64 %12, kind 1
+    call @use(%13) : (i64)
+    %14 = object_size.i64 %12, kind 5
+    call @use(%14) : (i64)
+    %15 = iconst.i64 100
+    %16 = ptr_add %3, %15, trailing 240
+    %17 = object_size.i64 %16, kind 1
+    call @use(%17) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [240, 298, -1, -1, 200]);
+        let text = printed(body, Some(&[]));
+        assert!(!text.contains("trailing"), "{text}");
     }
 
     /// A `ptr_add` whose count the program worked out leaves the closest kinds with all of the

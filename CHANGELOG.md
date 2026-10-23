@@ -26,6 +26,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The AArch64 assembler writes `udf #imm`, the permanently undefined instruction with its 16 bit immediate. The arm64 hwcap selftest in Linux 7.2 has `udf #0` in inline assembly, and rucc refused to build it, so `kselftest:arm64:hwcap` failed on both A64 nightly jobs. (#3823)
 - `__builtin_dynamic_object_size` of an address chosen at a join, where each way brings a different object or member, is a block parameter each way passes its own size in, as gcc builds a PHI of the sizes. It was -1, so the field spanning WARN that gcc keeps in arcmsr's `arcmsr_sysfs_iop_message_write` and f2fs's xattr code was missing from the arm64 allmodconfig build. (#3824)
 - objsize: measure what an allocator gave back when a loop moves through it, step back from a join by the offset added after it, and let a null pointer a branch has ruled out bring nothing to a join, so fortified copies keep the same checks gcc does in brcmfmac, maple_tree, tscs454 and btrfs volumes (#3826)
+- objsize: give a trailing array its own length when the pointer is a step into a declared object and the whole object only when it is reached through a pointer, and measure an array with no length in a declared object to the end of that object, so the fortified memset in mwifiex's key material command builds the way gcc builds it (#3827)
 
 ## 0.30.11
 

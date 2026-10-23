@@ -105,7 +105,7 @@ pub use crate::asm::{
     in_a_register,
 };
 pub use crate::check::{
-    Checked, Checker, Context, library_name, unbounded_member, unchecked_name,
+    Checked, Checker, Context, library_name, open_to_pointer, unbounded_member, unchecked_name,
     unimplemented_builtin,
 };
 pub use crate::convert::Conv;
