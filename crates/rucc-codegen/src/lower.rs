@@ -6852,6 +6852,80 @@ impl<'a> Lowering<'a> {
                 }
             }
         }
+        // A template that writes a scratch register gets each operand that asks for any register
+        // pinned to one the template leaves alone. The allocator carries an operand it keeps on the
+        // stack through a scratch register, and the template may write that register before it
+        // reads its inputs. Linux 7.3's `cswap2` in lib/crypto/x86/curve25519.h clobbers `r8` to
+        // `r10`, its second pointer was on the stack in `montgomery_ladder` and came in through
+        // `r10`, and the curve25519 KUnit suite took a NULL pointer oops. Its `fmul` and `fsqr`
+        // clobber `r10` and `r11` too, and their `"+&r"` pointers went there the same way. A pinned
+        // operand goes from the stack straight into its own register. An output tied to an input
+        // is pinned with it, to the same register, and is no longer written early, since every
+        // other operand is pinned to a register of its own. When the free registers are too few
+        // for every operand, nothing is pinned.
+        if self.conv.word == 8 {
+            let scratch_written = written.iter().any(|operand| {
+                operand.class == int && operand.reg.phys().is_some_and(|reg| held.contains(&reg))
+            });
+            // Each is a register to pin, with the output and the input that go in it.
+            let mut groups: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+            let mut reused: Vec<usize> = Vec::new();
+            for (at, operand) in defs.iter().enumerate() {
+                if operand.class != int {
+                    continue;
+                }
+                match operand.constraint {
+                    Constraint::Reg => groups.push((Some(at), None)),
+                    Constraint::Reuse(read) => {
+                        let read = usize::from(read) - first_use;
+                        reused.push(read);
+                        groups.push((Some(at), Some(read)));
+                    }
+                    _ => {}
+                }
+            }
+            for (at, operand) in uses.iter().enumerate() {
+                if operand.class == int
+                    && operand.constraint == Constraint::Reg
+                    && !reused.contains(&at)
+                {
+                    groups.push((None, Some(at)));
+                }
+            }
+            let taken: Vec<PhysReg> = written
+                .iter()
+                .chain(&defs)
+                .chain(&uses)
+                .filter(|operand| operand.class == int)
+                .filter_map(|operand| match operand.constraint {
+                    Constraint::Fixed(at) => Some(at),
+                    _ => operand.reg.phys(),
+                })
+                .collect();
+            let spare: Vec<PhysReg> = self
+                .conv
+                .int_order
+                .iter()
+                .copied()
+                .filter(|reg| {
+                    !held.contains(reg)
+                        && !taken.contains(reg)
+                        && *reg != self.conv.stack_pointer
+                        && *reg != self.conv.frame_pointer
+                })
+                .collect();
+            if scratch_written && !groups.is_empty() && groups.len() <= spare.len() {
+                for ((def, read), reg) in groups.into_iter().zip(spare) {
+                    if let Some(def) = def {
+                        defs[def].constraint = Constraint::Fixed(reg);
+                        defs[def].role = Role::Def;
+                    }
+                    if let Some(read) = read {
+                        uses[read].constraint = Constraint::Fixed(reg);
+                    }
+                }
+            }
+        }
 
         // A line naming an operand in a register, with an instruction on it the reader knows, is
         // one the reader refused for a reason of its own, and keeping it as text would hand the
