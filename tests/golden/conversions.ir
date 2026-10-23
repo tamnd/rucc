@@ -7,7 +7,7 @@ global @values : bytes 16 = { zero 16 }, align 16, linkage(external)
 
 func @taking(i32, i64) -> i32, linkage(external);
 
-func @promotions(i8, i16, i8, i1) -> i64, linkage(external) {
+func @promotions(i8 sext, i16 sext, i8 zext, i1 zext) -> i64, linkage(external) {
 block0(%0: i8, %1: i16, %2: i8, %3: i1):
     %4 = sext.i32 %0
     %5 = sext.i32 %1

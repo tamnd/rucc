@@ -292,6 +292,14 @@ pub enum Narrow {
     /// `ret`, trusting the caller to have cleared bits 8 to 31, and its caller of a function
     /// returning `unsigned char` compares all of `w0` without clearing them itself.
     ToInt,
+    /// Extended to 32 bits by the type's own sign by the caller for an argument, and nothing said
+    /// for a return value.
+    ///
+    /// SysV x86-64, where the document says nothing but gcc and clang both extend, and clang's
+    /// callee trusts it. The kernel's own assembly does too: `__blowfish_dec_blk_4way` in
+    /// arch/x86/crypto/blowfish-x86_64-asm_64.S tests all of `rcx` for its `bool cbc`. A callee
+    /// still reads only the bits of its own type, since a caller written by hand may not extend.
+    ArgsToInt,
 }
 
 /// What the bits above a `_BitInt` narrower than its register are when it travels in one.
