@@ -28,8 +28,8 @@
 //! A declared object, a string literal or a compound literal, with members and constant subscripts
 //! on top of it and a constant displacement added to the whole. That is an address this compiler
 //! knows the object of by looking at it, and no analysis is involved: every number comes from the
-//! layout of a type. An array with no size stops the walk, which is the flexible array member at
-//! the end of a structure.
+//! layout of a type. An array with no size, the flexible array member at the end of a structure,
+//! has no size of its own, and in a declared object it is the rest of that object.
 //!
 //! A dereference is half a stop. What is behind `p` is a fact about where `p` came from rather
 //! than about the expression, so the whole object is not known, but `p->name` is a member whose
@@ -339,7 +339,16 @@ impl Checker<'_> {
                 if self.types.ends_flexible(field.ty, self.cx.gnuc) && self.open_to_pointer(base) {
                     return Some(reach.member(field.offset, None));
                 }
-                Some(reach.member(field.offset, Some(size?)))
+                // An array with no length in a declared object is what is left of that object, at
+                // either kind and wherever the record holding it sits, so `n.in.f` runs on over
+                // the members of `n` after `in`. That is gcc 13 and gcc 15. Through a pointer it
+                // has no answer.
+                let Some(size) = size else {
+                    reach.whole?;
+                    let reach = reach.member(field.offset, reach.whole);
+                    return Some(Reach { into_closest: reach.into_whole, ..reach });
+                };
+                Some(reach.member(field.offset, Some(size)))
             }
             ExprKind::Subscript { base, index } => {
                 // The closest object is the array and not the element, which is gcc's rule and is
@@ -355,16 +364,20 @@ impl Checker<'_> {
                 };
                 let element = i128::from(self.bytes_of(self.tast[expr].ty)?);
                 let into = u64::try_from(count.checked_mul(element)?).ok()?;
-                // An array the member walk left without a size has none as an array either.
-                let closest = match reach.closest {
-                    Some(_) => Some(self.bytes_of(self.tast[array].ty)?),
-                    None => None,
+                // An array the member walk left without a size has none as an array either. One
+                // with no length that it did measure is the rest of the object it is in.
+                let (closest, into_closest) = match reach.closest {
+                    Some(_) => match self.bytes_of(self.tast[array].ty) {
+                        Some(size) => (Some(size), into),
+                        None => (reach.closest, reach.into_closest.saturating_add(into)),
+                    },
+                    None => (None, into),
                 };
                 Some(Reach {
                     whole: reach.whole,
                     into_whole: reach.into_whole.saturating_add(into),
                     closest,
-                    into_closest: into,
+                    into_closest,
                 })
             }
             _ => None,
@@ -579,17 +592,9 @@ impl Checker<'_> {
     }
 
     /// Whether this lvalue is what a pointer points at, or a member of that whose record ends in a
-    /// flexible array, or a member of that again, so that nothing between it and the pointer has
-    /// a size the program cannot run past.
+    /// flexible array, as [`open_to_pointer`] says.
     fn open_to_pointer(&self, expr: ExprId) -> bool {
-        match self.tast[expr].kind {
-            _ if self.through_pointer(expr) => true,
-            ExprKind::Member { base, .. } => {
-                self.types.ends_flexible(self.tast[expr].ty, self.cx.gnuc)
-                    && self.open_to_pointer(base)
-            }
-            _ => false,
-        }
+        open_to_pointer(&self.tast, &self.types, expr, self.cx.gnuc)
     }
 
     /// Whether this lvalue is what a pointer points at, written `*p` or `p[i]`.
@@ -705,6 +710,23 @@ pub fn unbounded_member(tast: &Tast, types: &Types, base: ExprId, field: u32, le
             ExprKind::Member { base, .. } if union(base) => holder = base,
             _ => return false,
         }
+    }
+}
+
+/// Whether this lvalue is what a pointer points at, or a member of that whose record ends in a
+/// flexible array, or a member of that again, so that nothing between it and the pointer has a
+/// size the program cannot run past.
+///
+/// That is how gcc walks the address of a record that ends in a flexible array, in the release
+/// `gnuc` names, and the IR asks it too when lowering marks where such a member starts.
+#[must_use]
+pub fn open_to_pointer(tast: &Tast, types: &Types, expr: ExprId, gnuc: u32) -> bool {
+    match tast[expr].kind {
+        _ if pointed_at(tast, types, expr) => true,
+        ExprKind::Member { base, .. } => {
+            types.ends_flexible(tast[expr].ty, gnuc) && open_to_pointer(tast, types, base, gnuc)
+        }
+        _ => false,
     }
 }
 

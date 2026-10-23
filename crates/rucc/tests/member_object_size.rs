@@ -16,6 +16,14 @@
 //! fortified `memset` refused the build. pm8001 casts the address of a pointer member to a structure
 //! and copies into the flexible array at its end, which is the same question.
 //!
+//! An array at the end of a record is only that open where the record is what a pointer points
+//! at. mwifiex's `mwifiex_cmd_802_11_key_material_v1` casts `&cmd->params.key_material` to a layout
+//! that ends in an array of four and clears the array, and when the answer was what was left of
+//! the member under the cast, the fortified `memset` refused the build. A pointer that is a step
+//! into a local has the array's own length, and an array in a record that is a member of another
+//! one has its own length wherever that is. An array with no length in a declared object is the
+//! rest of that object, past the record holding it, at either kind.
+//!
 //! How far a trailing array may run is what `-fstrict-flex-arrays` says. At level three only `[]`
 //! runs past its end, so the `bits` of a `struct cpumask` is its 64 bytes, and the kernel's
 //! fortified `bitmap_copy` checks the copy against that. A member taken from an element whose index
@@ -42,6 +50,15 @@ struct fx { char t, n; short l; char name[]; };
 struct kx { union { struct key k; struct ki k_i; }; struct fx v; };
 struct payload { int sig; short id; long *specific; };
 struct control { int ret, len; char buffer[]; };
+struct ks { short t, l, id, info, len; char key[50]; } __attribute__((packed));
+struct km { short action; struct ks set; } __attribute__((packed));
+struct kw { short action; struct ks set[4]; } __attribute__((packed));
+struct cmd { short c, s; union { struct km km; char big[300]; } p; } __attribute__((packed)) *cp;
+struct out2 { int a; struct kw in; } *op;
+struct outu { int a; union { struct kw in; char big[300]; } u; int z; } *up;
+struct pad { int a; char c; char f[]; };
+struct opad { int x; struct pad in; };
+struct npad { int x; struct pad in; int z; };
 extern void *grab(size_t) __attribute__((alloc_size(1)));
 #define container_of(p, T, m) ((T *)((char *)(p) - __builtin_offsetof(T, m)))
 #define I static inline __attribute__((always_inline))
@@ -83,6 +100,24 @@ void f(int i) {
     struct payload *pay = grab(128);
     struct control *ctl = (struct control *)&pay->specific;
     WANT(wrong_cast_flex, q1(ctl->buffer), 112);
+    struct kw *w = (struct kw *)&cp->p.km;
+    WANT(wrong_trailing_cast, q1(w->set), -1);
+    struct cmd cmd_local;
+    struct kw *x = (struct kw *)&cmd_local.p.km;
+    WANT(wrong_trailing_local, q1(x->set), 240);
+    WANT(wrong_trailing_union, q1(up->u.in.set), 240);
+    WANT(wrong_trailing_nested, q1(op->in.set), 240);
+    struct kw *ip = &op->in;
+    WANT(wrong_trailing_two, q1(ip->set), -1);
+    struct opad opad_local;
+    WANT(wrong_trailing_padding, q1(opad_local.in.f), 3);
+    struct opad *po = &opad_local;
+    WANT(wrong_trailing_padding_local, q1(po->in.f), 3);
+    struct npad npad_local;
+    WANT(wrong_flex_rest, q1(npad_local.in.f), 7);
+    WANT(wrong_flex_rest_now, __builtin_object_size(npad_local.in.f, 1), 7);
+    WANT(wrong_flex_rest_index, __builtin_object_size(&npad_local.in.f[1], 1), 6);
+    WANT(wrong_flex_rest_whole, __builtin_object_size(opad_local.in.f, 0), 3);
 }
 "#;
 
