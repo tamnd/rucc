@@ -579,6 +579,7 @@ impl<'a> Checker<'a> {
     #[must_use]
     pub fn finish(mut self) -> Checked {
         self.tast.record_strict_flex_arrays(self.cx.strict_flex_arrays);
+        self.tast.record_gnuc(self.cx.gnuc);
         Checked { tast: self.tast, types: self.types, diagnostics: self.errors.finish() }
     }
 

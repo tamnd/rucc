@@ -544,24 +544,39 @@ impl Types {
         &self.records[id.0 as usize]
     }
 
-    /// Whether a record ends in a flexible array member, or in a record that does, or for a union
-    /// has one that does in any member, which is gcc's `TYPE_INCLUDES_FLEXARRAY`.
+    /// Whether a record ends in a flexible array member, or in a record that does, which is gcc's
+    /// `TYPE_INCLUDES_FLEXARRAY` in the release `gnuc` names.
     ///
     /// The object size builtins do not take such a member as the closest object, because the
     /// program allocates past its end and the array is how it reaches what it allocated.
     /// crypto/essiv.c does that through `&inst->s.base`, a `struct crypto_instance` whose `__ctx[]`
     /// is where its own context lives, and gcc answers type 1 there with what is left of the
     /// object holding it.
+    ///
+    /// gcc 14 is the release that brought the rule, so before it no record does. gcc 14 takes a
+    /// union from the last of its members that is an array or a record, so cxgb4's
+    /// `union t4_recv_wr`, which ends in `flits`, is measured as its own bytes. From gcc 15 a
+    /// union does where any of its members does.
     #[must_use]
-    pub fn ends_flexible(&self, ty: TypeId) -> bool {
+    pub fn ends_flexible(&self, ty: TypeId, gnuc: u32) -> bool {
+        if gnuc < 14 {
+            return false;
+        }
         let TypeKind::Record(id) = self.kind(self.canonical(ty)) else { return false };
         let info = self.record_info(id);
         let flexible = |field: &Field| match self.kind(self.canonical(field.ty)) {
             TypeKind::Array { len, .. } => len == ArrayLen::Unknown,
-            _ => self.ends_flexible(field.ty),
+            _ => self.ends_flexible(field.ty, gnuc),
+        };
+        let aggregate = |field: &&Field| {
+            matches!(
+                self.kind(self.canonical(field.ty)),
+                TypeKind::Array { .. } | TypeKind::Record(_)
+            )
         };
         match info.kind {
-            RecordKind::Union => info.fields.iter().any(flexible),
+            RecordKind::Union if gnuc >= 15 => info.fields.iter().any(flexible),
+            RecordKind::Union => info.fields.iter().rev().find(aggregate).is_some_and(flexible),
             RecordKind::Struct => info.fields.last().is_some_and(flexible),
         }
     }

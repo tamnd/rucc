@@ -283,6 +283,7 @@ pub struct Tast {
     tls_models: Map<DeclId, TlsModel>,
     strict_flex: Map<(RecordId, Symbol), u8>,
     strict_flex_arrays: u8,
+    gnuc: u32,
     symvers: Map<DeclId, Vec<(String, Span)>>,
     btf_decl_tags: Map<DeclId, Vec<Vec<u8>>>,
     member_tags: Map<(RecordId, Symbol), Vec<Vec<u8>>>,
@@ -749,6 +750,19 @@ impl Tast {
     /// Records the `-fstrict-flex-arrays` level the command line asked for.
     pub fn record_strict_flex_arrays(&mut self, level: u8) {
         self.strict_flex_arrays = level;
+    }
+
+    /// Records the major version of gcc the unit claims to be compiled by, for what lowering asks
+    /// that depends on the release, as [`Types::ends_flexible`](rucc_types::Types::ends_flexible)
+    /// does.
+    pub fn record_gnuc(&mut self, gnuc: u32) {
+        self.gnuc = gnuc;
+    }
+
+    /// The major version of gcc the unit claims to be compiled by.
+    #[must_use]
+    pub fn gnuc(&self) -> u32 {
+        self.gnuc
     }
 
     /// Records the level a member's own `strict_flex_array` asked for in place of that one.

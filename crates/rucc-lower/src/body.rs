@@ -6573,7 +6573,7 @@ impl<'u> Body<'_, 'u> {
     /// where it has none, which is what bcachefs's `bkey_xattr_init` clears `v` through after
     /// `container_of` on the member before it.
     fn closest(&self, flexible: bool, ty: TypeId) -> Option<u32> {
-        if flexible || self.types().ends_flexible(ty) {
+        if flexible || self.types().ends_flexible(ty, self.tast().gnuc()) {
             return Some(0);
         }
         let size = repr::size_of(self.types(), self.target(), ty);

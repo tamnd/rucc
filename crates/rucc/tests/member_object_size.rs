@@ -271,6 +271,39 @@ void g(struct block *b) {
 }
 "#;
 
+const RELEASE: &str = r#"
+typedef unsigned long size_t;
+struct sge { int a, b; long c; };
+struct isgl { unsigned short n; unsigned r2; struct sge sge[]; };
+struct recv { unsigned char op, len16; unsigned short wrid; unsigned r2; struct isgl isgl; };
+union first { struct recv recv; long flits[16]; };
+union last { long flits[16]; struct recv recv; };
+union scalar { struct recv recv; int x; };
+struct a { long id; union first w; };
+struct b { long id; union last w; char x; };
+struct c { long id; union scalar w; };
+struct d { long id; struct recv r; char x; };
+#define WANT(name, got, want) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if ((got) != (size_t)(want)) name(); \
+    } while (0)
+#if __GNUC__ < 14
+#define FLEX(gcc13, gcc14, gcc15) (gcc13)
+#elif __GNUC__ < 15
+#define FLEX(gcc13, gcc14, gcc15) (gcc14)
+#else
+#define FLEX(gcc13, gcc14, gcc15) (gcc15)
+#endif
+void f(struct a *a, struct b *b, struct c *c, struct d *d) {
+    WANT(wrong_first, __builtin_object_size(&a->w, 1), FLEX(128, 128, -1));
+    WANT(wrong_last, __builtin_object_size(&b->w, 1), FLEX(128, -1, -1));
+    WANT(wrong_scalar, __builtin_object_size(&c->w, 1), FLEX(sizeof(struct recv), -1, -1));
+    WANT(wrong_member, __builtin_object_size(&d->r, 1), FLEX(sizeof(struct recv), -1, -1));
+    WANT(wrong_dynamic, __builtin_dynamic_object_size(&a->w, 1), FLEX(128, 128, -1));
+}
+"#;
+
 fn compile(name: &str, source: &str, level: &str) -> Output {
     compile_with(name, source, &[level])
 }
@@ -357,5 +390,15 @@ fn a_pointer_in_a_member_of_a_local_is_measured_past_the_store_beside_it() {
     for level in ["-O1", "-O2", "-Os", "-O3"] {
         let out = compile(&format!("local{level}"), IN_LOCAL, level);
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn a_record_ending_in_a_flexible_array_is_the_one_the_claimed_gcc_release_says() {
+    for gnuc in ["13.3.0", "14.2.0", "15.2.0", "16.2.0"] {
+        let version = format!("-fgnuc-version={gnuc}");
+        let flags = ["-fstrict-flex-arrays=3", version.as_str(), "-O2"];
+        let out = compile_with(&format!("release{gnuc}"), RELEASE, &flags);
+        assert!(out.status.success(), "{gnuc}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }

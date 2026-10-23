@@ -336,7 +336,7 @@ impl Checker<'_> {
                 // A record ending in a flexible array goes on past its type, and so does every
                 // record holding it that ends in it too. Where that runs all the way out to the
                 // pointer, the closest object is what the pointer points at, as gcc walks it.
-                if self.types.ends_flexible(field.ty) && self.open_to_pointer(base) {
+                if self.types.ends_flexible(field.ty, self.cx.gnuc) && self.open_to_pointer(base) {
                     return Some(reach.member(field.offset, None));
                 }
                 Some(reach.member(field.offset, Some(size?)))
@@ -585,7 +585,8 @@ impl Checker<'_> {
         match self.tast[expr].kind {
             _ if self.through_pointer(expr) => true,
             ExprKind::Member { base, .. } => {
-                self.types.ends_flexible(self.tast[expr].ty) && self.open_to_pointer(base)
+                self.types.ends_flexible(self.tast[expr].ty, self.cx.gnuc)
+                    && self.open_to_pointer(base)
             }
             _ => false,
         }
