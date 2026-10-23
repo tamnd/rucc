@@ -219,6 +219,8 @@ pub(crate) fn plan(
         call = call.variadic();
     }
     let narrow = call.abi().narrow;
+    // What a return value is owed, which [`Narrow::ArgsToInt`] says nothing about.
+    let back = if narrow == Narrow::ToInt { narrow } else { Narrow::Unspecified };
     let shaped = shape(types, target, ret).ok_or("returning a value of this type")?;
     let ret = travel(types, target, &mut call, &shaped, Position::Return, ret);
 
@@ -229,7 +231,7 @@ pub(crate) fn plan(
         let (size, align) = (ret.size, ret.align);
         signature.params.push(Param::with_abi(Type::PTR, Abi::Sret { size, align, popped: None }));
     } else {
-        let returns = ret.types.iter().map(|ty| extended(types, target, narrow, &ret, *ty));
+        let returns = ret.types.iter().map(|ty| extended(types, target, back, &ret, *ty));
         signature.returns.extend(returns);
     }
 
@@ -308,7 +310,7 @@ fn extended(
         TypeKind::Bool | TypeKind::Int(_) | TypeKind::BitInt { .. } | TypeKind::Enum(_)
     );
     let direct = matches!(travel.pass, Pass::Direct) && ty.is_int() && !ty.is_vector();
-    if narrow != Narrow::ToInt || !integer || !direct || ty.bits() >= 32 {
+    if narrow == Narrow::Unspecified || !integer || !direct || ty.bits() >= 32 {
         return param(travel, ty);
     }
     let abi = if repr::is_signed(types, target, travel.ty) { Abi::Sext } else { Abi::Zext };
@@ -1161,6 +1163,14 @@ mod tests {
             plan(&types, &linux, Convention::Target, uchar, &params, &[], false).expect("a plan");
         assert!(elsewhere.signature.params.iter().all(|param| param.abi == Abi::Plain));
         assert_eq!(elsewhere.signature.returns[0].abi, Abi::Plain);
+
+        // SysV x86-64 extends an argument, as gcc and clang do, and promises nothing for a return.
+        let x64 = target("x86_64-unknown-linux-gnu");
+        let sysv =
+            plan(&types, &x64, Convention::Target, uchar, &params, &[], false).expect("a plan");
+        let abis: Vec<Abi> = sysv.signature.params.iter().map(|param| param.abi).collect();
+        assert_eq!(abis, vec![s, z, s, z, s, p, z]);
+        assert_eq!(sysv.signature.returns[0].abi, Abi::Plain);
     }
 
     #[test]
