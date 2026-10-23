@@ -97,7 +97,7 @@ mod ty;
 mod weak;
 
 pub use crate::check::builtin::{
-    library_name, unbounded_member, unchecked_name, unimplemented_builtin,
+    library_name, open_to_pointer, unbounded_member, unchecked_name, unimplemented_builtin,
 };
 
 /// What the checking needs and does not change.
