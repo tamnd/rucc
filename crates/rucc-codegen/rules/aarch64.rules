@@ -1535,8 +1535,9 @@
 
 
 ;; Reading memory. Two addressing modes, a register and a register plus a constant. The constant is
-;; held to the nine signed bits every load can take, which is the unscaled form; a larger one that
-;; the scaled form could take is left to the plain rule for now.
+;; one the unscaled form holds, which is nine signed bits, or one the scaled form holds, which is a
+;; multiple of the size of the access below 4096 of them. A field at 400 is `ldr w0, [x0, 400]` as
+;; gcc writes it, where it used to be an add in front of the load and a register to hold the sum.
 
 ;; A `_Bool` object is one byte holding a zero or a one, and a truth value in a register is the
 ;; same zero or one, so reading one is the byte load and writing one is the byte store. Nothing
@@ -1547,7 +1548,7 @@
       (spec (= (extract 0 0 (select (mem) a)) (result))))
 
 (rule (lower (load.i1 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 4096))))
       (a64.ldr_bit (amode_base_offset a k))
       (spec (= (extract 0 0 (select (mem) (bvadd a k))) (result))))
 
@@ -1556,7 +1557,7 @@
       (spec (= (store (mem) a (zero_extend 1 8 v)) (result))))
 
 (rule (lower (store.i1 (value.i1 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 4096))))
       (a64.str_bit (amode_base_offset a k) v)
       (spec (= (store (mem) (bvadd a k) (zero_extend 1 8 v)) (result))))
 
@@ -1581,23 +1582,23 @@
                        (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
 
 (rule (lower (load.i8 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 4096))))
       (a64.ldr_8 (amode_base_offset a k))
       (spec (= (select (mem) (bvadd a k)) (result))))
 
 (rule (lower (load.i16 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 8192) (= (extract 0 0 k) 0))))
       (a64.ldr_16 (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))) (result))))
 
 (rule (lower (load.i32 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 16384) (= (extract 1 0 k) 0))))
       (a64.ldr_32 (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
                        (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))) (result))))
 
 (rule (lower (load.i64 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 32768) (= (extract 2 0 k) 0))))
       (a64.ldr_64 (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 7)) (select (mem) (bvadd (bvadd a k) 6))
                        (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
@@ -1639,19 +1640,19 @@
                        (bvadd a 7) (extract 63 56 v)) (result))))
 
 (rule (lower (store.i8 (value.i8 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 4096))))
       (a64.str_8 (amode_base_offset a k) v)
       (spec (= (store (mem) (bvadd a k) v) (result))))
 
 (rule (lower (store.i16 (value.i16 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 8192) (= (extract 0 0 k) 0))))
       (a64.str_16 (amode_base_offset a k) v)
       (spec (= (store (store (mem)
                        (bvadd a k) (extract 7 0 v))
                        (bvadd (bvadd a k) 1) (extract 15 8 v)) (result))))
 
 (rule (lower (store.i32 (value.i32 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 16384) (= (extract 1 0 k) 0))))
       (a64.str_32 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 v))
@@ -1660,7 +1661,7 @@
                        (bvadd (bvadd a k) 3) (extract 31 24 v)) (result))))
 
 (rule (lower (store.i64 (value.i64 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 32768) (= (extract 2 0 k) 0))))
       (a64.str_64 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 v))
@@ -1889,7 +1890,7 @@
                        (select (mem) (bvadd a 1)) (select (mem) a))) (result))))
 
 (rule (lower (load.f32 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 16384) (= (extract 1 0 k) 0))))
       (a64.ldr_f32 (amode_base_offset a k))
       (spec (= (float_from_bits 32 (concat (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
                        (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))) (result))))
@@ -1902,7 +1903,7 @@
                        (select (mem) (bvadd a 1)) (select (mem) a))) (result))))
 
 (rule (lower (load.f64 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 32768) (= (extract 2 0 k) 0))))
       (a64.ldr_f64 (amode_base_offset a k))
       (spec (= (float_from_bits 64 (concat (select (mem) (bvadd (bvadd a k) 7)) (select (mem) (bvadd (bvadd a k) 6))
                        (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
@@ -1918,7 +1919,7 @@
                        (bvadd a 3) (extract 31 24 (bits_from_float 32 v))) (result))))
 
 (rule (lower (store.f32 (value.f32 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 16384) (= (extract 1 0 k) 0))))
       (a64.str_f32 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 (bits_from_float 32 v)))
@@ -1939,7 +1940,7 @@
                        (bvadd a 7) (extract 63 56 (bits_from_float 64 v))) (result))))
 
 (rule (lower (store.f64 (value.f64 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 32768) (= (extract 2 0 k) 0))))
       (a64.str_f64 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 (bits_from_float 64 v)))
@@ -1966,7 +1967,7 @@
                        (select (mem) (bvadd a 1)) (select (mem) a))) (result))))
 
 (rule (lower (load.f128 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.ldr_f128 (amode_base_offset a k))
       (spec (= (float_from_bits 128 (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
                        (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
@@ -1998,7 +1999,7 @@
                        (bvadd a 15) (extract 127 120 (bits_from_float 128 v))) (result))))
 
 (rule (lower (store.f128 (value.f128 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.str_f128 (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 (bits_from_float 128 v)))
@@ -2038,7 +2039,7 @@
                        (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
 
 (rule (lower (load.i8x16 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.ldr_q (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
                        (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
@@ -2070,7 +2071,7 @@
                        (bvadd a 15) (extract 127 120 v)) (result))))
 
 (rule (lower (store.i8x16 (value.i8x16 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.str_q (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 v))
@@ -2102,7 +2103,7 @@
                        (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
 
 (rule (lower (load.i16x8 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.ldr_q (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
                        (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
@@ -2134,7 +2135,7 @@
                        (bvadd a 15) (extract 127 120 v)) (result))))
 
 (rule (lower (store.i16x8 (value.i16x8 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.str_q (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 v))
@@ -2166,7 +2167,7 @@
                        (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
 
 (rule (lower (load.i32x4 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.ldr_q (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
                        (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
@@ -2198,7 +2199,7 @@
                        (bvadd a 15) (extract 127 120 v)) (result))))
 
 (rule (lower (store.i32x4 (value.i32x4 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.str_q (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 v))
@@ -2230,7 +2231,7 @@
                        (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
 
 (rule (lower (load.i64x2 (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.ldr_q (amode_base_offset a k))
       (spec (= (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
                        (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
@@ -2262,7 +2263,7 @@
                        (bvadd a 15) (extract 127 120 v)) (result))))
 
 (rule (lower (store.i64x2 (value.i64x2 v) (add.i64 (value.i64 a) (iconst.i64 k))))
-      (if (and (>= k -256) (< k 256)))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 65536) (= (extract 3 0 k) 0))))
       (a64.str_q (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                        (bvadd a k) (extract 7 0 v))
