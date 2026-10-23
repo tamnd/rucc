@@ -596,11 +596,18 @@ pub(crate) fn movable(func: &Func, inst: Inst) -> bool {
 /// further down, the first keeps both in registers through the whole function. On i386 that is a
 /// third of what there is, and `uncore_pmu_event_add` spilled them both.
 ///
-/// A sum is moved only when every reader of it is a constant past it and all of them move, since
-/// one left behind keeps the sum live and the pointer under it now is too. The total has to stay in
-/// the range [`licm::displacements`] calls small, which is what every target puts in an access.
-/// The blocks are walked in reverse postorder so a chain is moved from its root out, and each sum
-/// is looked at once its own base is final.
+/// A sum is moved only when every reader of it is a constant past it or a plain access through it,
+/// and all the constants move, since one left behind keeps the sum live and the pointer under it
+/// now is too. An access is no such reader, because it takes the sum into its address the way it
+/// would take the constant, so the sum is never in a register for it. That is the kernel's
+/// `dcn401_mpc_create`, which writes `mpc_regs.F[0]` for two hundred fields and then `F[1]` for
+/// each: every `&mpc_regs.F` was the address of a store and the base of a constant, and the
+/// function kept all of them for the second half, in a frame of 1808 bytes where gcc has 48. An
+/// atomic access is a reader like any other, since arm64 has no offset in one.
+///
+/// The total has to stay in the range [`licm::displacements`] calls small, which is what every
+/// target puts in an access. The blocks are walked in reverse postorder so a chain is moved from
+/// its root out, and each sum is looked at once its own base is final.
 fn rebase(func: &mut Func, order: &[Block], fuel: &mut Fuel, stats: &mut Stats) {
     let step = |func: &Func, value: Value| {
         let Def::Result { inst, .. } = func[value].def else { return None };
@@ -610,6 +617,7 @@ fn rebase(func: &mut Func, order: &[Block], fuel: &mut Fuel, stats: &mut Stats) 
     };
     let mut readers: Map<Value, Vec<Inst>> = Map::default();
     let mut other: Set<Value> = Set::default();
+    let mut accessed: Set<Value> = Set::default();
     for &block in order {
         for inst in func.insts(block) {
             let first = func[func[inst].args].first().copied();
@@ -617,9 +625,12 @@ fn rebase(func: &mut Func, order: &[Block], fuel: &mut Fuel, stats: &mut Stats) 
                 let result = func[inst].results().next();
                 result.is_some_and(|result| step(func, result).is_some())
             });
+            let through = access(func, inst);
             uses::operands(func, inst, |value| {
                 if Some(value) == stepped {
                     readers.entry(value).or_default().push(inst);
+                } else if Some(value) == through {
+                    accessed.insert(value);
                 } else {
                     other.insert(value);
                 }
@@ -670,8 +681,21 @@ fn rebase(func: &mut Func, order: &[Block], fuel: &mut Fuel, stats: &mut Stats) 
                 stats.optimized(REBASED);
             }
             readers.remove(&value);
-            func.remove_inst(sum);
+            if !accessed.contains(&value) {
+                func.remove_inst(sum);
+            }
         }
+    }
+}
+
+/// The address a plain load or store goes through, when that is all it reads the address for. A
+/// store of an address through itself reads it as a value as well, and an atomic access is an
+/// opcode of its own.
+fn access(func: &Func, inst: Inst) -> Option<Value> {
+    match (func[inst].opcode, &func[func[inst].args]) {
+        (Opcode::Load, &[at]) => Some(at),
+        (Opcode::Store, &[stored, at]) if stored != at => Some(at),
+        _ => None,
     }
 }
 
@@ -1196,6 +1220,48 @@ block0(%0: ptr):
     fn a_sum_read_as_a_value_as_well_stays_where_the_fields_are_counted_from() {
         let out = moved(&fields(108, "%2"));
         assert!(out.contains("ptr_add.nuw %2, %3") && out.contains("ptr_add.nuw %2, %6"), "{out}");
+    }
+
+    #[test]
+    fn a_sum_an_access_reads_as_well_still_counts_its_fields_from_the_structure() {
+        // `r.b[0]` written and then `r.b[1]`, where the address of the first is the base of the
+        // second. The store takes `%3` into its address, so `%5` is counted from `%0` and `%3` is
+        // left for the store alone.
+        let out = moved(
+            r#"
+func @f(ptr, i32), linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = iconst.i64 16
+    %3 = ptr_add.nuw %0, %2
+    store %1 -> %3, align 4
+    %4 = iconst.i64 4
+    %5 = ptr_add.nuw %3, %4
+    store %1 -> %5, align 4
+    return
+}
+"#,
+        );
+        assert!(out.contains("ptr_add.nuw %0, %2") && out.contains("iconst.i64 20"), "{out}");
+        assert!(!out.contains("ptr_add.nuw %3,"), "{out}");
+    }
+
+    #[test]
+    fn a_sum_an_atomic_access_reads_stays_where_its_fields_are_counted_from() {
+        let out = moved(
+            r#"
+func @f(ptr, i32), linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = iconst.i64 16
+    %3 = ptr_add.nuw %0, %2
+    atomic_store %1 -> %3, align 4, release
+    %4 = iconst.i64 4
+    %5 = ptr_add.nuw %3, %4
+    store %1 -> %5, align 4
+    return
+}
+"#,
+        );
+        assert!(out.contains("ptr_add.nuw %3, %4"), "{out}");
     }
 
     #[test]
