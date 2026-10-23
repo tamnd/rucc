@@ -32,20 +32,25 @@
 //! in `check/builtin/sign.rs` next door. This file is only the values that are constants however
 //! they are reached.
 
-use rucc_ast as ast;
+use rucc_ast::{self as ast, BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_base::float::Float;
 use rucc_diag::Span;
 use rucc_lex::Encoding;
-use rucc_types::{FloatKind, float_format};
-
-use rucc_types::TypeKind;
+use rucc_types::{
+    ArrayLen, FloatKind, Qualifiers, TypeKind, float_format, is_pointer, layout, pointee,
+};
 
 use crate::check::Checker;
-use crate::decl::{DeclKind, Linkage};
-use crate::expr::ExprId;
+use crate::decl::{DeclFlags, DeclId, DeclKind, Linkage, StorageDuration};
+use crate::eval::bare;
+use crate::expr::{Conversion, ExprId, ExprKind};
 use crate::scope::Binding;
 use crate::tast::Const;
+
+/// How many `const` pointer objects deep a length follows one initializer into the next, which
+/// only stops `static const char *const p = p;`.
+const OBJECT_DEPTH: u32 = 8;
 
 /// What one name answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,30 +175,192 @@ impl Checker<'_> {
     ) -> Option<ExprId> {
         let spelled = self.text(name);
         let &(_, answer) = LIBRARY.iter().find(|(row, _)| *row == spelled)?;
-        if !self.cx.means_the_library(spelled) {
+        if !self.library_shaped(name, answer) {
             return None;
         }
-        let Some(Binding::Decl(decl)) = self.scopes.lookup(name) else { return None };
+        self.constant_answer(answer, args, span)
+    }
+
+    /// Whether a plain name still means the library function, in what it was declared as too.
+    fn library_shaped(&self, name: Symbol, answer: Answer) -> bool {
+        if !self.cx.means_the_library(self.text(name)) {
+            return false;
+        }
+        let Some(Binding::Decl(decl)) = self.scopes.lookup(name) else { return false };
         let decl = &self.tast[decl];
         if decl.kind != DeclKind::Function || decl.linkage != Linkage::External {
-            return None;
+            return false;
         }
         let TypeKind::Function(id) = self.types.kind(self.types.canonical(decl.ty)) else {
-            return None;
+            return false;
         };
         let signature = self.types.signature(id);
         let ret = match answer {
             Answer::Length => self.size_type(),
             _ => self.int(),
         };
-        if !signature.prototyped
-            || signature.variadic
-            || signature.params.len() != answer.arity()
-            || self.types.canonical(signature.ret) != self.types.canonical(ret)
+        signature.prototyped
+            && !signature.variadic
+            && signature.params.len() == answer.arity()
+            && self.types.canonical(signature.ret) == self.types.canonical(ret)
+    }
+
+    /// Answers a checked call to `strlen` whose argument points into a string gcc's front end
+    /// can read, which is more than a literal written in the call.
+    ///
+    /// gcc folds the length of a `const` character array that was initialized with a string at
+    /// every level, and from `-O1` up it reads through a `const` pointer object as well, inside a
+    /// function and not in a static initializer. That makes the answer an integer constant
+    /// expression, and the kernel's `fortify_kunit.c` asks exactly that of
+    /// `__is_constexpr(__builtin_strlen(unchanging_12))` with `unchanging_12` a `static const
+    /// char * const`. Measured on gcc 13, 14 and 16, which agree.
+    pub(in crate::check) fn constant_length(
+        &mut self,
+        function: Option<Symbol>,
+        checked: &[ExprId],
+        span: Span,
+    ) -> Option<ExprId> {
+        let name = function?;
+        let means = match self.text(name) {
+            "__builtin_strlen" => self.declared_builtins.contains(&name),
+            "strlen" => self.library_shaped(name, Answer::Length),
+            _ => false,
+        };
+        let [arg] = checked else { return None };
+        if !means {
+            return None;
+        }
+        let (bytes, at) = self.pointed_string(*arg, 0)?;
+        let rest = bytes.get(usize::try_from(at).ok()?..)?;
+        let length = rest.iter().position(|byte| *byte == 0)? as u64;
+        let ty = self.size_type();
+        Some(self.constant(Const::Int(i128::from(length)), ty, span))
+    }
+
+    /// The bytes of the string object a pointer points into and how far into it, where gcc reads
+    /// them too.
+    fn pointed_string(&mut self, expr: ExprId, depth: u32) -> Option<(Vec<u8>, u64)> {
+        if depth > OBJECT_DEPTH {
+            return None;
+        }
+        match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::ArrayDecay, operand } => {
+                Some((self.string_object(operand)?, 0))
+            }
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
+                let ExprKind::Decl(decl) = self.tast[operand].kind else { return None };
+                self.pointer_object(decl, depth)
+            }
+            ExprKind::Cast(inner)
+            | ExprKind::Convert { kind: Conversion::Pointer, operand: inner } => {
+                if !is_pointer(&self.types, self.tast[inner].ty) {
+                    return None;
+                }
+                self.pointed_string(inner, depth)
+            }
+            ExprKind::Binary { op: op @ (BinaryOp::Add | BinaryOp::Sub), lhs, rhs } => {
+                let (pointer, index) = match is_pointer(&self.types, self.tast[lhs].ty) {
+                    true => (lhs, rhs),
+                    false if op == BinaryOp::Add => (rhs, lhs),
+                    false => return None,
+                };
+                let step = self.step(pointer, index)?;
+                let step = if op == BinaryOp::Sub { -step } else { step };
+                let (bytes, at) = self.pointed_string(pointer, depth)?;
+                Some((bytes, u64::try_from(i128::from(at) + step).ok()?))
+            }
+            ExprKind::Unary { op: UnaryOp::AddrOf, operand } => match self.tast[operand].kind {
+                ExprKind::Subscript { base, index } => {
+                    let step = self.step(base, index)?;
+                    let (bytes, at) = self.pointed_string(base, depth)?;
+                    Some((bytes, u64::try_from(i128::from(at) + step).ok()?))
+                }
+                _ => Some((self.string_object(operand)?, 0)),
+            },
+            _ => None,
+        }
+    }
+
+    /// How many bytes adding a constant index to a pointer moves it.
+    fn step(&self, pointer: ExprId, index: ExprId) -> Option<i128> {
+        let target = pointee(&self.types, self.tast[pointer].ty)?;
+        let size = layout(&self.types, target, self.cx.target).ok()?.size;
+        let mut eval = self.eval();
+        let value = eval.constant(index);
+        let _ = eval.finish();
+        let Ok(Const::Int(value)) = value else { return None };
+        value.checked_mul(i128::from(size))
+    }
+
+    /// What a `const` pointer object was initialized to point at, which gcc reads once it
+    /// optimizes and only inside a function.
+    fn pointer_object(&mut self, decl: DeclId, depth: u32) -> Option<(Vec<u8>, u64)> {
+        if !self.cx.optimizing || self.defining.is_none() {
+            return None;
+        }
+        let node = &self.tast[decl];
+        let quals = self.types.quals(self.types.canonical(node.ty));
+        if node.kind != DeclKind::Object
+            || node.flags.contains(DeclFlags::WEAK)
+            || !quals.has(Qualifiers::CONST)
+            || quals.has(Qualifiers::VOLATILE)
+            || !is_pointer(&self.types, node.ty)
         {
             return None;
         }
-        self.constant_answer(answer, args, span)
+        let entries = self.tast[node.init?].to_vec();
+        let [entry] = entries.as_slice() else { return None };
+        if entry.offset != 0 || entry.bit_width != 0 {
+            return None;
+        }
+        self.pointed_string(entry.value, depth + 1)
+    }
+
+    /// The bytes of a narrow string literal, or of a `const` character array that was
+    /// initialized with one, as many as the object holds.
+    ///
+    /// The array has to be one whose initializer nothing can change and that the linker cannot
+    /// swap for another: not `volatile` and not weak. gcc leaves out a `static` one inside a
+    /// function as well, which keeps its initializer somewhere the front end does not read.
+    fn string_object(&self, expr: ExprId) -> Option<Vec<u8>> {
+        let (elem, len) = match bare(&self.types, self.tast[expr].ty) {
+            TypeKind::Array { elem, len: ArrayLen::Fixed(len) } => (elem, len),
+            _ => return None,
+        };
+        if layout(&self.types, elem, self.cx.target).ok()?.size != 1 {
+            return None;
+        }
+        let mut bytes = match self.tast[expr].kind {
+            ExprKind::Str(id) => {
+                let literal = &self.tast[id];
+                if !matches!(literal.encoding, Encoding::Plain | Encoding::Utf8) {
+                    return None;
+                }
+                literal.bytes(self.cx.target)
+            }
+            ExprKind::Decl(decl) => {
+                let node = &self.tast[decl];
+                let quals = self.types.quals(self.types.canonical(elem));
+                if node.kind != DeclKind::Object
+                    || node.flags.contains(DeclFlags::WEAK)
+                    || !quals.has(Qualifiers::CONST)
+                    || quals.has(Qualifiers::VOLATILE)
+                    || (node.duration != StorageDuration::Automatic
+                        && node.linkage == Linkage::None)
+                {
+                    return None;
+                }
+                let entries = self.tast[node.init?].to_vec();
+                let [entry] = entries.as_slice() else { return None };
+                if entry.offset != 0 || !matches!(self.tast[entry.value].kind, ExprKind::Str(_)) {
+                    return None;
+                }
+                self.string_object(entry.value)?
+            }
+            _ => return None,
+        };
+        bytes.resize(usize::try_from(len).ok()?, 0);
+        Some(bytes)
     }
 
     /// The answer itself, once the name has been found to be one of these.

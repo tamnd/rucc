@@ -8388,8 +8388,9 @@ void f(unsigned long n) { use(alloca(n)); }
         assert_eq!(text.matches("\tcall").count(), 1, "the only call is the one written: {text}");
 
         // The table's rule and not this one name's, so a name whose whole answer is the library
-        // function of the same name gets that function's type and still reaches it.
-        let string = "unsigned long f(void) { return strlen(\"abc\"); }\n";
+        // function of the same name gets that function's type and still reaches it. The argument
+        // is not a constant, because gcc answers `strlen` of a literal at compile time.
+        let string = "unsigned long f(const char *s) { return strlen(s); }\n";
         let text = run(&opts, string).text().to_owned();
         assert!(text.contains("call\tstrlen"), "strlen is still a call: {text}");
 

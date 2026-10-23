@@ -1301,6 +1301,12 @@ impl At<'_> {
                 }
                 _ => return Err(self.unwritten()),
             },
+            // Permanently undefined, the sixteen bits all there is to it. The arm64 hwcap selftest
+            // writes `udf #0` to see the signal it raises.
+            "udf" => match values {
+                [Value::Imm(imm)] => self.number(*imm, 1 << 16)?,
+                _ => return Err(self.unwritten()),
+            },
             "dmb" | "dsb" | "isb" => match values {
                 [Value::Barrier(option)] if *option < 16 => {
                     let base = match m {
