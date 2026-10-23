@@ -312,6 +312,8 @@ d4200000	brk #0
 d4207d00	brk #1000
 d4000001	svc #0
 d4400000	hlt #0
+00000000	udf #0
+0000ffff	udf #65535
 d5033bbf	dmb ish
 d50339bf	dmb ishld
 d5033abf	dmb ishst
