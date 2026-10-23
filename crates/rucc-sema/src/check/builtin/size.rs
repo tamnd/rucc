@@ -430,12 +430,13 @@ impl Checker<'_> {
                         _ => false,
                     }
             }
-            // A pointer read out of what another pointer points at, as `inode->i_link` is. ufs
-            // sets it just before it copies the name there, and above `-O0` the IR looks for
-            // that store the way gcc's loads take the value of one. Where there is none the
-            // answer is the one that says nothing, as it would be here.
+            // A pointer read out of what another pointer points at, as `inode->i_link` is, or out
+            // of a member of a local, as f2fs's `dst.bitmap` is. ufs sets `i_link` just before it
+            // copies the name there, and above `-O0` the IR looks for that store the way gcc's
+            // loads take the value of one. Where there is none the answer is the one that says
+            // nothing, as it would be here.
             ExprKind::Convert { kind: Conversion::Lvalue, operand }
-                if self.cx.optimizing && self.through_memory(operand) =>
+                if self.cx.optimizing && self.in_memory(operand) =>
             {
                 true
             }
@@ -538,12 +539,14 @@ impl Checker<'_> {
     }
 
     /// Whether this lvalue is a pointer kept in memory a pointer points at, as `p->next` and
-    /// `p[1].buf` are, rather than in a variable.
-    fn through_memory(&self, expr: ExprId) -> bool {
+    /// `p[1].buf` are, or in a member of a local the IR can read the stores to, as `dst.bitmap`
+    /// is, rather than in a variable of its own.
+    fn in_memory(&self, expr: ExprId) -> bool {
         if !matches!(bare(&self.types, self.tast[expr].ty), TypeKind::Pointer(_)) {
             return false;
         }
         let mut expr = expr;
+        let mut inside = false;
         loop {
             match self.tast[expr].kind {
                 _ if self.through_pointer(expr) => return true,
@@ -552,8 +555,10 @@ impl Checker<'_> {
                     Some(array) => expr = array,
                     None => return true,
                 },
+                ExprKind::Decl(_) => return inside && self.local(expr),
                 _ => return false,
             }
+            inside = true;
         }
     }
 
