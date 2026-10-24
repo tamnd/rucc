@@ -1,0 +1,22 @@
+name: scratch
+on: push
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    steps:
+      - run: |
+          sudo apt-get update -q
+          sudo apt-get install -y gcc-16
+      - uses: actions/checkout@v7.0.1
+      - run: cargo build --release --bin rucc
+      - run: |
+          cd scratch-splice
+          for f in *.c *.S; do
+            echo "=================== $f"
+            gcc-16 -E "$f" > "$f.gcc"
+            ../target/release/rucc -E "$f" > "$f.rucc"
+            echo "----- gcc"; grep -v '^$' "$f.gcc" | grep -v '^# [0-9]* "<' | cat -A
+            echo "----- diff gcc rucc"; diff "$f.gcc" "$f.rucc" | cat -A || true
+          done
