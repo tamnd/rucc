@@ -31,6 +31,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - objsize: give a trailing array its own length when the pointer is a step into a declared object and the whole object only when it is reached through a pointer, and measure an array with no length in a declared object to the end of that object, so the fortified memset in mwifiex's key material command builds the way gcc builds it (#3827)
 - gcm: count a constant past an address from the pointer under it even when a plain load or store also goes through that address, so `dcn401_mpc_create` on arm64 keeps 768 bytes of frame instead of 1712 (#3828)
 - arm64: load and store at a constant offset up to 4095 times the access size with the scaled immediate form, as gcc does, instead of adding the offset into a register first (#3830)
+- `__builtin_dynamic_object_size` with the closest-member kind asks about a flexible or zero-length trailing member as the whole object when it reaches it through a join, as it already did without one. Linux 6.12's drivers/crypto/mxs-dcp.c clears `crypto_ahash_ctx(tfm)`, the `__crt_ctx[]` past the `base` an inlined `crypto_ahash_tfm` returns. The answer came back as the room left in `base`, which is nothing, so fortify's `__write_overflow_field` check fired and the arm64 `allmodconfig` build failed in mxs-dcp, qat and chcr with the gnuc 12 persona. (#3832)
 
 ## 0.30.11
 
