@@ -181,3 +181,101 @@ int main(void)
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// A literal that reads nothing in memory is assigned straight into the object too. The kernel's
+/// 7.3 `mldsa_verify` clears a 1024 byte member with `ws->tmp = (struct mldsa_ring_elem){};` in a
+/// loop, and its frame was 1648 bytes on x86-64, where gcc 14's is 208. `nodes` is the shape of
+/// `txgbe_swnodes_register`, which fills software node properties with addresses, strings and a
+/// local variable whose address is taken, and whose frame was 1328 bytes where gcc's is 128.
+#[test]
+fn a_literal_that_reads_nothing_is_assigned_with_no_slot_of_its_own() {
+    let source = r#"
+struct E { int x[256]; };
+struct W { long a; struct E tmp; };
+extern void g(struct W *);
+
+void clear(struct W *ws, int k)
+{
+	for (int i = 0; i < k; i++) {
+		ws->tmp = (struct E){};
+		g(ws);
+	}
+}
+
+void some(struct W *ws)
+{
+	ws->tmp = (struct E){ .x = { 1, 2 }, .x[200] = 3 };
+	g(ws);
+}
+
+struct Prop { const char *name; unsigned long length; const void *pointer; long pad[60]; };
+struct Node { char name[16]; struct Prop props[4]; struct Prop *self; };
+extern void h(int *);
+
+void nodes(struct Node *n, int k)
+{
+	int id = k;
+	h(&id);
+	n->props[0] = (struct Prop){ .name = "compatible", .length = sizeof(n->name) };
+	n->props[1] = (struct Prop){ .name = n->name, .pointer = &n->props[k] };
+	n->props[2] = (struct Prop){ .length = id, .pointer = n->props };
+}
+"#;
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+        let usage = usage(target, source);
+        for function in ["clear", "some", "nodes"] {
+            let bytes = frame(&usage, function);
+            assert!(bytes <= 64, "{target}: {bytes} bytes for {function}");
+        }
+    }
+}
+
+/// An assigned literal that reads the object it is assigned to is still built first, so the
+/// object is read before it is written, by its name or through a pointer. One that reads nothing
+/// leaves no old byte behind.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn an_assigned_literal_holds_what_its_initializer_says() {
+    let source = r#"
+extern int printf(const char *, ...);
+struct S { int a, b; char s[6]; int c[4]; };
+
+__attribute__((noinline)) void fill(struct S *p)
+{
+	__builtin_memset(p, 0x5a, sizeof *p);
+}
+
+int main(void)
+{
+	struct S v;
+	fill(&v);
+	v = (struct S){ .b = 3, .s = "hi", .c[3] = -1 };
+	printf("%d %d %s %d %d %d\n", v.a, v.b, v.s, v.s[5], v.c[0], v.c[3]);
+	v.a = 1;
+	v = (struct S){ .a = v.b, .b = v.a };
+	printf("%d %d %d\n", v.a, v.b, v.c[3]);
+	struct S *p = &v, *q = &v;
+	*p = (struct S){ .a = q->b + 1, .c[0] = q->a };
+	printf("%d %d %d\n", v.a, v.b, v.c[0]);
+	return 0;
+}
+"#;
+    for level in ["-O2", "-O0"] {
+        let dir = scratch(&format!("assign{level}"));
+        std::fs::write(dir.join("lit.c"), source).expect("the fixture can be written");
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .current_dir(&dir)
+            .args([level, "lit.c", "-o", "lit"])
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let ran = Command::new(dir.join("lit")).output().expect("what was linked can be run");
+        assert!(ran.status.success(), "{level}");
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout),
+            "0 3 hi 0 0 -1\n3 1 0\n2 0 3\n",
+            "{level}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
