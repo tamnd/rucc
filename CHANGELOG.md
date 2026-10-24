@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - `__builtin_dynamic_object_size` of a pointer chosen at a join whose ways bring different sizes is now the PHI of those sizes, as gcc builds it, and not the largest or the smallest. A way that a `switch` took and a later `switch` on the same value turns away from the question is left out of the join, as gcc has threaded the two by the time it answers. mac80211's `ieee80211_parse_tpe_data` picks `out` by a switch on `interpret`, the 5 entries of an EIRP or the 16 of a PSD, with no default, and copies to it under a second switch on `interpret`. rucc folded away the three field spanning WARNs gcc keeps at net/mac80211/parse.c lines 278, 296 and 305, which showed in the arm64 `allmodconfig` sections differential for parse.o and mac80211.ko. (#3835)
+- A direct call to a function in the unit whose every return gives the same integer now reads that integer, as gcc 14's return value range does at `-O2`. This runs once every body has been optimized, and then the caller's tests on the result are folded. tegra241-cmdqv's `tegra241_vintf_alloc_lvcmdq_user` unwinds through a WARN at line 1218 when `tegra241_vcmdq_hw_init_user` or `tegra241_vintf_init_lvcmdq` fails, and both of those always return 0. gcc 14 drops the error paths, while rucc kept the WARN, which showed as a rucc-only `__bug_table` entry in the 7.2.8 arm64 `allmodconfig` sections differential. (#3837)
 
 ## 0.30.12
 
