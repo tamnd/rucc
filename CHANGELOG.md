@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A `memset` call for a large object filled with a constant byte now passes the byte as one `movl` or `xorl` of the `int`, as gcc writes it. It was a `movb` of the byte and then a `movzbl` of the register. This is on each call that clears a large local or a large structure, for example the zeroed objects of Linux 7.3.
+
 ## 0.30.12
 
 This patch release fixes the X64 allmodconfig link of Linux 7.3 and two faults in the fedora-46 nightly on 7.3 X64: the curve25519 oops and the blowfish self-test WARNING. It also has more object size answers that agree with gcc for the fortified string functions.
