@@ -656,7 +656,9 @@ impl<'a> Checker<'a> {
         let mut at = ty;
         loop {
             if let Some((name, of)) = spelled {
-                if self.types.unqualified(at) == self.types.unqualified(of) {
+                if self.types.unqualified(at) == self.types.unqualified(of)
+                    || self.same_object(at, of)
+                {
                     self.use_type(Used::Spelled(name, of));
                     return;
                 }
@@ -671,6 +673,15 @@ impl<'a> Checker<'a> {
         if !matches!(self.types.kind(at), TypeKind::Function(_) | TypeKind::Void) {
             self.use_type(Used::Type(at));
         }
+    }
+
+    /// Whether `at` is the array `of` names with a qualifier or an address space over it, which C
+    /// puts on the elements, so that `(const banks_t *)p` and the kernel's
+    /// `(typeof(perf_trace_t) __percpu *)` in `alloc_percpu` keep the name as gcc keeps it.
+    fn same_object(&mut self, at: TypeId, of: TypeId) -> bool {
+        let (at, of) = (self.types.canonical(at), self.types.canonical(of));
+        matches!(self.types.kind(of), TypeKind::Array { .. })
+            && self.types.unqualified_object(at) == self.types.unqualified_object(of)
     }
 
     /// The conversions, over this tree and these types.

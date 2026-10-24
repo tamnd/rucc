@@ -1906,11 +1906,18 @@ fn fitted(func: &mut Func, inst: Inst, value: Value, want: Type) -> Value {
 }
 
 /// A value widened to an `int`, or the value itself when it is one already.
+///
+/// A constant byte becomes a constant `int`, so the argument is one move of the wide value, as gcc
+/// writes it. Widened as a value, it was a move of the byte and a `movzbl` of the register after
+/// it, which is what every `memset` call for a large zeroed object paid.
 fn widened(func: &mut Func, inst: Inst, value: Value) -> Value {
     let int = Type::int(32);
     let ty = func[value].ty;
     if ty == int {
         return value;
+    }
+    if let Some(byte) = literal(func, value) {
+        return ahead_const(func, inst, Imm::int(i128::from(byte), int), int);
     }
     ahead(func, inst, Opcode::ZExt, &[value], int)
 }
@@ -2872,6 +2879,19 @@ mod tests {
         assert!(!text.contains("memset"), "the fill is gone: {text}");
         assert_eq!(text.matches("store").count(), 2, "a store per word: {text}");
         assert!(!text.contains("load"), "a fill reads nothing: {text}");
+    }
+
+    /// A fill too large for stores is a call to `memset`, and a constant byte is passed as a
+    /// constant `int` and not as the byte extended after it is in a register.
+    #[test]
+    fn a_large_fill_passes_its_constant_byte_as_a_constant_int() {
+        let (mut names, mut func) = filling(1024, 8, 0);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memset"), "{text}");
+        assert!(text.contains("iconst.i32 0"), "{text}");
+        assert!(!text.contains("zext"), "{text}");
     }
 
     /// The spreading is arithmetic on the byte, which is the thing a rule cannot do and the
