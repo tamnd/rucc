@@ -150,6 +150,7 @@ pub fn answer(
                 answered: Map::default(),
                 moved: Cell::new(false),
                 through: Cell::new(false),
+                differed: Cell::new(false),
                 ways: Cell::new(WAYS),
                 splits: Cell::new(WAYS),
                 places: OnceCell::new(),
@@ -259,6 +260,35 @@ enum Answer {
 /// One edge into a join of [`Answer::Joined`]: the branch, the edge, and the address it passes
 /// with the answer for it.
 type Way = (Inst, Idx<BlockCall>, Option<(Value, Answer)>);
+
+/// The values of what a `switch` is on that take one way out of it, as [`Walk::chosen`] found
+/// them.
+enum Chosen {
+    /// The cases that go that way.
+    Only(Vec<i128>),
+    /// Any value but the cases that go elsewhere, where the default goes that way.
+    Not(Vec<i128>),
+}
+
+impl Chosen {
+    /// Whether the value is one of these.
+    fn lets(&self, value: i128) -> bool {
+        match self {
+            Chosen::Only(values) => values.contains(&value),
+            Chosen::Not(values) => !values.contains(&value),
+        }
+    }
+
+    /// Whether a value none of the cases has is one of these.
+    fn outside(&self, cases: &[Imm], ty: Type) -> bool {
+        match self {
+            Chosen::Only(values) => {
+                values.iter().any(|&value| cases.iter().all(|case| case.signed(ty) != value))
+            }
+            Chosen::Not(_) => true,
+        }
+    }
+}
 
 /// The object an address is in, as [`Walk::within`] found it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -604,6 +634,9 @@ struct Walk<'a> {
     /// Whether the last walk for the closest member stopped at a member of an object it reached
     /// through a pointer, rather than one of a local or a global it stepped into.
     through: Cell<bool>,
+    /// Whether the last walk met a join whose ways brought different sizes, which it put
+    /// together into the largest or the smallest of them.
+    differed: Cell<bool>,
     /// How many more ways into a join [`Walk::running`] may follow for the question it is on, so
     /// that joins one after another, each followed on every way into it, are not followed for a
     /// time that grows as a power of how many there are.
@@ -675,9 +708,22 @@ impl Walk<'_> {
         let largest = ask.largest;
         self.moved.set(false);
         self.through.set(false);
+        self.differed.set(false);
         self.ways.set(WAYS);
         let known = self.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten();
         let unknown = if largest { -1 } else { 0 };
+        // Ways into a join that bring different sizes are the PHI of them for the dynamic
+        // spelling, not the largest or the smallest. mac80211's `ieee80211_parse_tpe_data` copies
+        // into `out`, the 5 entries of an EIRP or the 16 of a PSD, and gcc keeps the field spanning
+        // WARN that checks the copy against the array it came with.
+        if known.is_some() && dynamic && kind != SMALLEST_MEMBER && self.differed.get() {
+            let (moved, through) = (self.moved.get(), self.through.get());
+            if let Some(joined) = self.split(address, at, ty, asked, depth) {
+                return joined;
+            }
+            self.moved.set(moved);
+            self.through.set(through);
+        }
         match known {
             // A pointer a loop moves has the most room where it starts, which is what the walk
             // found, and gcc answers the dynamic spelling with the room it has on the trip the
@@ -718,6 +764,9 @@ impl Walk<'_> {
     /// pointer is not null brings nothing, the way gcc has threaded that branch by the time it
     /// answers. maple_tree's `node_copy` copies to `ma_gaps (dst, d_mt) + d_start` inside `if
     /// (d_gaps)`, and `ma_gaps` gives back one of two members or `NULL`.
+    ///
+    /// A way a `switch` chose that a later `switch` on the same value turns away from the question
+    /// brings nothing either, for the same reason. See [`Walk::onward`].
     fn split(
         &self,
         address: Value,
@@ -753,10 +802,11 @@ impl Walk<'_> {
         if preds.iter().any(|&pred| self.dom.dominates(block, pred)) {
             return None;
         }
+        let there = self.func.block_of(question)?;
         let mut ways = Vec::new();
         for pred in preds {
             let term = self.func.terminator(pred)?;
-            let taken = self.taken(pred, block);
+            let taken = self.taken(pred, block) && self.onward(pred, block, there);
             for at in self.func.target_list(term).iter() {
                 let call = self.func[at];
                 if call.block != block {
@@ -785,6 +835,101 @@ impl Walk<'_> {
             true => Some(joined),
             false => Some(Answer::Less(Box::new(joined), steps)),
         }
+    }
+
+    /// Whether a way into the join from `pred` can go on to the question, where a `switch` chose
+    /// the way and another on the same value comes after the join. gcc has threaded the two by the
+    /// time it answers, so a way the second one turns away is not there. mac80211's
+    /// `ieee80211_parse_tpe_data` picks `out` by a switch on `interpret` with no default, so `out`
+    /// is still null on the default way, and copies to it under a second switch on `interpret`
+    /// that only has the cases. The value is the same on both, so the default way never gets to
+    /// the copy.
+    fn onward(&self, pred: Block, block: Block, question: Block) -> bool {
+        let Some((on, chosen)) = self.chosen(pred, block) else { return true };
+        let ty = self.func[on].ty;
+        let mut seen: Set<Block> = Set::default();
+        let mut work = vec![block];
+        seen.insert(block);
+        while let Some(at) = work.pop() {
+            if at == question {
+                return true;
+            }
+            let Some(term) = self.func.terminator(at) else { continue };
+            let gate = self.switch_on(term).filter(|&(value, _)| self.same(value, on));
+            for (arm, call) in self.func.successors(term).enumerate() {
+                let open = match (gate, arm.checked_sub(1)) {
+                    (None, _) => true,
+                    (Some((_, cases)), Some(case)) => chosen.lets(cases[case].signed(ty)),
+                    (Some((_, cases)), None) => chosen.outside(cases, ty),
+                };
+                if open && self.taken(at, call.block) && seen.insert(call.block) {
+                    work.push(call.block);
+                }
+            }
+        }
+        false
+    }
+
+    /// The value a `switch` chose the way from `pred` into `block` by, and the values of it that
+    /// take that way. The `switch` ends `pred`, or a block that `pred` is reached from alone, by
+    /// way of blocks that are reached from one block each.
+    fn chosen(&self, pred: Block, block: Block) -> Option<(Value, Chosen)> {
+        let (mut from, mut to) = (pred, block);
+        for _ in 0..STEPS {
+            let term = self.func.terminator(from)?;
+            if let Some((on, cases)) = self.switch_on(term) {
+                let ty = self.func[on].ty;
+                let (mut only, mut not, mut default) = (Vec::new(), Vec::new(), false);
+                for (arm, call) in self.func.successors(term).enumerate() {
+                    match arm.checked_sub(1) {
+                        None => default = call.block == to,
+                        Some(case) if call.block == to => only.push(cases[case].signed(ty)),
+                        Some(case) => not.push(cases[case].signed(ty)),
+                    }
+                }
+                let chosen = if default { Chosen::Not(not) } else { Chosen::Only(only) };
+                return Some((on, chosen));
+            }
+            let mut preds = self.cfg.predecessors(from).to_vec();
+            preds.dedup();
+            let &[up] = preds.as_slice() else { return None };
+            (from, to) = (up, from);
+        }
+        None
+    }
+
+    /// Whether two values are one, or the same conversion of one. Nothing has merged the copies
+    /// the front end makes by the time the questions are answered, and mac80211 switches twice on
+    /// `interpret`, a `u8` each switch widens on its own.
+    fn same(&self, mut a: Value, mut b: Value) -> bool {
+        for _ in 0..STEPS {
+            if a == b {
+                return true;
+            }
+            let (Def::Result { inst: x, .. }, Def::Result { inst: y, .. }) =
+                (self.func[a].def, self.func[b].def)
+            else {
+                return false;
+            };
+            let (x, y) = (&self.func[x], &self.func[y]);
+            let converts = matches!(x.opcode, Opcode::ZExt | Opcode::SExt | Opcode::Trunc);
+            if !converts || x.opcode != y.opcode || self.func[a].ty != self.func[b].ty {
+                return false;
+            }
+            let (Some(&from), Some(&to)) = (self.func[x.args].first(), self.func[y.args].first())
+            else {
+                return false;
+            };
+            (a, b) = (from, to);
+        }
+        false
+    }
+
+    /// The value a `switch` is on and its case values, one for each target after the default.
+    fn switch_on(&self, term: Inst) -> Option<(Value, &[Imm])> {
+        let Extra::Switch(info) = self.func[term].extra else { return None };
+        let &on = self.func[self.func[term].args].first()?;
+        Some((on, &self.func[self.func[info].cases]))
     }
 
     /// The closest member of an object reached through a pointer, which gcc answers with what is
@@ -868,7 +1013,11 @@ impl Walk<'_> {
                             continue;
                         }
                         let arg = *self.func[call.args].get(index as usize).ok_or(())?;
-                        all = both(all, self.left(arg, ask, depth, on), largest);
+                        let way = self.left(arg, ask, depth, on);
+                        if let (Ok(Some(one)), Ok(Some(other))) = (&all, &way) {
+                            self.differed.set(self.differed.get() || one != other);
+                        }
+                        all = both(all, way, largest);
                     }
                 }
                 on.pop();
@@ -2428,6 +2577,111 @@ block3(%10: ptr):
         assert_eq!(answers(body, true), [28, 28, 15, 0]);
         // And at `-O0` none of it is looked at.
         assert_eq!(answers(body, false), [-1, -1, 0, 0]);
+    }
+
+    /// The dynamic spelling of the same choice is what is left on the way the address came, the
+    /// PHI of sizes gcc 13 builds, where the other spelling is the larger or the smaller. Ways that
+    /// bring the same size are still that one number.
+    #[test]
+    fn a_choice_of_two_objects_asked_when_the_program_runs_is_what_its_way_has_left() {
+        let body = |other: &str| {
+            format!(
+                "
+global @g : bytes 32 = {{ zero 32 }}, align 1, linkage(external)
+
+func @f(i32), linkage(external) {{
+block0(%0: i32):
+    %1 = alloca, size 20, align 16
+    %2 = iconst.i32 0
+    %3 = icmp ne %0, %2
+    br_if %3, block1, block2
+
+block1:
+    %4 = iconst.i64 5
+    %5 = ptr_add %1, %4
+    jump block3(%5)
+
+block2:
+    %6 = global_addr @g
+    %7 = iconst.i64 {other}
+    %8 = ptr_add %6, %7
+    jump block3(%8)
+
+block3(%9: ptr):
+    %10 = object_size.i64 %9, kind 4
+    call @use(%10) : (i64)
+    %11 = object_size.i64 %9, kind 5
+    call @use(%11) : (i64)
+    %12 = object_size.i64 %9, kind 6
+    call @use(%12) : (i64)
+    %13 = object_size.i64 %9, kind 0
+    call @use(%13) : (i64)
+    return
+}}
+"
+            )
+        };
+        let text = printed(&body("4"), Some(&[]));
+        let joined =
+            text.lines().any(|line| line.starts_with("block3(") && line.ends_with(": i64):"));
+        assert!(joined, "the join is given a parameter, {text}");
+        assert!(text.contains("iconst.i64 15") && text.contains("iconst.i64 28"), "{text}");
+        assert_eq!(answers(&body("4"), true), [28]);
+        assert_eq!(answers(&body("17"), true), [15, 15, 15, 15]);
+    }
+
+    /// A way into a choice that a `switch` took and a later `switch` on the same value turns away
+    /// from the question adds nothing to the choice, as gcc has threaded the two by the time it
+    /// answers. The way that leaves the pointer null is the default of the first switch, and the
+    /// second only goes on to the question for a case the first one has. Each switch widens the
+    /// value on its own, as the front end leaves it.
+    #[test]
+    fn a_way_a_later_switch_on_the_same_value_turns_away_is_not_part_of_the_choice() {
+        let body = |cases: &str| {
+            format!(
+                "
+func @f(i8), linkage(external) {{
+block0(%0: i8):
+    %1 = alloca, size 20, align 16
+    %2 = iconst.i64 0
+    %3 = inttoptr.ptr %2
+    %4 = zext.i32 %0
+    switch %4, block1(%3), [0 => block2, 1 => block3]
+
+block1(%5: ptr):
+    %6 = zext.i32 %0
+    switch %6, block4, [{cases}]
+
+block2:
+    %7 = iconst.i64 5
+    %8 = ptr_add %1, %7
+    jump block1(%8)
+
+block3:
+    %9 = iconst.i64 12
+    %10 = ptr_add %1, %9
+    jump block1(%10)
+
+block4:
+    return
+
+block5:
+    %11 = object_size.i64 %5, kind 5
+    call @use(%11) : (i64)
+    %12 = object_size.i64 %5, kind 4
+    call @use(%12) : (i64)
+    return
+}}
+"
+            )
+        };
+        let text = printed(&body("0 => block5, 1 => block5"), Some(&[]));
+        let joined =
+            text.lines().any(|line| line.starts_with("block1(") && line.ends_with(": i64):"));
+        assert!(joined, "the join is given a parameter, {text}");
+        assert!(text.contains("iconst.i64 15") && text.contains("iconst.i64 8"), "{text}");
+        assert_eq!(answers(&body("0 => block5, 1 => block5"), true), []);
+        assert_eq!(answers(&body("0 => block5, 7 => block5"), true), [-1, -1]);
     }
 
     /// A pointer carried round a loop and replaced on some trips is the choice of every address it
