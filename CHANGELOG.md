@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A `memset` call for a large object filled with a constant byte now passes the byte as one `movl` or `xorl` of the `int`, as gcc writes it. It was a `movb` of the byte and then a `movzbl` of the register. This is on each call that clears a large local or a large structure, for example the zeroed objects of Linux 7.3.
+- `__builtin_dynamic_object_size` of a pointer chosen at a join whose ways bring different sizes is now the PHI of those sizes, as gcc builds it, and not the largest or the smallest. A way that a `switch` took and a later `switch` on the same value turns away from the question is left out of the join, as gcc has threaded the two by the time it answers. mac80211's `ieee80211_parse_tpe_data` picks `out` by a switch on `interpret`, the 5 entries of an EIRP or the 16 of a PSD, with no default, and copies to it under a second switch on `interpret`. rucc folded away the three field spanning WARNs gcc keeps at net/mac80211/parse.c lines 278, 296 and 305, which showed in the arm64 `allmodconfig` sections differential for parse.o and mac80211.ko. (#3835)
 
 ## 0.30.12
 
