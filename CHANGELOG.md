@@ -4,6 +4,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The debug information has the three typedef names that the BTF of gcc's 7.3 X64 kernel has and rucc's did not. A cast to an array typedef name with a qualifier or an address space over it now keeps the name, as the kernel's `alloc_percpu(perf_trace_t)` does. `typeof(&f)` is now a pointer to the typedef name that `f` was declared with, as the kernel's `static_call_update` does for `amd_pmu_branch_reset_t` and `perf_snapshot_branch_stack_t`.
+- A function under `ms_abi` is again a function type of its own in the debug information and not the typedef name it was written with, as gcc 14 to 16.2 write it. The kernel's `efi_get_time_t __efiapi *get_time` is a pointer to a function in gcc's BTF. Its parameters still keep the names they were written with.
+
 ## 0.30.12
 
 This patch release fixes the X64 allmodconfig link of Linux 7.3 and two faults in the fedora-46 nightly on 7.3 X64: the curve25519 oops and the blowfish self-test WARNING. It also has more object size answers that agree with gcc for the fortified string functions.

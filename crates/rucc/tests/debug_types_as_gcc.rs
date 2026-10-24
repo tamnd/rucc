@@ -1104,9 +1104,10 @@ int f(void) { return fixed[0]; }
     assert_eq!((name.tag, name.name.as_deref()), (DW_TAG_TYPEDEF, Some("banks_t")));
 }
 
-/// A function under `ms_abi` keeps the typedef names it was written with, for itself and for its
-/// parameters. The kernel's `efi_get_time_t __efiapi *get_time` is a pointer to `efi_get_time_t` in
-/// gcc's BTF, and `efi_status_t (__efiapi *handler_addr)(u64, void *)` has a `u64` parameter.
+/// A function under `ms_abi` is a new function type and not the typedef name it was written with,
+/// as gcc 14 to 16.2 write it, but its parameters keep their names. The kernel's
+/// `efi_get_time_t __efiapi *get_time` is a pointer to a function in gcc's BTF and not to
+/// `efi_get_time_t`, and `efi_status_t (__efiapi *handler_addr)(u64, void *)` has a `u64` parameter.
 #[test]
 fn a_function_under_another_convention_keeps_its_names() {
     let source = "\
@@ -1122,12 +1123,51 @@ struct svc { get_time_t __attribute__((ms_abi)) *get_time; long (__attribute__((
     };
     let get_time = member("get_time");
     assert_eq!(get_time.tag, DW_TAG_POINTER);
-    let name = at(&all, get_time.ty.expect("a pointer has a type"));
-    assert_eq!((name.tag, name.name.as_deref()), (DW_TAG_TYPEDEF, Some("get_time_t")));
+    let function = at(&all, get_time.ty.expect("a pointer has a type"));
+    assert_eq!(function.tag, DW_TAG_SUBROUTINE);
+    let param = &all[function.children[0]];
+    let pointer = at(&all, param.ty.expect("a parameter has a type"));
+    let tm = at(&all, pointer.ty.expect("a pointer has a type"));
+    assert_eq!((tm.tag, tm.name.as_deref()), (DW_TAG_TYPEDEF, Some("tm_t")));
+    assert!(named(&all, DW_TAG_TYPEDEF, "get_time_t").is_none(), "nothing names get_time_t");
     let h = member("h");
     let function = at(&all, h.ty.expect("a pointer has a type"));
     assert_eq!(function.tag, DW_TAG_SUBROUTINE);
     let param = &all[function.children[0]];
     let u64 = at(&all, param.ty.expect("a parameter has a type"));
     assert_eq!((u64.tag, u64.name.as_deref()), (DW_TAG_TYPEDEF, Some("u64")));
+}
+
+/// A cast to an array typedef name with a qualifier or an address space over it keeps the name, as
+/// gcc keeps it. C puts the qualifier on the elements, so the type of the cast is no longer the name
+/// itself. The kernel's `alloc_percpu(perf_trace_t)` casts to `typeof(perf_trace_t) __percpu *`,
+/// and gcc's BTF has `perf_trace_t` for it.
+#[test]
+fn a_cast_to_a_qualified_array_typedef_keeps_its_name() {
+    let source = "\
+typedef unsigned long fixed_t[8];
+typedef unsigned long trace_t[8];
+void *alloc(unsigned long);
+const void *f(void) { return (const fixed_t *)alloc(64); }
+void __seg_gs *g(void) { return (typeof(trace_t) __seg_gs *)alloc(64); }
+";
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "qualified-cast", source));
+    assert!(named(&all, DW_TAG_TYPEDEF, "fixed_t").is_some(), "the const cast keeps fixed_t");
+    assert!(named(&all, DW_TAG_TYPEDEF, "trace_t").is_some(), "the __seg_gs cast keeps trace_t");
+}
+
+/// `typeof(&f)` is a pointer to the typedef name `f` was declared with, as gcc keeps it. The
+/// kernel's `static_call_update` declares `typeof(&__SCT__name) __F`, and gcc's BTF has the
+/// static call's typedef, such as `amd_pmu_branch_reset_t`, for it.
+#[test]
+fn the_address_of_a_name_keeps_the_typedef_it_was_declared_with() {
+    let source = "\
+typedef void (reset_t)(void);
+extern typeof(reset_t) tramp;
+void reset(void);
+void update(void *, void *);
+void f(void) { typeof(&tramp) F = reset; update(F, F); }
+";
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "address-spelled", source));
+    assert!(named(&all, DW_TAG_TYPEDEF, "reset_t").is_some(), "typeof(&tramp) keeps reset_t");
 }

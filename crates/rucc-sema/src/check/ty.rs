@@ -225,10 +225,15 @@ impl Checker<'_> {
 
     /// The typedef name the type of a checked expression is spelled with, which is what
     /// `typeof` of it keeps: the first declaration's for a name, and the member's own for
-    /// `a.m` and `p->m`, which gcc keeps the same way.
+    /// `a.m` and `p->m`, which gcc keeps the same way. `&x` is spelled the way `x` is, as
+    /// `name *p` is, so the kernel's `typeof(&__SCT__name)` in `static_call_update` points at
+    /// the static call's typedef.
     fn expr_spelled_with(&self, node: crate::expr::ExprId) -> Option<(Symbol, TypeId)> {
         match self.tast[node].kind {
             crate::expr::ExprKind::Decl(decl) => self.first_spellings.get(&decl).copied().flatten(),
+            crate::expr::ExprKind::Unary { op: ast::UnaryOp::AddrOf, operand } => {
+                self.expr_spelled_with(operand)
+            }
             crate::expr::ExprKind::Member { base, field } => {
                 let base = self.types.canonical(self.tast[base].ty);
                 let TypeKind::Record(record) = self.types.kind(base) else { return None };
