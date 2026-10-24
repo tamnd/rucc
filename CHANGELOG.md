@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- `__builtin_dynamic_object_size` of a pointer chosen at a join whose ways bring different sizes is now the PHI of those sizes, as gcc builds it, and not the largest or the smallest. A way that a `switch` took and a later `switch` on the same value turns away from the question is left out of the join, as gcc has threaded the two by the time it answers. mac80211's `ieee80211_parse_tpe_data` picks `out` by a switch on `interpret`, the 5 entries of an EIRP or the 16 of a PSD, with no default, and copies to it under a second switch on `interpret`. rucc folded away the three field spanning WARNs gcc keeps at net/mac80211/parse.c lines 278, 296 and 305, which showed in the arm64 `allmodconfig` sections differential for parse.o and mac80211.ko. (#3835)
+
 ## 0.30.12
 
 This patch release fixes the X64 allmodconfig link of Linux 7.3 and two faults in the fedora-46 nightly on 7.3 X64: the curve25519 oops and the blowfish self-test WARNING. It also has more object size answers that agree with gcc for the fortified string functions.
