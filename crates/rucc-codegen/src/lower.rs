@@ -2697,14 +2697,16 @@ impl<'a> Lowering<'a> {
             let ty = self.source[value].ty;
             // A constant the callee reads extended is written extended, in one `mov` of the 32 bit
             // value, which is what gcc writes. Put in a register as itself, it is a `mov` of the
-            // narrow value and an extension of the register after it.
+            // narrow value and an extension of the register after it. It keeps its own type, so
+            // that one that goes to memory is still stored at its own width: Apple's AArch64
+            // packs a `short` after a `char` at `[sp, #2]`.
             if let Some(wide) = self.extended_constant(value, ty, abi) {
                 let block = self.at.expect("a block is being filled");
                 let reg = self.out.new_vreg(self.gpr);
                 let small = mir::Opcode::new(self.names.intern(self.selector.abi.small));
                 let span = self.source.span(inst);
                 self.out.build(block, small).at(span).def(reg, self.gpr).imm(wide).finish();
-                args.push(abi::Passing { ty: Type::int(32), reg, abi: Abi::Plain });
+                args.push(abi::Passing { ty, reg, abi: Abi::Plain });
                 continue;
             }
             // What travels for an eighty bit value is its bytes, so what the call is handed is
