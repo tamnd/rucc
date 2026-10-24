@@ -1534,6 +1534,14 @@ impl Walk<'_> {
                 let args = &self.func[data.args];
                 let (imm, ty) = self.number(*args.get(1)?, NUMBER)?;
                 let step = u64::try_from(imm.signed(ty)).ok()?;
+                // A member that may run past its end is asked about as the whole object, as
+                // `left` asks it, or a way into a join behind it would answer with a member the
+                // address is not in. mxs-dcp's `dcp_sha_import` clears `crypto_ahash_ctx (tfm)`,
+                // the `__crt_ctx[]` of the `base` an inlined `crypto_ahash_tfm` gives back, and
+                // `base` has nothing left there.
+                let open =
+                    data.extra.member() == Some(0) || matches!(data.extra, Extra::Trailing(_));
+                let ask = if ask.closest && open { Ask { closest: false, ..ask } } else { ask };
                 let mut running = self.running(args[0], ask, size, depth, on)?;
                 running.offset = running.offset.checked_add(step)?;
                 Some(running)
@@ -2523,6 +2531,35 @@ block2:
         assert_eq!(text.matches("icmp ugt").count(), 1, "{text}");
         assert!(text.contains("iconst.i64 32"), "{text}");
         assert_eq!(answers(&body.replace("STEP", "0"), true), [32, 32]);
+    }
+
+    /// A step to a member that may run past its end, behind a join that brings a member the
+    /// walk knows the length of, is asked about as the whole object, which through a pointer is
+    /// not known. That is mxs-dcp's `crypto_ahash_ctx (tfm)` under gcc 12, where `base` is 128
+    /// bytes and `__crt_ctx[]` starts at its end, and gcc answers both spellings with -1. A plain
+    /// step leaves the question about `base`, which has nothing left.
+    #[test]
+    fn a_member_that_runs_past_its_end_behind_a_join_is_the_whole_object() {
+        let body = "
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i64 128
+    %2 = ptr_add %0, %1, member 128
+    jump block1(%2)
+
+block1(%3: ptr):
+    %4 = iconst.i64 128
+    %5 = ptr_add %3, %4MARK
+    %6 = object_size.i64 %5, kind 5
+    call @use(%6) : (i64)
+    %7 = object_size.i64 %5, kind 1
+    call @use(%7) : (i64)
+    return
+}
+";
+        assert_eq!(answers(&body.replace("MARK", ", array 0"), true), [-1, -1]);
+        assert_eq!(answers(&body.replace("MARK", ", trailing 8"), true), [-1, -1]);
+        assert_eq!(answers(&body.replace("MARK", ""), true), [0, 0]);
     }
 
     /// A pointer a loop moves through what an allocator gave back has, for the dynamic spelling,
