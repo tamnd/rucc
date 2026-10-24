@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.12
+
+This patch release fixes the X64 allmodconfig link of Linux 7.3 and two faults in the fedora-46 nightly on 7.3 X64: the curve25519 oops and the blowfish self-test WARNING. It also has more object size answers that agree with gcc for the fortified string functions.
+
 ### Fixed
 
 - An `asm` operand that the allocator keeps on the stack is no longer carried in a register the template clobbers. On x86-64 the allocator holds back `r10` and `r11` to carry such a value, and on AArch64 it holds back `x16` and `x17`. A template that clobbers one of these now has each register operand pinned to a register the template does not touch. Linux 7.3's `cswap2` in lib/crypto/x86/curve25519.h clobbers `r8` to `r10`. At `montgomery_ladder` its second pointer came in through `r10`, the template wrote `r10` and then stored through it, and the curve25519 KUnit suite got a NULL pointer oops. The `"+&r"` pointers of `fmul` and `fsqr` in the same file went to `r10` the same way.
