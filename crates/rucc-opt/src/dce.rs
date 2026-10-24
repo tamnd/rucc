@@ -277,6 +277,21 @@ fn answered(func: &Func, inst: Inst) -> bool {
             .is_some_and(|(imm, _)| imm.unsigned() != 0)
 }
 
+/// Whether this is a local of a fixed size whose address nothing uses, which is an allocation
+/// nothing addresses with no memory analysis needed to say so.
+///
+/// Asked only once the count says the address is used by nothing, because no instruction can
+/// reach the bytes of a local without its address. One is left this way when [`crate::sroa`]
+/// turns the local that held its address into values, or when a test that guarded every use of
+/// it is settled. The kernel's `iwl_rfi_send_config_cmd` in 7.3 is the second. Its callee always
+/// returns false, so every use of `cmd` goes, and its frame was 792 bytes where gcc's is 8.
+fn unaddressed(func: &Func, inst: Inst) -> bool {
+    let data = &func[inst];
+    data.opcode == Opcode::Alloca
+        && func[data.args].is_empty()
+        && !data.flags.contains(Flags::VOLATILE)
+}
+
 /// What to do with this instruction.
 fn verdict(func: &Func, inst: Inst, uses: &[u32], facts: &Facts) -> Verdict {
     let data = &func[inst];
@@ -288,6 +303,9 @@ fn verdict(func: &Func, inst: Inst, uses: &[u32], facts: &Facts) -> Verdict {
     }
     if !data.results().all(|value| uses[value.index()] == 0) {
         return Verdict::Used;
+    }
+    if unaddressed(func, inst) {
+        return Verdict::Dead;
     }
     if !removable(func, inst, facts) {
         return Verdict::Effects;
