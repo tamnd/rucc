@@ -1613,6 +1613,49 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             None => report.spent.push((ipcp::NAME, fuel.spent())),
         }
     }
+    // And what a call gives back, after that sweep for the same reason it is late: a body only
+    // gives back one number once the passes have folded it, and a constant the sweep put in a
+    // callee can be what makes it one. A caller that gets the number has its test settled and the
+    // branch it guarded taken away. See [`ipvrp::returns`].
+    if wants_ipvrp {
+        let graph = CallGraph::of(module, opts.interposition);
+        let mut fuel = match (allowance.get(ipvrp::NAME).copied(), budget) {
+            (Some(count), Some(left)) => Fuel::of(count.min(left)),
+            (Some(count), None) => Fuel::of(count),
+            (None, Some(left)) => Fuel::of(left),
+            (None, None) => Fuel::unlimited(),
+        };
+        let started = Instant::now();
+        let changed = ipvrp::returns(module, &graph, &mut fuel);
+        for (id, stats) in changed {
+            for pass in ["sccp", "simplify-cfg", "dce"].into_iter().filter_map(pass::find) {
+                let mut an = Analyses::new(machine);
+                let tidied = pass.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+                report.remarks.push(Remark {
+                    pass: pass.name(),
+                    func: module[id].name,
+                    stats: tidied,
+                });
+            }
+            if opts.verify {
+                if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
+                    let func = names.resolve(module[id].name);
+                    for error in errors {
+                        report.broke.push(format!(
+                            "the {} return sweep left invalid IR in {func}, {error}",
+                            ipvrp::NAME
+                        ));
+                    }
+                }
+            }
+            report.remarks.push(Remark { pass: ipvrp::NAME, func: module[id].name, stats });
+        }
+        report.took(ipvrp::NAME, ipvrp::PHASE, started.elapsed(), Duration::ZERO);
+        match report.spent.iter_mut().find(|(it, _)| *it == ipvrp::NAME) {
+            Some((_, total)) => *total += fuel.spent(),
+            None => report.spent.push((ipvrp::NAME, fuel.spent())),
+        }
+    }
     // Last, once every pass that takes a call away has run. See [`inline::drop_unreferenced`].
     // Not at `-O0`, where nothing took a call away and gcc keeps what the source calls.
     if opts.level != OptLevel::O0 {
@@ -1702,7 +1745,7 @@ mod tests {
 
     use super::{Dumps, Options, for_level};
     use crate::stats::Kind;
-    use crate::{Pass, ipasra, ipcp, libcall, pass};
+    use crate::{Pass, ipasra, ipcp, ipvrp, libcall, pass};
 
     /// A module with one function whose body has something to fold in it.
     fn module() -> (Interner, Module) {
@@ -2355,11 +2398,12 @@ mod tests {
         // different pipeline at every step. One line per name rather than one per place the list
         // names it, because what a name was given is one allowance across all of them.
         let mut want: Vec<&str> = opts.passes().into_iter().map(Pass::name).collect();
-        // And the three transformations that are not in that list, because they are a module at a
+        // And the four transformations that are not in that list, because they are a module at a
         // time rather than one function at a time. They spend out of the same budget and are
         // bisected the same way, so they belong in the same accounting.
         want.push(ipcp::NAME);
         want.push(ipasra::NAME);
+        want.push(ipvrp::NAME);
         want.push(libcall::NAME);
         want.sort_unstable();
         want.dedup();

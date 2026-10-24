@@ -75,8 +75,8 @@ use rucc_diag::{SourceMap, Span};
 use rucc_sema::{DeclId, DeclKind, Definition, Linkage, Stmt, StmtId, StorageDuration, Tast, Used};
 use rucc_target::{Lane, TargetInfo, TypeName};
 use rucc_types::{
-    ArrayLen, FunctionId, FunctionType, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type,
-    TypeId, TypeKind, Types,
+    ArrayLen, FunctionId, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type, TypeId,
+    TypeKind, Types,
 };
 
 /// Everything the debug information says about what a unit's addresses mean.
@@ -955,7 +955,7 @@ impl Walk<'_> {
     /// One level of [`Walk::walked`].
     fn layered_over(&mut self, ty: Type, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
         let base = spaceless(self.types.get(of));
-        if ty == base || self.reconvened(ty, base) {
+        if ty == base {
             return self.alias(name, of);
         }
         // `const name` for an array name is an array of const elements, since C puts the
@@ -1012,18 +1012,6 @@ impl Walk<'_> {
         let at = self.out.len();
         self.out.push(shape);
         Some(at)
-    }
-
-    /// Whether `ty` is the function `base` under another calling convention, as
-    /// `efi_get_time_t __efiapi *get_time` makes of it. gcc keeps the name for it and says nothing
-    /// in the debug information about the convention.
-    fn reconvened(&self, ty: Type, base: Type) -> bool {
-        let (TypeKind::Function(which), TypeKind::Function(was)) = (ty.kind, base.kind) else {
-            return false;
-        };
-        let (now, then) = (self.types.signature(which), self.types.signature(was));
-        ty.quals == base.quals
-            && *now == FunctionType { convention: now.convention, ..then.clone() }
     }
 
     /// The qualifiers `id` has over `of` on its elements, where the two are the same array apart
