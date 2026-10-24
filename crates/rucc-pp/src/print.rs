@@ -272,51 +272,61 @@ impl Printer<'_> {
     /// time: a `2` for each file the output leaves, and a `1` for each it goes into.
     fn marker(&mut self, file: FileId, name: &str, line: u32) {
         let chain = self.chain(file);
-        if chain.first() != self.stack.first() {
-            // A file the main one did not include, such as one named by `-include`. Entering
-            // or returning is decided by whether it is already on the stack.
-            let flag = match self.stack.iter().position(|&f| f == file) {
-                Some(at) => {
-                    self.stack.truncate(at + 1);
-                    2
-                }
-                None => {
-                    self.stack.push(file);
-                    1
-                }
-            };
-            self.write_marker(name, line, flag);
+        let shared = if chain.first() == self.stack.first() {
+            self.stack.iter().zip(&chain).take_while(|(a, b)| a == b).count()
         } else {
-            let shared = self.stack.iter().zip(&chain).take_while(|(a, b)| a == b).count();
-            while self.stack.len() > shared {
-                let left = self.stack.pop().unwrap_or(file);
-                let to = self.stack.last().copied().unwrap_or(file);
-                if self.stack.len() == chain.len() {
-                    self.write_marker(name, line, 2);
-                } else if let Some(loc) =
-                    self.included_at(left).and_then(|at| self.sources.presumed_after(at))
-                {
-                    self.write_marker(loc.name, loc.line, 2);
-                } else {
-                    let name = self.sources.file(to).name.clone();
-                    self.write_marker(&name, 1, 2);
-                }
+            // A chain that starts somewhere else, such as a file named by `-include`, which
+            // `<command-line>` reads. The output leaves every file it is in down to the outermost
+            // one, and then names the outermost one of the chain with no flag, as gcc does.
+            self.leave(1, &chain, name, line);
+            let root = chain[0];
+            self.stack.clear();
+            self.stack.push(root);
+            match chain
+                .get(1)
+                .and_then(|&c| self.included_at(c))
+                .and_then(|at| self.sources.presumed(at))
+            {
+                Some(loc) => self.jump(loc.name, loc.line),
+                None => self.jump(name, line),
             }
-            for (at, &next) in chain.iter().enumerate().skip(shared) {
-                self.stack.push(next);
-                let child = chain.get(at + 1);
-                match child
-                    .and_then(|&c| self.included_at(c))
-                    .and_then(|at| self.sources.presumed(at))
-                {
-                    Some(loc) => self.write_marker(loc.name, loc.line, 1),
-                    None => self.write_marker(name, line, 1),
-                }
+            1
+        };
+        self.leave(shared, &chain, name, line);
+        for (at, &next) in chain.iter().enumerate().skip(shared) {
+            self.stack.push(next);
+            let child = chain.get(at + 1);
+            match child.and_then(|&c| self.included_at(c)).and_then(|at| self.sources.presumed(at))
+            {
+                Some(loc) => self.write_marker(loc.name, loc.line, 1),
+                None => self.write_marker(name, line, 1),
             }
         }
         self.file = file;
         self.set_name(name);
         self.line = line;
+    }
+
+    /// Leaves the files on the stack down to the first `depth`, with a `2` for each.
+    ///
+    /// A `2` that comes back to the end of `chain` names `name` and `line`, which are where the
+    /// output goes next. One that comes back to a file the output leaves again names the line
+    /// after the `#include` it comes back from.
+    fn leave(&mut self, depth: usize, chain: &[FileId], name: &str, line: u32) {
+        while self.stack.len() > depth.max(1) {
+            let Some(left) = self.stack.pop() else { break };
+            if self.stack.len() == chain.len() && self.stack[..] == chain[..] {
+                self.write_marker(name, line, 2);
+            } else if let Some(loc) =
+                self.included_at(left).and_then(|at| self.sources.presumed_after(at))
+            {
+                self.write_marker(loc.name, loc.line, 2);
+            } else {
+                let to = self.stack.last().copied().unwrap_or(left);
+                let name = self.sources.file(to).name.clone();
+                self.write_marker(&name, 1, 2);
+            }
+        }
     }
 
     /// Writes one marker with a flag, under `-E` without `-P`.
@@ -596,6 +606,36 @@ mod tests {
              # 3 \"/a.h\" 2\n\
              int a;\n\
              # 2 \"/main.c\" 2\n\
+             int m;\n"
+        );
+    }
+
+    #[test]
+    fn a_deep_header_is_left_one_file_at_a_time_for_another_one() {
+        // The output leaves `c.h` three deep for `e.h` two deep. Each `2` on the way back names
+        // the line after the `#include` it comes back from, and not where `e.h` starts.
+        let mut run = Run::new();
+        run.file("/c.h", "int c;\n");
+        run.file("/b.h", "#include \"c.h\"\n");
+        run.file("/a.h", "#include \"b.h\"\n");
+        run.file("/e.h", "int e;\n");
+        run.file("/d.h", "#include \"e.h\"\n");
+        let text = run.go("#include \"a.h\"\n#include \"d.h\"\nint m;\n");
+        assert_eq!(
+            text,
+            "# 1 \"/main.c\"\n\
+             # 1 \"/a.h\" 1\n\
+             # 1 \"/b.h\" 1\n\
+             # 1 \"/c.h\" 1\n\
+             int c;\n\
+             # 1 \"/b.h\" 2\n\
+             # 1 \"/a.h\" 2\n\
+             # 2 \"/main.c\" 2\n\
+             # 1 \"/d.h\" 1\n\
+             # 1 \"/e.h\" 1\n\
+             int e;\n\
+             # 1 \"/d.h\" 2\n\
+             # 3 \"/main.c\" 2\n\
              int m;\n"
         );
     }
