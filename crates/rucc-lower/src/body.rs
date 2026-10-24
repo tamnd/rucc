@@ -10477,7 +10477,11 @@ impl<'u> Body<'_, 'u> {
         // The kernel's `mldsa_verify` in 7.3 clears a 1024 byte member with
         // `ws->tmp = (struct mldsa_ring_elem){};` in a loop. With a slot for the literal and a
         // copy out of it the frame was 1648 bytes, where gcc's is 208.
-        if self.reads_nothing(rhs) && self.space(place.ty).is_empty() && !self.is_atomic(place.ty) {
+        let room = repr::size_of(self.types(), self.target(), place.ty);
+        if self.reads_nothing(rhs, room)
+            && self.space(place.ty).is_empty()
+            && !self.is_atomic(place.ty)
+        {
             let destination = self.address_of(place, span);
             if self.literal_in_place(place, rhs, destination) {
                 return None;
@@ -10499,29 +10503,102 @@ impl<'u> Body<'_, 'u> {
         None
     }
 
-    /// Whether `expr` is a compound literal whose initializer reads no object, because each of its
-    /// entries is a constant or a string. Such a literal has the same bytes wherever it is built.
-    fn reads_nothing(&self, expr: ExprId) -> bool {
+    /// Whether `expr` is a compound literal whose initializer reads nothing in memory, so that its
+    /// bytes are the same wherever it is built.
+    ///
+    /// An entry may be a constant, a string, an address, and arithmetic on these. It may also
+    /// read a local variable that is kept in a register, since no store can reach one, or one
+    /// that is smaller than `room`, the size of the object assigned to. An object of that size
+    /// does not fit inside the smaller variable, so the two have no byte in common. An entry that
+    /// reads other memory, calls a function or writes anything is not one, because the object the
+    /// literal is assigned to could be what it reads.
+    fn reads_nothing(&self, expr: ExprId, room: u64) -> bool {
         let tast = self.tast();
         let literal = match tast[expr].kind {
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
             _ => expr,
         };
         let ExprKind::CompoundLiteral(decl) = tast[literal].kind else { return false };
+        self.initializer_reads_nothing(decl, room)
+    }
+
+    /// Whether every entry of the initializer of `decl` reads nothing in memory, as
+    /// [`Self::reads_nothing`] says.
+    fn initializer_reads_nothing(&self, decl: DeclId, room: u64) -> bool {
+        let tast = self.tast();
         let Some(init) = tast[decl].init else { return false };
-        tast[init].iter().all(|entry| {
-            let mut value = entry.value;
-            while let ExprKind::Convert { kind, operand } = tast[value].kind {
-                if kind == Conversion::Lvalue {
-                    return false;
+        tast[init].iter().all(|entry| self.value_reads_nothing(entry.value, room))
+    }
+
+    /// Whether working out the value of `expr` reads nothing in memory and has no effect.
+    fn value_reads_nothing(&self, expr: ExprId, room: u64) -> bool {
+        let tast = self.tast();
+        match tast[expr].kind {
+            ExprKind::Const(_) | ExprKind::Str(_) | ExprKind::LabelAddr(_) => true,
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
+                !self.is_volatile(tast[operand].ty) && self.read_reads_nothing(operand, room)
+            }
+            ExprKind::Convert {
+                kind: Conversion::ArrayDecay | Conversion::FunctionDecay,
+                operand,
+            }
+            | ExprKind::Unary { op: UnaryOp::AddrOf, operand } => {
+                self.place_reads_nothing(operand, room)
+            }
+            ExprKind::Convert { kind: Conversion::Hardbool, .. } => false,
+            ExprKind::Convert { operand, .. }
+            | ExprKind::Cast(operand)
+            | ExprKind::Unary {
+                op: UnaryOp::Plus | UnaryOp::Minus | UnaryOp::Not | UnaryOp::BitNot,
+                operand,
+            } => self.value_reads_nothing(operand, room),
+            ExprKind::Binary { lhs, rhs, .. } | ExprKind::Comma { lhs, rhs } => {
+                self.value_reads_nothing(lhs, room) && self.value_reads_nothing(rhs, room)
+            }
+            ExprKind::Cond { cond, then, otherwise } => {
+                self.value_reads_nothing(cond, room)
+                    && self.value_reads_nothing(then, room)
+                    && self.value_reads_nothing(otherwise, room)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether working out where the object `expr` names is reads nothing in memory and has no
+    /// effect. Only the address is worked out, so the object itself is not read.
+    fn place_reads_nothing(&self, expr: ExprId, room: u64) -> bool {
+        let tast = self.tast();
+        match tast[expr].kind {
+            ExprKind::Decl(_) | ExprKind::Str(_) => true,
+            ExprKind::Member { base, .. } => self.place_reads_nothing(base, room),
+            ExprKind::Subscript { base, index } => {
+                self.value_reads_nothing(base, room) && self.value_reads_nothing(index, room)
+            }
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => {
+                self.value_reads_nothing(operand, room)
+            }
+            ExprKind::CompoundLiteral(decl) => self.initializer_reads_nothing(decl, room),
+            _ => false,
+        }
+    }
+
+    /// Whether reading the object `expr` names reads nothing the object assigned to can hold,
+    /// which is so when it is in a local variable that is kept in a register or that is smaller
+    /// than `room`. Only a local variable is asked about, because a static object can be larger
+    /// than its type when its flexible array member is initialized.
+    fn read_reads_nothing(&self, expr: ExprId, room: u64) -> bool {
+        let tast = self.tast();
+        match tast[expr].kind {
+            ExprKind::Decl(decl) => match self.vars.get(&decl) {
+                Some(Local::Value(_)) => true,
+                Some(Local::Slot(_)) => {
+                    repr::size_of(self.types(), self.target(), tast[decl].ty) < room
                 }
-                value = operand;
-            }
-            while let ExprKind::Cast(operand) = tast[value].kind {
-                value = operand;
-            }
-            matches!(tast[value].kind, ExprKind::Const(_) | ExprKind::Str(_))
-        })
+                None => false,
+            },
+            ExprKind::Member { base, .. } => self.read_reads_nothing(base, room),
+            _ => false,
+        }
     }
 
     /// A call, whose value is a value when the return type has one, and `must` where a

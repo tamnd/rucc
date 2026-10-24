@@ -6,7 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
-- An assignment of a compound literal whose initializer is only constants and strings now writes the literal straight into the object, with no slot of its own and no copy. Linux 7.3's `mldsa_verify` in lib/crypto/mldsa.c clears a 1024 byte member with `ws->tmp = (struct mldsa_ring_elem){};` in a loop, and its frame was 1648 bytes on x86-64, where gcc 14's is 208. A literal that reads anything, as in `v = (struct S){ .a = v.b }`, is still built first and then copied.
+- An assignment of a compound literal whose initializer reads nothing that the object could hold now writes the literal straight into the object, with no slot of its own and no copy. The initializer can have constants, strings, addresses, and local variables that are in a register or are smaller than the object. Linux 7.3's `mldsa_verify` in lib/crypto/mldsa.c clears a 1024 byte member with `ws->tmp = (struct mldsa_ring_elem){};` in a loop, and its frame was 1648 bytes on x86-64, where gcc 14's is 208. `txgbe_swnodes_register` fills software node properties with `PROPERTY_ENTRY_STRING` and `SOFTWARE_NODE_REFERENCE`, and its frame went from 1328 bytes to 104. A literal that reads anything else, as in `v = (struct S){ .a = v.b }`, is still built first and then copied.
 
 ## 0.30.12
 
