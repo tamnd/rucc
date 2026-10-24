@@ -2695,6 +2695,20 @@ impl<'a> Lowering<'a> {
             let abi = named.get(index).or_else(|| beyond.get(index - named.len()));
             let abi = abi.copied().unwrap_or_default();
             let ty = self.source[value].ty;
+            // A constant the callee reads extended is written extended, in one `mov` of the 32 bit
+            // value, which is what gcc writes. Put in a register as itself, it is a `mov` of the
+            // narrow value and an extension of the register after it. It keeps its own type, so
+            // that one that goes to memory is still stored at its own width: Apple's AArch64
+            // packs a `short` after a `char` at `[sp, #2]`.
+            if let Some(wide) = self.extended_constant(value, ty, abi) {
+                let block = self.at.expect("a block is being filled");
+                let reg = self.out.new_vreg(self.gpr);
+                let small = mir::Opcode::new(self.names.intern(self.selector.abi.small));
+                let span = self.source.span(inst);
+                self.out.build(block, small).at(span).def(reg, self.gpr).imm(wide).finish();
+                args.push(abi::Passing { ty, reg, abi: Abi::Plain });
+                continue;
+            }
             // What travels for an eighty bit value is its bytes, so what the call is handed is
             // where they are rather than a register they are in, and there is no register they
             // could be in. Everything else about it is a sixteen byte object passed by value and
@@ -5382,6 +5396,26 @@ impl<'a> Lowering<'a> {
         let &[_, count] = &self.source[data.args] else { return None };
         let by = self.splat_bits(count)?;
         (by < bits).then(|| u8::try_from(by).ok()).flatten()
+    }
+
+    /// The 32 bit value a constant argument is once it is extended the way its attribute asks, for
+    /// an argument the convention extends before the call. [`None`] for one that is not a
+    /// constant or that travels as itself.
+    fn extended_constant(&self, value: Value, ty: Type, abi: Abi) -> Option<i64> {
+        (self.selector.abi.extend)(ty, abi)?;
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        let made = &self.source[inst];
+        let Extra::Imm(imm) = made.extra else { return None };
+        if made.opcode != Opcode::IConst {
+            return None;
+        }
+        let bits = ty.bits();
+        let low = self.source[imm].bits() as u64 & ((1u64 << bits) - 1);
+        let wide = match abi {
+            Abi::Sext => ((low << (64 - bits)) as i64) >> (64 - bits),
+            _ => low as i64,
+        };
+        Some(wide)
     }
 
     /// The constant a value is a `splat` of, when it is one.
