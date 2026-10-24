@@ -230,9 +230,8 @@ void nodes(struct Node *n, int k)
     }
 }
 
-/// An assigned literal that reads the object it is assigned to is still built first, so the
-/// object is read before it is written, by its name or through a pointer. One that reads nothing
-/// leaves no old byte behind.
+/// An assigned literal that reads the object it is assigned to still reads it before anything is
+/// written, by its name or through a pointer. One that reads nothing leaves no old byte behind.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn an_assigned_literal_holds_what_its_initializer_says() {
@@ -276,6 +275,82 @@ int main(void)
             "0 3 hi 0 0 -1\n3 1 0\n2 0 3\n",
             "{level}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A literal with entries that read memory or call a function is assigned straight into the
+/// object too, because those entries are worked out first. The kernel's 7.3
+/// `ntfs_init_fs_context` does `*vol = (struct ntfs_volume){ ..., .nls_map = load_nls_default(),
+/// ... };`, and its frame was 1064 bytes on x86-64, where gcc 14's is 40.
+#[test]
+fn a_literal_with_calls_is_assigned_with_no_slot_of_its_own() {
+    let source = r#"
+struct K { int val; };
+struct V { long a[100]; int x, y; void *map; unsigned flag : 3; struct K uid; };
+extern void *load(void);
+extern int count(struct V *);
+
+void init(struct V *v, int k)
+{
+	*v = (struct V){ .x = k, .y = 1, .map = load(), .flag = count(v), .uid = (struct K){ count(v) } };
+}
+
+void swap(struct V *v)
+{
+	*v = (struct V){ .x = v->y, .y = v->x, .a[7] = v->a[3] };
+}
+"#;
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+        let usage = usage(target, source);
+        for function in ["init", "swap"] {
+            let bytes = frame(&usage, function);
+            assert!(bytes <= 64, "{target}: {bytes} bytes for {function}");
+        }
+    }
+}
+
+/// The entries that read memory or call a function see the object as it was before the
+/// assignment, each call is made once, and what the literal does not name is zero.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_literal_with_calls_holds_what_its_initializer_says() {
+    let source = r#"
+extern int printf(const char *, ...);
+struct K { int val; };
+struct V { long a[10]; int x, y; int b : 3; struct K k; };
+static int calls;
+
+__attribute__((noinline)) int peek(struct V *v)
+{
+	calls++;
+	return v->x * 10 + v->y;
+}
+
+int main(void)
+{
+	struct V g;
+	__builtin_memset(&g, 0x5a, sizeof g);
+	struct V *v = &g;
+	v->x = 1;
+	v->y = 2;
+	*v = (struct V){ .x = peek(v), .b = peek(v), .a[3] = v->y, .k = (struct K){ v->x } };
+	printf("%d %d %ld %ld %d %d %d\n", v->x, v->y, v->a[3], v->a[0], v->b, v->k.val, calls);
+	return 0;
+}
+"#;
+    for level in ["-O2", "-O0"] {
+        let dir = scratch(&format!("calls{level}"));
+        std::fs::write(dir.join("lit.c"), source).expect("the fixture can be written");
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .current_dir(&dir)
+            .args([level, "lit.c", "-o", "lit"])
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let ran = Command::new(dir.join("lit")).output().expect("what was linked can be run");
+        assert!(ran.status.success(), "{level}");
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "12 0 2 0 -4 1 2\n", "{level}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
