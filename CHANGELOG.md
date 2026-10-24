@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- An assignment of a compound literal whose initializer is only constants and strings now writes the literal straight into the object, with no slot of its own and no copy. Linux 7.3's `mldsa_verify` in lib/crypto/mldsa.c clears a 1024 byte member with `ws->tmp = (struct mldsa_ring_elem){};` in a loop, and its frame was 1648 bytes on x86-64, where gcc 14's is 208. A literal that reads anything, as in `v = (struct S){ .a = v.b }`, is still built first and then copied.
+
 ## 0.30.12
 
 This patch release fixes the X64 allmodconfig link of Linux 7.3 and two faults in the fedora-46 nightly on 7.3 X64: the curve25519 oops and the blowfish self-test WARNING. It also has more object size answers that agree with gcc for the fortified string functions.

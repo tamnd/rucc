@@ -10470,6 +10470,19 @@ impl<'u> Body<'_, 'u> {
     /// through a temporary and never one lock held across the other, which is what would deadlock
     /// a table that hashes two objects onto one entry.
     fn copy(&mut self, place: Place, rhs: ExprId, ty: TypeId, span: Span) -> Option<Value> {
+        // A literal that reads nothing is written straight into the object, for the reason
+        // [`Self::literal_in_place`] gives. Its initializer cannot see what the object holds, so
+        // what the object holds afterwards is the same as with a copy out of a slot of its own.
+        //
+        // The kernel's `mldsa_verify` in 7.3 clears a 1024 byte member with
+        // `ws->tmp = (struct mldsa_ring_elem){};` in a loop. With a slot for the literal and a
+        // copy out of it the frame was 1648 bytes, where gcc's is 208.
+        if self.reads_nothing(rhs) && self.space(place.ty).is_empty() && !self.is_atomic(place.ty) {
+            let destination = self.address_of(place, span);
+            if self.literal_in_place(place, rhs, destination) {
+                return None;
+            }
+        }
         let source = self.place(rhs);
         let source = self.address_of(source, span);
         let space = self.space(place.ty);
@@ -10484,6 +10497,31 @@ impl<'u> Body<'_, 'u> {
         }
         self.copy_bytes(destination, source, ty, span);
         None
+    }
+
+    /// Whether `expr` is a compound literal whose initializer reads no object, because each of its
+    /// entries is a constant or a string. Such a literal has the same bytes wherever it is built.
+    fn reads_nothing(&self, expr: ExprId) -> bool {
+        let tast = self.tast();
+        let literal = match tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            _ => expr,
+        };
+        let ExprKind::CompoundLiteral(decl) = tast[literal].kind else { return false };
+        let Some(init) = tast[decl].init else { return false };
+        tast[init].iter().all(|entry| {
+            let mut value = entry.value;
+            while let ExprKind::Convert { kind, operand } = tast[value].kind {
+                if kind == Conversion::Lvalue {
+                    return false;
+                }
+                value = operand;
+            }
+            while let ExprKind::Cast(operand) = tast[value].kind {
+                value = operand;
+            }
+            matches!(tast[value].kind, ExprKind::Const(_) | ExprKind::Str(_))
+        })
     }
 
     /// A call, whose value is a value when the return type has one, and `must` where a
