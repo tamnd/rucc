@@ -378,14 +378,21 @@ impl Checker<'_> {
         };
         let counter = *counter;
         let (spelled, array) = (self.text(counter).to_owned(), self.text(decl.name?).to_owned());
-        let Some((found, _)) = fields.iter().find(|(field, _)| field.name == Some(counter)) else {
+        // The counter can be in an anonymous member, as the kernel's `struct posix_acl` has it
+        // inside `struct_group_tagged`, and gcc takes that.
+        let found = fields
+            .iter()
+            .find(|(field, _)| field.name == Some(counter))
+            .map(|(field, _)| field.ty)
+            .or_else(|| self.anonymous_field(fields, counter));
+        let Some(found) = found else {
             let what = format!(
                 "argument '{spelled}' to the 'counted_by' attribute is not a field declaration in \
                  the same structure as '{array}'"
             );
             return refuse(self, what);
         };
-        if !is_integer(&self.types, self.types.canonical(found.ty)) {
+        if !is_integer(&self.types, self.types.canonical(found)) {
             let what = format!(
                 "argument '{spelled}' to the 'counted_by' attribute is not a field declaration \
                  with an integer type"
@@ -393,6 +400,25 @@ impl Checker<'_> {
             return refuse(self, what);
         }
         Some(counter)
+    }
+
+    /// The type of member `name` of an anonymous member among `fields`, at any depth.
+    fn anonymous_field(&self, fields: &[(FieldDecl, Span)], name: Symbol) -> Option<TypeId> {
+        fields.iter().filter(|(field, _)| field.name.is_none()).find_map(|(field, _)| {
+            let TypeKind::Record(inner) = self.types.kind(self.types.canonical(field.ty)) else {
+                return None;
+            };
+            let path = self.find_field(inner, name)?;
+            let mut record = inner;
+            let mut ty = field.ty;
+            for &index in &path {
+                ty = self.types.record_info(record).fields[index as usize].ty;
+                if let TypeKind::Record(next) = self.types.kind(self.types.canonical(ty)) {
+                    record = next;
+                }
+            }
+            Some(ty)
+        })
     }
 
     /// Whether a type is a record that ends in a flexible array member, which gcc calls one that
@@ -626,8 +652,8 @@ impl Checker<'_> {
             self.report(Diagnostic::error(what, span).with_code("E0767"));
             return Some(self.poison(span));
         }
-        if let Some((base, index)) = self.counter_of(operand) {
-            let member = self.member_node(base, index, span);
+        if let Some((base, path)) = self.counter_of(operand) {
+            let member = path.iter().fold(base, |base, &index| self.member_node(base, index, span));
             return Some(self.address_of(member, span));
         }
         let zero = self.answer(false, span);
@@ -636,8 +662,8 @@ impl Checker<'_> {
         Some(self.conv().to_type(zero, void))
     }
 
-    /// The object and the index of the member that counts an array, when it has one.
-    fn counter_of(&self, array: ExprId) -> Option<(ExprId, u32)> {
+    /// The object and the indices that reach the member that counts an array, when it has one.
+    fn counter_of(&self, array: ExprId) -> Option<(ExprId, Vec<u32>)> {
         let ExprKind::Member { base, field } = self.tast[array].kind else { return None };
         let TypeKind::Record(record) = self.types.kind(self.types.canonical(self.tast[base].ty))
         else {
@@ -646,7 +672,6 @@ impl Checker<'_> {
         let fields = &self.types.record_info(record).fields;
         let name = fields[field as usize].name?;
         let counter = *self.annotations.counters.get(&(record, name))?;
-        let index = fields.iter().position(|field| field.name == Some(counter))?;
-        Some((base, u32::try_from(index).ok()?))
+        Some((base, self.find_field(record, counter)?))
     }
 }
