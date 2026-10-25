@@ -563,6 +563,9 @@ impl DeclFlags {
     /// The same for the subscript check, which `bounds` and `bounds-strict` both name.
     pub const NO_UBSAN_BOUNDS: Self = Self(1 << 49);
 
+    /// The same for `unreachable`.
+    pub const NO_UBSAN_UNREACHABLE: Self = Self(1 << 50);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

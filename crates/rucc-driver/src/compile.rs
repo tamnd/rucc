@@ -524,6 +524,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 shift_base: lower_check(opts.sanitize.shift_base),
                                 boolean: lower_check(opts.sanitize.boolean),
                                 bounds: lower_check(opts.sanitize.bounds_strict),
+                                unreachable: lower_check(opts.sanitize.unreachable),
                             },
                             sources: &sess.sources,
                             c23: opts.std >= rucc_session::Std::C23,
