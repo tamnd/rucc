@@ -10109,13 +10109,14 @@ static __inline__ poly8x16_t vmulq_p8(poly8x16_t __a, poly8x16_t __b) {
   return __r;
 }
 static __inline__ poly128_t vmull_p64(poly64_t __a, poly64_t __b) {
-  __Poly128_t __r = 0;
-  for (int __k = 0; __k < 64; __k++)
-    if (__b >> __k & 1) __r ^= (__Poly128_t)__a << __k;
-  return __r;
+  uint64x2_t __x = {__a, 0}, __y = {__b, 0}, __r;
+  __asm__("pmull %0.1q, %1.1d, %2.1d" : "=w"(__r) : "w"(__x), "w"(__y));
+  __Poly128_t __p; __builtin_memcpy(&__p, &__r, sizeof __p); return __p;
 }
 static __inline__ poly128_t vmull_high_p64(poly64x2_t __a, poly64x2_t __b) {
-  return vmull_p64(__a[1], __b[1]);
+  uint64x2_t __x = (uint64x2_t)__a, __y = (uint64x2_t)__b, __r;
+  __asm__("pmull2 %0.1q, %1.2d, %2.2d" : "=w"(__r) : "w"(__x), "w"(__y));
+  __Poly128_t __p; __builtin_memcpy(&__p, &__r, sizeof __p); return __p;
 }
 static __inline__ int8x16_t vreinterpretq_s8_p128(poly128_t __v) {
   int8x16_t __r;
