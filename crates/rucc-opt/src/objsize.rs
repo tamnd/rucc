@@ -981,6 +981,27 @@ impl Walk<'_> {
         false
     }
 
+    /// Whether an address is an element of an array member picked by an index gcc does not know
+    /// yet. gcc keeps the array reference there, and an array reference on the way to a member
+    /// means the member is not at the end of the structure, even where the array is. mwifiex's
+    /// `mwifiex_cfg80211_set_default_key` copies into `key->key_material` with `key` set to
+    /// `&priv->wep_key[key_index]`, and gcc keeps the field spanning WARN that checks it.
+    fn indexed(&self, value: Value) -> bool {
+        let Def::Result { inst, .. } = self.func[value].def else { return false };
+        let data = &self.func[inst];
+        if data.opcode != Opcode::PtrAdd || data.flags.contains(Flags::COUNTED) {
+            return false;
+        }
+        let args = &self.func[data.args];
+        let (Some(&base), Some(&count)) = (args.first(), args.get(1)) else { return false };
+        if self.number(count, NUMBER).is_some() {
+            return false;
+        }
+        let Def::Result { inst, .. } = self.func[base].def else { return false };
+        let data = &self.func[inst];
+        data.opcode == Opcode::PtrAdd && matches!(data.extra, Extra::Array(_) | Extra::Trailing(_))
+    }
+
     /// How many bytes there are from this address to the end of its object.
     ///
     /// `on` is the block parameters whose answer is being worked out, which is how a loop is seen.
@@ -1052,12 +1073,21 @@ impl Walk<'_> {
                     // it says where the pointer is a step into a declared object and is the whole
                     // object otherwise. mwifiex's `mwifiex_cmd_802_11_key_material_v1` clears the
                     // `key_param_set` array of the WEP layout it casts `&cmd->params.key_material`
-                    // to, and gcc answers the closest member there with what `cmd` has left.
+                    // to, and gcc answers the closest member there with what `cmd` has left. In
+                    // an element of an array member at an unknown index, it is as long as it says.
                     Opcode::PtrAdd if ask.closest && matches!(data.extra, Extra::Trailing(_)) => {
                         let Extra::Trailing(size) = data.extra else { return Err(()) };
+                        let base = *args.first().ok_or(())?;
+                        // An element at an index gcc does not know is answered as a member is.
+                        if self.indexed(base) {
+                            if !self.declared(base) {
+                                self.through.set(true);
+                            }
+                            return Ok(Some(u64::from(size)));
+                        }
                         let whole = self.stepped(inst, Ask { closest: false, ..ask }, depth, on);
                         match whole {
-                            Ok(Some(left)) if self.declared(*args.first().ok_or(())?) => {
+                            Ok(Some(left)) if self.declared(base) => {
                                 Ok(Some(left.min(u64::from(size))))
                             }
                             other => other,
@@ -1937,7 +1967,7 @@ impl Walk<'_> {
                             Extra::Member(size) | Extra::Array(size) => {
                                 Ok(Some(Object::Member(value, size)))
                             }
-                            Extra::Trailing(size) if self.declared(base) => {
+                            Extra::Trailing(size) if self.declared(base) || self.indexed(base) => {
                                 Ok(Some(Object::Member(value, size)))
                             }
                             Extra::Trailing(_) => self.object(base, whole, depth, seen),

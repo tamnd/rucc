@@ -210,6 +210,41 @@ void f(struct ctx *c, union both *u, unsigned i) {
 }
 "#;
 
+/// An array at the end of an element picked out of an array member by an index that is only known
+/// when the program runs, which gcc answers with the array's own length wherever the member is in
+/// its record. mwifiex's `mwifiex_cfg80211_set_default_key` copies into
+/// `key->key_material` with `key` set to `&priv->wep_key[key_index]`. A constant index and a
+/// pointer moved with `+` leave gcc with an address it does not know the member of.
+const INDEXED: &str = r#"
+typedef unsigned long size_t;
+struct k { unsigned a, b, c; unsigned char m[16]; };
+struct p { int x; struct k w[4]; int y; };
+struct e { int x; struct k w[4]; };
+struct f { int x; struct k w[]; };
+#define D1(p) __builtin_dynamic_object_size(p, 1)
+#define WANT(name, got, want) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if ((got) != (size_t)(want)) name(); \
+    } while (0)
+void f(struct p *p, struct e *e, struct f *fl, struct k *param, int i) {
+    struct k *k = &p->w[i];
+    WANT(wrong_indexed, D1(k->m), 16);
+    WANT(wrong_indexed_direct, D1(p->w[i].m), 16);
+    struct k *two = &p->w[2];
+    WANT(wrong_indexed_constant, D1(two->m), -1);
+    struct k *moved = p->w + i;
+    WANT(wrong_indexed_moved, D1(moved->m), -1);
+    struct k *last = &e->w[i];
+    WANT(wrong_indexed_last, D1(last->m), 16);
+    struct k *open = &fl->w[i];
+    WANT(wrong_indexed_flexible, D1(open->m), 16);
+    struct k *at = &param[i];
+    WANT(wrong_indexed_pointer, D1(at->m), -1);
+    WANT(wrong_indexed_param, D1(param->m), -1);
+}
+"#;
+
 /// A member of what a pointer points at, which gcc answers with what is left of the member or of
 /// the whole object, whichever is less. cxgb4's `t4_alloc_mac_filt` copies each address into
 /// `p->macaddr` at a `p` its loop moves through a command on the stack, and gcc works the answer
@@ -399,6 +434,14 @@ fn what_is_left_of_a_member_at_a_bounded_index_is_at_least_one_element() {
 fn an_array_in_a_union_inside_a_structure_is_as_long_as_its_type() {
     for level in ["-O1", "-O2", "-Os", "-O3"] {
         let out = compile(&format!("union{level}"), UNION, level);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn an_array_ending_an_element_picked_at_a_variable_index_is_as_long_as_its_type() {
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let out = compile(&format!("indexed{level}"), INDEXED, level);
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }
