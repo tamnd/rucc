@@ -7552,10 +7552,11 @@ decl #0 x : int object external static defined
         // And it reserved the bytes it wrote into, so nothing else in the frame is on top of them.
         assert!(text.contains("\tsubq\t$"), "{text}");
 
-        // A narrower one is written at its own width, matching what the callee reads it back with.
+        // A narrower one is written as the full word, as gcc writes it, and the callee reads back
+        // only its own width.
         let narrow = "int g(int, int, int, int, int, int, int);\n";
         let text = asm(&format!("{narrow}int f(void) {{ return g({six}, 7); }}\n"));
-        assert!(text.contains("\tmovl\t%"), "{text}");
+        assert!(text.contains("\tmovq\t%"), "{text}");
         assert!(text.contains(", (%rsp)\n"), "{text}");
     }
 

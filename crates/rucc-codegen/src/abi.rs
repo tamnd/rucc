@@ -606,6 +606,9 @@ pub struct Insts {
     pub load: fn(Type) -> Option<&'static str>,
     /// The store that writes one of that type into the argument area. See [`store_of`].
     pub store: fn(Type) -> Option<&'static str>,
+    /// The store that writes an argument of that type into its own word of the argument area,
+    /// which is [`Insts::store`] except for a narrow integer. See [`word_of`].
+    pub word: fn(Type) -> Option<&'static str>,
     /// The pseudo a value of that type leaves in the register at that place. See [`ret_of`].
     pub ret: fn(Type, usize) -> Option<&'static str>,
     /// The call of a name. See [`CALL`].
@@ -627,6 +630,7 @@ pub static X86_64: Insts = Insts {
     arg: head_of,
     load: load_of,
     store: store_of,
+    word: word_of,
     ret: ret_of,
     call: CALL,
     call_reg: CALL_REG,
@@ -657,6 +661,7 @@ pub static X86: Insts = Insts {
     arg: |ty| head_at(ty, 32),
     load: |ty| load_at(ty, 32),
     store: |ty| store_at(ty, 32),
+    word: |ty| word_at(ty, 32),
     ret: |ty, at| ret_at(ty, at, 32),
     lea: "x64.lea_32",
     ..X86_64
@@ -948,7 +953,7 @@ pub fn call(
                 position += 1;
             }
             Where::Stack(up) => {
-                let store = (insts.store)(ty).ok_or(refused(Missing::Width))?;
+                let store = (insts.word)(ty).ok_or(refused(Missing::Width))?;
                 on_stack.push((reg, class, names.intern(store), up));
             }
         }
@@ -1437,13 +1442,34 @@ pub fn load_at(ty: Type, address: u32) -> Option<&'static str> {
 /// of the argument area and a caller cannot write into it would be a call turned away for a reason
 /// the function it calls does not have.
 ///
-/// Writing a narrow argument at its own width leaves whatever was already in the rest of the word.
-/// That is allowed, and it is what [`load_of`] is written against: the convention does not say what
-/// is above the value, so the callee reads only the bits that mean anything and neither end has to
-/// agree about the rest.
+/// A callee reads only the bits of a narrow argument that mean anything, since the convention does
+/// not say what is above the value. A caller writes the full word all the same, with [`word_of`].
 #[must_use]
 pub fn store_of(ty: Type) -> Option<&'static str> {
     store_at(ty, 64)
+}
+
+/// What the instruction that writes an argument of that type into its own word of the argument
+/// area is called.
+///
+/// This is [`store_of`], but an integer narrower than the word is written as the full word. The
+/// convention does not say what is above the value, and GCC writes the full word with a `push`.
+/// Some callees read the full word. `syscall` reads each argument as a `long`, and the kernel
+/// then reads a `size_t` out of the word that an `int` was passed in. The `_NSIG / 8` that LTP
+/// gives `io_uring_enter` is such an `int`. With only four bytes written, the kernel read the
+/// four bytes above it from what was on the stack before, and the call failed with `EINVAL`.
+#[must_use]
+pub fn word_of(ty: Type) -> Option<&'static str> {
+    word_at(ty, 64)
+}
+
+/// [`word_of`] for a target whose address is that many bits wide.
+#[must_use]
+pub fn word_at(ty: Type, address: u32) -> Option<&'static str> {
+    if ty.is_int() && ty.lanes() == 1 && ty.bits() < address {
+        return store_at(Type::int(address), address);
+    }
+    store_at(ty, address)
 }
 
 /// [`store_of`] for a target whose address is that many bits wide.
@@ -2082,7 +2108,7 @@ mod tests {
         // above all three of its words.
         let text = mir::print_func(&func, &names, &REGS);
         assert!(text.contains("x64.mov_mr_64 %9, [$rsp + 16]\n"), "{text}");
-        assert!(text.contains("x64.mov_mr_32 %8, [$rsp + 40]\n"), "{text}");
+        assert!(text.contains("x64.mov_mr_64 %8, [$rsp + 40]\n"), "{text}");
         assert_eq!(made.outgoing, 48);
     }
 
@@ -2207,16 +2233,16 @@ mod tests {
         assert!(text.contains("x64.mov_mr_64 %6, [$rsp + 48]\n"), "{text}");
     }
 
-    /// What a stack argument is written with is its own width and its own register file, matching
-    /// what the callee reads it back with.
+    /// A narrow integer on the stack is written as its full word, as GCC writes it, and a floating
+    /// argument is written from its own register file at its own width.
     #[test]
-    fn a_narrow_or_floating_argument_keeps_its_own_store() {
+    fn a_narrow_argument_fills_its_word_and_a_floating_one_keeps_its_own_store() {
         let i64 = Type::int(64);
         let narrow = [i64, i64, i64, i64, i64, i64, Type::int(8)];
         let (names, func, made) = make(&narrow, &[], false, &SYSV);
         made.expect("the seventh goes to memory");
         let text = mir::print_func(&func, &names, &REGS);
-        assert!(text.contains("x64.mov_mr_8 %6, [$rsp]\n"), "{text}");
+        assert!(text.contains("x64.mov_mr_64 %6, [$rsp]\n"), "{text}");
 
         let f32 = Type::float(rucc_ir::Float::F32);
         let (names, func, made) = make(&[f32; 9], &[], false, &SYSV);
