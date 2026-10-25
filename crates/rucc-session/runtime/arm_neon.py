@@ -838,19 +838,29 @@ def emit():
                 "return __r;",
             ],
         )
-    # The same at 64 bits, which is PMULL and PMULL2 from the crypto extension.
+    # The same at 64 bits, which is PMULL and PMULL2 from the crypto extension. The operands are
+    # sixteen byte integer vectors, which are kept in a vector register, since a `w` operand of
+    # an integer type is not taken yet (tamnd/rucc#3866).
     fn(
         "poly128_t",
         "vmull_p64",
         "poly64_t a, poly64_t b",
         [
-            "poly128_t __r = 0;",
-            "for (int k = 0; k < 64; k++)",
-            "  if (b >> k & 1) __r ^= (poly128_t)a << k;",
-            "return __r;",
+            "uint64x2_t __x = {a, 0}, __y = {b, 0}, __r;",
+            '__asm__("pmull %0.1q, %1.1d, %2.1d" : "=w"(__r) : "w"(__x), "w"(__y));',
+            "poly128_t __p; __builtin_memcpy(&__p, &__r, sizeof __p); return __p;",
         ],
     )
-    fn("poly128_t", "vmull_high_p64", "poly64x2_t a, poly64x2_t b", "return vmull_p64(a[1], b[1]);")
+    fn(
+        "poly128_t",
+        "vmull_high_p64",
+        "poly64x2_t a, poly64x2_t b",
+        [
+            "uint64x2_t __x = (uint64x2_t)a, __y = (uint64x2_t)b, __r;",
+            '__asm__("pmull2 %0.1q, %1.2d, %2.2d" : "=w"(__r) : "w"(__x), "w"(__y));',
+            "poly128_t __p; __builtin_memcpy(&__p, &__r, sizeof __p); return __p;",
+        ],
+    )
     for e in ALL:
         v = vt(e, True)
         fn(
