@@ -237,6 +237,10 @@ fn inside(func: &Func, sizes: &Map<Symbol, u64>, access: &Access) -> bool {
         .is_ok_and(|offset| offset.checked_add(size).is_some_and(|end| end <= room))
 }
 
+/// The bytes one shadow byte says are good or bad, which is the shift of three in the shadow
+/// address.
+const GROUP: u64 = 8;
+
 /// The check in front of one access.
 fn check(
     func: &mut Func,
@@ -249,7 +253,7 @@ fn check(
     let kind = if access.write { "store" } else { "load" };
     let inline = match access.size {
         Size::Bytes(size @ (1 | 2 | 4)) => Some(size),
-        Size::Bytes(size @ (8 | 16)) if access.align >= 8 => Some(size),
+        Size::Bytes(size @ (8 | 16)) if u64::from(access.align) >= GROUP => Some(size),
         _ => None,
     };
     match (access.size, inline) {
@@ -299,14 +303,15 @@ fn shadow(
     let after = func.create_block();
     func.move_after(first, after);
     let reports = func.create_block();
-    let partial = (size < 8).then(|| func.create_block());
+    let partial = (size < GROUP).then(|| func.create_block());
     let mut build = rucc_ir::Builder::new(func, block).at(span);
     let three = build.iconst(word, 3);
     let group = build.binary(Opcode::LShr, address, three, Flags::NONE);
     let base = build.iconst(word, offset as i128);
     let at = build.binary(Opcode::Add, group, base, Flags::NONE);
     let at = build.unary(Opcode::IntToPtr, at, Type::PTR);
-    let wide = if size == 16 { Type::int(16) } else { Type::int(8) };
+    // An access of two groups reads their two shadow bytes as one.
+    let wide = if size == 2 * GROUP { Type::int(16) } else { Type::int(8) };
     let info = MemInfo {
         size: size.max(8) / 8,
         align: 1,
