@@ -86,7 +86,7 @@ RISC-V 64, which document 10 calls the middle-end canary. Windows as a host and 
 
 The security and hardening flags the kernel needs: stack protector, stack clash protection, CET, PAC and BTI, the retpoline thunk modes, `-fpatchable-function-entry`. `-mgeneral-regs-only` as a hard constraint. `-mcmodel=kernel` and `-mno-red-zone`.
 
-And the abstraction test: **bring up a fourth target** (i686 or 32-bit ARM) and record the effort number. Either it is a rule set and four data files, as document 10.8 claims, or the number tells us what leaked.
+And the abstraction test: **bring up a fourth target**, which is i686, and record the effort number. Either it is a rule set and four data files, as document 10.8 claims, or the number tells us what leaked. The choice between i686 and 32-bit ARM that used to be open here is settled by the kernel: an x86-64 kernel cannot be built without a 32-bit x86 compiler, since its real mode setup code is compiled with `-m16` and its compat vDSO with `-m32`, and every kernel before 2.6.24 that is not x86-64 is i386 only. 32-bit ARM stays a candidate for a later target and is not needed for anything in M11.
 
 **Exit:** every flag in document 13.7 works rather than being accepted, each with a test that would fail if it were ignored; the fourth target passes rungs 0 and 1; the effort number is published.
 
@@ -97,6 +97,8 @@ Rung 4. Level A first (`defconfig` boots on x86-64 under QEMU with `objtool` cle
 The estimate's spread is honest: this is the milestone where we have the least information, and the `objtool` interaction in particular is an unknown that could be a week or a quarter.
 
 The linker measurement from document 11.6 is taken here, and open question two in document 19 is answered.
+
+The levels are graded by the kernel harness in `tamnd/rucc-kernel`, whose plan splits this milestone into its own K0 to K12, and each level is one of its milestones. Level A is K3: x86-64 boots with KUnit at parity with the reference GCC build and `objtool` reports nothing, graded first on `tinyconfig` with the harness's test fragment, and on `defconfig` at K4 once the i686 target can build its 16 and 32 bit parts. Level B is K5: x86-64 at distribution strength, which is a Debian kernel config with the hardening options, `allmodconfig`, kselftest and LTP. Level C is K8: the performance gate, where no benchmark of a rucc built kernel is more than five percent slower than the GCC build and the geometric mean is within two. The other architectures of level C are K6 for AArch64 and K7 for RISC-V, and they are counted in C rather than being levels of their own.
 
 **Exit:** the three levels of document 14.5, with no source patches.
 
