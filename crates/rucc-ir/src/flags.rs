@@ -237,6 +237,16 @@ impl Flags {
     /// spellings of a call.
     pub const LIBRARY: Self = Self(1 << 26);
 
+    /// The `asm` reads memory the program can see and writes none: its only operands in memory
+    /// are inputs and its clobber list does not name `memory`.
+    ///
+    /// gcc deletes one of these that is not `volatile` when nothing reads its outputs, as it does
+    /// one under [`Self::NOMEM`]. The kernel's `__my_cpu_offset` on arm64 is one, with the stack
+    /// pointer as an input in memory, and a `this_cpu_ptr` handed to a lock hook that is empty
+    /// without lockdep leaves it with no reader. A fact the front end states, like `NOMEM`, and
+    /// never on the same statement.
+    pub const READMEM: Self = Self(1 << 27);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -324,7 +334,9 @@ impl Flags {
             }
             // The address space on an `asm` is the one its operands in memory are in, and `inline` is
             // the qualifier it was written with.
-            Opcode::InlineAsm => Self::KEEP.union(Self::INLINE).union(Self::NOMEM),
+            Opcode::InlineAsm => {
+                Self::KEEP.union(Self::INLINE).union(Self::NOMEM).union(Self::READMEM)
+            }
             // On all three spellings of a call, including the indirect one. Nothing works out
             // `nofree` for a call through an address today, and the flag is legal there because
             // what it says is about the functions the call reaches rather than about how the call
@@ -443,6 +455,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::COUNTED, "counted"),
     (Flags::EARLY, "early"),
     (Flags::LIBRARY, "library"),
+    (Flags::READMEM, "readmem"),
 ];
 
 /// The maths functions that [`Flags::LIBRARY`] is about, each with its `float` form. A
