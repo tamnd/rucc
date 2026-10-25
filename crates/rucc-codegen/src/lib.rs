@@ -174,6 +174,7 @@ pub mod double;
 pub mod edges;
 pub mod elsewhere;
 pub mod expand;
+pub mod fills;
 pub mod finish;
 pub mod fold;
 pub mod forks;
