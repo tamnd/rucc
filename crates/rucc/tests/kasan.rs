@@ -24,6 +24,12 @@ __attribute__((no_sanitize_address)) int quiet(int *p) { return *p; }
 int table[10];
 __attribute__((noinline)) int xadd(int *p) { return __atomic_fetch_add(p, 1, 5); }
 __attribute__((noinline)) int at(int i) { return table[i]; }
+__attribute__((noinline)) char vla(int n, int i) {
+    char a[n];
+    for (int k = 0; k < n; k++)
+        a[k] = k;
+    return a[i];
+}
 #ifdef __SANITIZE_ADDRESS__
 int sanitizes_address;
 #endif
@@ -44,6 +50,7 @@ static volatile int reports, kind;
 static void *volatile last;
 QUIET static void report(void *p, int k) { reports++; last = p; kind = k; }
 QUIET void __asan_report_load1_noabort(void *p) { report(p, 1); }
+QUIET void __asan_report_store1_noabort(void *p) { report(p, 11); }
 QUIET void __asan_report_load4_noabort(void *p) { report(p, 4); }
 QUIET void __asan_report_store4_noabort(void *p) { report(p, 14); }
 QUIET void __asan_report_load8_noabort(void *p) { report(p, 8); }
@@ -106,6 +113,37 @@ QUIET static int globals(void) {
         return 73;
     return 0;
 }
+// What the kernel's `__asan_alloca_poison` and `__asan_allocas_unpoison` do with the shadow.
+#define SHADOW_OF(p) (*(signed char *)(((u64)(p) >> 3) + 0x100000000000UL))
+static volatile int poisoned, unpoisoned;
+QUIET void __asan_alloca_poison(char *a, u64 n) {
+    u64 end = ((n + 31) & ~31UL) + 32;
+    poisoned += (u64)a % 32 ? 100 : 1;
+    for (int b = 1; b <= 4; b++)
+        SHADOW_OF(a - 8 * b) = -54;
+    for (u64 b = 0; b < end; b += 8)
+        SHADOW_OF(a + b) = b + 8 <= n ? 0 : b < n ? (signed char)(n - b) : -53;
+}
+QUIET void __asan_allocas_unpoison(char *top, char *bottom) {
+    unpoisoned++;
+    for (; top < bottom; top += 8)
+        SHADOW_OF(top) = 0;
+}
+QUIET static int allocas(void) {
+    char probe;
+    if (vla(20, 19) != 19 || reports != 11 || poisoned != 1 || unpoisoned == 0)
+        return 80;
+    vla(20, 20);
+    if (reports != 12 || kind != 1)
+        return 82;
+    vla(20, -1);
+    if (reports != 13 || kind != 1 || poisoned != 3)
+        return 83;
+    for (char *p = &probe - 4096; p < &probe; p += 8)
+        if (SHADOW_OF(p) != 0)
+            return 84;
+    return 0;
+}
 QUIET int main(void) {
     if (mmap(BUF, 1 << 16, 3, 0x32, -1, 0) != BUF || mmap(SHADOW, 1 << 13, 3, 0x32, -1, 0) != SHADOW)
         return 40;
@@ -143,7 +181,8 @@ QUIET int main(void) {
     if (ldu((struct pk *)(BUF + 9)) != 9 << 16 || !saw(7, BUF + 10, 1004))
         return 52;
     int bad = frames();
-    return bad ? bad : globals();
+    bad = bad ? bad : globals();
+    return bad ? bad : allocas();
 }
 "#;
 
@@ -261,6 +300,21 @@ fn a_global_gets_a_redzone_and_a_line_in_the_table() {
 }
 
 #[test]
+fn the_memory_of_a_variable_length_array_has_redzones_around_it() {
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+        let mut args = vec!["-O2"];
+        args.extend(KERNEL);
+        args.extend(["--param", "asan-instrument-allocas=1"]);
+        let (_, vla) = listing(target, &args, "vla");
+        assert_eq!(vla.matches("__asan_alloca_poison").count(), 1, "{target}:\n{vla}");
+        assert!(vla.contains("__asan_allocas_unpoison"), "{target}:\n{vla}");
+        args.extend(["--param", "asan-instrument-allocas=0"]);
+        let (_, vla) = listing(target, &args, "vla");
+        assert!(!vla.contains("__asan_alloca"), "{target}:\n{vla}");
+    }
+}
+
+#[test]
 fn the_settings_the_kernel_gives_are_read() {
     let target = "x86_64-unknown-linux-gnu";
     let outline = [
@@ -294,8 +348,6 @@ fn the_settings_the_kernel_gives_are_read() {
 #[test]
 fn what_is_not_made_yet_is_refused() {
     let on = "-fsanitize=kernel-address";
-    let said = refused(&[on, "--param", "asan-instrument-allocas=1", "-S", "-o", "-"]);
-    assert!(said.contains("redzones"), "{said}");
     let said = refused(&["-fasan-shadow-offset=0x1000", "-S", "-o", "-"]);
     assert!(said.contains("should only be used with -fsanitize=kernel-address"), "{said}");
     let said = refused(&["--target=riscv64-unknown-linux-gnu", on, "-S", "-o", "-"]);

@@ -40,8 +40,7 @@
 //!
 //! An access to a local or to a named object at a constant offset that is inside it, since the
 //! check could not fail. An access through `__seg_fs` or `__seg_gs`, whose address is not a place
-//! the shadow covers. A function marked `no_sanitize_address` or `naked`. The memory of `alloca`
-//! has no redzones around it yet.
+//! the shadow covers. A function marked `no_sanitize_address` or `naked`.
 //!
 //! # The frame
 //!
@@ -55,6 +54,13 @@
 //! redzone of zero bytes after it, which the symbol's size leaves out. A table of eight words for
 //! each of them goes to `__asan_register_globals` from a constructor, and the kernel poisons the
 //! shadow of each redzone when it reads the table.
+//!
+//! # The memory of `alloca`
+//!
+//! Under `--param asan-instrument-allocas=1`, which gcc only reads when `asan-stack` is on too, the
+//! memory of each `alloca` whose size the program works out has a redzone of 32 bytes before it and
+//! one of at least 32 after it. `__asan_alloca_poison` poisons them when the memory is made, and
+//! `__asan_allocas_unpoison` clears the shadow before a `stackrestore` and before a return.
 //!
 //! # Order
 //!
@@ -427,7 +433,92 @@ fn instrument(
         prefixed(func, runtime, inst);
     }
     let framed = frame(func, runtime, &guarded, how.offset);
-    accesses.len() + routines.len() + framed
+    let dynamic = if how.stack && how.allocas { allocas(func, runtime) } else { 0 };
+    accesses.len() + routines.len() + framed + dynamic
+}
+
+/// The redzone on each side of the memory of an `alloca`, and what its start is aligned to.
+const ALLOCA_ZONE: u64 = 32;
+
+/// Puts redzones around the memory of each `alloca` whose size the program works out, which is
+/// the one `__builtin_alloca` and a variable length array make, as gcc does it, and says how
+/// many it did.
+///
+/// The memory of `n` bytes becomes `n - n % 32 + 96` bytes aligned to 32, and the program gets
+/// the address 32 bytes in. `__asan_alloca_poison` is told that address and `n`, and it poisons
+/// the 32 bytes before it and the bytes from the end of `n` to the end of the memory. What the
+/// shadow says of the memory a `stackrestore` gives back is cleared before it does, and so is
+/// what it says of all of it before the function returns, with `__asan_allocas_unpoison` and the
+/// stack pointer at that point. gcc gives the call the start of the last `alloca` there instead,
+/// which is above the stack pointer by no more than the padding below it.
+fn allocas(func: &mut Func, runtime: &mut Runtime<'_>) -> usize {
+    let slots: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Alloca && !func[func[inst].args].is_empty())
+        .collect();
+    if slots.is_empty() {
+        return 0;
+    }
+    let word = Type::int(64);
+    let (poison, poison_sig) = runtime.callee("__asan_alloca_poison", &[Type::PTR, word], &[]);
+    let (unpoison, unpoison_sig) =
+        runtime.callee("__asan_allocas_unpoison", &[Type::PTR, Type::PTR], &[]);
+    let mut forward = Map::default();
+    for &slot in &slots {
+        let Extra::Mem(mem) = func[slot].extra else { continue };
+        let next = func.next_inst(slot).expect("an alloca is not a terminator");
+        let size = widen(func, func[func[slot].args][0], word, slot);
+        let mask = constant(func, word, (ALLOCA_ZONE - 1) as i128, slot);
+        let args = func.push_values(&[size, mask]);
+        let partial = place(func, InstData { args, ..InstData::new(Opcode::And) }, word, slot);
+        let args = func.push_values(&[size, partial]);
+        let whole = place(func, InstData { args, ..InstData::new(Opcode::Sub) }, word, slot);
+        let zones = constant(func, word, (3 * ALLOCA_ZONE) as i128, slot);
+        let args = func.push_values(&[whole, zones]);
+        let total = place(func, InstData { args, ..InstData::new(Opcode::Add) }, word, slot);
+        let info = func[mem];
+        let align = info.align.max(ALLOCA_ZONE as u32);
+        let mem = func.add_mem(MemInfo { align, ..info });
+        let args = func.push_values(&[total]);
+        let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) };
+        let base = place(func, data, Type::PTR, slot);
+        let by = constant(func, word, ALLOCA_ZONE as i128, next);
+        let args = func.push_values(&[base, by]);
+        let user = place(func, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR, next);
+        call(func, poison, poison_sig.clone(), &[user, size], next);
+        forward.insert(func[slot].first_result.expect("a value"), user);
+    }
+    crate::uses::substitute(func, &forward);
+    for &slot in &slots {
+        func.remove_inst(slot);
+    }
+    let restores: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::StackRestore)
+        .collect();
+    for restore in restores {
+        let saved = func[func[restore].args][0];
+        let now = place(func, InstData::new(Opcode::StackSave), Type::PTR, restore);
+        call(func, unpoison, unpoison_sig.clone(), &[now, saved], restore);
+    }
+    let Some(entry) = func.entry() else { return slots.len() };
+    let first = func
+        .insts(entry)
+        .find(|&inst| func[inst].opcode != Opcode::MemEntry && func[inst].opcode != Opcode::Alloca)
+        .expect("the entry block has a terminator");
+    let top = place(func, InstData::new(Opcode::StackSave), Type::PTR, first);
+    let exits: Vec<Inst> = func
+        .blocks()
+        .filter_map(|block| func.terminator(block))
+        .filter(|&inst| matches!(func[inst].opcode, Opcode::Return | Opcode::TailCall))
+        .collect();
+    for exit in exits {
+        let now = place(func, InstData::new(Opcode::StackSave), Type::PTR, exit);
+        call(func, unpoison, unpoison_sig.clone(), &[now, top], exit);
+    }
+    slots.len()
 }
 
 /// How many bytes a value of that type takes in memory, on a 64-bit target.
@@ -444,6 +535,9 @@ fn inside(func: &Func, sizes: &Map<Symbol, u64>, access: &Access) -> bool {
     let Size::Bytes(size) = access.size else { return false };
     let (from, Some(offset)) = origin(func, access.address) else { return false };
     let room = match from {
+        // The memory of an `alloca` whose size the program works out has no size here that a
+        // check could be left out for, so gcc checks every access to it.
+        Origin::Local(slot) if !func[func[slot].args].is_empty() => 0,
         Origin::Local(slot) => match func[slot].extra {
             Extra::Mem(mem) => func[mem].size,
             _ => 0,
