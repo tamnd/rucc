@@ -251,7 +251,7 @@ fn pick(build: &mut Builder<'_>, pred: IntPred, seen: Value, operand: Value) -> 
 /// The whole function rather than the part below the loop, because a use above it cannot exist. The
 /// value being replaced is the result of an instruction that stood where the loop now stands, and
 /// nothing that runs before an instruction reads what it produced.
-fn replace(func: &mut Func, from: Value, to: Value) {
+pub(crate) fn replace(func: &mut Func, from: Value, to: Value) {
     let blocks: Vec<Block> = func.blocks().collect();
     for block in blocks {
         let insts: Vec<Inst> = func.insts(block).collect();

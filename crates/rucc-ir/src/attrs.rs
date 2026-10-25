@@ -280,6 +280,9 @@ impl AttrSet {
     /// `__attribute__((no_sanitize_coverage))`. None of the calls `-fsanitize-coverage=` asks for
     /// go in this function, which is how the kernel's `noinstr` code stays out of kcov.
     pub const NO_SANCOV: Self = Self(1 << 42);
+    /// Every fill is written inline, one whose length the program works out included, from
+    /// `-finline-stringops=memset`. The function has no call to `memset` that it did not spell.
+    pub const INLINE_MEMSET: Self = Self(1 << 43);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -415,6 +418,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::ROUNDING_MATH, "rounding_math"),
     (AttrSet::NO_TRAPPING_MATH, "no_trapping_math"),
     (AttrSet::NO_SANCOV, "no_sancov"),
+    (AttrSet::INLINE_MEMSET, "inline_memset"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
