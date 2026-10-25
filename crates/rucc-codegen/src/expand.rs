@@ -1684,7 +1684,7 @@ fn shrinkable(func: &Func, names: &Interner, inst: Inst) -> Option<(Opcode, Valu
 /// Through one widening as well, since at `-O0` the size is the `int` the program wrote widened to
 /// `size_t` and nothing has folded the two together. A size is never negative, so whichever of the
 /// two widenings it went through the number is the same.
-fn number(func: &Func, value: Value) -> Option<u128> {
+pub(crate) fn number(func: &Func, value: Value) -> Option<u128> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     if matches!(func[inst].opcode, Opcode::SExt | Opcode::ZExt) {
         let &[narrow] = &func[func[inst].args] else { return None };
@@ -1949,7 +1949,12 @@ fn widened(func: &mut Func, inst: Inst, value: Value) -> Value {
 /// pointer is six bytes written as three two byte fields, and copied as four bytes at 0 and four
 /// at 2 the second load straddled two of them on every tuple a scan stored in a slot, where four
 /// at 0 and two at 4 reads the last field from the one store that wrote it (tamnd/rucc#1994).
-fn chunks(info: MemInfo, word: u32, unaligned: bool, most: usize) -> Option<Vec<(u64, u32)>> {
+pub(crate) fn chunks(
+    info: MemInfo,
+    word: u32,
+    unaligned: bool,
+    most: usize,
+) -> Option<Vec<(u64, u32)>> {
     if unaligned {
         overlapped(info.size, word, most)
     } else {
@@ -2010,7 +2015,7 @@ pub(crate) fn plan(size: u64, align: u32, word: u32, most: usize) -> Option<Vec<
 }
 
 /// The byte a fill writes, when the program said which one rather than working it out.
-fn literal(func: &Func, value: Value) -> Option<u8> {
+pub(crate) fn literal(func: &Func, value: Value) -> Option<u8> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     if func[inst].opcode != Opcode::IConst {
         return None;
@@ -2020,7 +2025,7 @@ fn literal(func: &Func, value: Value) -> Option<u8> {
 }
 
 /// One byte repeated across a word of that many bytes, which is what a fill stores.
-fn spread(byte: u8, width: u32) -> u64 {
+pub(crate) fn spread(byte: u8, width: u32) -> u64 {
     (0..width).fold(0, |word, at| word | u64::from(byte) << (at * 8))
 }
 

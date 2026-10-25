@@ -11352,7 +11352,30 @@ impl<'u> Body<'_, 'u> {
             return None;
         }
         let &[to, with, length] = values else { return None };
-        let size = self.small_length(length)?;
+        // Under `-finline-stringops=memset` a fill of any length is the IR's, with the length as
+        // an operand where it is not small, since the code generator writes it as a loop rather
+        // than as the call (tamnd/rucc#3761).
+        let inline =
+            opcode == Opcode::Memset && self.unit.environment.contains(AttrSet::INLINE_MEMSET);
+        let Some(size) = self.small_length(length) else {
+            if !inline {
+                return None;
+            }
+            let with = self.fill_byte(with, span);
+            let info = MemInfo {
+                size: 0,
+                align: 1,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            let mut build = self.build(span);
+            let mem = build.func().add_mem(info);
+            let args = build.func().push_values(&[to, with, length]);
+            build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(opcode) }, &[]);
+            return Some(matches!(plan.ret.pass, Pass::Direct).then_some(to));
+        };
         // One that runs off the array member it was handed stays a call, the way gcc leaves it to
         // `__memcpy_chk` under `_FORTIFY_SOURCE`, so that a safety build's wrapper judges it
         // against the member. A correct program never gets here.
@@ -11368,14 +11391,7 @@ impl<'u> Body<'_, 'u> {
                 owns: 0,
                 restrict: Restrict::NONE,
             };
-            // A fill passes an `int` and the IR's fill takes the byte, which is the low eight bits.
-            let with = match opcode {
-                Opcode::Memset => match self.bits_of(with) {
-                    Some(bits) => self.build(span).iconst(Type::int(8), i128::from(bits as u8)),
-                    None => self.build(span).unary(Opcode::Trunc, with, Type::int(8)),
-                },
-                _ => with,
-            };
+            let with = if opcode == Opcode::Memset { self.fill_byte(with, span) } else { with };
             let mut build = self.build(span);
             let mem = build.func().add_mem(info);
             let args = build.func().push_values(&[to, with]);
@@ -11394,6 +11410,14 @@ impl<'u> Body<'_, 'u> {
                 data.opcode == Opcode::PtrAdd && member != 0 && u64::from(member) < size
             }
             _ => false,
+        }
+    }
+
+    /// A fill passes an `int` and the IR's fill takes the byte, which is the low eight bits.
+    fn fill_byte(&mut self, with: Value, span: Span) -> Value {
+        match self.bits_of(with) {
+            Some(bits) => self.build(span).iconst(Type::int(8), i128::from(bits as u8)),
+            None => self.build(span).unary(Opcode::Trunc, with, Type::int(8)),
         }
     }
 
