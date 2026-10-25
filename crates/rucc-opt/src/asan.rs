@@ -191,22 +191,20 @@ fn instrument(
                     Some(length) => Size::Value(length),
                     None => Size::Bytes(func[mem].size),
                 };
+                // The alignment of a copy is known for both of its ends, so a copy of a 16 byte
+                // `struct path` aligned to eight gets the check of an aligned 16 byte access, as
+                // it does from gcc.
+                let align = func[mem].align;
                 if data.opcode != Opcode::Memset {
                     accesses.push(Access {
                         before: inst,
                         address: bulk.with,
                         size,
-                        align: 1,
+                        align,
                         write: false,
                     });
                 }
-                accesses.push(Access {
-                    before: inst,
-                    address: bulk.to,
-                    size,
-                    align: 1,
-                    write: true,
-                });
+                accesses.push(Access { before: inst, address: bulk.to, size, align, write: true });
             }
             Opcode::Call if how.mem_prefix => {
                 let Extra::Call(info) = data.extra else { continue };

@@ -16,6 +16,8 @@ __attribute__((noinline)) long ld8(long *p) { return *p; }
 __attribute__((noinline)) void st16(__int128 *p) { *p = 0; }
 struct __attribute__((packed)) pk { char c; int i; };
 __attribute__((noinline)) int ldu(struct pk *p) { return p->i; }
+struct two { void *a, *b; };
+__attribute__((noinline)) void cp16(struct two *d, struct two *s) { *d = *s; }
 __attribute__((noinline)) void cp(void *d, const void *s, u64 n) { __builtin_memcpy(d, s, n); }
 __attribute__((noinline)) int over(int i) { int a[8] = {0}; a[i] = 1; return a[i ^ 1]; }
 __attribute__((no_sanitize_address)) int quiet(int *p) { return *p; }
@@ -192,6 +194,9 @@ fn every_access_reads_its_shadow_and_reports_with_gcc_names() {
     let (_, ldu) = listing("x86_64-unknown-linux-gnu", &args, "ldu");
     assert_eq!(ldu.matches("shrq\t$3").count(), 2, "the first and the last byte:\n{ldu}");
     assert!(ldu.contains("movl\t$4, %esi"), "the size goes to the report:\n{ldu}");
+    let (_, cp16) = listing("x86_64-unknown-linux-gnu", &args, "cp16");
+    assert!(cp16.contains("__asan_report_load16_noabort"), "an aligned copy:\n{cp16}");
+    assert!(cp16.contains("__asan_report_store16_noabort"), "an aligned copy:\n{cp16}");
 }
 
 #[test]
