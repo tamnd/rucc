@@ -62,8 +62,8 @@ use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
-    Control, Dumps, EmitKind, Hook, Math, Options, Pic, PrefixMap, Preinclude, Protector,
-    SaveTemps, Session, Std, Wrapping, runtime,
+    Check, Control, Dumps, EmitKind, Hook, Math, Options, Pic, PrefixMap, Preinclude, Protector,
+    Sanitize, SaveTemps, Session, Std, Wrapping, runtime,
 };
 use rucc_sysroot::{Manifest, Sysroot};
 use rucc_target::{ObjectFormat, Triple};
@@ -449,6 +449,24 @@ const SANITIZERS: [&str; 35] = [
     "restrict",
     "memory",
 ];
+
+/// The names one name in `-fsanitize=` and its relatives stands for.
+///
+/// `shift` is the two shift checks together, as gcc has it, so `-fsanitize=shift
+/// -fno-sanitize=shift-base` leaves the count checked and the value not. `all` and `undefined` in
+/// the families that say what a check does are every check this compiler makes, and they stay one
+/// name in `-fsanitize=`, where `undefined` is refused for the checks in it that are not made.
+fn sanitizer_names(name: &str) -> Vec<&str> {
+    match name {
+        "shift" => vec!["shift-exponent", "shift-base"],
+        "all" | "undefined" => {
+            let mut names = Sanitize::NAMES.to_vec();
+            names.push(name);
+            names
+        }
+        _ => vec![name],
+    }
+}
 
 /// The command line with every `@file` replaced by the words in the file, the way gcc does it.
 ///
@@ -918,6 +936,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // build that asks for a check and then takes it back has asked for nothing. What happens to a
     // set that is not empty is decided after the loop.
     let mut sanitizers: Vec<&str> = Vec::new();
+    // The checks `-fno-sanitize-recover=` and `-fsanitize-trap=` were last written for, by the
+    // name of the check. Read against the list above after the loop, so the order of the three
+    // families on the line does not matter, as it does not to gcc.
+    let mut aborts: Vec<&str> = Vec::new();
+    let mut traps: Vec<&str> = Vec::new();
     // The `-ffast-math` family in the order it was written, replayed after the loop on top of
     // what `-Ofast` implies. gcc applies a level's defaults before any flag and the flags in order
     // after that, so `-fno-fast-math -Ofast` is not fast math, and only a replay can say so.
@@ -2312,8 +2335,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                             "`{one}` is not a sanitizer, see spec/04-driver-and-cli.md section 4.7"
                         )));
                     }
-                    if !sanitizers.contains(&one) {
-                        sanitizers.push(one);
+                    for one in sanitizer_names(one) {
+                        if !sanitizers.contains(&one) {
+                            sanitizers.push(one);
+                        }
                     }
                 }
             }
@@ -2328,32 +2353,46 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                             "`{one}` is not a sanitizer, see spec/04-driver-and-cli.md section 4.7"
                         )));
                     }
-                    sanitizers.retain(|asked| *asked != one);
+                    let names = sanitizer_names(one);
+                    sanitizers.retain(|asked| !names.contains(asked));
                 }
             }
-            // What a check does when it fires, and where the records about the checked objects go.
-            // Each of them is an answer about the sanitizers refused after the loop, so there is
-            // nothing left for them to change here. The names are still held to the list, because
-            // a misspelling in a build's flags is worth finding when the compiler reads it.
+            // What a check does when it fires. Only the checks this compiler makes have anything to
+            // change, and the names are still held to the list, because a misspelling in a build's
+            // flags is worth finding when the compiler reads it.
             _ if arg.starts_with("-fsanitize-recover=")
                 || arg.starts_with("-fno-sanitize-recover=")
                 || arg.starts_with("-fsanitize-trap=")
                 || arg.starts_with("-fno-sanitize-trap=") =>
             {
-                // The guard above matched on a spelling that has an `=` in it, so the tail is
-                // whatever follows the first one.
-                let how = arg.split_once('=').map_or("", |(_, rest)| rest);
+                // The guard above matched on a spelling that has an `=` in it, so the flag is
+                // what comes before the first one and the names are what follows it.
+                let (flag, how) = arg.split_once('=').unwrap_or((arg, ""));
+                let (list, on) = match flag {
+                    "-fsanitize-recover" => (&mut aborts, false),
+                    "-fno-sanitize-recover" => (&mut aborts, true),
+                    "-fsanitize-trap" => (&mut traps, true),
+                    _ => (&mut traps, false),
+                };
                 for one in how.split(',') {
                     if one != "all" && !SANITIZERS.contains(&one) {
                         return Err(err(format!(
                             "`{one}` is not a sanitizer, see spec/04-driver-and-cli.md section 4.7"
                         )));
                     }
+                    let names = sanitizer_names(one);
+                    list.retain(|was| !names.contains(was));
+                    if on {
+                        list.extend(names);
+                    }
                 }
             }
-            "-fsanitize-undefined-trap-on-error"
-            | "-fsanitize-address-use-after-scope"
-            | "-fno-sanitize-address-use-after-scope" => {}
+            // The old spelling of `-fsanitize-trap=all`, which gcc still takes.
+            "-fsanitize-undefined-trap-on-error" => {
+                traps.retain(|was| !Sanitize::NAMES.contains(was));
+                traps.extend(Sanitize::NAMES);
+            }
+            "-fsanitize-address-use-after-scope" | "-fno-sanitize-address-use-after-scope" => {}
             _ if arg.starts_with("-fsanitize-sections=") => {}
             // The calls a fuzzer learns from, the two gcc has and the kernel's kcov uses. Anything
             // else is refused rather than dropped, because a fuzzer whose calls were never
@@ -3322,9 +3361,26 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // reason. `-fsafety=` is the checking this compiler does have, and the message says so, because
     // somebody reaching for `-fsanitize=address` wants the nearest thing rather than a list of
     // options.
+    // The checks this compiler makes are taken out first, and each one gets what the two
+    // families above said it does when it fires. A trap wins over the routine, as it does in gcc.
+    for name in Sanitize::NAMES {
+        let check = if !sanitizers.contains(&name) {
+            Check::Off
+        } else if traps.contains(&name) {
+            Check::Trap
+        } else if aborts.contains(&name) {
+            Check::Abort
+        } else {
+            Check::Report
+        };
+        if let Some(slot) = opts.sanitize.check_mut(name) {
+            *slot = check;
+        }
+    }
+    sanitizers.retain(|asked| !Sanitize::NAMES.contains(asked));
     if let Some(first) = sanitizers.first() {
         return Err(err(format!(
-            "-fsanitize={first}: this compiler has no sanitizer instrumentation, and a build that \
+            "-fsanitize={first}: this compiler has no instrumentation for this sanitizer, and a build that \
              asked for one and got none would run its tests unchecked, see \
              spec/04-driver-and-cli.md section 4.7. `-fsafety=detect` is the memory checking this \
              compiler does have"
@@ -10604,7 +10660,7 @@ mod tests {
         }
         // A sanitizer rather than a typo, so it gets the refusal every sanitizer gets.
         let failed = refused(&[KERNEL_ARM64, "-fsanitize=shadow-call-stack", "-c", "a.c"]);
-        assert!(failed.contains("no sanitizer instrumentation"), "{failed}");
+        assert!(failed.contains("no instrumentation for this sanitizer"), "{failed}");
     }
 
     /// A flag of one architecture is an unknown option on another, as it is to gcc, and not an

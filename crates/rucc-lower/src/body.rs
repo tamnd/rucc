@@ -52,7 +52,9 @@ use crate::bits::{Piece, Run, shifted};
 use crate::repr;
 use crate::restrict::Scopes;
 use crate::ssa::{Ssa, Var};
-use crate::unit::{AutoInit, Protector, Unit};
+use crate::unit::{AutoInit, Check, Protector, Sanitize, Unit};
+
+mod ubsan;
 
 /// Builds the body of one function definition into `func`.
 ///
@@ -78,7 +80,9 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
 
     let entry = func.create_block();
     let address = repr::address_type(unit.target);
+    let sanitize = sanitized(unit.sanitize, tast[decl].flags);
     let mut body = Body {
+        sanitize,
         unit,
         func,
         ssa: Ssa::new(address),
@@ -355,6 +359,22 @@ pub(crate) fn untyped(align: u32) -> MemInfo {
         owns: 0,
         restrict: Restrict::NONE,
     }
+}
+
+/// The checks of `asked` a function with `flags` gets, which is all of them less the ones a
+/// `no_sanitize` attribute names and the base of a left shift in a function that wraps.
+fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
+    let mut sanitize = asked;
+    if flags.contains(DeclFlags::NO_UBSAN_DIVIDE) {
+        sanitize.divide = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_SHIFT_EXPONENT) {
+        sanitize.shift_exponent = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_SHIFT_BASE) || flags.contains(DeclFlags::WRAPV) {
+        sanitize.shift_base = Check::Off;
+    }
+    sanitize
 }
 
 /// What `-finstrument-functions` calls on the way into a function, and on the way out of one.
@@ -881,6 +901,9 @@ struct Body<'a, 'u> {
     /// marker at all. Taken at every label rather than only the ones a jump from outside reaches,
     /// which costs a check on a local nothing jumps past and nothing else.
     skipped: Set<Value>,
+    /// The undefined behaviour checks put in this function, which are the ones the command line
+    /// asked for less the ones a `no_sanitize` attribute on the function takes away.
+    sanitize: Sanitize,
 }
 
 /// What one function of a tree of nested ones has in hand to find the things it reaches.
@@ -8157,6 +8180,14 @@ impl<'u> Body<'_, 'u> {
             _ => {
                 let left = self.value(lhs);
                 let right = self.value(rhs);
+                let count = self.tast()[rhs].ty;
+                self.check_arithmetic(
+                    op,
+                    ubsan::Operand { value: left, ty },
+                    ubsan::Operand { value: right, ty: count },
+                    (lhs, rhs),
+                    span,
+                );
                 Some(self.arithmetic(op, left, right, ty, span))
             }
         }
@@ -9771,6 +9802,14 @@ impl<'u> Body<'_, 'u> {
             let signed = repr::is_signed(self.types(), self.target(), index);
             self.step(old, right, signed, size, op == BinaryOp::Sub, span)
         } else {
+            let count = self.tast()[rhs].ty;
+            self.check_arithmetic(
+                op,
+                ubsan::Operand { value: old, ty: computation },
+                ubsan::Operand { value: right, ty: count },
+                (lhs, rhs),
+                span,
+            );
             self.arithmetic(op, old, right, computation, span)
         };
         let value = self.coerce(value, computation, ty, span);

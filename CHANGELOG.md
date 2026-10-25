@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-fsanitize=integer-divide-by-zero` and `-fsanitize=shift` now put in the checks, as gcc does. These are the two UBSAN checks that Linux 7.3 turns on with `CONFIG_UBSAN_DIV_ZERO` and `CONFIG_UBSAN_SHIFT`. The divide check is before each integer `/` and `%` and calls `__ubsan_handle_divrem_overflow` when the divisor is zero. The shift check is before each `<<` and `>>` and calls `__ubsan_handle_shift_out_of_bounds` when the count is too large or negative, or when a signed left shift moves a set bit into the sign. Under `-fwrapv` and `-fno-strict-overflow` that last part is not checked, as in gcc. Each call gets the record that gcc builds: the file, the line and column of the operator, and the gcc name of each type. The `shift-exponent` and `shift-base` halves can be asked for one at a time. `-fno-sanitize-recover` calls the `_abort` routines, and `-fsanitize-trap` and `-fsanitize-undefined-trap-on-error` stop on a trap instruction. A function with `no_sanitize` that names a check, or with `no_sanitize_undefined`, gets none of the checks named. The other UBSAN checks and `-fsanitize=undefined` itself are still refused.
+
 ### Fixed
 
 - A `memset` call for a large object filled with a constant byte now passes the byte as one `movl` or `xorl` of the `int`, as gcc writes it. It was a `movb` of the byte and then a `movzbl` of the register. This is on each call that clears a large local or a large structure, for example the zeroed objects of Linux 7.3.

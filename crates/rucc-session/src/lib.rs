@@ -312,6 +312,55 @@ impl fmt::Display for Subobject {
     }
 }
 
+/// What one undefined behaviour check of `-fsanitize=` does when the program breaks the rule it
+/// watches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Check {
+    /// The check is not made.
+    #[default]
+    Off,
+    /// The runtime is told and the program goes on, which is gcc's default for these checks.
+    Report,
+    /// The runtime is told through the routine that does not come back, from
+    /// `-fno-sanitize-recover=`.
+    Abort,
+    /// The program stops on a trap instruction and no runtime is called, from
+    /// `-fsanitize-trap=`.
+    Trap,
+}
+
+/// The undefined behaviour checks of `-fsanitize=` that this compiler generates, each with what it
+/// does when it fires.
+///
+/// These are the checks Linux turns on with `CONFIG_UBSAN_DIV_ZERO` and `CONFIG_UBSAN_SHIFT`. The
+/// kernel probes each one with `cc-option`, so a check that is here is a check the kernel builds
+/// with, and the rest of gcc's list is still refused by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Sanitize {
+    /// `integer-divide-by-zero`: an integer division or remainder by zero.
+    pub divide: Check,
+    /// `shift-exponent`: a shift by a negative count or by the width of the type or more.
+    pub shift_exponent: Check,
+    /// `shift-base`: a left shift of a signed value that is negative or that moves a set bit into
+    /// or past the sign bit.
+    pub shift_base: Check,
+}
+
+impl Sanitize {
+    /// The names `-fsanitize=` takes that this compiler generates, in gcc's spelling.
+    pub const NAMES: [&'static str; 3] = ["integer-divide-by-zero", "shift-exponent", "shift-base"];
+
+    /// The check for one of [`Self::NAMES`].
+    pub fn check_mut(&mut self, name: &str) -> Option<&mut Check> {
+        match name {
+            "integer-divide-by-zero" => Some(&mut self.divide),
+            "shift-exponent" => Some(&mut self.shift_exponent),
+            "shift-base" => Some(&mut self.shift_base),
+            _ => None,
+        }
+    }
+}
+
 /// Whether pointer races are watched, from `-fsafety-races=`.
 ///
 /// Design: `spec/safe-memory/09-type-init-and-races.md` section 9.5, which is document 03's C1
@@ -2620,6 +2669,9 @@ pub struct Options {
     /// one of the `__sanitizer_cov_trace_cmp` functions first, from
     /// `-fsanitize-coverage=trace-cmp`. A function declared `no_sanitize_coverage` gets neither.
     pub sanitize_coverage_cmp: bool,
+    /// The undefined behaviour checks of `-fsanitize=` that are made, and what each does when it
+    /// fires.
+    pub sanitize: Sanitize,
     /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`, or is not
     /// position independent at all, from `-fno-pic` and `-fno-pie`.
     pub pic: Pic,
@@ -2999,6 +3051,7 @@ impl Options {
             instrument_functions: false,
             sanitize_coverage_pc: false,
             sanitize_coverage_cmp: false,
+            sanitize: Sanitize::default(),
             pic: Pic::default(),
             interposition: true,
             async_unwind_tables: true,

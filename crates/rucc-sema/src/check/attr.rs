@@ -2007,7 +2007,7 @@ impl Checker<'_> {
     /// What an attribute list says about inlining and about what is written around the body, as
     /// the bits it can set.
     ///
-    /// `always_inline`, `noinline`, `noipa`, `no_instrument_function`, `no_stack_protector`,
+    /// `always_inline`, `noinline`, `noipa`, `no_instrument_function`, `no_sanitize`, `no_sanitize_undefined`, `no_stack_protector`,
     /// `stack_protect`, `cold`, `hot`, `function_return("keep")`, `indirect_branch("keep")` and
     /// `zero_call_used_regs`, `cf_check`, `force_align_arg_pointer`, `no_reorder`, `ms_hook_prologue`, and the `optimize` options that stand for two of them, and
     /// `uninitialized`, `common`, `nocommon` and `retain`, which are not about inlining but are read in the
@@ -2030,6 +2030,12 @@ impl Checker<'_> {
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
                 "no_profile_instrument_function" => flags |= DeclFlags::NO_PROFILE,
                 "no_sanitize_coverage" => flags |= DeclFlags::NO_SANCOV,
+                "no_sanitize_undefined" => flags |= unsanitized("undefined"),
+                "no_sanitize" => {
+                    for name in self.optimize_options(attr) {
+                        flags |= unsanitized(&name);
+                    }
+                }
                 "cf_check" if matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") => {
                     flags |= DeclFlags::CF_CHECK;
                 }
@@ -3620,6 +3626,26 @@ fn is_versioned_name(spelled: &str) -> bool {
     let Some((bare, node)) = spelled.split_once('@') else { return false };
     let node = node.strip_prefix('@').unwrap_or(node);
     name(bare) && (node.is_empty() || name(node))
+}
+
+/// The checks one name in a `no_sanitize` attribute turns off in the function it is written on.
+///
+/// Only the names of the checks that are lowered are read. `undefined` turns off all of them and
+/// `shift` both shift checks, as on the command line. Any other name is a check that is never put
+/// in, so there is nothing to turn off.
+fn unsanitized(name: &str) -> DeclFlags {
+    match name {
+        "integer-divide-by-zero" => DeclFlags::NO_UBSAN_DIVIDE,
+        "shift-exponent" => DeclFlags::NO_UBSAN_SHIFT_EXPONENT,
+        "shift-base" => DeclFlags::NO_UBSAN_SHIFT_BASE,
+        "shift" => DeclFlags::NO_UBSAN_SHIFT_EXPONENT | DeclFlags::NO_UBSAN_SHIFT_BASE,
+        "undefined" => {
+            DeclFlags::NO_UBSAN_DIVIDE
+                | DeclFlags::NO_UBSAN_SHIFT_EXPONENT
+                | DeclFlags::NO_UBSAN_SHIFT_BASE
+        }
+        _ => DeclFlags::NONE,
+    }
 }
 
 /// What one option of an `optimize` attribute or a `#pragma GCC optimize` line adds to `flags`.

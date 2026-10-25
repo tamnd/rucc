@@ -31,7 +31,7 @@ use std::fmt;
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
-use rucc_diag::{Diagnostic, Span};
+use rucc_diag::{Diagnostic, SourceMap, Span};
 use rucc_ir::{
     Abi, Alias, AliasKind, AttrSet, Builder, CallInfo, DataList, Datum, Dll, Extra, FpContract,
     Func, FuncId, Global, Imm, InstData, LIBCALL_REPLACEMENTS, LIBCALL_UNCHECKED,
@@ -135,6 +135,46 @@ pub struct Wrapping {
     pub trap: bool,
 }
 
+/// What one undefined behaviour check does when it fires. See `rucc_session::Check`, which this
+/// is the walk's copy of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Check {
+    /// The check is not made.
+    #[default]
+    Off,
+    /// The runtime is told and the program goes on.
+    Report,
+    /// The runtime is told through the routine whose name ends in `_abort`.
+    Abort,
+    /// The program stops on a trap instruction.
+    Trap,
+}
+
+impl Check {
+    /// Whether the check is made at all.
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        self != Self::Off
+    }
+}
+
+/// The undefined behaviour checks of `-fsanitize=` the walk puts in, which gcc calls UBSan.
+///
+/// Done here rather than in a pass over the IR because each check is a statement about a C type:
+/// the routine it calls is given the name gcc gives the type and where in the source the operator
+/// is, and by the time a pass runs there is no type and an operator has become an instruction. gcc
+/// puts them in before it optimizes anything as well, so a body that is inlined later takes its
+/// checks with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Sanitize {
+    /// `-fsanitize=integer-divide-by-zero`.
+    pub divide: Check,
+    /// `-fsanitize=shift-exponent`.
+    pub shift_exponent: Check,
+    /// `-fsanitize=shift-base`.
+    pub shift_base: Check,
+}
+
 /// Everything the walk reads, which is a checked translation unit and the target it is for.
 ///
 /// The interner is mutable because the walk invents names the program never wrote: the label a
@@ -211,6 +251,11 @@ pub struct Context<'a> {
     /// that is inlined takes its two calls with it and they still name the function they were
     /// written for. A pass over the IR would see the body only after that had happened to it.
     pub instrument: bool,
+    /// The undefined behaviour checks of `-fsanitize=` that are put in.
+    pub sanitize: Sanitize,
+    /// Where each position in the tree is in the source, which is what a check tells the runtime
+    /// about where it was written.
+    pub sources: &'a SourceMap,
     /// Whether an exception may unwind through what the walk builds, which is `-fexceptions`.
     ///
     /// What it asks of C is that a `cleanup` handler run when an unwind passes through its scope,
@@ -333,6 +378,7 @@ impl fmt::Debug for Context<'_> {
             .field("environment", &self.environment)
             .field("align", &self.align)
             .field("instrument", &self.instrument)
+            .field("sanitize", &self.sanitize)
             .field("exceptions", &self.exceptions)
             .field("non_call_exceptions", &self.non_call_exceptions)
             .field("common", &self.common)
@@ -414,6 +460,8 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         environment,
         align,
         instrument,
+        sanitize,
+        sources,
         exceptions,
         non_call_exceptions,
         lifetimes,
@@ -452,6 +500,8 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         environment,
         align,
         instrument,
+        sanitize,
+        sources,
         exceptions,
         non_call_exceptions,
         lifetimes,
@@ -490,6 +540,8 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         named,
         used: Set::default(),
         nest: Nest::default(),
+        checked_types: Map::default(),
+        checks: 0,
     };
     unit.run();
     Lowered { module: unit.module, diagnostics: unit.diagnostics }
@@ -525,6 +577,15 @@ pub(crate) struct Unit<'a> {
     align: Option<u32>,
     /// Whether the profiling hooks are called. See [`Context::instrument`].
     pub(crate) instrument: bool,
+    /// The undefined behaviour checks that are put in. See [`Context::sanitize`].
+    pub(crate) sanitize: Sanitize,
+    /// Where each position is in the source. See [`Context::sources`].
+    pub(crate) sources: &'a SourceMap,
+    /// The descriptor of each type a check has named, by the name, so each type has one.
+    pub(crate) checked_types: Map<String, Symbol>,
+    /// How many descriptors of a place and of the types there have been made, which is what
+    /// keeps the next one from being given the same name.
+    pub(crate) checks: usize,
     /// Whether an exception may unwind through the unit. See [`Context::exceptions`].
     pub(crate) exceptions: bool,
     /// Whether a trapping instruction may unwind. See [`Context::non_call_exceptions`].
@@ -3001,12 +3062,19 @@ impl Unit<'_> {
         if self.tast.is_function_name(id) {
             return self.function_name(id, bytes, align);
         }
-        let align = align.max(1);
+        let name = format!(".Lstr.{}", self.strings.len());
+        let symbol = self.literal(bytes, align.max(1), &name);
+        self.strings.insert(id, symbol);
+        symbol
+    }
+
+    /// The global a run of bytes is emitted as when it is a string literal, which is one object
+    /// for every literal spelled the same. `name` is what it is called if it is made here.
+    pub(crate) fn literal(&mut self, bytes: Vec<u8>, align: u32, name: &str) -> Symbol {
         if let Some(&symbol) = self.literals.get(&(bytes.clone(), align)) {
-            self.strings.insert(id, symbol);
             return symbol;
         }
-        let symbol = self.names.intern(&format!(".Lstr.{}", self.strings.len()));
+        let symbol = self.names.intern(name);
 
         let mut global = Global::new(symbol, bytes.len() as u64, align);
         global.linkage = IrLinkage::Internal;
@@ -3021,7 +3089,6 @@ impl Unit<'_> {
         let range = self.module.push_bytes(&bytes);
         global.init = Some(self.module.push_data(&[Datum::Bytes(range)]));
         self.module.add_global(global);
-        self.strings.insert(id, symbol);
         self.literals.insert((bytes, align), symbol);
         symbol
     }

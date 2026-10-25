@@ -13,7 +13,7 @@
 //! checking this compiler does have. What this file holds the compiler to is that the refusal is
 //! precise: it fires on the command lines that are still asking for a check by the end, and not on
 //! the ones that asked and took it back, and not on the flags that only describe what a check would
-//! have done.
+//! have done. The checks that are put in are taken, and `ubsan.rs` holds them to gcc's output.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -75,7 +75,6 @@ fn asking_for_a_sanitizer_is_refused_by_name_and_writes_no_object() {
         "leak",
         "undefined",
         "signed-integer-overflow",
-        "shift",
         "bounds",
         "null",
         "memory",
