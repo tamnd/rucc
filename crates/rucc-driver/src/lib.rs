@@ -451,10 +451,6 @@ const SANITIZERS: [&str; 35] = [
 ];
 
 /// Reads one `--param` of the shadow checks into `kasan`, and says whether `spec` was one.
-///
-/// gcc's defaults put the `alloca` memory under the checks as well. That is not made yet, so the
-/// setting that asks for it is refused when it asks, and a build that tests for it with
-/// `cc-param`, as the kernel does, is told so.
 fn asan_param(kasan: &mut rucc_session::Kasan, spec: &str) -> Result<bool, String> {
     let Some((name, value)) = spec.split_once('=') else { return Ok(false) };
     if !name.starts_with("asan-") {
@@ -467,13 +463,7 @@ fn asan_param(kasan: &mut rucc_session::Kasan, spec: &str) -> Result<bool, Strin
         "asan-kernel-mem-intrinsic-prefix" => kasan.mem_prefix = number != 0,
         "asan-stack" => kasan.stack = number != 0,
         "asan-globals" => kasan.globals = number != 0,
-        "asan-instrument-allocas" if number == 0 => {}
-        "asan-instrument-allocas" => {
-            return Err(format!(
-                "--param {name}={number}: this compiler does not yet put redzones around the \
-                 objects that would check, see spec/04-driver-and-cli.md section 4.7"
-            ));
-        }
+        "asan-instrument-allocas" => kasan.allocas = number != 0,
         _ => return Ok(false),
     }
     Ok(true)
