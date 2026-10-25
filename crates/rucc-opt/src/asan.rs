@@ -12,19 +12,20 @@
 //!
 //! # The check
 //!
-//! An access of one, two or four bytes reads the shadow byte of its first byte. When that byte is
-//! not zero and the offset of the last byte in its group of eight is not below it, the access is
-//! bad and `__asan_report_load4_noabort` or the call of that size is made with the address. An
-//! access of eight bytes that is aligned to eight is bad when its shadow byte is not zero, and one
-//! of sixteen when its two shadow bytes are not. Any other access, which is one of eight or sixteen
-//! bytes that is not aligned or one of another size, calls `__asan_load8_noabort` or
-//! `__asan_loadN_noabort` and the runtime works it out. These are gcc's rules, and like gcc's they
-//! read the shadow of the first group only, so an access of four bytes that is not aligned and
-//! runs into a bad group is not caught.
+//! An access of one byte, or of two or four that is aligned to its size, reads the shadow byte of
+//! its first byte. When that byte is not zero and the offset of the last byte in its group of
+//! eight is not below it, the access is bad and `__asan_report_load4_noabort` or the call of that
+//! size is made with the address. An access of eight bytes that is aligned to eight is bad when
+//! its shadow byte is not zero, and one of sixteen aligned to eight when its two shadow bytes are
+//! not. Any other access of a known size reads the shadow of its first byte and of its last byte,
+//! checks each as an access of one byte, and calls `__asan_report_load_n_noabort` with the address
+//! and the size when either is bad. One whose size the program works out calls
+//! `__asan_loadN_noabort` and the runtime works it out. These are gcc's rules.
 //!
 //! A function with as many accesses as `--param asan-instrumentation-with-call-threshold=` says
 //! makes a call in front of every one instead, `__asan_load4_noabort` and the rest, which is how
-//! `CONFIG_KASAN_OUTLINE` asks for it with a threshold of zero.
+//! `CONFIG_KASAN_OUTLINE` asks for it with a threshold of zero. There an access that is not one of
+//! the aligned ones calls `__asan_loadN_noabort`.
 //!
 //! A copy or a fill the compiler makes is checked as a read of the bytes it reads and a write of
 //! the bytes it writes. One whose length the program works out is a call to `__asan_memcpy`,
@@ -285,24 +286,32 @@ fn check(
     offset: u64,
 ) {
     let kind = if access.write { "store" } else { "load" };
-    let inline = match access.size {
-        Size::Bytes(size @ (1 | 2 | 4)) => Some(size),
-        Size::Bytes(size @ (8 | 16)) if u64::from(access.align) >= GROUP => Some(size),
-        _ => None,
+    // gcc's scalar access: a size it has a routine for, aligned to that size. A 16 byte access
+    // needs only eight, since the two shadow bytes are read as one on the targets this has.
+    let scalar = match access.size {
+        Size::Bytes(1) => true,
+        Size::Bytes(size @ (2 | 4 | 8)) => u64::from(access.align) >= size,
+        Size::Bytes(16) => u64::from(access.align) >= GROUP,
+        _ => false,
     };
-    match (access.size, inline) {
-        (Size::Bytes(size), Some(size_inline)) if !outline => {
-            debug_assert_eq!(size, size_inline);
+    match access.size {
+        Size::Bytes(size) if scalar && !outline => {
             let name = format!("__asan_report_{kind}{size}{suffix}");
             let (callee, signature) = runtime.callee(&name, &[Type::PTR], &[]);
             shadow(func, access, size, offset, callee, signature);
         }
-        (Size::Bytes(size @ (1 | 2 | 4 | 8 | 16)), _) => {
+        Size::Bytes(size) if scalar => {
             let name = format!("__asan_{kind}{size}{suffix}");
             let (callee, signature) = runtime.callee(&name, &[Type::PTR], &[]);
             call(func, callee, signature, &[access.address], access.before);
         }
-        (size, _) => {
+        Size::Bytes(size) if !outline => {
+            let name = format!("__asan_report_{kind}_n{suffix}");
+            let word = Type::int(64);
+            let (callee, signature) = runtime.callee(&name, &[Type::PTR, word], &[]);
+            ends(func, access, size, offset, callee, signature);
+        }
+        size => {
             let name = format!("__asan_{kind}N{suffix}");
             let word = Type::int(64);
             let (callee, signature) = runtime.callee(&name, &[Type::PTR, word], &[]);
@@ -378,6 +387,70 @@ fn shadow(
     build.jump(after, &[]);
 }
 
+/// The inline check of an access that is not a scalar one: the shadow of its first byte and of
+/// its last byte are each read and compared as a one byte access would be, and either one that
+/// is bad calls the report with the address and the size, as gcc does.
+fn ends(
+    func: &mut Func,
+    access: Access,
+    size: u64,
+    offset: u64,
+    report: Symbol,
+    signature: Signature,
+) {
+    let word = Type::int(64);
+    let byte = Type::int(8);
+    let before = access.before;
+    let span = func.span(before);
+    let args = func.push_values(&[access.address]);
+    let first =
+        func.create_inst(InstData { args, ..InstData::new(Opcode::PtrToInt) }, &[word], span);
+    func.insert_before(first, before);
+    let address = func[first].first_result.expect("a value");
+    let block = func.block_of(first).expect("the access is in a block");
+    let after = func.create_block();
+    func.move_after(first, after);
+    let reports = func.create_block();
+    let info = MemInfo {
+        size: 1,
+        align: 1,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    };
+    let mut build = rucc_ir::Builder::new(func, block).at(span);
+    let three = build.iconst(word, 3);
+    let seven = build.iconst(word, 7);
+    let base = build.iconst(word, offset as i128);
+    let zero = build.iconst(byte, 0);
+    let back = build.iconst(word, size as i128 - 1);
+    let last = build.binary(Opcode::Add, address, back, Flags::NONE);
+    let mut bad = None;
+    for at in [address, last] {
+        let group = build.binary(Opcode::LShr, at, three, Flags::NONE);
+        let shadow = build.binary(Opcode::Add, group, base, Flags::NONE);
+        let shadow = build.unary(Opcode::IntToPtr, shadow, Type::PTR);
+        let value = build.load(byte, shadow, info, Flags::NONE);
+        let poisoned = build.icmp(IntPred::Ne, value, zero);
+        let low = build.binary(Opcode::And, at, seven, Flags::NONE);
+        let low = build.unary(Opcode::Trunc, low, byte);
+        let past = build.icmp(IntPred::Sge, low, value);
+        let one = build.binary(Opcode::And, poisoned, past, Flags::NONE);
+        bad = Some(match bad {
+            Some(other) => build.binary(Opcode::Or, other, one, Flags::NONE),
+            None => one,
+        });
+    }
+    let bad = bad.expect("two ends were checked");
+    build.br_if(bad, reports, &[], after, &[]);
+    let signature = func.add_signature(signature);
+    let mut build = rucc_ir::Builder::new(func, reports).at(span);
+    let length = build.iconst(word, size as i128);
+    build.call(report, signature, &[access.address, length]);
+    build.jump(after, &[]);
+}
+
 /// The shadow byte of the left redzone, where the frame record is.
 const LEFT: u8 = 0xf1;
 /// The shadow byte of a redzone between two locals.
@@ -393,8 +466,7 @@ const MAGIC: i128 = 0x41b5_8ab3;
 fn redzone(size: u64) -> u64 {
     match size {
         0..=4 => 16,
-        5..=16 => 32,
-        17..=128 => 32,
+        5..=128 => 32,
         129..=512 => 64,
         513..=4096 => 128,
         _ => 256,

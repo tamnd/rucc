@@ -6,14 +6,16 @@
 use std::path::Path;
 use std::process::Command;
 
-/// One access of each size the inline check has, a copy whose length the program works out, and
-/// a function that asks for no checks.
+/// One access of each size the inline check has, an access that is not aligned, a copy whose
+/// length the program works out, and a function that asks for no checks.
 const SOURCE: &str = r#"typedef unsigned long u64;
 __attribute__((noinline)) int ld4(int *p) { return *p; }
 __attribute__((noinline)) void st4(int *p, int v) { *p = v; }
 __attribute__((noinline)) char ld1(char *p) { return *p; }
 __attribute__((noinline)) long ld8(long *p) { return *p; }
 __attribute__((noinline)) void st16(__int128 *p) { *p = 0; }
+struct __attribute__((packed)) pk { char c; int i; };
+__attribute__((noinline)) int ldu(struct pk *p) { return p->i; }
 __attribute__((noinline)) void cp(void *d, const void *s, u64 n) { __builtin_memcpy(d, s, n); }
 __attribute__((noinline)) int over(int i) { int a[8] = {0}; a[i] = 1; return a[i ^ 1]; }
 __attribute__((no_sanitize_address)) int quiet(int *p) { return *p; }
@@ -41,6 +43,7 @@ QUIET void __asan_report_load4_noabort(void *p) { report(p, 4); }
 QUIET void __asan_report_store4_noabort(void *p) { report(p, 14); }
 QUIET void __asan_report_load8_noabort(void *p) { report(p, 8); }
 QUIET void __asan_report_store16_noabort(void *p) { report(p, 116); }
+QUIET void __asan_report_load_n_noabort(void *p, u64 n) { report(p, 1000 + (int)n); }
 QUIET void *__asan_memcpy(void *d, const void *s, u64 n) {
     char *to = d;
     const char *from = s;
@@ -55,10 +58,10 @@ QUIET static int frames(void) {
     signed char *shadow = (signed char *)(at - (1 << 16));
     if (mmap(shadow, 1 << 17, 3, 0x100032, -1, 0) != shadow)
         return 60;
-    if (over(2) != 0 || reports != 6)
+    if (over(2) != 0 || reports != 7)
         return 61;
     over(9);
-    if (reports != 8 || kind != 4)
+    if (reports != 9 || kind != 4)
         return 62;
     for (int n = 0; n < 1 << 17; n++)
         if (shadow[n] != 0)
@@ -96,6 +99,12 @@ QUIET int main(void) {
         return 49;
     if (quiet((int *)(BUF + 12)) != 9 || reports != 6)
         return 50;
+    // Bytes 6 to 9 end in the group whose first four bytes are good, and bytes 10 to 13 run past
+    // them. The shadow of the first byte is good for both.
+    if (ldu((struct pk *)(BUF + 5)) != 0 || reports != 6)
+        return 51;
+    if (ldu((struct pk *)(BUF + 9)) != 9 << 16 || !saw(7, BUF + 10, 1004))
+        return 52;
     return frames();
 }
 "#;
@@ -161,6 +170,7 @@ fn every_access_reads_its_shadow_and_reports_with_gcc_names() {
                 "__asan_report_load1_noabort",
                 "__asan_report_load8_noabort",
                 "__asan_report_store16_noabort",
+                "__asan_report_load_n_noabort",
                 "__asan_memcpy",
             ] {
                 assert!(text.contains(wanted), "{target} {level} has no {wanted}:\n{text}");
@@ -179,6 +189,9 @@ fn every_access_reads_its_shadow_and_reports_with_gcc_names() {
     assert!(ld8.contains("$-2305847407260205056"), "the offset is the one asked for:\n{ld8}");
     assert!(ld8.contains("shrq\t$3"), "{ld8}");
     assert!(ld8.contains("cmpb\t$0"), "{ld8}");
+    let (_, ldu) = listing("x86_64-unknown-linux-gnu", &args, "ldu");
+    assert_eq!(ldu.matches("shrq\t$3").count(), 2, "the first and the last byte:\n{ldu}");
+    assert!(ldu.contains("movl\t$4, %esi"), "the size goes to the report:\n{ldu}");
 }
 
 #[test]
@@ -196,6 +209,7 @@ fn the_settings_the_kernel_gives_are_read() {
     let (text, _) = listing(target, &outline, "ld4");
     assert!(text.contains("__asan_load4_noabort"), "{text}");
     assert!(text.contains("__asan_store16_noabort"), "{text}");
+    assert!(text.contains("__asan_loadN_noabort"), "an access that is not aligned:\n{text}");
     assert!(!text.contains("__asan_report"), "{text}");
     assert!(!text.contains("__asan_memcpy"), "the routines are named only when asked:\n{text}");
     assert!(!text.contains("__asan_gen_frame"), "asan-stack=0 makes no frame record:\n{text}");
