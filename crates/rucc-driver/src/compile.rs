@@ -519,8 +519,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 divide: lower_check(opts.sanitize.divide),
                                 shift_exponent: lower_check(opts.sanitize.shift_exponent),
                                 shift_base: lower_check(opts.sanitize.shift_base),
+                                boolean: lower_check(opts.sanitize.boolean),
                             },
                             sources: &sess.sources,
+                            c23: opts.std >= rucc_session::Std::C23,
                             exceptions: opts.exceptions,
                             non_call_exceptions: opts.exceptions && opts.non_call_exceptions,
                             // The same answer `reuse` below is given, since the markers are only

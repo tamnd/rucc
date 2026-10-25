@@ -332,9 +332,10 @@ pub enum Check {
 /// The undefined behaviour checks of `-fsanitize=` that this compiler generates, each with what it
 /// does when it fires.
 ///
-/// These are the checks Linux turns on with `CONFIG_UBSAN_DIV_ZERO` and `CONFIG_UBSAN_SHIFT`. The
-/// kernel probes each one with `cc-option`, so a check that is here is a check the kernel builds
-/// with, and the rest of gcc's list is still refused by name.
+/// These are the checks Linux turns on with `CONFIG_UBSAN_DIV_ZERO`, `CONFIG_UBSAN_SHIFT`,
+/// `CONFIG_UBSAN_BOOL` and `CONFIG_UBSAN_ENUM`. The kernel probes each one with `cc-option`, so a
+/// check that is here is a check the kernel builds with, and the rest of gcc's list is still
+/// refused by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Sanitize {
     /// `integer-divide-by-zero`: an integer division or remainder by zero.
@@ -344,11 +345,17 @@ pub struct Sanitize {
     /// `shift-base`: a left shift of a signed value that is negative or that moves a set bit into
     /// or past the sign bit.
     pub shift_base: Check,
+    /// `bool`: a `bool` read from memory whose byte is neither zero nor one.
+    pub boolean: Check,
+    /// `enum`: a value read from an enumeration that its type cannot hold. gcc makes this check in
+    /// C++ only, and in C it is taken and puts nothing in, so it is kept here only to be taken.
+    pub enumeration: Check,
 }
 
 impl Sanitize {
     /// The names `-fsanitize=` takes that this compiler generates, in gcc's spelling.
-    pub const NAMES: [&'static str; 3] = ["integer-divide-by-zero", "shift-exponent", "shift-base"];
+    pub const NAMES: [&'static str; 5] =
+        ["integer-divide-by-zero", "shift-exponent", "shift-base", "bool", "enum"];
 
     /// The check for one of [`Self::NAMES`].
     pub fn check_mut(&mut self, name: &str) -> Option<&mut Check> {
@@ -356,6 +363,8 @@ impl Sanitize {
             "integer-divide-by-zero" => Some(&mut self.divide),
             "shift-exponent" => Some(&mut self.shift_exponent),
             "shift-base" => Some(&mut self.shift_base),
+            "bool" => Some(&mut self.boolean),
+            "enum" => Some(&mut self.enumeration),
             _ => None,
         }
     }

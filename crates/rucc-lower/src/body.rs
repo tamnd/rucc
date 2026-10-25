@@ -374,6 +374,9 @@ fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
     if flags.contains(DeclFlags::NO_UBSAN_SHIFT_BASE) || flags.contains(DeclFlags::WRAPV) {
         sanitize.shift_base = Check::Off;
     }
+    if flags.contains(DeclFlags::NO_UBSAN_BOOL) {
+        sanitize.boolean = Check::Off;
+    }
     sanitize
 }
 
@@ -7765,6 +7768,9 @@ impl<'u> Body<'_, 'u> {
                     return Some(value);
                 }
                 let place = self.place(operand);
+                if let Some(value) = self.checked_bool(place, operand, span) {
+                    return Some(value);
+                }
                 self.read(place, span)
             }
             Conversion::ArrayDecay | Conversion::FunctionDecay => {

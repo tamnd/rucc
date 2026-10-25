@@ -548,7 +548,7 @@ impl DeclFlags {
 
     /// `no_sanitize("integer-divide-by-zero")`, or `no_sanitize_undefined` or `no_sanitize` naming
     /// `undefined`, was written on a declaration of this function, so its divisions are not
-    /// checked. Merged the way [`Self::NO_INSTRUMENT`] is, and so are the two after it.
+    /// checked. Merged the way [`Self::NO_INSTRUMENT`] is, and so are the three after it.
     pub const NO_UBSAN_DIVIDE: Self = Self(1 << 45);
 
     /// The same for `shift-exponent`, which `shift` names as well.
@@ -556,6 +556,9 @@ impl DeclFlags {
 
     /// The same for `shift-base`, which `shift` names as well.
     pub const NO_UBSAN_SHIFT_BASE: Self = Self(1 << 47);
+
+    /// The same for `bool`.
+    pub const NO_UBSAN_BOOL: Self = Self(1 << 48);
 
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.

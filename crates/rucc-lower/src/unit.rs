@@ -173,6 +173,8 @@ pub struct Sanitize {
     pub shift_exponent: Check,
     /// `-fsanitize=shift-base`.
     pub shift_base: Check,
+    /// `-fsanitize=bool`.
+    pub boolean: Check,
 }
 
 /// Everything the walk reads, which is a checked translation unit and the target it is for.
@@ -256,6 +258,9 @@ pub struct Context<'a> {
     /// Where each position in the tree is in the source, which is what a check tells the runtime
     /// about where it was written.
     pub sources: &'a SourceMap,
+    /// Whether the unit is C23 or later, where `_Bool` is called `bool`. Read for the name a check
+    /// gives the type.
+    pub c23: bool,
     /// Whether an exception may unwind through what the walk builds, which is `-fexceptions`.
     ///
     /// What it asks of C is that a `cleanup` handler run when an unwind passes through its scope,
@@ -462,6 +467,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         instrument,
         sanitize,
         sources,
+        c23,
         exceptions,
         non_call_exceptions,
         lifetimes,
@@ -502,6 +508,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         instrument,
         sanitize,
         sources,
+        c23,
         exceptions,
         non_call_exceptions,
         lifetimes,
@@ -581,6 +588,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) sanitize: Sanitize,
     /// Where each position is in the source. See [`Context::sources`].
     pub(crate) sources: &'a SourceMap,
+    /// Whether `_Bool` is called `bool`. See [`Context::c23`].
+    pub(crate) c23: bool,
     /// The descriptor of each type a check has named, by the name, so each type has one.
     pub(crate) checked_types: Map<String, Symbol>,
     /// How many descriptors of a place and of the types there have been made, which is what

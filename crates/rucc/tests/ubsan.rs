@@ -1,5 +1,5 @@
-//! `-fsanitize=integer-divide-by-zero` and `-fsanitize=shift`, which the kernel's `CONFIG_UBSAN`
-//! puts on every unit that does not opt out. The calls carry gcc's names, the record each one is
+//! `-fsanitize=integer-divide-by-zero`, `-fsanitize=shift`, `-fsanitize=bool` and
+//! `-fsanitize=enum`, which the kernel's `CONFIG_UBSAN` puts on every unit that does not opt out. The calls carry gcc's names, the record each one is
 //! handed is laid out the way gcc lays it out, and a function marked `no_sanitize` makes none.
 
 use std::path::Path;
@@ -195,4 +195,44 @@ fn the_runtime_is_told_where_and_what_and_the_program_goes_on() {
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+}
+
+/// Reads of a `bool` from memory, which are checked, and after `local` reads that are not.
+const BOOLS: &str = r#"struct s { int a; _Bool b; };
+int deref(_Bool *p) { return *p ? 3 : 4; }
+int member(struct s *s) { return s->b; }
+int element(_Bool *arr, int i) { return arr[i]; }
+int local(int x) { _Bool b = x; return b; }
+__attribute__((no_sanitize("bool"))) int quiet(_Bool *p) { return *p; }
+__attribute__((no_sanitize_undefined)) int still(_Bool *p) { return *p; }
+"#;
+
+fn bools(args: &[&str]) -> String {
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir = std::env::temp_dir().join(format!("rucc-ubsan-bool-{}{tag}", std::process::id()));
+    let mut all = vec!["--target=x86_64-unknown-linux-gnu", "-std=gnu11", "-S", "-o", "-"];
+    all.extend(args);
+    let out = compile(&dir, BOOLS, &all);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).expect("a listing is text")
+}
+
+#[test]
+fn a_bool_read_from_memory_is_checked_and_enum_is_taken() {
+    for level in ["-O0", "-O2"] {
+        let text = bools(&[level, "-fsanitize=bool,enum"]);
+        assert_eq!(text.matches("call\t__ubsan_handle_load_invalid_value").count(), 3, "{text}");
+        assert!(text.contains("'_Bool'"), "{level}:\n{text}");
+        let start = text.find("\nlocal:").expect("local is defined");
+        assert!(!text[start..].contains("__ubsan"), "{level}:\n{text}");
+    }
+    let text = bools(&["-O2", "-std=c23", "-fsanitize=bool"]);
+    assert!(text.contains("'bool'"), "{text}");
+    let text = bools(&["-O2", "-fsanitize=bool", "-fno-sanitize-recover=bool"]);
+    assert!(text.contains("__ubsan_handle_load_invalid_value_abort"), "{text}");
+    let text = bools(&["-O2", "-fsanitize=bool", "-fsanitize-trap=bool"]);
+    assert!(!text.contains("__ubsan_handle"), "{text}");
+    let text = bools(&["-O2", "-fsanitize=enum"]);
+    assert!(!text.contains("__ubsan_handle"), "{text}");
 }

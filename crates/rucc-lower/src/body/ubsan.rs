@@ -14,10 +14,10 @@ use rucc_ir::{
     Datum, Flags, Global, Imm, InstData, IntPred, Linkage as IrLinkage, Opcode, Reloc, Signature,
     Type, Value,
 };
-use rucc_sema::ExprId;
+use rucc_sema::{ExprId, ExprKind};
 use rucc_types::{IntKind, TypeId, TypeKind};
 
-use super::Body;
+use super::{Body, MemInfo, Ordered, Place, Where};
 use crate::repr;
 use crate::unit::{Check, Unit};
 
@@ -58,7 +58,8 @@ impl Body<'_, '_> {
                     build.icmp(IntPred::Eq, rhs.value, zero)
                 };
                 let at = self.operator(written, span);
-                let data = self.unit.ubsan_data(at, &[kind]);
+                let ty = self.unit.int_type(kind);
+                let data = self.unit.ubsan_data(at, &[ty]);
                 self.fire(zero, check, "__ubsan_handle_divrem_overflow", data, &[lhs, rhs], span);
             }
             BinaryOp::Shl | BinaryOp::Shr => {
@@ -102,7 +103,8 @@ impl Body<'_, '_> {
                 let Some(fires) = fires else { return };
                 let check = if exponent.is_on() { exponent } else { base };
                 let at = self.operator(written, span);
-                let data = self.unit.ubsan_data(at, &[kind, count]);
+                let types = [self.unit.int_type(kind), self.unit.int_type(count)];
+                let data = self.unit.ubsan_data(at, &types);
                 self.fire(
                     fires,
                     check,
@@ -114,6 +116,68 @@ impl Body<'_, '_> {
             }
             _ => {}
         }
+    }
+
+    /// Reads a `bool` in memory with the check of `-fsanitize=bool`, and [`None`] when the read is
+    /// not one that is checked, which leaves it to [`Self::read`].
+    ///
+    /// gcc checks a `bool` that is read from memory and nothing else: not one in a register, not a
+    /// bit-field, not an atomic one and not a `hardbool` type, which has its own check. The byte is
+    /// read whole and fires when it is more than one, and the value after a report is its low bit,
+    /// which is what gcc gives the program that goes on.
+    pub(super) fn checked_bool(
+        &mut self,
+        place: Place,
+        operand: ExprId,
+        span: Span,
+    ) -> Option<Value> {
+        let check = self.sanitize.boolean;
+        if !check.is_on() || self.at.is_none() {
+            return None;
+        }
+        let Where::Addr(addr) = place.at else { return None };
+        let canonical = self.types().canonical(place.ty);
+        if !matches!(self.types().kind(canonical), TypeKind::Bool)
+            || self.types().hardbool_of(place.ty).is_some()
+            || self.atomic_access(place.ty) != Ordered::No
+        {
+            return None;
+        }
+        let info = MemInfo { owns: 0, ..self.info_of(place) };
+        let flags = self.flags(place.ty);
+        let (byte, fires) = {
+            let mut build = self.build(span);
+            let byte = build.load(Type::int(8), addr, info, flags);
+            let one = build.iconst(Type::int(8), 1);
+            (byte, build.icmp(IntPred::Ugt, byte, one))
+        };
+        let at = self.loaded_at(operand, span);
+        let ty = self.unit.bool_type();
+        let data = self.unit.ubsan_data(at, &[ty]);
+        let operand = Operand { value: byte, ty: place.ty };
+        self.fire(fires, check, "__ubsan_handle_load_invalid_value", data, &[operand], span);
+        Some(self.build(span).unary(Opcode::Trunc, byte, Type::I1))
+    }
+
+    /// Where gcc says a read from memory is, which is the `[` of a subscript and where the
+    /// expression starts for anything else: the `*` of `*p` and the base of a member.
+    fn loaded_at(&self, operand: ExprId, span: Span) -> BytePos {
+        let expr = &self.tast()[operand];
+        let ExprKind::Subscript { base, .. } = expr.kind else {
+            return self.tast().expr_span(operand).lo;
+        };
+        let sources = self.unit.sources;
+        let from = sources.real(self.tast().expr_span(base).hi);
+        let Some(id) = sources.lookup_file(from) else { return span.lo };
+        let file = sources.file(id);
+        let bytes = file.bytes();
+        let start = (from - file.start) as usize;
+        bytes
+            .get(start..)
+            .and_then(|after| {
+                after.iter().position(|&byte| !byte.is_ascii_whitespace() && byte != b')')
+            })
+            .map_or(span.lo, |at| from + at as u32)
     }
 
     /// The integer kind of a type the checks are made in, and [`None`] for any other type.
@@ -223,7 +287,7 @@ impl Unit<'_> {
     /// gcc's layout is the file name, the line and the column as two words of four bytes, and a
     /// pointer to each descriptor. It is writable and in `.data` for the reason gcc gives, which
     /// is that the runtime writes into the location to say it has reported it already.
-    pub(super) fn ubsan_data(&mut self, at: BytePos, kinds: &[IntKind]) -> Symbol {
+    pub(super) fn ubsan_data(&mut self, at: BytePos, types: &[Symbol]) -> Symbol {
         let (file, line, column) = match self.sources.presumed(at) {
             Some(loc) => (loc.name.to_owned(), loc.line, loc.column),
             None => (String::new(), 0, 0),
@@ -232,7 +296,6 @@ impl Unit<'_> {
         bytes.push(0);
         let name = format!(".Lubsan_file.{}", self.checks);
         let file = self.literal(bytes, 1, &name);
-        let types: Vec<Symbol> = kinds.iter().map(|&kind| self.ubsan_type(kind)).collect();
 
         let word = self.target.pointer_width / 8;
         let mut data =
@@ -241,10 +304,10 @@ impl Unit<'_> {
             let value = self.module.add_imm(Imm::int(i128::from(number), Type::int(32)));
             data.push(Datum::Scalar { ty: Type::int(32), value });
         }
-        for symbol in types {
+        for &symbol in types {
             data.push(Datum::Addr(self.module.add_reloc(Reloc { symbol, addend: 0, size: word })));
         }
-        let size = u64::from(word) * (1 + kinds.len() as u64) + 8;
+        let size = u64::from(word) * (1 + types.len() as u64) + 8;
         let symbol = self.names.intern(&format!(".Lubsan_data.{}", self.checks));
         self.checks += 1;
         let mut global = Global::new(symbol, size, word);
@@ -255,18 +318,29 @@ impl Unit<'_> {
         symbol
     }
 
-    /// The descriptor of an integer type, made once in a unit for each type.
+    /// The descriptor of an integer type.
+    pub(super) fn int_type(&mut self, kind: IntKind) -> Symbol {
+        let bits = rucc_types::int_width(kind, self.target);
+        let signed = kind.is_signed(self.target.char_is_signed);
+        self.ubsan_type(gnu_name(kind), bits, signed)
+    }
+
+    /// The descriptor of `bool`, which gcc gives the name the dialect spells it with and describes
+    /// as an unsigned integer of eight bits.
+    fn bool_type(&mut self) -> Symbol {
+        self.ubsan_type(if self.c23 { "bool" } else { "_Bool" }, 8, false)
+    }
+
+    /// The descriptor of an integer type that is `bits` wide, made once in a unit for each name.
     ///
     /// Two bytes that say it is an integer, two that say how wide it is and whether it is signed,
     /// and the name in quotes, which is the name gcc prints for the type and not the one the
     /// program wrote: `size_t` is `'long unsigned int'`.
-    fn ubsan_type(&mut self, kind: IntKind) -> Symbol {
-        let name = format!("'{}'", gnu_name(kind));
+    fn ubsan_type(&mut self, name: &str, bits: u32, signed: bool) -> Symbol {
+        let name = format!("'{name}'");
         if let Some(&symbol) = self.checked_types.get(&name) {
             return symbol;
         }
-        let bits = rucc_types::int_width(kind, self.target);
-        let signed = kind.is_signed(self.target.char_is_signed);
         let info = (bits.trailing_zeros() << 1) | u32::from(signed);
         let mut data = Vec::new();
         for number in [0, info] {

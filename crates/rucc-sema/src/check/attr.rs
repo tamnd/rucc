@@ -3639,10 +3639,12 @@ fn unsanitized(name: &str) -> DeclFlags {
         "shift-exponent" => DeclFlags::NO_UBSAN_SHIFT_EXPONENT,
         "shift-base" => DeclFlags::NO_UBSAN_SHIFT_BASE,
         "shift" => DeclFlags::NO_UBSAN_SHIFT_EXPONENT | DeclFlags::NO_UBSAN_SHIFT_BASE,
+        "bool" => DeclFlags::NO_UBSAN_BOOL,
         "undefined" => {
             DeclFlags::NO_UBSAN_DIVIDE
                 | DeclFlags::NO_UBSAN_SHIFT_EXPONENT
                 | DeclFlags::NO_UBSAN_SHIFT_BASE
+                | DeclFlags::NO_UBSAN_BOOL
         }
         _ => DeclFlags::NONE,
     }
