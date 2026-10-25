@@ -54,6 +54,11 @@ def narrow(e):
     return e[0] + str(BY[e][2] // 2)
 
 
+def arr(e, q):
+    """The arrangement an instruction names a vector of these lanes by, as in `v0.16b`."""
+    return f"{lanes(e, q)}{'bhsd'[[8, 16, 32, 64].index(BY[e][2])]}"
+
+
 def name(op, e, q, suffix=""):
     return f"{op}{'q' if q else ''}{suffix}_{e}"
 
@@ -819,7 +824,7 @@ def emit():
         ],
     )
     # The same kept to 8 bits a lane, which is PMUL. The kernel's raid6 neon code multiplies in
-    # GF(2^8) with it.
+    # GF(2^8) with it. The instruction itself, since the loop is 128 tests and shifts a vector.
     for q in QS:
         v = vt("p8", q)
         fn(
@@ -827,10 +832,9 @@ def emit():
             name("vmul", "p8", q),
             f"{v} a, {v} b",
             [
-                f"{v} __r = {{0}};",
-                f"for (int i = 0; i < {lanes('p8', q)}; i++)",
-                "  for (int k = 0; k < 8; k++)",
-                "    if (b[i] >> k & 1) __r[i] ^= (uint8_t)(a[i] << k);",
+                f"{v} __r;",
+                f'__asm__("pmul %0.{arr("p8", q)}, %1.{arr("p8", q)}, %2.{arr("p8", q)}"'
+                ' : "=w"(__r) : "w"(a), "w"(b));',
                 "return __r;",
             ],
         )
@@ -956,20 +960,30 @@ def emit():
                         f"a[i - i % {k} + {k} - 1 - i % {k}]",
                         n,
                     )
+    # TBL and TBX, which the kernel's raid6 recovery looks its GF(2^8) products up with. As a loop
+    # each lane was a compare and a load from the table on the stack.
     for q in QS:
         for e in ("u8", "s8", "p8"):
-            v, n = vt(e, q), lanes(e, q)
+            v, a = vt(e, q), arr(e, q)
             t = vt(e, True)
-            lanewise(
-                e, q, name("vqtbl1", e, q), f"{t} t, {vt('u8', q)} x", "x[i] < 16 ? t[x[i]] : 0", n
+            fn(
+                v,
+                name("vqtbl1", e, q),
+                f"{t} t, {vt('u8', q)} x",
+                [
+                    f"{v} __r;",
+                    f'__asm__("tbl %0.{a}, {{%1.16b}}, %2.{a}" : "=w"(__r) : "w"(t), "w"(x));',
+                    "return __r;",
+                ],
             )
-            lanewise(
-                e,
-                q,
+            fn(
+                v,
                 name("vqtbx1", e, q),
                 f"{v} lo, {t} t, {vt('u8', q)} x",
-                "x[i] < 16 ? t[x[i]] : lo[i]",
-                n,
+                [
+                    f'__asm__("tbx %0.{a}, {{%1.16b}}, %2.{a}" : "+w"(lo) : "w"(t), "w"(x));',
+                    "return lo;",
+                ],
             )
     for e in ("u8", "s8", "p8"):
         x = vt("s8" if e == "s8" else "u8", False)
