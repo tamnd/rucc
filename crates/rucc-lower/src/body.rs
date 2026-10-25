@@ -7303,7 +7303,44 @@ impl<'u> Body<'_, 'u> {
                 _ => break,
             }
         }
+        if self.read_volatile_record(at) {
+            return;
+        }
         self.eval(expr);
+    }
+
+    /// A `volatile` structure or union read for nothing, `*p;` or `(void)w->data;`, which gcc
+    /// reads as one access when the object is 1, 2, 4, 8 or 16 bytes: those are the sizes a
+    /// machine mode has, and a record of one of them is moved as that mode. A record of any
+    /// other size is not read at all. The kernel reads a freed `work_struct` this way and wants
+    /// KASAN to see it.
+    fn read_volatile_record(&mut self, expr: ExprId) -> bool {
+        let tast = self.tast();
+        let ty = tast[expr].ty;
+        if !self.is_volatile(ty)
+            || !matches!(self.types().kind(self.types().canonical(ty)), TypeKind::Record(_))
+            || !matches!(
+                tast[expr].kind,
+                ExprKind::Decl(_)
+                    | ExprKind::Member { .. }
+                    | ExprKind::Subscript { .. }
+                    | ExprKind::Unary { op: UnaryOp::Deref, .. }
+            )
+        {
+            return false;
+        }
+        let size = repr::size_of(self.types(), self.target(), ty);
+        if !matches!(size, 1 | 2 | 4 | 8 | 16) {
+            return false;
+        }
+        let span = tast.expr_span(expr);
+        let place = self.place(expr);
+        let Where::Addr(addr) = place.at else { return true };
+        let info = MemInfo { owns: 0, ..self.info_of(place) };
+        let flags = self.flags(place.ty);
+        let piece = Type::int(u32::try_from(size * 8).expect("16 bytes at most"));
+        self.build(span).load(piece, addr, info, flags);
+        true
     }
 
     /// The value of an expression, which is [`None`] only when it has none.

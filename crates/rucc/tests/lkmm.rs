@@ -232,3 +232,44 @@ fn a_kept_asm_with_a_memory_clobber_keeps_the_stores_on_their_sides() {
     let at = |what: &str| lines.iter().position(|line| line.contains(what)).expect(what);
     assert!(at("(%rdi)") < at("sfence") && at("sfence") < at("(%rsi)"), "{lines:#?}");
 }
+
+#[test]
+fn a_volatile_record_read_for_nothing_is_read_when_gcc_reads_it() {
+    // gcc reads a volatile structure or union that is thrown away when it is 1, 2, 4, 8 or 16
+    // bytes, the sizes a machine mode has, and does not read one of any other size. The kernel's
+    // KASAN test reads a freed `work_struct` this way and expects the report.
+    let text = assembly(
+        "record",
+        "typedef struct { long counter; } atomic_long_t;
+         struct work { atomic_long_t data; void *a, *b; };
+         struct s1 { char a; }; struct s2 { short a; }; struct s16 { long a, b; };
+         struct s3 { char c[3]; }; struct s12 { int a, b, c; };
+         union u8 { long a; char b; };
+         void member(struct work *w) { ((volatile struct work *)w)->data; }
+         void voided(volatile struct work *w) { (void)w->data; }
+         void whole(volatile struct work *w) { *w; }
+         void one(volatile struct s1 *p) { *p; }
+         void two(volatile struct s2 *p) { *p; }
+         void sixteen(volatile struct s16 *p) { *p; }
+         void three(volatile struct s3 *p) { *p; }
+         void twelve(volatile struct s12 *p) { *p; }
+         void either(volatile union u8 *p) { *p; }
+         void plain(struct s2 *p) { *p; }
+        ",
+    );
+    for (name, reads) in [
+        ("member", 1),
+        ("voided", 1),
+        ("whole", 0),
+        ("one", 1),
+        ("two", 1),
+        ("sixteen", 2),
+        ("three", 0),
+        ("twelve", 0),
+        ("either", 1),
+        ("plain", 0),
+    ] {
+        let lines = body(&text, name);
+        assert_eq!(touching(&lines, "(%rdi)"), reads, "{name}: {lines:#?}");
+    }
+}
