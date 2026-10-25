@@ -181,6 +181,28 @@ impl Body<'_, '_> {
         Some(self.build(span).unary(Opcode::Trunc, byte, Type::I1))
     }
 
+    /// The check of `-fsanitize=unreachable`, put in where a `__builtin_unreachable()` is.
+    ///
+    /// Control that gets here has broken the promise, so there is nothing to test and the call is
+    /// made each time. gcc has one routine for this, and it does not come back, so a report and an
+    /// abort are the same call. The record has where the call is written and no type.
+    pub(super) fn checked_unreachable(&mut self, span: Span) {
+        let check = self.sanitize.unreachable;
+        if !check.is_on() || self.at.is_none() {
+            return;
+        }
+        if check == Check::Trap {
+            self.build(span).inst(InstData::new(Opcode::Trap), &[]);
+            return;
+        }
+        let data = self.unit.ubsan_data(span.lo, &[]);
+        let callee = self.unit.names.intern("__ubsan_handle_builtin_unreachable");
+        let args = [self.global_addr(data, span)];
+        let params = [self.func[args[0]].ty];
+        let signature = self.func.add_signature(Signature::new().with_params(&params));
+        self.build(span).call(callee, signature, &args);
+    }
+
     /// Where gcc says a read from memory is, which is the `[` of a subscript and where the
     /// expression starts for anything else: the `*` of `*p` and the base of a member.
     fn loaded_at(&self, operand: ExprId, span: Span) -> BytePos {

@@ -177,6 +177,8 @@ pub struct Sanitize {
     pub boolean: Check,
     /// `-fsanitize=bounds-strict`.
     pub bounds: Check,
+    /// `-fsanitize=unreachable`.
+    pub unreachable: Check,
 }
 
 /// Everything the walk reads, which is a checked translation unit and the target it is for.

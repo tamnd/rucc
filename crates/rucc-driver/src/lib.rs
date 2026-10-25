@@ -2380,6 +2380,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                             "`{one}` is not a sanitizer, see spec/04-driver-and-cli.md section 4.7"
                         )));
                     }
+                    // gcc has no routine that comes back from this one, and says so.
+                    if one == "unreachable" && flag == "-fsanitize-recover" {
+                        return Err(err("-fsanitize-recover=unreachable is not supported"));
+                    }
                     let names = sanitizer_names(one);
                     list.retain(|was| !names.contains(was));
                     if on {
