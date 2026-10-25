@@ -27,6 +27,7 @@ __attribute__((no_sanitize("shift"))) int quiet(int a, int n) { return a << n; }
 
 /// The runtime, which looks at what it is handed and exits with a status that says whether it was
 /// right, and a `main` that picks the case from how many arguments it was given.
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
 const RUNS: &str = r#"
 static int same(const char *a, const char *b) {
     while (*a && *a == *b)
