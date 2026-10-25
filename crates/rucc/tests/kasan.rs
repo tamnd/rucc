@@ -44,6 +44,7 @@ QUIET void __asan_report_load1_noabort(void *p) { report(p, 1); }
 QUIET void __asan_report_load4_noabort(void *p) { report(p, 4); }
 QUIET void __asan_report_store4_noabort(void *p) { report(p, 14); }
 QUIET void __asan_report_load8_noabort(void *p) { report(p, 8); }
+QUIET void __asan_report_load16_noabort(void *p) { report(p, 16); }
 QUIET void __asan_report_store16_noabort(void *p) { report(p, 116); }
 QUIET void __asan_report_load_n_noabort(void *p, u64 n) { report(p, 1000 + (int)n); }
 QUIET void *__asan_memcpy(void *d, const void *s, u64 n) {
