@@ -209,6 +209,21 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_SANCOV) {
             head.push_str(" no_sanitize_coverage");
         }
+        if node.flags.contains(DeclFlags::NO_UBSAN_DIVIDE) {
+            head.push_str(" no_sanitize(integer-divide-by-zero)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_SHIFT_EXPONENT) {
+            head.push_str(" no_sanitize(shift-exponent)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_SHIFT_BASE) {
+            head.push_str(" no_sanitize(shift-base)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_BOOL) {
+            head.push_str(" no_sanitize(bool)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_BOUNDS) {
+            head.push_str(" no_sanitize(bounds)");
+        }
         if node.flags.contains(DeclFlags::CF_CHECK) {
             head.push_str(" cf_check");
         }

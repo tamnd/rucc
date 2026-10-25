@@ -52,7 +52,9 @@ use crate::bits::{Piece, Run, shifted};
 use crate::repr;
 use crate::restrict::Scopes;
 use crate::ssa::{Ssa, Var};
-use crate::unit::{AutoInit, Protector, Unit};
+use crate::unit::{AutoInit, Check, Protector, Sanitize, Unit};
+
+mod ubsan;
 
 /// Builds the body of one function definition into `func`.
 ///
@@ -78,7 +80,10 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
 
     let entry = func.create_block();
     let address = repr::address_type(unit.target);
+    let sanitize = sanitized(unit.sanitize, tast[decl].flags);
     let mut body = Body {
+        sanitize,
+        one_past: None,
         unit,
         func,
         ssa: Ssa::new(address),
@@ -355,6 +360,28 @@ pub(crate) fn untyped(align: u32) -> MemInfo {
         owns: 0,
         restrict: Restrict::NONE,
     }
+}
+
+/// The checks of `asked` a function with `flags` gets, which is all of them less the ones a
+/// `no_sanitize` attribute names and the base of a left shift in a function that wraps.
+fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
+    let mut sanitize = asked;
+    if flags.contains(DeclFlags::NO_UBSAN_DIVIDE) {
+        sanitize.divide = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_SHIFT_EXPONENT) {
+        sanitize.shift_exponent = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_SHIFT_BASE) || flags.contains(DeclFlags::WRAPV) {
+        sanitize.shift_base = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_BOOL) {
+        sanitize.boolean = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_BOUNDS) {
+        sanitize.bounds = Check::Off;
+    }
+    sanitize
 }
 
 /// What `-finstrument-functions` calls on the way into a function, and on the way out of one.
@@ -881,6 +908,13 @@ struct Body<'a, 'u> {
     /// marker at all. Taken at every label rather than only the ones a jump from outside reaches,
     /// which costs a check on a local nothing jumps past and nothing else.
     skipped: Set<Value>,
+    /// The undefined behaviour checks put in this function, which are the ones the command line
+    /// asked for less the ones a `no_sanitize` attribute on the function takes away.
+    sanitize: Sanitize,
+    /// The subscript whose address is all that is wanted of it, which `-fsanitize=bounds-strict`
+    /// lets go one past the end. Set by `&a[i]` and by the decay of `a[i]` just before the
+    /// place is worked out, and taken by the subscript.
+    one_past: Option<ExprId>,
 }
 
 /// What one function of a tree of nested ones has in hand to find the things it reaches.
@@ -4574,7 +4608,8 @@ impl<'u> Body<'_, 'u> {
             }
             ExprKind::Member { base, field } => self.member(base, field, ty, span),
             ExprKind::Subscript { base, index } => {
-                let addr = self.element(base, index, ty, span);
+                let past = self.one_past.take() == Some(expr);
+                let addr = self.element(base, index, ty, past, span);
                 let through = self.through(base);
                 // An array is not a type the attribute can be written on, so an element of one
                 // is stored the way the record the array is a member of stores everything.
@@ -6461,6 +6496,20 @@ impl<'u> Body<'_, 'u> {
     /// `base.field`, which is the base's address plus the member's offset.
     fn member(&mut self, holder: ExprId, field: u32, ty: TypeId, span: Span) -> Place {
         let place = self.place(holder);
+        self.member_at(place, holder, field, ty, span)
+    }
+
+    /// Member `field` of the object at `place`, which `holder` names. Kept apart from
+    /// [`Self::member`] for a check that reads two members of one object and works out where the
+    /// object is only once.
+    fn member_at(
+        &mut self,
+        place: Place,
+        holder: ExprId,
+        field: u32,
+        ty: TypeId,
+        span: Span,
+    ) -> Place {
         let addr = self.address_of(place, span);
         let record = self.types().canonical(self.tast()[holder].ty);
         let TypeKind::Record(id) = self.types().kind(record) else {
@@ -6696,7 +6745,22 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// `base[index]`, where the base is already a pointer to the element type.
-    fn element(&mut self, base: ExprId, index: ExprId, ty: TypeId, span: Span) -> Value {
+    ///
+    /// `past` says only the address of the element is wanted, which is the one place
+    /// `-fsanitize=bounds-strict` lets the index be the length of the array.
+    fn element(
+        &mut self,
+        base: ExprId,
+        index: ExprId,
+        ty: TypeId,
+        past: bool,
+        span: Span,
+    ) -> Value {
+        if self.sanitize.bounds.is_on() {
+            if let Some(addr) = self.checked_element(base, index, ty, past, span) {
+                return addr;
+            }
+        }
         // A vector does not decay, so the base is the vector and the address to step from is
         // the one it lives at. Every other base is a pointer already.
         let pointer = if rucc_types::is_vector(self.types(), self.tast()[base].ty) {
@@ -7742,9 +7806,13 @@ impl<'u> Body<'_, 'u> {
                     return Some(value);
                 }
                 let place = self.place(operand);
+                if let Some(value) = self.checked_bool(place, operand, span) {
+                    return Some(value);
+                }
                 self.read(place, span)
             }
             Conversion::ArrayDecay | Conversion::FunctionDecay => {
+                self.one_past = Some(operand);
                 let place = self.place(operand);
                 Some(self.taken(place, span))
             }
@@ -7938,6 +8006,7 @@ impl<'u> Body<'_, 'u> {
                 self.read(place, span)
             }
             UnaryOp::AddrOf => {
+                self.one_past = Some(operand);
                 let place = self.place(operand);
                 Some(self.taken(place, span))
             }
@@ -8157,6 +8226,14 @@ impl<'u> Body<'_, 'u> {
             _ => {
                 let left = self.value(lhs);
                 let right = self.value(rhs);
+                let count = self.tast()[rhs].ty;
+                self.check_arithmetic(
+                    op,
+                    ubsan::Operand { value: left, ty },
+                    ubsan::Operand { value: right, ty: count },
+                    (lhs, rhs),
+                    span,
+                );
                 Some(self.arithmetic(op, left, right, ty, span))
             }
         }
@@ -9771,6 +9848,14 @@ impl<'u> Body<'_, 'u> {
             let signed = repr::is_signed(self.types(), self.target(), index);
             self.step(old, right, signed, size, op == BinaryOp::Sub, span)
         } else {
+            let count = self.tast()[rhs].ty;
+            self.check_arithmetic(
+                op,
+                ubsan::Operand { value: old, ty: computation },
+                ubsan::Operand { value: right, ty: count },
+                (lhs, rhs),
+                span,
+            );
             self.arithmetic(op, old, right, computation, span)
         };
         let value = self.coerce(value, computation, ty, span);

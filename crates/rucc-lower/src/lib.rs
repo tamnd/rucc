@@ -41,7 +41,7 @@ mod unit;
 
 pub use reach::referred;
 pub use ssa::{Ssa, Var};
-pub use unit::{AutoInit, Context, Lowered, Protector, Wrapping, lower};
+pub use unit::{AutoInit, Check, Context, Lowered, Protector, Sanitize, Wrapping, lower};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";

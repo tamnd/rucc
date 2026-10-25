@@ -372,8 +372,8 @@ kind = "attribute"
 gcc_version = "4.8"
 status = "implemented"
 used_by = ["linux"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c"]
-notes = "Says a function is to be left out of the instrumentation the sanitizers named ask for. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
+tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc::every_check_calls_the_runtime_gcc_names_with_gcc_records"]
+notes = "Says a function is to be left out of the instrumentation the sanitizers named ask for. The names of the checks this compiler puts in are read, which are `integer-divide-by-zero`, `shift`, `shift-exponent`, `shift-base`, `bool`, `enum`, `bounds`, `bounds-strict` and `undefined`, and the function gets none of those checks. Every other sanitizer is refused on the command line, so for the other names the promise is kept by doing nothing."
 
 [[feature]]
 name = "no_sanitize_address"
@@ -409,7 +409,7 @@ gcc_version = "4.9"
 status = "implemented"
 used_by = ["linux"]
 tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
-notes = "`no_sanitize` naming `undefined`, under its older name. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
+notes = "`no_sanitize` naming `undefined`, under its older name. The function gets none of the undefined behaviour checks this compiler puts in, which are the ones of `-fsanitize=integer-divide-by-zero` and `-fsanitize=shift`."
 
 [[feature]]
 name = "no_sanitize_coverage"
@@ -1234,7 +1234,7 @@ gcc_version = "15.0"
 status = "implemented"
 used_by = ["linux"]
 tests = ["rucc/tests/annotations.rs"]
-notes = "Checked with the rules and messages of the gcc the persona claims. gcc 15 takes it on a flexible array member only, naming an integer member of the same structure. gcc 16 also takes it on a pointer member anywhere in the record, except a pointer to a function or to a structure or union that includes a flexible array member, and the kernel writes that as `__counted_by_ptr` once Kconfig sees gcc 16. On a declaration that is not a member it is an error. `__builtin_counted_by_ref` reads it. `__builtin_dynamic_object_size` does not yet, so a fortified copy into the array or through the pointer is checked against what the layout says rather than against the count, which is the answer an unannotated member gets."
+notes = "Checked with the rules and messages of the gcc the persona claims. gcc 15 takes it on a flexible array member only, naming an integer member of the same structure. gcc 16 also takes it on a pointer member anywhere in the record, except a pointer to a function or to a structure or union that includes a flexible array member, and the kernel writes that as `__counted_by_ptr` once Kconfig sees gcc 16. On a declaration that is not a member it is an error. `__builtin_counted_by_ref` reads it, and so does the check of `-fsanitize=bounds-strict`. `__builtin_dynamic_object_size` does not yet, so a fortified copy into the array or through the pointer is checked against what the layout says rather than against the count, which is the answer an unannotated member gets."
 
 [[feature]]
 name = "btf_decl_tag"
