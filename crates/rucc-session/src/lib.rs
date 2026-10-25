@@ -2025,6 +2025,43 @@ impl FromStr for SaveTemps {
     }
 }
 
+/// The string operations `-finline-stringops` names, as gcc 14 spells them.
+///
+/// The bare flag is all four and `-fno-inline-stringops` is none, and `=` takes a list with commas
+/// as well as one name. Only `memset` changes the code so far, which is the one Linux asks for in
+/// its vDSO. The other three are taken so a probe for them answers as gcc does, and a copy, a move
+/// or a comparison the library would be called for is still a call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct Stringops {
+    /// `memcmp`.
+    pub memcmp: bool,
+    /// `memcpy`.
+    pub memcpy: bool,
+    /// `memmove`.
+    pub memmove: bool,
+    /// `memset`.
+    pub memset: bool,
+}
+
+impl Stringops {
+    /// The names gcc takes, in the order its note lists them.
+    pub const NAMES: [&'static str; 4] = ["memcmp", "memcpy", "memmove", "memset"];
+
+    /// Turns one of them on or off by name, or answers `false` for a name that is not one.
+    pub fn set(&mut self, name: &str, on: bool) -> bool {
+        let slot = match name {
+            "memcmp" => &mut self.memcmp,
+            "memcpy" => &mut self.memcpy,
+            "memmove" => &mut self.memmove,
+            "memset" => &mut self.memset,
+            _ => return false,
+        };
+        *slot = on;
+        true
+    }
+}
+
 /// The members of `-ffast-math` that are licences about what an arithmetic may answer, one field
 /// each, so that a build writing `-ffast-math -fno-finite-math-only` gets what gcc gives it.
 ///
@@ -2558,6 +2595,9 @@ pub struct Options {
     /// folded, since an inexact one would be rounded the way the compiler rounds rather than the
     /// way the program asked.
     pub rounding_math: bool,
+    /// Which of the four string operations `-finline-stringops` asks to be written inline every
+    /// time, so the object never calls the library for one. See [`Stringops`].
+    pub inline_stringops: Stringops,
     /// The rest of the `-ffast-math` family, from the flag itself and from each member spelled on
     /// its own. See [`Math`].
     pub math: Math,
@@ -3036,6 +3076,7 @@ impl Options {
             fp_contract: Contract::Off,
             trapping_math: true,
             rounding_math: false,
+            inline_stringops: Stringops::default(),
             math: Math::default(),
             exceptions: false,
             non_call_exceptions: false,

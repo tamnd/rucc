@@ -511,6 +511,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 if !opts.trapping_math {
                                     set |= AttrSet::NO_TRAPPING_MATH;
                                 }
+                                if opts.inline_stringops.memset {
+                                    set |= AttrSet::INLINE_MEMSET;
+                                }
                                 set
                             },
                             align: opts.align_functions,
