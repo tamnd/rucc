@@ -6756,10 +6756,10 @@ impl<'u> Body<'_, 'u> {
         past: bool,
         span: Span,
     ) -> Value {
-        if self.sanitize.bounds.is_on()
-            && let Some(addr) = self.checked_element(base, index, ty, past, span)
-        {
-            return addr;
+        if self.sanitize.bounds.is_on() {
+            if let Some(addr) = self.checked_element(base, index, ty, past, span) {
+                return addr;
+            }
         }
         // A vector does not decay, so the base is the vector and the address to step from is
         // the one it lives at. Every other base is a pointer already.

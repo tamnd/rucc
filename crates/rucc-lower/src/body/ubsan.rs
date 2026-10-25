@@ -248,11 +248,12 @@ impl Body<'_, '_> {
         let extra = u64::from(past);
         let length = match len {
             Some(ArrayLen::Fixed(count)) => {
-                if let ExprKind::Const(id) = self.tast()[index].kind
-                    && let Const::Int(value) = self.tast()[id]
-                    && u64::try_from(value).is_ok_and(|value| value < count + extra)
-                {
-                    return None;
+                if let ExprKind::Const(id) = self.tast()[index].kind {
+                    if let Const::Int(value) = self.tast()[id] {
+                        if u64::try_from(value).is_ok_and(|value| value < count + extra) {
+                            return None;
+                        }
+                    }
                 }
                 Length::Fixed(count)
             }
