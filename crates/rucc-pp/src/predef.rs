@@ -175,6 +175,8 @@ pub struct Predef {
     /// Which functions get a stack protector, which decides `__SSP__` and the three macros like it.
     /// glibc reads them to decide how to build its own code that must not have a canary.
     pub protector: Protector,
+    /// Whether `-fsanitize=kernel-address` is on, which decides `__SANITIZE_ADDRESS__`.
+    pub address: bool,
     /// What `-fcf-protection=` asked for, which decides `__CET__` on x86. Assembly reads it to put
     /// `endbr64` at each entry and to write the note that the C code gets from the compiler.
     pub control: Control,
@@ -214,6 +216,7 @@ impl Predef {
             strict_align: false,
             branch_protection: BranchProtection::default(),
             protector: Protector::None,
+            address: false,
             control: Control::None,
             assembler: false,
         }
@@ -253,6 +256,7 @@ impl Predef {
             strict_align: opts.strict_align,
             branch_protection: opts.branch_protection,
             protector: opts.protector,
+            address: opts.kasan.on,
             control: opts.control,
             assembler: false,
         }
@@ -977,6 +981,8 @@ fn hardening(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
         Protector::Strong => d.set("__SSP_STRONG__", "3"),
         Protector::Explicit => d.set("__SSP_EXPLICIT__", "4"),
     }
+    // The kernel's `compiler-gcc.h` reads it to decide what `__no_sanitize_address` is.
+    d.flag_if(opts.address, "__SANITIZE_ADDRESS__");
     // A set of bits: 1 is the branch half, 2 is the return half and 8 is `check`. gcc defines it
     // only on x86, and the AArch64 form of the question is `-mbranch-protection=`.
     let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);

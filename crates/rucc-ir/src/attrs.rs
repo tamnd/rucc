@@ -283,6 +283,10 @@ impl AttrSet {
     /// Every fill is written inline, one whose length the program works out included, from
     /// `-finline-stringops=memset`. The function has no call to `memset` that it did not spell.
     pub const INLINE_MEMSET: Self = Self(1 << 43);
+    /// `__attribute__((no_sanitize_address))` under `-fsanitize=kernel-address`. None of the
+    /// shadow checks go in this function, and it is not inlined into one that has them, which is
+    /// what lets the kernel read a word past the end of a string in `read_word_at_a_time`.
+    pub const NO_ASAN: Self = Self(1 << 44);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -419,6 +423,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NO_TRAPPING_MATH, "no_trapping_math"),
     (AttrSet::NO_SANCOV, "no_sancov"),
     (AttrSet::INLINE_MEMSET, "inline_memset"),
+    (AttrSet::NO_ASAN, "no_asan"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

@@ -227,6 +227,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_UBSAN_UNREACHABLE) {
             head.push_str(" no_sanitize(unreachable)");
         }
+        if node.flags.contains(DeclFlags::NO_ASAN) {
+            head.push_str(" no_sanitize_address");
+        }
         if node.flags.contains(DeclFlags::CF_CHECK) {
             head.push_str(" cf_check");
         }

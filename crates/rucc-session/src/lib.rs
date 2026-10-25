@@ -384,6 +384,32 @@ impl Sanitize {
     }
 }
 
+/// The shadow checks of `-fsanitize=kernel-address`, which the kernel's `CONFIG_KASAN_GENERIC`
+/// asks for, and the `--param asan-*` settings that go with them.
+///
+/// Every byte of memory has a shadow byte for each group of eight, at the address shifted right by
+/// three plus [`Kasan::offset`]. Zero is eight bytes the program may use, a number from one to seven
+/// is that many bytes at the start of the group, and a negative number is none of them. The kernel
+/// keeps the shadow, so all this asks for is the check in front of each access and the call that
+/// says it failed. See `rucc_opt::asan`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Kasan {
+    /// Whether the checks go in.
+    pub on: bool,
+    /// What the shifted address is added to, from `-fasan-shadow-offset=`.
+    pub offset: u64,
+    /// How many accesses a function has before each check is a call rather than inline code, from
+    /// `--param asan-instrumentation-with-call-threshold=`. gcc's default is 7000.
+    pub call_threshold: u32,
+    /// Whether a copy or a fill the compiler makes calls `__asan_memcpy`, `__asan_memmove` or
+    /// `__asan_memset` rather than the plain routine, from
+    /// `--param asan-kernel-mem-intrinsic-prefix=1`.
+    pub mem_prefix: bool,
+    /// Whether a check that fails stops the program, from `-fno-sanitize-recover=kernel-address`.
+    /// The calls then have no `_noabort` in their names.
+    pub abort: bool,
+}
+
 /// Whether pointer races are watched, from `-fsafety-races=`.
 ///
 /// Design: `spec/safe-memory/09-type-init-and-races.md` section 9.5, which is document 03's C1
@@ -2735,6 +2761,8 @@ pub struct Options {
     /// The undefined behaviour checks of `-fsanitize=` that are made, and what each does when it
     /// fires.
     pub sanitize: Sanitize,
+    /// The shadow checks of `-fsanitize=kernel-address`.
+    pub kasan: Kasan,
     /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`, or is not
     /// position independent at all, from `-fno-pic` and `-fno-pie`.
     pub pic: Pic,
@@ -3116,6 +3144,7 @@ impl Options {
             sanitize_coverage_pc: false,
             sanitize_coverage_cmp: false,
             sanitize: Sanitize::default(),
+            kasan: Kasan { call_threshold: 7000, ..Kasan::default() },
             pic: Pic::default(),
             interposition: true,
             async_unwind_tables: true,

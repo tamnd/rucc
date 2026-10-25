@@ -10099,17 +10099,13 @@ static __inline__ poly16x8_t vmull_p8(poly8x8_t __a, poly8x8_t __b) {
   return __r;
 }
 static __inline__ poly8x8_t vmul_p8(poly8x8_t __a, poly8x8_t __b) {
-  poly8x8_t __r = {0};
-  for (int __i = 0; __i < 8; __i++)
-    for (int __k = 0; __k < 8; __k++)
-      if (__b[__i] >> __k & 1) __r[__i] ^= (__UINT8_TYPE__)(__a[__i] << __k);
+  poly8x8_t __r;
+  __asm__("pmul %0.8b, %1.8b, %2.8b" : "=w"(__r) : "w"(__a), "w"(__b));
   return __r;
 }
 static __inline__ poly8x16_t vmulq_p8(poly8x16_t __a, poly8x16_t __b) {
-  poly8x16_t __r = {0};
-  for (int __i = 0; __i < 16; __i++)
-    for (int __k = 0; __k < 8; __k++)
-      if (__b[__i] >> __k & 1) __r[__i] ^= (__UINT8_TYPE__)(__a[__i] << __k);
+  poly8x16_t __r;
+  __asm__("pmul %0.16b, %1.16b, %2.16b" : "=w"(__r) : "w"(__a), "w"(__b));
   return __r;
 }
 static __inline__ poly128_t vmull_p64(poly64_t __a, poly64_t __b) {
@@ -11668,63 +11664,57 @@ static __inline__ poly64x2_t vtrn2q_p64(poly64x2_t __a, poly64x2_t __b) {
 }
 static __inline__ uint8x8_t vqtbl1_u8(uint8x16_t __t, uint8x8_t __x) {
   uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : 0;
+  __asm__("tbl %0.8b, {%1.16b}, %2.8b" : "=w"(__r) : "w"(__t), "w"(__x));
   return __r;
 }
 static __inline__ uint8x8_t vqtbx1_u8(uint8x8_t __lo, uint8x16_t __t, uint8x8_t __x) {
-  uint8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : __lo[__i];
-  return __r;
+  __asm__("tbx %0.8b, {%1.16b}, %2.8b" : "+w"(__lo) : "w"(__t), "w"(__x));
+  return __lo;
 }
 static __inline__ int8x8_t vqtbl1_s8(int8x16_t __t, uint8x8_t __x) {
   int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : 0;
+  __asm__("tbl %0.8b, {%1.16b}, %2.8b" : "=w"(__r) : "w"(__t), "w"(__x));
   return __r;
 }
 static __inline__ int8x8_t vqtbx1_s8(int8x8_t __lo, int8x16_t __t, uint8x8_t __x) {
-  int8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : __lo[__i];
-  return __r;
+  __asm__("tbx %0.8b, {%1.16b}, %2.8b" : "+w"(__lo) : "w"(__t), "w"(__x));
+  return __lo;
 }
 static __inline__ poly8x8_t vqtbl1_p8(poly8x16_t __t, uint8x8_t __x) {
   poly8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : 0;
+  __asm__("tbl %0.8b, {%1.16b}, %2.8b" : "=w"(__r) : "w"(__t), "w"(__x));
   return __r;
 }
 static __inline__ poly8x8_t vqtbx1_p8(poly8x8_t __lo, poly8x16_t __t, uint8x8_t __x) {
-  poly8x8_t __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : __lo[__i];
-  return __r;
+  __asm__("tbx %0.8b, {%1.16b}, %2.8b" : "+w"(__lo) : "w"(__t), "w"(__x));
+  return __lo;
 }
 static __inline__ uint8x16_t vqtbl1q_u8(uint8x16_t __t, uint8x16_t __x) {
   uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : 0;
+  __asm__("tbl %0.16b, {%1.16b}, %2.16b" : "=w"(__r) : "w"(__t), "w"(__x));
   return __r;
 }
 static __inline__ uint8x16_t vqtbx1q_u8(uint8x16_t __lo, uint8x16_t __t, uint8x16_t __x) {
-  uint8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : __lo[__i];
-  return __r;
+  __asm__("tbx %0.16b, {%1.16b}, %2.16b" : "+w"(__lo) : "w"(__t), "w"(__x));
+  return __lo;
 }
 static __inline__ int8x16_t vqtbl1q_s8(int8x16_t __t, uint8x16_t __x) {
   int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : 0;
+  __asm__("tbl %0.16b, {%1.16b}, %2.16b" : "=w"(__r) : "w"(__t), "w"(__x));
   return __r;
 }
 static __inline__ int8x16_t vqtbx1q_s8(int8x16_t __lo, int8x16_t __t, uint8x16_t __x) {
-  int8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : __lo[__i];
-  return __r;
+  __asm__("tbx %0.16b, {%1.16b}, %2.16b" : "+w"(__lo) : "w"(__t), "w"(__x));
+  return __lo;
 }
 static __inline__ poly8x16_t vqtbl1q_p8(poly8x16_t __t, uint8x16_t __x) {
   poly8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : 0;
+  __asm__("tbl %0.16b, {%1.16b}, %2.16b" : "=w"(__r) : "w"(__t), "w"(__x));
   return __r;
 }
 static __inline__ poly8x16_t vqtbx1q_p8(poly8x16_t __lo, poly8x16_t __t, uint8x16_t __x) {
-  poly8x16_t __r;
-  for (int __i = 0; __i < 16; __i++) __r[__i] = __x[__i] < 16 ? __t[__x[__i]] : __lo[__i];
-  return __r;
+  __asm__("tbx %0.16b, {%1.16b}, %2.16b" : "+w"(__lo) : "w"(__t), "w"(__x));
+  return __lo;
 }
 static __inline__ uint8x8_t vtbl1_u8(uint8x8_t __t, uint8x8_t __x) {
   uint8x8_t __r;
