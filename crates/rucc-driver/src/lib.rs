@@ -63,7 +63,7 @@ use rucc_codegen::pressure::Pressure;
 use rucc_pp::Dependency;
 use rucc_session::{
     Check, Control, Dumps, EmitKind, Hook, Math, Options, Pic, PrefixMap, Preinclude, Protector,
-    Sanitize, SaveTemps, Session, Std, Wrapping, runtime,
+    Sanitize, SaveTemps, Session, Std, Stringops, Wrapping, runtime,
 };
 use rucc_sysroot::{Manifest, Sysroot};
 use rucc_target::{ObjectFormat, Triple};
@@ -2730,6 +2730,35 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     return Err(err(format!(
                         "{arg}: registers are only cleared on return on x86-64, i386 and AArch64"
                     )));
+                }
+            }
+            // Which string operations are written inline every time, which came in gcc 14. Linux
+            // 7.3 asks for `=memset` in its vDSO through CONFIG_CC_OPT_INLINE_MEMSET, and the
+            // messages are gcc's, since a probe reads only whether the command failed.
+            "-finline-stringops" | "-fno-inline-stringops" => {
+                newer.push((14, format!("unknown option `{arg}`")));
+                let on = arg == "-finline-stringops";
+                for name in Stringops::NAMES {
+                    opts.inline_stringops.set(name, on);
+                }
+            }
+            _ if arg.starts_with("-finline-stringops=")
+                || arg.starts_with("-fno-inline-stringops=") =>
+            {
+                newer.push((14, format!("unknown option `{arg}`")));
+                let (flag, list) = arg.split_once('=').unwrap_or((arg, ""));
+                let on = flag == "-finline-stringops";
+                if list.is_empty() {
+                    return Err(err(format!("missing argument to `{flag}=`")));
+                }
+                for name in list.split(',') {
+                    if !opts.inline_stringops.set(name, on) {
+                        return Err(err(format!(
+                            "unavailable stringop for inlining `{name}`; valid arguments to \
+                             `{flag}=` are: {}",
+                            Stringops::NAMES.join(" ")
+                        )));
+                    }
                 }
             }
             // A floor under every function that `-falign-functions` cannot lower, which is gcc's
