@@ -187,6 +187,7 @@ impl Checker<'_> {
             for attr in asked {
                 if let Some(counter) = self.counter(attr, fields, at) {
                     self.annotations.counters.insert((record, name), counter);
+                    self.tast.record_counter(record, name, counter);
                 }
             }
             let written = lists.iter().flat_map(|&list| self.ast[list].iter().copied());

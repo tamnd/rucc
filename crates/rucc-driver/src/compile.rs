@@ -518,6 +518,15 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             },
                             align: opts.align_functions,
                             instrument: opts.instrument_functions,
+                            sanitize: rucc_lower::Sanitize {
+                                divide: lower_check(opts.sanitize.divide),
+                                shift_exponent: lower_check(opts.sanitize.shift_exponent),
+                                shift_base: lower_check(opts.sanitize.shift_base),
+                                boolean: lower_check(opts.sanitize.boolean),
+                                bounds: lower_check(opts.sanitize.bounds_strict),
+                            },
+                            sources: &sess.sources,
+                            c23: opts.std >= rucc_session::Std::C23,
                             exceptions: opts.exceptions,
                             non_call_exceptions: opts.exceptions && opts.non_call_exceptions,
                             // The same answer `reuse` below is given, since the markers are only
@@ -3515,6 +3524,16 @@ fn failure(message: String) -> Compiled {
         timing: crate::trace::Timing::default(),
         stack_usage: String::new(),
         note: Vec::new(),
+    }
+}
+
+/// What one check of `-fsanitize=` does, in the walk's words for it.
+fn lower_check(check: rucc_session::Check) -> rucc_lower::Check {
+    match check {
+        rucc_session::Check::Off => rucc_lower::Check::Off,
+        rucc_session::Check::Report => rucc_lower::Check::Report,
+        rucc_session::Check::Abort => rucc_lower::Check::Abort,
+        rucc_session::Check::Trap => rucc_lower::Check::Trap,
     }
 }
 
