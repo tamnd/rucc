@@ -373,7 +373,7 @@ gcc_version = "4.8"
 status = "implemented"
 used_by = ["linux"]
 tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc::every_check_calls_the_runtime_gcc_names_with_gcc_records"]
-notes = "Says a function is to be left out of the instrumentation the sanitizers named ask for. The names of the checks this compiler puts in are read, which are `integer-divide-by-zero`, `shift`, `shift-exponent`, `shift-base`, `bool`, `enum`, `bounds`, `bounds-strict`, `unreachable` and `undefined`, and the function gets none of those checks. Every other sanitizer is refused on the command line, so for the other names the promise is kept by doing nothing."
+notes = "Says a function is to be left out of the instrumentation the sanitizers named ask for. The names of the checks this compiler puts in are read, which are `integer-divide-by-zero`, `shift`, `shift-exponent`, `shift-base`, `bool`, `enum`, `bounds`, `bounds-strict`, `unreachable` and `undefined`, and the function gets none of those checks. `address` and `kernel-address` turn the shadow checks of `-fsanitize=kernel-address` off. Every other sanitizer is refused on the command line, so for the other names the promise is kept by doing nothing."
 
 [[feature]]
 name = "no_sanitize_address"
@@ -381,8 +381,8 @@ kind = "attribute"
 gcc_version = "4.8"
 status = "implemented"
 used_by = ["linux"]
-tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
-notes = "`no_sanitize` naming `address`, under its older name. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word", "rucc::every_access_reads_its_shadow_and_reports_with_gcc_names"]
+notes = "`no_sanitize` naming `address`, under its older name. Under `-fsanitize=kernel-address` the function gets no shadow checks, and it is not inlined into a function that gets them, so the kernel's `noinstr` code stays without checks."
 
 [[feature]]
 name = "no_address_safety_analysis"
@@ -391,7 +391,7 @@ gcc_version = "4.8"
 status = "implemented"
 used_by = []
 tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
-notes = "The first name `no_sanitize_address` had, still taken by gcc. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
+notes = "The first name `no_sanitize_address` had, still taken by gcc. It is read the same as `no_sanitize_address`."
 
 [[feature]]
 name = "no_sanitize_thread"

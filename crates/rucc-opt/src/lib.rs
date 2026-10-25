@@ -103,6 +103,7 @@
 pub mod adce;
 pub mod alias;
 pub mod analysis;
+pub mod asan;
 pub mod bswap;
 pub mod budget;
 pub mod callgraph;
