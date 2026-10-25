@@ -153,6 +153,7 @@ pub fn answer(
                 differed: Cell::new(false),
                 ways: Cell::new(WAYS),
                 splits: Cell::new(WAYS),
+                covered: Cell::new(false),
                 places: OnceCell::new(),
                 escapes: OnceCell::new(),
                 dynamic: Cell::new(false),
@@ -644,6 +645,10 @@ struct Walk<'a> {
     /// How many more ways into a join [`Walk::split`] may follow for the question it is on, for
     /// the same reason.
     splits: Cell<u32>,
+    /// Whether the join [`Walk::split`] is asked about next is a way into one whose question is
+    /// only asked once a branch has found it is not a null pointer, so that the joined pointer is
+    /// that one on every way it can bring a null pointer to the question.
+    covered: Cell<bool>,
     /// Where each address into a fixed local is used, worked out on the first question that
     /// needs it, as [`Places`] says.
     places: OnceCell<Places>,
@@ -753,7 +758,11 @@ impl Walk<'_> {
     /// `arcmsr_sysfs_iop_message_write` copies into `&acb->wqbuffer[acb->put]` or, once it has
     /// wrapped, into `acb->wqbuffer`, and gcc keeps the field spanning WARN that checks the copy
     /// against what is left of the member on the way it came. Every way that can be taken has to
-    /// bring something known, and a loop is not followed, since nothing could be passed round it.
+    /// bring something known. A way round a loop is only followed where the address it brings is
+    /// worked out afresh on each trip, as [`Walk::afresh`] says, since nothing else could be passed
+    /// round it. tls's `tls_split_open_record` copies each entry to `nsge`, which it sets to
+    /// `sk_msg_elem (msg_npl, j)` at the end of each trip, and gcc keeps the field spanning WARN
+    /// that checks the copy against what is left of the array from entry `j`.
     ///
     /// Steps added to the address after the join are taken off what the ways bring, as tscs454's
     /// `coeff_ram_put` copies to `&coeff_ram[ctl->addr * COEFF_SIZE]` with `coeff_ram` one of
@@ -764,6 +773,11 @@ impl Walk<'_> {
     /// pointer is not null brings nothing, the way gcc has threaded that branch by the time it
     /// answers. maple_tree's `node_copy` copies to `ma_gaps (dst, d_mt) + d_start` inside `if
     /// (d_gaps)`, and `ma_gaps` gives back one of two members or `NULL`.
+    ///
+    /// That holds for a way into a join that is itself a way into the one the branch tested too.
+    /// dml2's `get_expanded_strategy_list` picks one of four lists by a switch with a default that
+    /// leaves it `NULL`, and `insert_strategy_into_expanded_list` copies into an entry of it inside
+    /// `if (expanded_strategy_list)`. gcc keeps the field spanning WARN that checks the copy.
     ///
     /// A way a `switch` chose that a later `switch` on the same value turns away from the question
     /// brings nothing either, for the same reason. See [`Walk::onward`].
@@ -795,30 +809,37 @@ impl Walk<'_> {
             steps.push(step);
             value = base;
         };
+        let covered = self.covered.replace(false) && steps.is_empty();
         let unknown = if asked & 2 == 0 { -1 } else { 0 };
         let mut preds = self.cfg.predecessors(block).to_vec();
         preds.sort_unstable();
         preds.dedup();
-        if preds.iter().any(|&pred| self.dom.dominates(block, pred)) {
-            return None;
-        }
         let there = self.func.block_of(question)?;
+        let guarded = covered || self.guarded(value, question);
         let mut ways = Vec::new();
         for pred in preds {
             let term = self.func.terminator(pred)?;
             let taken = self.taken(pred, block) && self.onward(pred, block, there);
+            let round = self.dom.dominates(block, pred);
             for at in self.func.target_list(term).iter() {
                 let call = self.func[at];
                 if call.block != block {
                     continue;
+                }
+                if round && !self.afresh(*self.func[call.args].get(index as usize)?, block) {
+                    return None;
                 }
                 let way = match taken {
                     false => None,
                     true => {
                         self.splits.set(self.splits.get().checked_sub(1)?);
                         let arg = *self.func[call.args].get(index as usize)?;
-                        match self.reply(arg, term, ty, asked, depth) {
-                            _ if self.null(arg) && self.guarded(value, question) => None,
+                        let joined = matches!(self.func[arg].def, Def::Param { .. });
+                        self.covered.set(guarded && joined);
+                        let answer = self.reply(arg, term, ty, asked, depth);
+                        self.covered.set(false);
+                        match answer {
+                            _ if self.null(arg) && guarded => None,
                             Answer::Known(number) if number == unknown => return None,
                             answer => Some((arg, answer)),
                         }
@@ -835,6 +856,54 @@ impl Walk<'_> {
             true => Some(joined),
             false => Some(Answer::Less(Box::new(joined), steps)),
         }
+    }
+
+    /// Whether an address is a step from something no join has chosen, so that what is left behind
+    /// it can be worked out on a way round a loop from what that trip found. The steps are taken
+    /// back to where they start, which has to be a parameter of the function or an instruction
+    /// other than a `select`, which may choose the join's own parameter. Either is fine when it is
+    /// set before the loop starts, in a block above `header`, and is then the same on every trip.
+    /// tls's `tls_get_rec` is inlined into `tls_split_open_record`, so the record `nsge` is in
+    /// is the join of what it gave back. A parameter of a block with one way in is what that way
+    /// passes, as [`Walk::only`] says.
+    fn afresh(&self, mut value: Value, header: Block) -> bool {
+        let above = |block: Block| block != header && self.dom.dominates(block, header);
+        for _ in 0..DEPTH {
+            match self.func[value].def {
+                Def::Param { block, index } => {
+                    if self.cfg.predecessors(block).is_empty() || above(block) {
+                        return true;
+                    }
+                    match self.only(block, index) {
+                        Some(arg) => value = arg,
+                        None => return false,
+                    }
+                }
+                Def::Result { inst, .. } if self.func[inst].opcode == Opcode::PtrAdd => {
+                    let Some(&base) = self.func[self.func[inst].args].first() else { return false };
+                    value = base;
+                }
+                Def::Result { inst, .. } => {
+                    return self.func[inst].opcode != Opcode::Select
+                        || self.func.block_of(inst).is_some_and(above);
+                }
+            }
+        }
+        false
+    }
+
+    /// What a parameter of a block with one way into it is passed on that way, which is the
+    /// parameter. An inlined `sk_msg_elem` hands back the address it worked out like that.
+    fn only(&self, block: Block, index: u32) -> Option<Value> {
+        let &[pred] = self.cfg.predecessors(block) else { return None };
+        let term = self.func.terminator(pred)?;
+        let mut calls =
+            self.func.target_list(term).iter().filter(|&at| self.func[at].block == block);
+        let at = calls.next()?;
+        if calls.next().is_some() {
+            return None;
+        }
+        self.func[self.func[at].args].get(index as usize).copied()
     }
 
     /// Whether a way into the join from `pred` can go on to the question, where a `switch` chose
@@ -2025,20 +2094,44 @@ impl Walk<'_> {
 
     /// Whether the edge from `pred` to `block` is the way a branch takes where `value` is not a
     /// null pointer.
+    ///
+    /// The test may be turned round by an `xor` with true, which is how `if (!r)` comes out of
+    /// lowering. tls's `tls_get_rec` returns `NULL` under one and `tls_split_open_record` tests
+    /// what it got the same way, and gcc keeps the field spanning WARN of the copy into the
+    /// record once it is past that.
     fn not_null(&self, pred: Block, block: Block, value: Value) -> bool {
         let Some(term) = self.func.terminator(pred) else { return false };
         if self.func[term].opcode != Opcode::BrIf {
             return false;
         }
         let Some(&cond) = self.func[self.func[term].args].first() else { return false };
-        let Def::Result { inst, .. } = self.func[cond].def else { return false };
+        let (mut cond, mut flipped) = (cond, false);
+        let inst = loop {
+            let Def::Result { inst, .. } = self.func[cond].def else { return false };
+            let test = &self.func[inst];
+            let &[one, other] = &self.func[test.args][..] else { return false };
+            if test.opcode != Opcode::Xor || self.func[cond].ty != Type::I1 {
+                break inst;
+            }
+            let all =
+                |v: Value| self.number(v, NUMBER).is_some_and(|(imm, _)| imm.unsigned() & 1 == 1);
+            cond = match (all(one), all(other)) {
+                (_, true) => one,
+                (true, false) => other,
+                (false, false) => return false,
+            };
+            flipped = !flipped;
+        };
         let test = &self.func[inst];
         let (Opcode::ICmp, Extra::IntPred(pred)) = (test.opcode, test.extra) else { return false };
         let &[one, other] = &self.func[test.args][..] else { return false };
         if !(one == value && self.null(other) || other == value && self.null(one)) {
             return false;
         }
-        let calls: Vec<Block> = self.func.successors(term).map(|call| call.block).collect();
+        let mut calls: Vec<Block> = self.func.successors(term).map(|call| call.block).collect();
+        if flipped {
+            calls.reverse();
+        }
         match (pred, calls.as_slice()) {
             (_, &[then, other]) if then == other => false,
             (IntPred::Ne, &[then, _]) => then == block,
