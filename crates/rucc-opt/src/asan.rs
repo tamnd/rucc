@@ -27,6 +27,10 @@
 //! `CONFIG_KASAN_OUTLINE` asks for it with a threshold of zero. There an access that is not one of
 //! the aligned ones calls `__asan_loadN_noabort`.
 //!
+//! An atomic access is a call to the runtime whatever the threshold says, `__asan_load4_noabort`
+//! for a load and `__asan_store4_noabort` for every other kind, which is what gcc gives the
+//! `__atomic` and `__sync` builtins.
+//!
 //! A copy or a fill the compiler makes is checked as a read of the bytes it reads and a write of
 //! the bytes it writes. One whose length the program works out is a call to `__asan_memcpy`,
 //! `__asan_memmove` or `__asan_memset` under `--param asan-kernel-mem-intrinsic-prefix=1`, and so
@@ -273,6 +277,9 @@ struct Access {
     size: Size,
     align: u32,
     write: bool,
+    /// Whether it is an atomic access, which gcc checks with a call to the runtime whatever the
+    /// threshold says.
+    atomic: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -309,6 +316,7 @@ fn instrument(
                     size: Size::Bytes(size),
                     align,
                     write: false,
+                    atomic: false,
                 });
             }
             Opcode::Store => {
@@ -322,6 +330,30 @@ fn instrument(
                     size: Size::Bytes(size),
                     align,
                     write: true,
+                    atomic: false,
+                });
+            }
+            // An atomic load is checked as a read and every other atomic as a write, a
+            // compare and exchange too, as gcc checks the builtins. The value a compare and
+            // exchange expects is not an access here, since the front end has read it already.
+            Opcode::AtomicLoad | Opcode::AtomicStore | Opcode::AtomicRmw | Opcode::Cmpxchg => {
+                let (Extra::Mem(mem) | Extra::Rmw(_, mem)) = data.extra else { continue };
+                let args = &func[data.args];
+                let (address, ty) = match data.opcode {
+                    Opcode::AtomicLoad => {
+                        let Some(result) = data.first_result else { continue };
+                        (args[0], func[result].ty)
+                    }
+                    Opcode::AtomicStore => (args[1], func[args[0]].ty),
+                    _ => (args[0], func[args[1]].ty),
+                };
+                accesses.push(Access {
+                    before: inst,
+                    address,
+                    size: Size::Bytes(bytes(ty)),
+                    align: func[mem].align,
+                    write: data.opcode != Opcode::AtomicLoad,
+                    atomic: true,
                 });
             }
             Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => {
@@ -346,9 +378,18 @@ fn instrument(
                         size,
                         align,
                         write: false,
+                        atomic: false,
                     });
                 }
-                accesses.push(Access { before: inst, address: bulk.to, size, align, write: true });
+                let to = bulk.to;
+                accesses.push(Access {
+                    before: inst,
+                    address: to,
+                    size,
+                    align,
+                    write: true,
+                    atomic: false,
+                });
             }
             Opcode::Call if how.mem_prefix => {
                 let Extra::Call(info) = data.extra else { continue };
@@ -428,6 +469,7 @@ fn check(
     offset: u64,
 ) {
     let kind = if access.write { "store" } else { "load" };
+    let outline = outline || access.atomic;
     // gcc's scalar access: a size it has a routine for, aligned to that size. A 16 byte access
     // needs only eight, since the two shadow bytes are read as one on the targets this has.
     let scalar = match access.size {
