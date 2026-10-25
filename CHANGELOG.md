@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-finline-stringops`, `-fno-inline-stringops` and the `=` forms with `memcmp`, `memcpy`, `memmove` and `memset`, alone or in a list, as gcc 14 to 16 take them. Linux 7.3 probes for `-finline-stringops=memset` with `cc-option` and builds the vDSO with it on x86-64, arm64 and riscv64. rucc gave "unknown option", so the probe failed and `CONFIG_CC_OPT_INLINE_MEMSET` was empty where it has the flag for gcc 16. With `memset` on, each `__builtin_memset` and each structure fill that would be a call to `memset` is now a loop of stores, a word at a time and then a byte at a time, also when the length is not a constant. This is also true under `-ffreestanding` and `-fno-builtin`, where only a plain call to `memset` stays a call, as gcc does it. The other three names are accepted, but their code does not change yet. A persona before gcc 14 does not accept the flag. (#3761)
+
 ### Fixed
 
 - A `memset` call for a large object filled with a constant byte now passes the byte as one `movl` or `xorl` of the `int`, as gcc writes it. It was a `movb` of the byte and then a `movzbl` of the register. This is on each call that clears a large local or a large structure, for example the zeroed objects of Linux 7.3.
