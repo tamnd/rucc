@@ -342,9 +342,12 @@ impl Checker<'_> {
                 // An array with no length in a declared object is what is left of that object, at
                 // either kind and wherever the record holding it sits, so `n.in.f` runs on over
                 // the members of `n` after `in`. That is gcc 13 and gcc 15. Through a pointer it
-                // has no answer.
+                // has no answer, but a member of one of its elements still has its own size, as
+                // in gs_usb's `hf->classic_can->data`, where the array is in an unnamed struct.
                 let Some(size) = size else {
-                    reach.whole?;
+                    if reach.whole.is_none() {
+                        return Some(reach.member(field.offset, None));
+                    }
                     let reach = reach.member(field.offset, reach.whole);
                     return Some(Reach { into_closest: reach.into_whole, ..reach });
                 };
@@ -362,26 +365,44 @@ impl Checker<'_> {
                 let Ok(count) = self.eval().integer(index) else {
                     return Some(Reach::UNSEEN);
                 };
-                let element = i128::from(self.bytes_of(self.tast[expr].ty)?);
-                let into = u64::try_from(count.checked_mul(element)?).ok()?;
-                // An array the member walk left without a size has none as an array either. One
-                // with no length that it did measure is the rest of the object it is in.
-                let (closest, into_closest) = match reach.closest {
-                    Some(_) => match self.bytes_of(self.tast[array].ty) {
-                        Some(size) => (Some(size), into),
-                        None => (reach.closest, reach.into_closest.saturating_add(into)),
-                    },
-                    None => (None, into),
-                };
-                Some(Reach {
-                    whole: reach.whole,
-                    into_whole: reach.into_whole.saturating_add(into),
-                    closest,
-                    into_closest,
-                })
+                self.sized_element(expr, array, reach, count)
+            }
+            // `*a` of an array reached through a pointer, which is `a[0]`. One in a declared
+            // object is what a pointer points at, and the arm at the top has it.
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => {
+                let array = self.decayed(operand)?;
+                let reach = self.inside(array)?;
+                self.sized_element(expr, array, reach, 0)
             }
             _ => None,
         }
+    }
+
+    /// The element `count` places into `array`, which the walk measured as `reach`.
+    fn sized_element(
+        &mut self,
+        expr: ExprId,
+        array: ExprId,
+        reach: Reach,
+        count: i128,
+    ) -> Option<Reach> {
+        let element = i128::from(self.bytes_of(self.tast[expr].ty)?);
+        let into = u64::try_from(count.checked_mul(element)?).ok()?;
+        // An array the member walk left without a size has none as an array either. One
+        // with no length that it did measure is the rest of the object it is in.
+        let (closest, into_closest) = match reach.closest {
+            Some(_) => match self.bytes_of(self.tast[array].ty) {
+                Some(size) => (Some(size), into),
+                None => (reach.closest, reach.into_closest.saturating_add(into)),
+            },
+            None => (None, into),
+        };
+        Some(Reach {
+            whole: reach.whole,
+            into_whole: reach.into_whole.saturating_add(into),
+            closest,
+            into_closest,
+        })
     }
 
     /// Whether working this address out changes nothing, so that lowering it for the question
@@ -472,11 +493,11 @@ impl Checker<'_> {
         match self.tast[expr].kind {
             ExprKind::Member { base, .. }
             | ExprKind::Unary { op: UnaryOp::AddrOf, operand: base } => self.set_here(base),
-            ExprKind::Subscript { base, .. } => match self.decayed(base) {
+            ExprKind::Subscript { base, .. }
+            | ExprKind::Unary { op: UnaryOp::Deref, operand: base } => match self.decayed(base) {
                 Some(array) => self.set_here(array),
                 None => self.pointer_set_here(base),
             },
-            ExprKind::Unary { op: UnaryOp::Deref, operand } => self.pointer_set_here(operand),
             _ => false,
         }
     }
@@ -542,11 +563,11 @@ impl Checker<'_> {
             ExprKind::Binary { op: BinaryOp::Add | BinaryOp::Sub, lhs, rhs } => {
                 self.read_pointer(lhs) || self.read_pointer(rhs)
             }
-            ExprKind::Subscript { base, .. } => match self.decayed(base) {
+            ExprKind::Subscript { base, .. }
+            | ExprKind::Unary { op: UnaryOp::Deref, operand: base } => match self.decayed(base) {
                 Some(array) => self.read_pointer(array),
                 None => automatic(base),
             },
-            ExprKind::Unary { op: UnaryOp::Deref, operand } => automatic(operand),
             _ => false,
         }
     }
@@ -564,10 +585,13 @@ impl Checker<'_> {
             match self.tast[expr].kind {
                 _ if self.through_pointer(expr) => return true,
                 ExprKind::Member { base, .. } => expr = base,
-                ExprKind::Subscript { base, .. } => match self.decayed(base) {
-                    Some(array) => expr = array,
-                    None => return true,
-                },
+                ExprKind::Subscript { base, .. }
+                | ExprKind::Unary { op: UnaryOp::Deref, operand: base } => {
+                    match self.decayed(base) {
+                        Some(array) => expr = array,
+                        None => return true,
+                    }
+                }
                 ExprKind::Decl(_) => return inside && self.local(expr),
                 _ => return false,
             }
@@ -731,10 +755,30 @@ pub fn open_to_pointer(tast: &Tast, types: &Types, expr: ExprId, gnuc: u32) -> b
 }
 
 /// Whether this lvalue is what a pointer points at, written `*p` or `p[i]`.
+///
+/// `*a` of an array `a` that is reached through a pointer is `a[0]` to gcc, an element of the
+/// array, and so not what a pointer points at. gs_usb's `hf->classic_can->data` is how the kernel
+/// writes it, and gcc keeps the field spanning WARN of the copy into it. An array in a declared
+/// object is not folded that way, and gcc answers what is left of the object there.
 fn pointed_at(tast: &Tast, types: &Types, expr: ExprId) -> bool {
     match tast[expr].kind {
-        ExprKind::Unary { op: UnaryOp::Deref, .. } => true,
+        ExprKind::Unary { op: UnaryOp::Deref, operand } => {
+            decayed_in(tast, types, operand).is_none_or(|array| !reached(tast, types, array))
+        }
         ExprKind::Subscript { base, .. } => decayed_in(tast, types, base).is_none(),
+        _ => false,
+    }
+}
+
+/// Whether this lvalue is in an object a pointer points at, through the members and the elements
+/// of arrays it is in.
+fn reached(tast: &Tast, types: &Types, expr: ExprId) -> bool {
+    match tast[expr].kind {
+        ExprKind::Member { base, .. } => reached(tast, types, base),
+        ExprKind::Unary { op: UnaryOp::Deref, operand: base }
+        | ExprKind::Subscript { base, .. } => {
+            decayed_in(tast, types, base).is_none_or(|array| reached(tast, types, array))
+        }
         _ => false,
     }
 }
