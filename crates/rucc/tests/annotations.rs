@@ -145,6 +145,27 @@ fn the_counter_is_reached_through_the_array() {
     assert!(!uncounted.contains("(%rdi)"), "the object is written without a counter:\n{out}");
 }
 
+/// A counter in an anonymous member, as `struct posix_acl` has it through `struct_group_tagged`,
+/// is found and written at its offset in the record.
+#[test]
+fn a_counter_in_an_anonymous_member_is_found() {
+    let out = listing(
+        "anonymous",
+        "struct e { int x; };\n\
+         struct acl {\n\
+         \tunion {\n\
+         \t\tstruct { int r; unsigned int a_count; };\n\
+         \t\tstruct hdr { int r; unsigned int a_count; } hdr;\n\
+         \t};\n\
+         \tstruct e a_entries[] __attribute__((__counted_by__(a_count)));\n\
+         };\n\
+         _Static_assert(_Generic(__builtin_counted_by_ref(((struct acl *)0)->a_entries), \
+                        unsigned int *: 1, default: 0), \"unsigned\");\n\
+         void set(struct acl *a) { *__builtin_counted_by_ref(a->a_entries) = 5; }\n",
+    );
+    assert!(out.contains(", 4(%rdi)"), "the counter is not written:\n{out}");
+}
+
 /// What gcc 16 refuses, in its words.
 #[test]
 fn what_gcc_refuses_is_refused() {
