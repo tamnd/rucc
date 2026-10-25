@@ -2030,6 +2030,9 @@ impl Checker<'_> {
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
                 "no_profile_instrument_function" => flags |= DeclFlags::NO_PROFILE,
                 "no_sanitize_coverage" => flags |= DeclFlags::NO_SANCOV,
+                "no_sanitize_address" | "no_address_safety_analysis" => {
+                    flags |= DeclFlags::NO_ASAN;
+                }
                 "no_sanitize_undefined" => flags |= unsanitized("undefined"),
                 "no_sanitize" => {
                     for name in self.optimize_options(attr) {
@@ -3642,6 +3645,7 @@ fn unsanitized(name: &str) -> DeclFlags {
         "bool" => DeclFlags::NO_UBSAN_BOOL,
         "bounds" | "bounds-strict" => DeclFlags::NO_UBSAN_BOUNDS,
         "unreachable" => DeclFlags::NO_UBSAN_UNREACHABLE,
+        "address" | "kernel-address" => DeclFlags::NO_ASAN,
         "undefined" => {
             DeclFlags::NO_UBSAN_DIVIDE
                 | DeclFlags::NO_UBSAN_SHIFT_EXPONENT

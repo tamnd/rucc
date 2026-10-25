@@ -69,7 +69,6 @@ fn asking_for_a_sanitizer_is_refused_by_name_and_writes_no_object() {
     let dir = fixture("refused");
     for asked in [
         "address",
-        "kernel-address",
         "hwaddress",
         "thread",
         "leak",

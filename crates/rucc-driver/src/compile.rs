@@ -525,6 +525,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 boolean: lower_check(opts.sanitize.boolean),
                                 bounds: lower_check(opts.sanitize.bounds_strict),
                                 unreachable: lower_check(opts.sanitize.unreachable),
+                                address: opts.kasan.on,
                             },
                             sources: &sess.sources,
                             c23: opts.std >= rucc_session::Std::C23,
@@ -1200,6 +1201,16 @@ fn optimize(
             return Err(errors
                 .iter()
                 .map(|e| internal(&format!("invalid IR after the coverage calls, {e}")))
+                .collect());
+        }
+    }
+    // After the coverage calls, as gcc's pass is, so the blocks the checks split off get no call
+    // of their own. See `rucc_opt::asan`.
+    if rucc_opt::asan::run(module, names, opts.kasan) > 0 {
+        if let Err(errors) = rucc_ir::verify(module, names) {
+            return Err(errors
+                .iter()
+                .map(|e| internal(&format!("invalid IR after the shadow checks, {e}")))
                 .collect());
         }
     }
