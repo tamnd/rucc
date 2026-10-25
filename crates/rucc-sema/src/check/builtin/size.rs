@@ -218,7 +218,11 @@ impl Checker<'_> {
         // inlined the IR can see what the caller passed, and that is when gcc answers it:
         // `check_copy_size` inside `copy_from_user` asks about its `addr` and gets the size of
         // the buffer the caller of the caller passed.
-        if ((answer.is_none() && self.local(address)) || capped)
+        // The dynamic spelling asked about a flexible array member with `counted_by` is answered
+        // with the count, which the IR reads where the address of the array is taken. gcc 16
+        // answers every kind that way above `-O0`.
+        let counted = spelled == FAMILY[1] && self.cx.optimizing && self.counted_array(address);
+        if ((answer.is_none() && self.local(address)) || capped || counted)
             && self.body.is_some()
             && self.quiet(address)
         {
@@ -624,6 +628,34 @@ impl Checker<'_> {
     /// Whether this lvalue is what a pointer points at, written `*p` or `p[i]`.
     fn through_pointer(&self, expr: ExprId) -> bool {
         pointed_at(&self.tast, &self.types, expr)
+    }
+
+    /// Whether an address is a flexible array member whose `counted_by` named its count, or a step
+    /// into one.
+    fn counted_array(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Cast(inner) | ExprKind::Unary { op: UnaryOp::AddrOf, operand: inner } => {
+                self.counted_array(inner)
+            }
+            ExprKind::Convert { kind, operand } if through(kind) => self.counted_array(operand),
+            ExprKind::Subscript { base, .. } => self.counted_array(base),
+            ExprKind::Binary { op: BinaryOp::Add | BinaryOp::Sub, lhs, rhs } => {
+                self.counted_array(lhs) || self.counted_array(rhs)
+            }
+            ExprKind::Member { base, field } => {
+                let TypeKind::Record(record) =
+                    self.types.kind(self.types.canonical(self.tast[base].ty))
+                else {
+                    return false;
+                };
+                let fields = &self.types.record_info(record).fields;
+                let Some(name) = fields.get(field as usize).and_then(|field| field.name) else {
+                    return false;
+                };
+                self.tast.counter(record, name).is_some()
+            }
+            _ => false,
+        }
     }
 
     /// The lvalue an array to pointer conversion was applied to, if that is what this is.

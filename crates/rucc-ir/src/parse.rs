@@ -42,8 +42,9 @@ use rucc_tuple::TargetTuple;
 use crate::attrs::{AllocSize, AttrSet, Attrs, FpContract};
 use crate::func::Func;
 use crate::inst::{
-    Abi, AsmInfo, Block, BlockCall, CallInfo, Drains, Hint, Imm, Inst, InstData, MemInfo, Meta,
-    MetaNode, Param, PlaneNode, Restrict, Shuffle, Signature, SwitchInfo, TbaaNode, VaInfo, Value,
+    Abi, AsmInfo, Block, BlockCall, CallInfo, Counter, Drains, Hint, Imm, Inst, InstData, MemInfo,
+    Meta, MetaNode, Param, PlaneNode, Restrict, Shuffle, Signature, SwitchInfo, TbaaNode, VaInfo,
+    Value,
 };
 use crate::module::{
     Alias, AliasKind, DataLayout, Datum, Dll, Global, Linkage, Module, Reloc, TlsModel, Visibility,
@@ -281,6 +282,7 @@ enum PendingExtra<'a> {
     Member(u32),
     Array(u32),
     Trailing(u32),
+    Counted(Counter),
     Lane(u8),
     Shuffle(Shuffle),
     Class(StorageClass),
@@ -1021,6 +1023,8 @@ impl<'a, 'n> Parser<'a, 'n> {
                         PendingExtra::Array(self.u32()?)
                     } else if self.eat("trailing") {
                         PendingExtra::Trailing(self.u32()?)
+                    } else if self.eat("counted") {
+                        PendingExtra::Counted(self.counter()?)
                     } else {
                         self.expect("member")?;
                         PendingExtra::Member(self.u32()?)
@@ -1680,6 +1684,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             PendingExtra::Member(size) => Extra::Member(*size),
             PendingExtra::Array(size) => Extra::Array(*size),
             PendingExtra::Trailing(size) => Extra::Trailing(*size),
+            PendingExtra::Counted(counter) => Extra::Counted(*counter),
             PendingExtra::Lane(lane) => Extra::Lane(*lane),
             PendingExtra::Shuffle(shuffle) => Extra::Shuffle(*shuffle),
             PendingExtra::Class(class) => Extra::Class(*class),
@@ -1951,6 +1956,32 @@ impl<'a, 'n> Parser<'a, 'n> {
             Some(number) => Ok(number),
             None => self.fail(format!("`{word}` is not a number")),
         }
+    }
+
+    /// `i32 -4 2` after `counted`, which is the count's type, how far it is from the array and how
+    /// many bytes each element is.
+    fn counter(&mut self) -> Result<Counter, ParseError> {
+        let word = self.word();
+        let (signed, bits) = match word.split_at_checked(1) {
+            Some(("i", bits)) => (true, bits),
+            Some(("u", bits)) => (false, bits),
+            _ => return self.fail(format!("`{word}` is not the type of a count")),
+        };
+        let width = match bits {
+            "8" => 1,
+            "16" => 2,
+            "32" => 4,
+            "64" => 8,
+            _ => return self.fail(format!("`{word}` is not the type of a count")),
+        };
+        let negative = self.eat("-");
+        let distance = self.u32()?;
+        let delta = i32::try_from(distance).ok().map(|delta| if negative { -delta } else { delta });
+        let Some(delta) = delta else {
+            return self.fail(format!("`{distance}` is too far from the array"));
+        };
+        let size = self.u16()?;
+        Ok(Counter { delta, size, width, signed })
     }
 
     fn u16(&mut self) -> Result<u16, ParseError> {
