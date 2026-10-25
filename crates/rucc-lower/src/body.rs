@@ -92,6 +92,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         ret: plan.ret.clone(),
         sret: None,
         vlas: Map::default(),
+        early: Map::default(),
         shared: None,
         conditions: 0,
         marks: Vec::new(),
@@ -734,6 +735,10 @@ struct Body<'a, 'u> {
     /// written as. C says that expression is evaluated where the declaration having it is
     /// reached and not again, so `int a[n]; n = 0;` leaves `sizeof a` what it was.
     vlas: Map<ExprId, Value>,
+    /// The entries of a compound literal that were worked out before the literal is written
+    /// straight into the object it is assigned to, keyed by the entry, as
+    /// [`Self::early_entries`] says.
+    early: Map<ExprId, Value>,
     /// The node a conditional's condition and its first arm are both written out of, and what it
     /// is worth. GNU's `a ?: b` evaluates `a` once, which the checking says by keeping one node
     /// for it, so meeting that node again while lowering the arm is meeting the same node and not
@@ -4377,27 +4382,34 @@ impl<'u> Body<'_, 'u> {
     /// `vm_area_struct` with `(struct vm_area_struct){ ... }` each. With a slot for every literal
     /// and a copy out of it the frame was 2304 bytes, over FRAME_WARN, where gcc's is 1280.
     fn literal_in_place(&mut self, place: Place, value: ExprId, addr: Value) -> bool {
+        let Some((decl, slot)) = self.literal_fits(place, value) else { return false };
+        self.vars.insert(decl, Local::Slot(addr));
+        self.init(decl);
+        self.vars.insert(decl, Local::Slot(slot));
+        true
+    }
+
+    /// The compound literal `value` and its own slot, when [`Self::literal_in_place`] can write
+    /// it straight into `place`.
+    fn literal_fits(&self, place: Place, value: ExprId) -> Option<(DeclId, Value)> {
         let tast = self.tast();
         let literal = match tast[value].kind {
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
             _ => value,
         };
-        let ExprKind::CompoundLiteral(decl) = tast[literal].kind else { return false };
+        let ExprKind::CompoundLiteral(decl) = tast[literal].kind else { return None };
         let ty = tast[value].ty;
         let own = tast[decl].ty;
-        let Some(Local::Slot(slot)) = self.vars.get(&decl).copied() else { return false };
+        let Some(Local::Slot(slot)) = self.vars.get(&decl).copied() else { return None };
         if repr::size_of(self.types(), self.target(), own)
             != repr::size_of(self.types(), self.target(), ty)
             || self.is_volatile(own)
             || self.is_volatile(ty)
             || self.is_volatile(place.ty)
         {
-            return false;
+            return None;
         }
-        self.vars.insert(decl, Local::Slot(addr));
-        self.init(decl);
-        self.vars.insert(decl, Local::Slot(slot));
-        true
+        Some((decl, slot))
     }
 
     /// A fill of a fixed number of bytes with one byte.
@@ -7234,6 +7246,9 @@ impl<'u> Body<'_, 'u> {
         // points at, so meeting it again here is meeting the same node, and what it is worth is
         // what it was worth then rather than what `n` says now.
         if let Some(&value) = self.vlas.get(&expr) {
+            return Some(value);
+        }
+        if let Some(&value) = self.early.get(&expr) {
             return Some(value);
         }
         // The node an `a ?: b` is written out of, whose value was taken before the branch was
@@ -10487,6 +10502,29 @@ impl<'u> Body<'_, 'u> {
                 return None;
             }
         }
+        // A literal with entries that read memory or call a function is written straight into
+        // the object too, when each of those entries is a value. They are worked out first, in
+        // order, before anything is written to the object, so what they read is what the object
+        // held before the assignment, as with a copy out of a slot of its own. gcc does the same.
+        //
+        // The kernel's `ntfs_init_fs_context` in 7.3 does `*vol = (struct ntfs_volume){ ...,
+        // .nls_map = load_nls_default(), ... };`. With a slot for the literal and a copy out of
+        // it the frame was 1064 bytes, where gcc's is 40.
+        let early = self.early_entries(rhs, room).filter(|_| {
+            self.space(place.ty).is_empty()
+                && !self.is_atomic(place.ty)
+                && self.literal_fits(place, rhs).is_some()
+        });
+        if let Some(entries) = early {
+            let destination = self.address_of(place, span);
+            for entry in entries {
+                let Some(value) = self.eval(entry) else { continue };
+                self.early.insert(entry, value);
+            }
+            self.literal_in_place(place, rhs, destination);
+            self.early.clear();
+            return None;
+        }
         let source = self.place(rhs);
         let source = self.address_of(source, span);
         let space = self.space(place.ty);
@@ -10520,6 +10558,37 @@ impl<'u> Body<'_, 'u> {
         };
         let ExprKind::CompoundLiteral(decl) = tast[literal].kind else { return false };
         self.initializer_reads_nothing(decl, room)
+    }
+
+    /// The entries of the compound literal `expr` that must be worked out before it is written
+    /// straight into an object of `room` bytes, or nothing when it cannot be written that way.
+    ///
+    /// An entry that reads nothing, as [`Self::reads_nothing`] says, is left where it is. Every
+    /// other entry must be a value, which can wait in a register while the object is written, or
+    /// a literal of its own whose entries are the same. Any other entry that is an aggregate is
+    /// copied out of memory, and that copy cannot be made early.
+    fn early_entries(&self, expr: ExprId, room: u64) -> Option<Vec<ExprId>> {
+        let tast = self.tast();
+        let literal = match tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            _ => expr,
+        };
+        let ExprKind::CompoundLiteral(decl) = tast[literal].kind else { return None };
+        let init = tast[decl].init?;
+        let mut early = Vec::new();
+        for entry in tast[init].iter() {
+            if self.value_reads_nothing(entry.value, room) {
+                continue;
+            }
+            if repr::value_type(self.types(), self.target(), tast[entry.value].ty).is_some() {
+                early.push(entry.value);
+            } else {
+                // A literal inside the literal, such as the `(kuid_t){ -1 }` that `INVALID_UID`
+                // is, whose own entries are worked out first in the same way.
+                early.extend(self.early_entries(entry.value, room)?);
+            }
+        }
+        Some(early)
     }
 
     /// Whether every entry of the initializer of `decl` reads nothing in memory, as
