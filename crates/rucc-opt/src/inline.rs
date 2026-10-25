@@ -446,6 +446,10 @@ pub fn run(
                     || set.without(
                         AttrSet::NOINLINE | AttrSet::OPTNONE | AttrSet::NAKED | AttrSet::INTERRUPT,
                     ) != set
+                    // gcc does not inline a body the shadow checks leave alone into one they
+                    // check, since the checks would go in with it. Only the walk under
+                    // `-fsanitize=kernel-address` sets this.
+                    || set.contains(AttrSet::NO_ASAN)
                 {
                     return None;
                 } else if func.linkage == Linkage::Internal

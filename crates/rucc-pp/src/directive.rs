@@ -679,7 +679,12 @@ impl Preprocessor {
                 && !self.poison_pragma(rest, None, interner)
             {
                 self.options_pragma(rest, hash, interner);
-                self.pass_through(body, hash, out);
+                // gcc prints a pragma it does not know only for C. For assembly it drops the
+                // line, which is what keeps `-include hidden.h` in x86's boot/compressed from
+                // putting a `#pragma GCC visibility` in front of the assembler.
+                if !cx.lex.assembly {
+                    self.pass_through(body, hash, out);
+                }
             }
         } else if name == Some(names.include) || name == Some(names.include_next) {
             self.include(rest, hash, name == Some(names.include_next), out, cx, names);
@@ -1977,6 +1982,9 @@ impl Preprocessor {
             return;
         }
         self.options_pragma(&tokens, span, interner);
+        if self.expander.assembly() {
+            return;
+        }
         out.push(Tok::synthetic(
             PpTokenKind::Punct(Punct::Hash),
             None,
@@ -3073,6 +3081,19 @@ mod tests {
         let out = run.go("#if 0\n#frobnicate\n#else\n#define N 1\nN\n#endif\n#\n");
         assert!(run.messages().is_empty(), "{:?}", run.messages());
         assert_eq!(out, "1");
+    }
+
+    #[test]
+    fn in_assembly_a_pragma_is_dropped_and_the_ones_the_preprocessor_answers_still_act() {
+        // x86's boot/compressed reads hidden.h into its `.S` files with `-include`, and gcc -E
+        // in assembler-with-cpp prints neither of these two.
+        let mut run = Run::assembly();
+        let src = "#pragma GCC visibility push(hidden)\n_Pragma(\"weak x\") ret\n\
+                   #define N 1\n#pragma push_macro(\"N\")\n#undef N\n\
+                   #pragma pop_macro(\"N\")\nN\n";
+        let out = run.go(src);
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "ret 1");
     }
 
     #[test]
