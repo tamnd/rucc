@@ -292,3 +292,45 @@ fn an_index_past_a_known_length_calls_the_runtime() {
     let text = bounds("x86_64-unknown-linux-gnu", &["-O2", "-fno-sanitize=bounds-strict"]);
     assert!(!text.contains("__ubsan_handle_out_of_bounds"), "{text}");
 }
+
+/// A promise that control does not get somewhere, kept in `f` and `g` and turned off in `quiet`.
+const UNREACHABLE: &str = r#"int f(int x) { if (x > 3) __builtin_unreachable(); return x; }
+int g(int x) { switch (x) { case 1: return 2; default: __builtin_unreachable(); } }
+__attribute__((no_sanitize("unreachable"))) int quiet(int x) { if (x) __builtin_unreachable(); return 1; }
+"#;
+
+fn unreachable(args: &[&str]) -> std::process::Output {
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir =
+        std::env::temp_dir().join(format!("rucc-ubsan-unreachable-{}{tag}", std::process::id()));
+    let mut all =
+        vec!["--target=x86_64-unknown-linux-gnu", "-fsanitize=unreachable", "-S", "-o", "-"];
+    all.extend(args);
+    let out = compile(&dir, UNREACHABLE, &all);
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn reaching_an_unreachable_builtin_calls_the_runtime() {
+    for level in ["-O0", "-O2"] {
+        let out = unreachable(&[level]);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8(out.stdout).expect("a listing is text");
+        let calls = text.matches("call\t__ubsan_handle_builtin_unreachable").count();
+        assert_eq!(calls, 2, "{level}:\n{text}");
+        assert!(text.contains("\t.long\t27\n"), "{level} has no column 27:\n{text}");
+        let start = text.find("\nquiet:").expect("quiet is defined");
+        assert!(!text[start..].contains("call\t__ubsan"), "{level}:\n{text}");
+    }
+    let out = unreachable(&["-O2", "-fno-sanitize-recover=unreachable"]);
+    let text = String::from_utf8(out.stdout).expect("a listing is text");
+    assert_eq!(text.matches("call\t__ubsan_handle_builtin_unreachable").count(), 2, "{text}");
+    let out = unreachable(&["-O2", "-fsanitize-trap=unreachable"]);
+    let text = String::from_utf8(out.stdout).expect("a listing is text");
+    assert!(!text.contains("__ubsan_handle"), "{text}");
+    assert!(text.contains("ud2"), "{text}");
+    let out = unreachable(&["-O2", "-fsanitize-recover=unreachable"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is not supported"));
+}
