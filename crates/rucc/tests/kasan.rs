@@ -101,8 +101,9 @@ fn compile(dir: &Path, source: &str, args: &[&str]) -> std::process::Output {
 
 /// The listing for that target and those flags, and the lines of one function in it.
 fn listing(target: &str, args: &[&str], function: &str) -> (String, String) {
-    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).take(40).collect();
-    let dir = std::env::temp_dir().join(format!("rucc-kasan-{}-{target}{tag}", std::process::id()));
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir = std::env::temp_dir()
+        .join(format!("rucc-kasan-{}-{target}-{function}-{tag}", std::process::id()));
     let mut all = vec![format!("--target={target}"), "-S".into(), "-o".into(), "-".into()];
     all.extend(args.iter().map(|&arg| arg.to_owned()));
     let all: Vec<&str> = all.iter().map(String::as_str).collect();
