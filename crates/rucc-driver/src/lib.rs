@@ -406,8 +406,8 @@ fn function_alignment(text: &str) -> Option<Option<u32>> {
 /// each undefined behaviour this compiler exploits is listed there with the check that detects it,
 /// and `alias`, `restrict` and `memory` are checks gcc has no spelling for. gcc refuses `memory`
 /// outright, since the sanitizer of that name is clang's. A name being here means it is a name
-/// rather than a typo, and nothing more than that: every one of them is refused after the loop,
-/// because none of them is implemented.
+/// rather than a typo, and nothing more than that: every one of them that is not made is refused
+/// after the loop.
 ///
 /// `all` is deliberately absent. gcc takes it only in the negative, so it is handled where each of
 /// those two spellings is read rather than by being on this list.
@@ -449,6 +449,33 @@ const SANITIZERS: [&str; 35] = [
     "restrict",
     "memory",
 ];
+
+/// Reads one `--param` of the shadow checks into `kasan`, and says whether `spec` was one.
+///
+/// gcc's defaults put the stack and the globals under the checks as well. Those are not made yet,
+/// so the two settings that ask for them are refused when they ask, and a build that tests for
+/// them with `cc-option`, as the kernel does, is told so.
+fn asan_param(kasan: &mut rucc_session::Kasan, spec: &str) -> Result<bool, String> {
+    let Some((name, value)) = spec.split_once('=') else { return Ok(false) };
+    if !name.starts_with("asan-") {
+        return Ok(false);
+    }
+    let number: u32 =
+        value.parse().map_err(|_| format!("invalid value '{value}' for --param {name}"))?;
+    match name {
+        "asan-instrumentation-with-call-threshold" => kasan.call_threshold = number,
+        "asan-kernel-mem-intrinsic-prefix" => kasan.mem_prefix = number != 0,
+        "asan-stack" | "asan-globals" | "asan-instrument-allocas" if number == 0 => {}
+        "asan-stack" | "asan-globals" | "asan-instrument-allocas" => {
+            return Err(format!(
+                "--param {name}={number}: this compiler does not yet put redzones around the \
+                 objects that would check, see spec/04-driver-and-cli.md section 4.7"
+            ));
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
 
 /// The names one name in `-fsanitize=` and its relatives stands for.
 ///
@@ -941,6 +968,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // families on the line does not matter, as it does not to gcc.
     let mut aborts: Vec<&str> = Vec::new();
     let mut traps: Vec<&str> = Vec::new();
+    // `-fasan-shadow-offset=`, which is only taken with `-fsanitize=kernel-address`, and that is
+    // known only at the end of the line.
+    let mut shadow_offset: Option<u64> = None;
     // The `-ffast-math` family in the order it was written, replayed after the loop on top of
     // what `-Ofast` implies. gcc applies a level's defaults before any flag and the flags in order
     // after that, so `-fno-fast-math -Ofast` is not fast math, and only a replay can say so.
@@ -1110,13 +1140,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "--param" => {
                 let spec = args.get(i).ok_or_else(|| err("--param requires name=value"))?.clone();
                 i += 1;
-                rucc_cost::heuristics::Param::new(&spec).map_err(|e| err(e.to_string()))?;
-                opts.params.push(spec);
+                if !asan_param(&mut opts.kasan, &spec).map_err(err)? {
+                    rucc_cost::heuristics::Param::new(&spec).map_err(|e| err(e.to_string()))?;
+                    opts.params.push(spec);
+                }
             }
             _ if arg.starts_with("--param=") => {
                 let spec = &arg["--param=".len()..];
-                rucc_cost::heuristics::Param::new(spec).map_err(|e| err(e.to_string()))?;
-                opts.params.push(spec.to_owned());
+                if !asan_param(&mut opts.kasan, spec).map_err(err)? {
+                    rucc_cost::heuristics::Param::new(spec).map_err(|e| err(e.to_string()))?;
+                    opts.params.push(spec.to_owned());
+                }
             }
             "-###" => print_plan = true,
             "-v" => verbose = true,
@@ -2397,6 +2431,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 traps.extend(Sanitize::NAMES);
             }
             "-fsanitize-address-use-after-scope" | "-fno-sanitize-address-use-after-scope" => {}
+            _ if arg.starts_with("-fasan-shadow-offset=") => {
+                let text = &arg["-fasan-shadow-offset=".len()..];
+                let number = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                    Some(hex) => u64::from_str_radix(hex, 16),
+                    None => text.parse(),
+                };
+                shadow_offset =
+                    Some(number.map_err(|_| err(format!("unrecognized shadow offset '{text}'")))?);
+            }
             _ if arg.starts_with("-fsanitize-sections=") => {}
             // The calls a fuzzer learns from, the two gcc has and the kernel's kcov uses. Anything
             // else is refused rather than dropped, because a fuzzer whose calls were never
@@ -3411,6 +3454,33 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
     }
     sanitizers.retain(|asked| !Sanitize::NAMES.contains(asked));
+    // The shadow checks, which gcc makes without being told how only on the targets it has a
+    // shadow offset for. The kernel always says where its shadow is.
+    if sanitizers.contains(&"kernel-address") {
+        sanitizers.retain(|&asked| asked != "kernel-address");
+        let offset = match (shadow_offset, opts.target.arch) {
+            (Some(offset), _) => offset,
+            (None, rucc_target::Arch::X86_64) => 0x7fff_8000,
+            (None, rucc_target::Arch::Aarch64) => 1 << 36,
+            (None, rucc_target::Arch::Riscv64) => {
+                return Err(err(
+                    "-fsanitize=kernel-address on riscv64 needs -fasan-shadow-offset=, since the \
+                     target has no default one",
+                ));
+            }
+            (None, _) => {
+                return Err(err(
+                    "-fsanitize=kernel-address is not supported for this target, which is not a \
+                     64-bit one",
+                ));
+            }
+        };
+        opts.kasan.on = true;
+        opts.kasan.offset = offset;
+        opts.kasan.abort = aborts.contains(&"kernel-address") || aborts.contains(&"all");
+    } else if shadow_offset.is_some() {
+        return Err(err("-fasan-shadow-offset should only be used with -fsanitize=kernel-address"));
+    }
     if let Some(first) = sanitizers.first() {
         return Err(err(format!(
             "-fsanitize={first}: this compiler has no instrumentation for this sanitizer, and a build that \
@@ -9116,7 +9186,7 @@ mod tests {
     /// for the wrong reason rather than a slower program.
     #[test]
     fn a_sanitizer_that_is_still_asked_for_at_the_end_of_the_line_is_refused_by_name() {
-        for asked in ["address", "undefined", "thread", "kernel-address", "leak", "memory"] {
+        for asked in ["address", "undefined", "thread", "kernel-hwaddress", "leak", "memory"] {
             let failed = refused(&[&format!("-fsanitize={asked}"), "-c", "a.c"]);
             assert!(failed.contains(asked), "the refusal names what was asked for: {failed}");
             assert!(failed.contains("-fsafety=detect"), "and the nearest thing: {failed}");
