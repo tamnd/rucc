@@ -408,6 +408,9 @@ pub struct Kasan {
     /// Whether a check that fails stops the program, from `-fno-sanitize-recover=kernel-address`.
     /// The calls then have no `_noabort` in their names.
     pub abort: bool,
+    /// Whether the locals whose address is taken get redzones around them, from
+    /// `--param asan-stack=`. gcc's default is on.
+    pub stack: bool,
 }
 
 /// Whether pointer races are watched, from `-fsafety-races=`.
@@ -3144,7 +3147,7 @@ impl Options {
             sanitize_coverage_pc: false,
             sanitize_coverage_cmp: false,
             sanitize: Sanitize::default(),
-            kasan: Kasan { call_threshold: 7000, ..Kasan::default() },
+            kasan: Kasan { call_threshold: 7000, stack: true, ..Kasan::default() },
             pic: Pic::default(),
             interposition: true,
             async_unwind_tables: true,

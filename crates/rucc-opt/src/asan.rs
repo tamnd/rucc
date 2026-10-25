@@ -35,9 +35,14 @@
 //!
 //! An access to a local or to a named object at a constant offset that is inside it, since the
 //! check could not fail. An access through `__seg_fs` or `__seg_gs`, whose address is not a place
-//! the shadow covers. A function marked `no_sanitize_address` or `naked`. The stack and the globals
-//! have no redzones around them yet, so a read past the end of a local array is only caught when
-//! it reaches memory the kernel poisoned itself.
+//! the shadow covers. A function marked `no_sanitize_address` or `naked`. The globals and the
+//! memory of `alloca` have no redzones around them yet.
+//!
+//! # The frame
+//!
+//! Under `--param asan-stack=1` the locals a check can find wrong go into one frame with a redzone
+//! after each of them, laid out as gcc lays it out, and the shadow of the redzones is poisoned on
+//! the way in and cleared on the way out.
 //!
 //! # Order
 //!
@@ -45,15 +50,15 @@
 //! not an access any more, and a body inlined into a function marked `no_sanitize_address` gets no
 //! checks, which is what the kernel's `noinstr` code needs.
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    AttrSet, CallInfo, Extra, Flags, Func, FuncId, Inst, InstData, IntPred, MemInfo, MemOrder,
-    Module, Opcode, Restrict, Signature, Type, Value,
+    AttrSet, CallInfo, Datum, Extra, Flags, Func, FuncId, Global, Inst, InstData, IntPred, Linkage,
+    MemInfo, MemOrder, Module, Opcode, Restrict, Signature, Type, Value,
 };
 use rucc_session::Kasan;
 
-use crate::alias::{Origin, origin};
+use crate::alias::{Escapes, Origin, origin};
 
 /// Puts the checks in every function of the module that has a body and was not marked
 /// `no_sanitize_address` or `naked`, and says how many it put in.
@@ -63,7 +68,7 @@ pub fn run(module: &mut Module, names: &mut Interner, how: Kasan) -> usize {
     }
     let sizes: Map<Symbol, u64> =
         module.globals().map(|id| (module[id].name, module[id].size)).collect();
-    let mut runtime = Runtime { names, declared: Vec::new() };
+    let mut runtime = Runtime { names, declared: Vec::new(), frames: Vec::new() };
     let mut checks = 0;
     for id in module.funcs().collect::<Vec<FuncId>>() {
         let func = &module[id];
@@ -80,6 +85,16 @@ pub fn run(module: &mut Module, names: &mut Interner, how: Kasan) -> usize {
             module.add_func(Func::new(name, signature));
         }
     }
+    for (name, text) in runtime.frames {
+        let mut bytes = text.into_bytes();
+        bytes.push(0);
+        let mut global = Global::new(name, bytes.len() as u64, 1);
+        global.linkage = Linkage::Internal;
+        global.constant = true;
+        let range = module.push_bytes(&bytes);
+        global.init = Some(module.push_data(&[Datum::Bytes(range)]));
+        module.add_global(global);
+    }
     checks
 }
 
@@ -87,6 +102,8 @@ pub fn run(module: &mut Module, names: &mut Interner, how: Kasan) -> usize {
 struct Runtime<'a> {
     names: &'a mut Interner,
     declared: Vec<(Symbol, Signature)>,
+    /// The frame records written so far, by the name of the string and its text.
+    frames: Vec<(Symbol, String)>,
 }
 
 impl Runtime<'_> {
@@ -201,6 +218,22 @@ fn instrument(
         }
     }
     accesses.retain(|access| !inside(func, sizes, access));
+    // The locals the checks can find wrong, which are the ones an access reaches at an offset
+    // that is not known to be inside, and the ones whose address leaves the function.
+    let mut guarded = Set::default();
+    if how.stack {
+        let escapes = Escapes::of(func);
+        for inst in func.blocks().flat_map(|block| func.insts(block)) {
+            if func[inst].opcode == Opcode::Alloca && escapes.escaped(inst) {
+                guarded.insert(inst);
+            }
+        }
+        for access in &accesses {
+            if let (Origin::Local(slot), _) = origin(func, access.address) {
+                guarded.insert(slot);
+            }
+        }
+    }
     let outline = accesses.len() as u64 >= u64::from(how.call_threshold);
     let suffix = if how.abort { "" } else { "_noabort" };
     for &access in &accesses {
@@ -209,7 +242,8 @@ fn instrument(
     for &inst in &routines {
         prefixed(func, runtime, inst);
     }
-    accesses.len() + routines.len()
+    let framed = frame(func, runtime, &guarded, how.offset);
+    accesses.len() + routines.len() + framed
 }
 
 /// How many bytes a value of that type takes in memory, on a 64-bit target.
@@ -342,6 +376,173 @@ fn shadow(
     let mut build = rucc_ir::Builder::new(func, reports).at(span);
     build.call(report, signature, &[access.address]);
     build.jump(after, &[]);
+}
+
+/// The shadow byte of the left redzone, where the frame record is.
+const LEFT: u8 = 0xf1;
+/// The shadow byte of a redzone between two locals.
+const MIDDLE: u8 = 0xf2;
+/// The shadow byte of the redzone after the last local.
+const RIGHT: u8 = 0xf3;
+/// What the first word of the frame says, so the runtime can find the record from an address in
+/// the frame.
+const MAGIC: i128 = 0x41b5_8ab3;
+
+/// The bytes after a local of that size before the next one starts, which is gcc's
+/// `asan_var_and_redzone_size` before the round up to 32.
+fn redzone(size: u64) -> u64 {
+    match size {
+        0..=4 => 16,
+        5..=16 => 32,
+        17..=128 => 32,
+        129..=512 => 64,
+        513..=4096 => 128,
+        _ => 256,
+    }
+}
+
+/// Puts the locals in `guarded` into one frame with redzones between them, as gcc lays it out,
+/// poisons the shadow of the redzones on the way in and clears it on the way out, and says how
+/// many locals it moved.
+///
+/// The frame starts with 32 bytes that hold the magic word, the address of a string that names
+/// each local with its offset and size, and the address of the function. The kernel reads those
+/// three when it reports a bad access to the stack. Each local starts at a multiple of 32.
+fn frame(func: &mut Func, runtime: &mut Runtime<'_>, guarded: &Set<Inst>, offset: u64) -> usize {
+    let Some(entry) = func.entry() else { return 0 };
+    let slots: Vec<Inst> = func
+        .insts(entry)
+        .filter(|&inst| guarded.contains(&inst) && func[func[inst].args].is_empty())
+        .collect();
+    if slots.is_empty() {
+        return 0;
+    }
+    let mut places = Vec::new();
+    let mut at = 32u64;
+    let mut align = 16u32;
+    let mut shadow = vec![LEFT; 4];
+    let mut text = slots.len().to_string();
+    for (n, &slot) in slots.iter().enumerate() {
+        let Extra::Mem(mem) = func[slot].extra else { return 0 };
+        let (size, slot_align) = (func[mem].size.max(1), func[mem].align);
+        align = align.max(slot_align);
+        let start = at.next_multiple_of(u64::from(slot_align).max(32));
+        shadow.resize((start / 8) as usize, MIDDLE);
+        let end = (start + size + redzone(size)).next_multiple_of(32);
+        let name = format!("v{n}");
+        text.push_str(&format!(" {start} {size} {} {name}", name.len()));
+        for granule in 0..(end - start) / 8 {
+            let used = size.saturating_sub(granule * 8);
+            shadow.push(match used {
+                0 => MIDDLE,
+                1..=7 => used as u8,
+                _ => 0,
+            });
+        }
+        places.push((slot, start));
+        at = end;
+    }
+    for byte in shadow.iter_mut().rev() {
+        if *byte != MIDDLE {
+            break;
+        }
+        *byte = RIGHT;
+    }
+    let word = Type::int(64);
+    let first = func
+        .insts(entry)
+        .find(|&inst| func[inst].opcode != Opcode::MemEntry && !slots.contains(&inst))
+        .expect("the entry block has a terminator");
+    let info = |size: u64, align: u32| MemInfo {
+        size,
+        align,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    };
+    let mem = func.add_mem(info(at, align));
+    let span = func.span(first);
+    let data = InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) };
+    let base = func.create_inst(data, &[Type::PTR], span);
+    func.insert_before(base, first);
+    let base = func[base].first_result.expect("a value");
+    let mut forward = Map::default();
+    for &(slot, start) in &places {
+        let by = constant(func, word, i128::from(start), first);
+        let args = func.push_values(&[base, by]);
+        let moved =
+            place(func, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR, first);
+        let old = func[slot].first_result.expect("a value");
+        forward.insert(old, moved);
+    }
+    crate::uses::substitute(func, &forward);
+    for &(slot, _) in &places {
+        func.remove_inst(slot);
+    }
+    // The record, which the kernel reads when an access in the frame is bad.
+    let name = runtime.names.intern(&format!("__asan_gen_frame.{}", runtime.frames.len()));
+    runtime.frames.push((name, text));
+    let magic = constant(func, word, MAGIC, first);
+    store(func, magic, base, 0, info(8, 8), first);
+    let data = InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) };
+    let record = place(func, data, Type::PTR, first);
+    store(func, record, base, 8, info(8, 8), first);
+    let data = InstData { extra: Extra::Symbol(func.name), ..InstData::new(Opcode::GlobalAddr) };
+    let pc = place(func, data, Type::PTR, first);
+    store(func, pc, base, 16, info(8, 8), first);
+    // The shadow of the frame, written four bytes at a time where the four are not all zero.
+    let args = func.push_values(&[base]);
+    let address = place(func, InstData { args, ..InstData::new(Opcode::PtrToInt) }, word, first);
+    let three = constant(func, word, 3, first);
+    let args = func.push_values(&[address, three]);
+    let group = place(func, InstData { args, ..InstData::new(Opcode::LShr) }, word, first);
+    let start = constant(func, word, offset as i128, first);
+    let args = func.push_values(&[group, start]);
+    let group = place(func, InstData { args, ..InstData::new(Opcode::Add) }, word, first);
+    let args = func.push_values(&[group]);
+    let to = place(func, InstData { args, ..InstData::new(Opcode::IntToPtr) }, Type::PTR, first);
+    shadow.resize(shadow.len().next_multiple_of(4), RIGHT);
+    let words: Vec<(u64, u32)> = shadow
+        .chunks(4)
+        .enumerate()
+        .map(|(n, four)| (4 * n as u64, u32::from_le_bytes([four[0], four[1], four[2], four[3]])))
+        .filter(|&(_, bits)| bits != 0)
+        .collect();
+    let int = Type::int(32);
+    for &(at, bits) in &words {
+        let bits = constant(func, int, i128::from(bits), first);
+        store(func, bits, to, at, info(4, 1), first);
+    }
+    let exits: Vec<Inst> = func
+        .blocks()
+        .filter_map(|block| func.terminator(block))
+        .filter(|&inst| matches!(func[inst].opcode, Opcode::Return | Opcode::TailCall))
+        .collect();
+    for exit in exits {
+        let zero = constant(func, int, 0, exit);
+        for &(at, _) in &words {
+            store(func, zero, to, at, info(4, 1), exit);
+        }
+    }
+    places.len()
+}
+
+/// A store of `value` at `offset` bytes past `base`, just before `before`.
+fn store(func: &mut Func, value: Value, base: Value, offset: u64, info: MemInfo, before: Inst) {
+    let address = if offset == 0 {
+        base
+    } else {
+        let by = constant(func, Type::int(64), i128::from(offset), before);
+        let args = func.push_values(&[base, by]);
+        place(func, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR, before)
+    };
+    let mem = func.add_mem(info);
+    let args = func.push_values(&[value, address]);
+    let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Store) };
+    let span = func.span(before);
+    let inst = func.create_inst(data, &[], span);
+    func.insert_before(inst, before);
 }
 
 /// A copy or a fill whose length the program works out, or a call to `memcpy`, `memmove` or

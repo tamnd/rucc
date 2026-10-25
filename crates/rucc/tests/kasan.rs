@@ -15,6 +15,7 @@ __attribute__((noinline)) char ld1(char *p) { return *p; }
 __attribute__((noinline)) long ld8(long *p) { return *p; }
 __attribute__((noinline)) void st16(__int128 *p) { *p = 0; }
 __attribute__((noinline)) void cp(void *d, const void *s, u64 n) { __builtin_memcpy(d, s, n); }
+__attribute__((noinline)) int over(int i) { int a[8] = {0}; a[i] = 1; return a[i ^ 1]; }
 __attribute__((no_sanitize_address)) int quiet(int *p) { return *p; }
 #ifdef __SANITIZE_ADDRESS__
 int sanitizes_address;
@@ -23,14 +24,17 @@ int sanitizes_address;
 
 /// The runtime, which counts the reports and keeps the last one, and a `main` that maps a buffer
 /// and its shadow at fixed addresses, poisons parts of the shadow and checks what was reported.
+///
+/// The count is `volatile` because the checks go in after the optimizer, which takes a call to
+/// `over` as a call that writes nothing. In the kernel the runtime is in another unit.
 #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
 const RUNS: &str = r#"
 void *mmap(void *, u64, int, int, int, long);
 #define BUF ((char *)0x200000000000UL)
 #define SHADOW ((signed char *)((0x200000000000UL >> 3) + 0x100000000000UL))
 #define QUIET __attribute__((no_sanitize_address))
-static int reports, kind;
-static void *last;
+static volatile int reports, kind;
+static void *volatile last;
 QUIET static void report(void *p, int k) { reports++; last = p; kind = k; }
 QUIET void __asan_report_load1_noabort(void *p) { report(p, 1); }
 QUIET void __asan_report_load4_noabort(void *p) { report(p, 4); }
@@ -44,6 +48,22 @@ QUIET void *__asan_memcpy(void *d, const void *s, u64 n) {
     while (n--)
         *to++ = *from++;
     return d;
+}
+QUIET static int frames(void) {
+    char probe;
+    u64 at = (((u64)&probe >> 3) + 0x100000000000UL) & ~4095UL;
+    signed char *shadow = (signed char *)(at - (1 << 16));
+    if (mmap(shadow, 1 << 17, 3, 0x100032, -1, 0) != shadow)
+        return 60;
+    if (over(2) != 0 || reports != 6)
+        return 61;
+    over(9);
+    if (reports != 8 || kind != 4)
+        return 62;
+    for (int n = 0; n < 1 << 17; n++)
+        if (shadow[n] != 0)
+            return 63;
+    return 0;
 }
 QUIET static int saw(int count, void *p, int k) { return reports == count && last == p && kind == k; }
 QUIET int main(void) {
@@ -74,7 +94,9 @@ QUIET int main(void) {
     cp(BUF + 64, BUF + 12, 4);
     if (!saw(6, BUF + 64, 99) || *(int *)(BUF + 64) != 9)
         return 49;
-    return quiet((int *)(BUF + 12)) == 9 && reports == 6 ? 0 : 50;
+    if (quiet((int *)(BUF + 12)) != 9 || reports != 6)
+        return 50;
+    return frames();
 }
 "#;
 
@@ -146,6 +168,9 @@ fn every_access_reads_its_shadow_and_reports_with_gcc_names() {
             assert!(!text.contains("__asan_load"), "{target} {level}:\n{text}");
             assert!(!quiet.contains("__asan"), "{target} {level}:\n{quiet}");
             assert!(text.contains("sanitizes_address"), "{target} {level}: the macro is defined");
+            assert!(text.contains("__asan_gen_frame.0"), "{target} {level}: a frame record");
+            let magic = text.contains("1102416563") || text.contains("#16821, lsl #16");
+            assert!(magic, "{target} {level}: the frame magic 0x41b58ab3");
         }
     }
     let mut args = vec!["-O2"];
@@ -173,6 +198,7 @@ fn the_settings_the_kernel_gives_are_read() {
     assert!(text.contains("__asan_store16_noabort"), "{text}");
     assert!(!text.contains("__asan_report"), "{text}");
     assert!(!text.contains("__asan_memcpy"), "the routines are named only when asked:\n{text}");
+    assert!(!text.contains("__asan_gen_frame"), "asan-stack=0 makes no frame record:\n{text}");
 
     let (text, _) =
         listing(target, &["-O2", "-fsanitize=kernel-address", "-fno-sanitize-recover=all"], "ld4");
@@ -187,7 +213,7 @@ fn the_settings_the_kernel_gives_are_read() {
 #[test]
 fn what_is_not_made_yet_is_refused() {
     let on = "-fsanitize=kernel-address";
-    for param in ["asan-stack=1", "asan-globals=1", "asan-instrument-allocas=1"] {
+    for param in ["asan-globals=1", "asan-instrument-allocas=1"] {
         let said = refused(&[on, "--param", param, "-S", "-o", "-"]);
         assert!(said.contains("redzones"), "{param}: {said}");
     }
