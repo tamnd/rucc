@@ -3044,6 +3044,8 @@ impl<'u> Body<'_, 'u> {
         let named = tast[node.outputs].iter().chain(&tast[node.inputs]).any(|op| op.memory);
         if !memory && !named {
             flags = flags.union(Flags::NOMEM);
+        } else if !memory && !tast[node.outputs].iter().any(|op| op.memory) {
+            flags = flags.union(Flags::READMEM);
         }
         let flags = flags.union(space);
         let inst = self.build(span).inline_asm(info, &args, &results, flags);

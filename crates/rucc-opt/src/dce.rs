@@ -252,17 +252,20 @@ pub(crate) fn removable(func: &Func, inst: Inst, facts: &Facts) -> bool {
 /// Whether this is inline assembly that can go when nothing reads what it wrote.
 ///
 /// gcc's rule, which is that a statement not written `volatile` is there for its outputs. One with
-/// no outputs at all was made `volatile` when it was read, as gcc makes it. Anything in memory is
+/// no outputs at all was made `volatile` when it was read, as gcc makes it. An output in memory is
 /// left alone, as is a `memory` clobber, since either is a write nobody here is counting the
-/// readers of, and so is `asm goto`, which is a jump. What is left is the kernel's `RELOC_HIDE`,
+/// readers of, and so is `asm goto`, which is a jump. An input in memory is only read, so it does
+/// not keep the statement. What goes is the kernel's `RELOC_HIDE`,
 /// `__asm__ ("" : "=r" (p) : "0" (v))`, which every bit operation runs once for the sanitizer hook
-/// that is empty in a build without the sanitizer, and which cost a copy of the address each time.
+/// that is empty in a build without the sanitizer, and which cost a copy of the address each time,
+/// and arm64's `__my_cpu_offset`, whose input in memory is the stack pointer, when a `this_cpu_ptr`
+/// goes to a lock hook that is empty without lockdep.
 fn quiet(func: &Func, inst: Inst) -> bool {
     let data = &func[inst];
     let Extra::Asm(info) = data.extra else { return false };
     data.opcode == Opcode::InlineAsm
         && !data.flags.contains(Flags::VOLATILE)
-        && data.flags.contains(Flags::NOMEM)
+        && (data.flags.contains(Flags::NOMEM) || data.flags.contains(Flags::READMEM))
         && func[info].targets.is_empty()
 }
 
@@ -636,5 +639,53 @@ mod tests {
         assert_eq!(left(&func, block), 3);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED), 1);
         assert_eq!(stats.count(Kind::Missed, super::NO_FUEL), 1);
+    }
+
+    /// The one function in that text with the pass run over it, printed.
+    fn dce_text(body: &str) -> String {
+        let mut names = Interner::new();
+        let text = format!(
+            "; ModuleID = 't.c'\n; format 0\ntarget triple = \"aarch64-unknown-linux-gnu\"\n\
+             target datalayout = \"e-p:64:64-i64:64-S128\"\n{body}"
+        );
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let ids: Vec<_> = module.funcs().collect();
+        for id in ids {
+            let mut an = crate::machine::fixtures::analyses();
+            Dce.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        }
+        rucc_ir::print(&module, &names)
+    }
+
+    #[test]
+    fn an_asm_that_only_reads_memory_goes_when_nothing_reads_its_output() {
+        // arm64's `__my_cpu_offset`, with the stack pointer as its input in memory, for a
+        // `this_cpu_ptr` nobody uses.
+        let out = dce_text(
+            r#"
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = inline_asm.i64.readmem "mrs %0, tpidr_el1", "=r,Q", ""(%0)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("inline_asm"), "{out}");
+    }
+
+    #[test]
+    fn an_asm_with_an_operand_in_memory_it_may_write_stays() {
+        // Without `readmem` the operand in memory may be an output, or the clobber list names
+        // `memory`, and either is a write.
+        let out = dce_text(
+            r#"
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = inline_asm.i64 "mrs %0, tpidr_el1", "=r,=Q", ""(%0)
+    return
+}
+"#,
+        );
+        assert!(out.contains("inline_asm"), "{out}");
     }
 }
