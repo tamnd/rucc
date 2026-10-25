@@ -125,7 +125,8 @@ const DESCRIBED: usize = 8;
 /// Whether a global gets a redzone, which is gcc's `asan_protect_global`.
 ///
 /// A definition that is not thread-local and that the program put in no section of its own,
-/// with a size and an alignment no larger than two redzones. One the linker can replace with
+/// with an alignment no larger than two redzones. One of no size is one too, which is what the
+/// kernel's `struct lock_class_key` is without lockdep, and gcc gives each of them a redzone. One the linker can replace with
 /// another definition is left alone, since the table would then describe the other one with the
 /// size of this one, and so is a tentative one.
 fn protected(global: &Global) -> bool {
@@ -135,7 +136,6 @@ fn protected(global: &Global) -> bool {
         && matches!(global.linkage, Linkage::External | Linkage::Internal)
         && !global.noinit
         && !global.persistent
-        && global.size > 0
         && global.align <= MAX_ALIGN
 }
 
@@ -844,6 +844,23 @@ fn call(func: &mut Func, callee: Symbol, signature: Signature, args: &[Value], b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rucc_target::{TargetInfo, Triple};
+
+    #[test]
+    fn a_global_has_the_redzone_gcc_gives_it() {
+        let sizes = [(0, 32), (4, 60), (5, 59), (8, 56), (32, 32), (40, 56), (100, 60)];
+        for (size, redzone) in sizes {
+            assert_eq!(global_redzone(size), redzone, "{size}");
+        }
+        let mut names = Interner::default();
+        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let mut module = Module::new(names.intern("t.c"), &target);
+        let mut empty = Global::new(names.intern("key"), 0, 1);
+        empty.init = Some(module.push_data(&[]));
+        assert!(protected(&empty), "a global of no size gets one");
+        empty.linkage = Linkage::Weak;
+        assert!(!protected(&empty), "a weak one does not");
+    }
 
     #[test]
     fn a_value_takes_the_bytes_its_type_is_wide() {
