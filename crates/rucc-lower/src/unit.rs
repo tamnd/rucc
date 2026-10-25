@@ -179,6 +179,9 @@ pub struct Sanitize {
     pub bounds: Check,
     /// `-fsanitize=unreachable`.
     pub unreachable: Check,
+    /// `-fsanitize=kernel-address`, whose checks a pass over the IR puts in. The walk only says
+    /// which functions are left out of them.
+    pub address: bool,
 }
 
 /// Everything the walk reads, which is a checked translation unit and the target it is for.
@@ -1300,6 +1303,7 @@ impl Unit<'_> {
         let untraced = node.flags.contains(DeclFlags::NO_INSTRUMENT);
         let unprofiled = node.flags.contains(DeclFlags::NO_PROFILE);
         let uncovered = node.flags.contains(DeclFlags::NO_SANCOV);
+        let unchecked = node.flags.contains(DeclFlags::NO_ASAN) && self.sanitize.address;
         let twice = node.flags.contains(DeclFlags::RETURNS_TWICE);
         let effects = node.effects;
         let startup = node.startup;
@@ -1407,6 +1411,10 @@ impl Unit<'_> {
         // Read by `rucc_opt::sancov`, which puts no calls in it.
         if uncovered {
             func.attrs.set |= AttrSet::NO_SANCOV;
+        }
+        // Read by `rucc_opt::asan` and by the inliner.
+        if unchecked {
+            func.attrs.set |= AttrSet::NO_ASAN;
         }
         // A claim about what a call to it does, like `noreturn`, and it has to travel for the same
         // reason: `sigsetjmp` is only ever declared here, and the frame of whoever calls it is

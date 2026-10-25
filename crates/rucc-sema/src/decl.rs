@@ -566,6 +566,12 @@ impl DeclFlags {
     /// The same for `unreachable`.
     pub const NO_UBSAN_UNREACHABLE: Self = Self(1 << 50);
 
+    /// `no_sanitize_address`, `no_address_safety_analysis`, or `no_sanitize` naming `address` or
+    /// `kernel-address`, was written on a declaration of this function, so its accesses are not
+    /// checked against the shadow. The kernel's `noinstr` says it. Merged the way
+    /// [`Self::NO_INSTRUMENT`] is.
+    pub const NO_ASAN: Self = Self(1 << 51);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

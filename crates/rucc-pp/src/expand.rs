@@ -98,6 +98,11 @@ impl Expander {
         self.assembly = assembly;
     }
 
+    /// Whether what is being expanded is assembly.
+    pub fn assembly(&self) -> bool {
+        self.assembly
+    }
+
     /// Everything reported so far.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
