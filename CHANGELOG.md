@@ -36,6 +36,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `vqtbl1`, `vqtbx1`, `vmul_p8` and `vmulq_p8` in `<arm_neon.h>` are now the TBL, TBX and PMUL instructions. They were loops over the lanes, and `vmulq_p8` was 128 tests and shifts, which the kernel's raid6 recovery and GF(2^8) code paid for on every block. (#3864)
 - An `asm` that is not `volatile` and whose only operands in memory are inputs now goes away when nothing reads its outputs, as gcc does it. arm64's `__my_cpu_offset` is one, with the stack pointer as an input in memory, and a `this_cpu_ptr` handed to the `local_lock` hooks that are empty without lockdep left a dead `mrs tpidr_el1` with its `HAS_VIRT_HOST_EXTN` alternative in ten 7.2.8 arm64 defconfig objects, among them `kernel/pid.o` and `ipc/util.o`. (#3865)
 - `vmull_p64` and `vmull_high_p64` in `<arm_neon.h>` are now PMULL and PMULL2, where each was a loop of 64 tests and shifts. (#3867)
+- The check of the `ld.lld` version for a Windows GNU or WASI link now tries again when the linker file is busy. On Linux a child that another thread forks holds a copy of each open file until it runs its own program, so a linker that was written a moment ago can fail to start for a short time. The check then read no version and let an `ld.lld` 18 link for Windows GNU. This made the test of that check fail now and then in CI.
 
 ## 0.30.12
 

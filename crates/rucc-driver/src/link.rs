@@ -1458,9 +1458,22 @@ pub fn suitable(target: Triple, linker: &Linker) -> Result<(), Error> {
 /// A linker that cannot be started is not this function's problem to report, because the link is
 /// about to start it again and say so properly. What this returns for such a one is nothing to
 /// read, which is the same as a linker that ran and said something unrecognisable.
+///
+/// A start that fails because the file is open for writing is tried again a few times. On Linux a
+/// child that another thread forks holds a copy of each open file until it runs its own program,
+/// so a linker that was written a moment ago can be busy for a short time and then start.
 fn reported_version(path: &Path) -> String {
-    let Ok(out) = Command::new(path).arg("--version").output() else { return String::new() };
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    let mut tries = 0;
+    loop {
+        match Command::new(path).arg("--version").output() {
+            Ok(out) => return String::from_utf8_lossy(&out.stdout).into_owned(),
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return String::new(),
+        }
+    }
 }
 
 /// The major version in an lld's `--version`, when the program that printed it was an lld.
