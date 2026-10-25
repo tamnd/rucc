@@ -381,6 +381,9 @@ fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
     if flags.contains(DeclFlags::NO_UBSAN_BOUNDS) {
         sanitize.bounds = Check::Off;
     }
+    if flags.contains(DeclFlags::NO_UBSAN_UNREACHABLE) {
+        sanitize.unreachable = Check::Off;
+    }
     sanitize
 }
 
@@ -7515,6 +7518,7 @@ impl<'u> Body<'_, 'u> {
             // of an expression and a block cannot end there, and `rucc_opt::simplify_cfg` is what
             // ends it at the promise and throws away what was lowered after it.
             ExprKind::Unreachable => {
+                self.checked_unreachable(span);
                 self.build(span).inst(InstData::new(Opcode::UnreachableHint), &[]);
                 None
             }
