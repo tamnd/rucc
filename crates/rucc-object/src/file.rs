@@ -1170,7 +1170,7 @@ fn put(
         if let Some(name) = object.place.split(&object.name) {
             let section = obj.add_section(Vec::new(), name.into_bytes(), kind_of(&object.place));
             let offset = if carries_no_bytes(&object.place) {
-                obj.append_section_bss(section, object.size, object.align)
+                obj.append_section_bss(section, object.size + object.redzone, object.align)
             } else {
                 obj.append_section_data(section, &object.bytes, object.align)
             };
@@ -1229,7 +1229,7 @@ fn put(
         }
     };
     let offset = if carries_no_bytes(&object.place) {
-        obj.append_section_bss(section, object.size, object.align)
+        obj.append_section_bss(section, object.size + object.redzone, object.align)
     } else {
         obj.append_section_data(section, &object.bytes, object.align)
     };
@@ -2281,6 +2281,7 @@ mod tests {
             place,
             binding: Binding::Global,
             visibility: Visibility::Default,
+            redzone: 0,
             relocs: Vec::new(),
         }
     }
@@ -3476,6 +3477,7 @@ mod tests {
                 place: Place::Written,
                 binding: Binding::Global,
                 visibility: Visibility::Default,
+                redzone: 0,
                 relocs: vec![Reloc {
                     at: 0,
                     symbol: "x".to_owned(),
@@ -3555,6 +3557,7 @@ mod tests {
             place: Place::Written,
             binding: Binding::Global,
             visibility: Visibility::Default,
+            redzone: 0,
             relocs: vec![Reloc {
                 at: 0,
                 symbol: "swapper_pg_dir".to_owned(),
@@ -3642,6 +3645,7 @@ mod tests {
                 place: Place::Written,
                 binding: Binding::Global,
                 visibility: Visibility::Default,
+                redzone: 0,
                 relocs: vec![
                     Reloc {
                         at: 0,

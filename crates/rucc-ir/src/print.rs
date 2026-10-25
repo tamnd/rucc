@@ -283,6 +283,9 @@ impl<'a> Printer<'a> {
         if global.shared {
             self.out.push_str(", shared");
         }
+        if global.redzone > 0 {
+            let _ = write!(self.out, ", redzone {}", global.redzone);
+        }
         self.out.push('\n');
     }
 

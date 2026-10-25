@@ -832,6 +832,11 @@ impl Writer<'_> {
             self.piece(piece);
         }
         self.directives.close(&mut self.out, &var.name);
+        // After the size, so that the symbol is as big as the program said it was and the
+        // redzone is only bytes the section holds after it.
+        if var.redzone > 0 {
+            let _ = writeln!(self.out, "\t.space\t{}", var.redzone);
+        }
         self.directives.descriptor(&mut self.out, var);
     }
 
@@ -1579,6 +1584,7 @@ mod tests {
             visibility: Visibility::Default,
             retain: false,
             pieces,
+            redzone: 0,
         }
     }
 

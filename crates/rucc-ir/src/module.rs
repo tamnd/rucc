@@ -403,6 +403,11 @@ pub struct Global {
     /// their addresses and has no right to compare those. What lets the object writer put it in a
     /// section the linker merges, which is where gcc puts every literal it can.
     pub literal: bool,
+    /// How many zero bytes come after the image and are not part of the size the symbol says,
+    /// which is the redzone `--param asan-globals=1` puts after a variable. An access that runs off
+    /// the end lands in it, and the shadow of it says the bytes are not to be used. Zero for every
+    /// other variable.
+    pub redzone: u64,
 }
 
 impl Global {
@@ -428,6 +433,7 @@ impl Global {
             init: None,
             droppable: false,
             literal: false,
+            redzone: 0,
         }
     }
 

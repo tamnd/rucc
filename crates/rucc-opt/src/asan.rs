@@ -36,14 +36,21 @@
 //!
 //! An access to a local or to a named object at a constant offset that is inside it, since the
 //! check could not fail. An access through `__seg_fs` or `__seg_gs`, whose address is not a place
-//! the shadow covers. A function marked `no_sanitize_address` or `naked`. The globals and the
-//! memory of `alloca` have no redzones around them yet.
+//! the shadow covers. A function marked `no_sanitize_address` or `naked`. The memory of `alloca`
+//! has no redzones around it yet.
 //!
 //! # The frame
 //!
 //! Under `--param asan-stack=1` the locals a check can find wrong go into one frame with a redzone
 //! after each of them, laid out as gcc lays it out, and the shadow of the redzones is poisoned on
 //! the way in and cleared on the way out.
+//!
+//! # The globals
+//!
+//! Under `--param asan-globals=1` each global that gcc protects is aligned to 32 bytes and has a
+//! redzone of zero bytes after it, which the symbol's size leaves out. A table of eight words for
+//! each of them goes to `__asan_register_globals` from a constructor, and the kernel poisons the
+//! shadow of each redzone when it reads the table.
 //!
 //! # Order
 //!
@@ -54,8 +61,9 @@
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    AttrSet, CallInfo, Datum, Extra, Flags, Func, FuncId, Global, Inst, InstData, IntPred, Linkage,
-    MemInfo, MemOrder, Module, Opcode, Restrict, Signature, Type, Value,
+    AttrSet, Builder, CallInfo, Datum, Extra, Flags, Func, FuncId, Global, GlobalId, Imm, Inst,
+    InstData, IntPred, Linkage, MemInfo, MemOrder, Module, Opcode, Reloc, Restrict, Signature,
+    Type, Value,
 };
 use rucc_session::Kasan;
 
@@ -81,6 +89,9 @@ pub fn run(module: &mut Module, names: &mut Interner, how: Kasan) -> usize {
         }
         checks += instrument(&mut module[id], &mut runtime, &sizes, how);
     }
+    if how.globals {
+        globals(module, &mut runtime);
+    }
     for (name, signature) in runtime.declared {
         if module.lookup(name).is_none() {
             module.add_func(Func::new(name, signature));
@@ -97,6 +108,139 @@ pub fn run(module: &mut Module, names: &mut Interner, how: Kasan) -> usize {
         module.add_global(global);
     }
     checks
+}
+
+/// The alignment past which a global gets no redzone, which is gcc's two redzones.
+const MAX_ALIGN: u32 = 64;
+
+/// What the start of a protected global is aligned to, and what its redzone is made a multiple
+/// of. gcc's `ASAN_RED_ZONE_SIZE`.
+const GLOBAL_ZONE: u64 = 32;
+
+/// How many words the runtime reads for each global: where it is, its size, its size with the
+/// redzone, its name, the name of the file, whether it has a dynamic initializer, where it is
+/// in the source, and the address of its ODR indicator. `struct kasan_global` in the kernel.
+const DESCRIBED: usize = 8;
+
+/// Whether a global gets a redzone, which is gcc's `asan_protect_global`.
+///
+/// A definition that is not thread-local and that the program put in no section of its own,
+/// with a size and an alignment no larger than two redzones. One the linker can replace with
+/// another definition is left alone, since the table would then describe the other one with the
+/// size of this one, and so is a tentative one.
+fn protected(global: &Global) -> bool {
+    !global.is_declaration()
+        && global.tls.is_none()
+        && global.section.is_none()
+        && matches!(global.linkage, Linkage::External | Linkage::Internal)
+        && !global.noinit
+        && !global.persistent
+        && global.size > 0
+        && global.align <= MAX_ALIGN
+}
+
+/// The redzone after a global of that size, which takes it to a multiple of 32 bytes with at
+/// least 32 bytes after it, as gcc's `asan_red_zone_size` does.
+fn global_redzone(size: u64) -> u64 {
+    let over = size % GLOBAL_ZONE;
+    if over == 0 { GLOBAL_ZONE } else { 2 * GLOBAL_ZONE - over }
+}
+
+/// Puts a redzone after each global that gets one and the table the runtime reads them from,
+/// and adds the constructor that gives the table to `__asan_register_globals` and the destructor
+/// that takes it back with `__asan_unregister_globals`.
+///
+/// A string literal that gets one is not a literal any more, because a section the linker merges
+/// strings in would merge the redzone away. The location word is zero, which the kernel does not
+/// read.
+fn globals(module: &mut Module, runtime: &mut Runtime<'_>) {
+    let ids: Vec<GlobalId> = module.globals().filter(|&id| protected(&module[id])).collect();
+    if ids.is_empty() {
+        return;
+    }
+    let file = runtime.names.resolve(module.name).to_owned();
+    let file = string(module, runtime.names.intern("__asan_gen_module"), &file);
+    let mut table = Vec::with_capacity(ids.len() * DESCRIBED);
+    for (index, &id) in ids.iter().enumerate() {
+        let global = &mut module[id];
+        global.redzone = global_redzone(global.size);
+        global.align = global.align.max(GLOBAL_ZONE as u32);
+        let (name, size, redzone) = (global.name, global.size, global.redzone);
+        let shown = if global.literal {
+            format!("*{}", runtime.names.resolve(name))
+        } else {
+            runtime.names.resolve(name).to_owned()
+        };
+        global.literal = false;
+        let shown =
+            string(module, runtime.names.intern(&format!("__asan_gen_name.{index}")), &shown);
+        table.push(address(module, name));
+        table.push(word(module, size));
+        table.push(word(module, size + redzone));
+        table.push(address(module, shown));
+        table.push(address(module, file));
+        table.extend([Datum::Zero(8), Datum::Zero(8), Datum::Zero(8)]);
+    }
+    let name = runtime.names.intern("__asan_gen_globals");
+    let mut global = Global::new(name, (table.len() * 8) as u64, GLOBAL_ZONE as u32);
+    global.linkage = Linkage::Internal;
+    global.init = Some(module.push_data(&table));
+    module.add_global(global);
+    let count = ids.len() as i128;
+    for (before, which, called) in [
+        (true, "_sub_I_65535_1", "__asan_register_globals"),
+        (false, "_sub_D_65535_0", "__asan_unregister_globals"),
+    ] {
+        let (callee, signature) = runtime.callee(called, &[Type::PTR, Type::int(64)], &[]);
+        let func_name = runtime.names.intern(which);
+        let mut func = Func::new(func_name, Signature::new());
+        func.linkage = Linkage::Internal;
+        func.attrs.set |= AttrSet::NO_ASAN;
+        let block = func.create_block();
+        let mut build = Builder::new(&mut func, block);
+        let signature = build.func().add_signature(signature);
+        let data = InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) };
+        let at = build.value(data, Type::PTR);
+        let count = build.iconst(Type::int(64), count);
+        build.call(callee, signature, &[at, count]);
+        build.ret(&[]);
+        module.add_func(func);
+        let section = if before { ".init_array" } else { ".fini_array" };
+        let kind = if before { "ctor" } else { "dtor" };
+        let pointer = runtime.names.intern(&format!("__rucc_{kind}.{which}"));
+        let mut global = Global::new(pointer, 8, 8);
+        global.linkage = Linkage::Internal;
+        global.section = Some(runtime.names.intern(section));
+        let entry = address(module, func_name);
+        global.init = Some(module.push_data(&[entry]));
+        module.add_global(global);
+    }
+}
+
+/// A string the table points at, with its zero, which gets no redzone of its own.
+fn string(module: &mut Module, name: Symbol, text: &str) -> Symbol {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    let mut global = Global::new(name, bytes.len() as u64, 1);
+    global.linkage = Linkage::Internal;
+    global.constant = true;
+    let range = module.push_bytes(&bytes);
+    global.init = Some(module.push_data(&[Datum::Bytes(range)]));
+    module.add_global(global);
+    name
+}
+
+/// A word of the table that holds the address of `symbol`.
+fn address(module: &mut Module, symbol: Symbol) -> Datum {
+    Datum::Addr(module.add_reloc(Reloc { symbol, addend: 0, size: 8 }))
+}
+
+/// A word of the table that holds a number.
+fn word(module: &mut Module, value: u64) -> Datum {
+    Datum::Scalar {
+        ty: Type::int(64),
+        value: module.add_imm(Imm::int(i128::from(value), Type::int(64))),
+    }
 }
 
 /// The runtime functions called so far, declared once the walk is over.
@@ -345,7 +489,7 @@ fn shadow(
     func.move_after(first, after);
     let reports = func.create_block();
     let partial = (size < GROUP).then(|| func.create_block());
-    let mut build = rucc_ir::Builder::new(func, block).at(span);
+    let mut build = Builder::new(func, block).at(span);
     let three = build.iconst(word, 3);
     let group = build.binary(Opcode::LShr, address, three, Flags::NONE);
     let base = build.iconst(word, offset as i128);
@@ -368,7 +512,7 @@ fn shadow(
     // path the access takes when it is good, as gcc has it.
     build.br_if(poisoned, partial.unwrap_or(reports), &[], after, &[]);
     if let Some(partial) = partial {
-        let mut build = rucc_ir::Builder::new(func, partial).at(span);
+        let mut build = Builder::new(func, partial).at(span);
         // The offset of the last byte in its group, which has to be below the number of bytes
         // the shadow says may be used.
         let seven = build.iconst(word, 7);
@@ -380,7 +524,7 @@ fn shadow(
         build.br_if(past, reports, &[], after, &[]);
     }
     let signature = func.add_signature(signature);
-    let mut build = rucc_ir::Builder::new(func, reports).at(span);
+    let mut build = Builder::new(func, reports).at(span);
     build.call(report, signature, &[access.address]);
     build.jump(after, &[]);
 }
@@ -417,7 +561,7 @@ fn ends(
         owns: 0,
         restrict: Restrict::NONE,
     };
-    let mut build = rucc_ir::Builder::new(func, block).at(span);
+    let mut build = Builder::new(func, block).at(span);
     let three = build.iconst(word, 3);
     let seven = build.iconst(word, 7);
     let base = build.iconst(word, offset as i128);
@@ -443,7 +587,7 @@ fn ends(
     let bad = bad.expect("two ends were checked");
     build.br_if(bad, reports, &[], after, &[]);
     let signature = func.add_signature(signature);
-    let mut build = rucc_ir::Builder::new(func, reports).at(span);
+    let mut build = Builder::new(func, reports).at(span);
     let length = build.iconst(word, size as i128);
     build.call(report, signature, &[access.address, length]);
     build.jump(after, &[]);
@@ -660,7 +804,7 @@ fn param_types(params: &[rucc_ir::Param]) -> Vec<Type> {
 
 /// An integer constant just before `before`.
 fn constant(func: &mut Func, ty: Type, value: i128, before: Inst) -> Value {
-    let imm = func.add_imm(rucc_ir::Imm::int(value, ty));
+    let imm = func.add_imm(Imm::int(value, ty));
     let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
     place(func, data, ty, before)
 }
