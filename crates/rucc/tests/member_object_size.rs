@@ -245,6 +245,122 @@ void f(struct p *p, struct e *e, struct f *fl, struct k *param, int i) {
 }
 "#;
 
+/// A member of the first element of an array reached through a pointer, written `a->m`, which gcc
+/// takes as `a[0].m` and answers with the member. gs_usb's `gs_can_start_xmit` copies the frame
+/// into `hf->classic_can->data`, where `classic_can` is a flexible array in a union, and gcc keeps
+/// the field spanning WARN that checks the copy. A pointer to the element type is still unknown.
+const FIRST: &str = r#"
+typedef unsigned long size_t;
+struct cc { unsigned char data[8]; };
+struct fd { unsigned char data[64]; };
+struct hf { int a, b; union { struct { struct {} e1; struct cc c[]; }; struct { struct {} e2; struct fd f[]; }; }; } __attribute__((packed));
+struct nu { int a, b; struct cc c[]; };
+struct two { int a; struct cc c[2]; };
+extern void *grab(size_t) __attribute__((alloc_size(1)));
+#define D1(p) __builtin_dynamic_object_size(p, 1)
+#define WANT(name, got, want) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if ((got) != (size_t)(want)) name(); \
+    } while (0)
+void f(struct hf *h, struct nu *n, struct two *t, struct cc *q) {
+    WANT(wrong_first_union, D1(h->c->data), 8);
+    WANT(wrong_first_union_wide, D1(h->f->data), 64);
+    WANT(wrong_first_union_static, __builtin_object_size(h->f->data, 1), 64);
+    WANT(wrong_first, D1(n->c->data), 8);
+    WANT(wrong_first_subscript, D1(n->c[0].data), 8);
+    WANT(wrong_first_fixed, D1(t->c->data), 8);
+    WANT(wrong_first_pointer, D1(q->data), -1);
+    struct hf *small = grab(20);
+    WANT(wrong_first_small, D1(small->f->data), 12);
+    WANT(wrong_first_small_whole, __builtin_dynamic_object_size(small->f->data, 0), 12);
+    struct hf *big = grab(200);
+    WANT(wrong_first_big, D1(big->f->data), 64);
+}
+"#;
+
+/// A pointer a join chose, asked about when the program runs, where a way that brings a null
+/// pointer comes through another join first or a way comes round a loop. dml2's
+/// `insert_strategy_into_expanded_list` copies into one of four lists or nothing, inside a test
+/// that it is not null, and tls's `tls_split_open_record` copies into `nsge`, which each trip sets
+/// to the next entry. gcc keeps the field spanning WARN that checks each copy. There the record is
+/// what an inlined `tls_get_rec` gave back once `if (!rec)` has turned the null away, and each
+/// entry is what an inlined `sk_msg_elem` gave back, which `fresh` does the same way.
+const JOINED: &str = r#"
+typedef unsigned long size_t;
+struct st { int m[8]; _Bool x; };
+struct init { struct st a[20]; struct st b[160]; struct st c[2160]; unsigned n[4]; };
+struct sg { unsigned long a; unsigned b, c; unsigned long d; };
+struct msg { int x; struct { unsigned start, end; struct sg data[19]; unsigned long copy; } sg; };
+#define D1(p) __builtin_dynamic_object_size(p, 1)
+#define RUNS(name, got) \
+    do { \
+        extern void name(void) __attribute__((error(#name))); \
+        if (__builtin_constant_p(got)) name(); \
+    } while (0)
+extern void take(size_t);
+void nested(int c, struct init *p, int i) {
+    struct st *l = 0;
+    if (c == 1)
+        l = p->b;
+    else if (c == 2)
+        l = p->c;
+    if (l) {
+        RUNS(wrong_nested, D1(l));
+        take(D1(l));
+        RUNS(wrong_nested_entry, D1(&l[p->n[i]]));
+        take(D1(&l[p->n[i]]));
+    }
+}
+void looped(struct msg *m, struct msg *o) {
+    unsigned j = m->sg.start, i = o->sg.start;
+    struct sg *ns = &m->sg.data[j];
+    struct sg *os = &o->sg.data[i];
+    while (os->d) {
+        RUNS(wrong_looped, D1(ns));
+        take(D1(ns));
+        if (++i == 19) i = 0;
+        if (++j == 19) j = 0;
+        if (i == o->sg.end) break;
+        os = &o->sg.data[i];
+        ns = &m->sg.data[j];
+    }
+}
+struct rec { long h; struct msg plain; struct msg enc; char ctx[]; };
+extern void *grab(size_t) __attribute__((alloc_size(1)));
+extern void opaque(struct msg *);
+static inline struct rec *get(int extra) {
+    struct rec *r = grab(sizeof(struct rec) + extra);
+    if (!r)
+        return 0;
+    __builtin_memset(&r->plain, 0, sizeof r->plain);
+    return r;
+}
+static inline struct sg *elem(struct msg *m, unsigned k) { return &m->sg.data[k]; }
+int fresh(struct msg *o, int extra) {
+    struct rec *r = get(extra);
+    if (!r)
+        return -1;
+    opaque(&r->enc);
+    struct msg *m = &r->plain;
+    unsigned j = m->sg.start, i = o->sg.start;
+    struct sg *ns = elem(m, j);
+    struct sg *os = elem(o, i);
+    RUNS(wrong_fresh_whole, __builtin_dynamic_object_size(ns, 0));
+    take(__builtin_dynamic_object_size(ns, 0));
+    while (os->d) {
+        RUNS(wrong_fresh, D1(ns));
+        take(D1(ns));
+        if (++i == 19) i = 0;
+        if (++j == 19) j = 0;
+        if (i == o->sg.end) break;
+        os = elem(o, i);
+        ns = elem(m, j);
+    }
+    return 0;
+}
+"#;
+
 /// A member of what a pointer points at, which gcc answers with what is left of the member or of
 /// the whole object, whichever is less. cxgb4's `t4_alloc_mac_filt` copies each address into
 /// `p->macaddr` at a `p` its loop moves through a command on the stack, and gcc works the answer
@@ -442,6 +558,22 @@ fn an_array_in_a_union_inside_a_structure_is_as_long_as_its_type() {
 fn an_array_ending_an_element_picked_at_a_variable_index_is_as_long_as_its_type() {
     for level in ["-O1", "-O2", "-Os", "-O3"] {
         let out = compile(&format!("indexed{level}"), INDEXED, level);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn a_member_of_the_first_element_of_an_array_through_a_pointer_is_as_long_as_its_type() {
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let out = compile(&format!("first{level}"), FIRST, level);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn a_join_through_another_join_or_round_a_loop_brings_the_size_of_each_way() {
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let out = compile(&format!("joined{level}"), JOINED, level);
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }
