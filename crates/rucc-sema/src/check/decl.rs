@@ -1853,6 +1853,7 @@ impl Checker<'_> {
                 DeclFlags::NO_UBSAN_SHIFT_EXPONENT,
                 DeclFlags::NO_UBSAN_SHIFT_BASE,
                 DeclFlags::NO_UBSAN_BOOL,
+                DeclFlags::NO_UBSAN_BOUNDS,
                 DeclFlags::COLD,
                 DeclFlags::HOT,
                 DeclFlags::NO_STACK_PROTECTOR,

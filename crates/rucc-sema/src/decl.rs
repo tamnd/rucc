@@ -560,6 +560,9 @@ impl DeclFlags {
     /// The same for `bool`.
     pub const NO_UBSAN_BOOL: Self = Self(1 << 48);
 
+    /// The same for the subscript check, which `bounds` and `bounds-strict` both name.
+    pub const NO_UBSAN_BOUNDS: Self = Self(1 << 49);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

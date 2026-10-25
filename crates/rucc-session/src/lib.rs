@@ -333,7 +333,7 @@ pub enum Check {
 /// does when it fires.
 ///
 /// These are the checks Linux turns on with `CONFIG_UBSAN_DIV_ZERO`, `CONFIG_UBSAN_SHIFT`,
-/// `CONFIG_UBSAN_BOOL` and `CONFIG_UBSAN_ENUM`. The kernel probes each one with `cc-option`, so a
+/// `CONFIG_UBSAN_BOOL`, `CONFIG_UBSAN_ENUM` and, with gcc, `CONFIG_UBSAN_BOUNDS`. The kernel probes each one with `cc-option`, so a
 /// check that is here is a check the kernel builds with, and the rest of gcc's list is still
 /// refused by name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -350,12 +350,14 @@ pub struct Sanitize {
     /// `enum`: a value read from an enumeration that its type cannot hold. gcc makes this check in
     /// C++ only, and in C it is taken and puts nothing in, so it is kept here only to be taken.
     pub enumeration: Check,
+    /// `bounds-strict`: an index into an array whose length is known that is past its end.
+    pub bounds_strict: Check,
 }
 
 impl Sanitize {
     /// The names `-fsanitize=` takes that this compiler generates, in gcc's spelling.
-    pub const NAMES: [&'static str; 5] =
-        ["integer-divide-by-zero", "shift-exponent", "shift-base", "bool", "enum"];
+    pub const NAMES: [&'static str; 6] =
+        ["integer-divide-by-zero", "shift-exponent", "shift-base", "bool", "enum", "bounds-strict"];
 
     /// The check for one of [`Self::NAMES`].
     pub fn check_mut(&mut self, name: &str) -> Option<&mut Check> {
@@ -365,6 +367,7 @@ impl Sanitize {
             "shift-base" => Some(&mut self.shift_base),
             "bool" => Some(&mut self.boolean),
             "enum" => Some(&mut self.enumeration),
+            "bounds-strict" => Some(&mut self.bounds_strict),
             _ => None,
         }
     }

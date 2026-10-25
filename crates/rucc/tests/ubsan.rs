@@ -1,5 +1,6 @@
-//! `-fsanitize=integer-divide-by-zero`, `-fsanitize=shift`, `-fsanitize=bool` and
-//! `-fsanitize=enum`, which the kernel's `CONFIG_UBSAN` puts on every unit that does not opt out. The calls carry gcc's names, the record each one is
+//! `-fsanitize=integer-divide-by-zero`, `-fsanitize=shift`, `-fsanitize=bool`, `-fsanitize=enum`
+//! and `-fsanitize=bounds-strict`, which the kernel's `CONFIG_UBSAN` puts on every unit that does
+//! not opt out. The calls carry gcc's names, the record each one is
 //! handed is laid out the way gcc lays it out, and a function marked `no_sanitize` makes none.
 
 use std::path::Path;
@@ -235,4 +236,58 @@ fn a_bool_read_from_memory_is_checked_and_enum_is_taken() {
     assert!(!text.contains("__ubsan_handle"), "{text}");
     let text = bools(&["-O2", "-fsanitize=enum"]);
     assert!(!text.contains("__ubsan_handle"), "{text}");
+}
+
+/// Subscripts of arrays whose length is known, the address of one past the end, and after
+/// `pointer` subscripts that have no check or are in a function that turns the check off.
+const BOUNDS: &str = r#"struct s { int n; int a[4]; };
+struct c { int n; long a[] __attribute__((counted_by(n))); };
+typedef struct { short x; } pair;
+int g[10];
+pair pairs[3];
+int fixed(int i) { return g[i]; }
+int member(struct s *s, unsigned char i) { return s->a[i]; }
+int *end(long i) { return &g[i]; }
+long counted(struct c *c, int i) { return c->a[i]; }
+int variable(int n, int i) { int v[n]; v[0] = 1; return v[i]; }
+short named(int i) { return pairs[i].x; }
+int pointer(int *p, int i) { return p[i]; }
+int constant(void) { return g[9]; }
+__attribute__((no_sanitize("bounds"))) int quiet(int i) { return g[i]; }
+__attribute__((no_sanitize_undefined)) int still(int i) { return g[i]; }
+"#;
+
+fn bounds(target: &str, args: &[&str]) -> String {
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir =
+        std::env::temp_dir().join(format!("rucc-ubsan-bounds-{}{target}{tag}", std::process::id()));
+    let target = format!("--target={target}");
+    let mut all = vec![target.as_str(), "-fsanitize=bounds-strict", "-S", "-o", "-"];
+    all.extend(args);
+    let out = compile(&dir, BOUNDS, &all);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).expect("a listing is text")
+}
+
+#[test]
+fn an_index_past_a_known_length_calls_the_runtime() {
+    let targets =
+        ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "i686-unknown-linux-gnu"];
+    for target in targets {
+        for level in ["-O0", "-O2"] {
+            let text = bounds(target, &[level]);
+            let calls = text.matches("__ubsan_handle_out_of_bounds").count();
+            assert!(calls >= 7, "{target} {level} has {calls} calls:\n{text}");
+            for wanted in ["'int [10]'", "'int [4]'", "'long int [*]'", "'int [*]'", "'int'"] {
+                assert!(text.contains(wanted), "{target} {level} has no {wanted}:\n{text}");
+            }
+            let start = text.find("\npointer:").expect("pointer is defined");
+            assert!(!text[start..].contains("__ubsan"), "{target} {level}:\n{}", &text[start..]);
+        }
+    }
+    let text = bounds("x86_64-unknown-linux-gnu", &["-O2", "-fsanitize-trap=bounds-strict"]);
+    assert!(!text.contains("__ubsan_handle_out_of_bounds"), "{text}");
+    let text = bounds("x86_64-unknown-linux-gnu", &["-O2", "-fno-sanitize=bounds-strict"]);
+    assert!(!text.contains("__ubsan_handle_out_of_bounds"), "{text}");
 }

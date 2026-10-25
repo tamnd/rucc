@@ -520,6 +520,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 shift_exponent: lower_check(opts.sanitize.shift_exponent),
                                 shift_base: lower_check(opts.sanitize.shift_base),
                                 boolean: lower_check(opts.sanitize.boolean),
+                                bounds: lower_check(opts.sanitize.bounds_strict),
                             },
                             sources: &sess.sources,
                             c23: opts.std >= rucc_session::Std::C23,

@@ -221,6 +221,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_UBSAN_BOOL) {
             head.push_str(" no_sanitize(bool)");
         }
+        if node.flags.contains(DeclFlags::NO_UBSAN_BOUNDS) {
+            head.push_str(" no_sanitize(bounds)");
+        }
         if node.flags.contains(DeclFlags::CF_CHECK) {
             head.push_str(" cf_check");
         }

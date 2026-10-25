@@ -282,6 +282,7 @@ pub struct Tast {
     fentry_sections: Map<DeclId, StrId>,
     tls_models: Map<DeclId, TlsModel>,
     strict_flex: Map<(RecordId, Symbol), u8>,
+    counters: Map<(RecordId, Symbol), Symbol>,
     strict_flex_arrays: u8,
     gnuc: u32,
     symvers: Map<DeclId, Vec<(String, Span)>>,
@@ -768,6 +769,17 @@ impl Tast {
     /// Records the level a member's own `strict_flex_array` asked for in place of that one.
     pub fn record_strict_flex(&mut self, record: RecordId, name: Symbol, level: u8) {
         self.strict_flex.insert((record, name), level);
+    }
+
+    /// Records that `counted_by` on member `name` of a record said member `counter` counts it.
+    pub fn record_counter(&mut self, record: RecordId, name: Symbol, counter: Symbol) {
+        self.counters.insert((record, name), counter);
+    }
+
+    /// The member that counts member `name` of a record, which `counted_by` names.
+    #[must_use]
+    pub fn counter(&self, record: RecordId, name: Symbol) -> Option<Symbol> {
+        self.counters.get(&(record, name)).copied()
     }
 
     /// The `-fstrict-flex-arrays` level this member of this record is read under, which is its

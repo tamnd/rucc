@@ -3640,11 +3640,13 @@ fn unsanitized(name: &str) -> DeclFlags {
         "shift-base" => DeclFlags::NO_UBSAN_SHIFT_BASE,
         "shift" => DeclFlags::NO_UBSAN_SHIFT_EXPONENT | DeclFlags::NO_UBSAN_SHIFT_BASE,
         "bool" => DeclFlags::NO_UBSAN_BOOL,
+        "bounds" | "bounds-strict" => DeclFlags::NO_UBSAN_BOUNDS,
         "undefined" => {
             DeclFlags::NO_UBSAN_DIVIDE
                 | DeclFlags::NO_UBSAN_SHIFT_EXPONENT
                 | DeclFlags::NO_UBSAN_SHIFT_BASE
                 | DeclFlags::NO_UBSAN_BOOL
+                | DeclFlags::NO_UBSAN_BOUNDS
         }
         _ => DeclFlags::NONE,
     }
