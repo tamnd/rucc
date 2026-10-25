@@ -180,7 +180,7 @@ pub fn returns(module: &mut Module, graph: &CallGraph, fuel: &mut Fuel) -> Vec<(
             if stats.changed() {
                 said.push((id, stats));
             }
-            if graph.trusted_body(node).is_some() {
+            if graph.trusted_body(node).is_some() && !hook(&module[id], graph, node) {
                 if let Some(number) = gives(&module[id], &known) {
                     known.insert(module[id].name, number);
                 }
@@ -188,6 +188,19 @@ pub fn returns(module: &mut Module, graph: &CallGraph, fuel: &mut Fuel) -> Vec<(
         }
     }
     said
+}
+
+/// Whether this is a function something outside the calls may make give back another number.
+///
+/// `noinline` with its address handed out. `ALLOW_ERROR_INJECTION` is the kernel's case: it puts
+/// the address of a `noinline` function that only says `return false` into
+/// `_error_injection_whitelist`, and a kprobe on it makes it return true when a test asks.
+/// `ssh_ptl_should_drop_ack_packet` in `drivers/platform/surface/aggregator/ssh_packet_layer.c` is
+/// one, and folding its callers' tests drops the injected paths and their tracepoints. Gcc 12 keeps
+/// those tests. A function that is only `noinline` stays readable, since nothing can reach it but
+/// the calls, and one that may be inlined has its body folded at every call anyway.
+fn hook(func: &Func, graph: &CallGraph, node: crate::callgraph::Node) -> bool {
+    func.attrs.set.contains(AttrSet::NOINLINE) && graph.address_taken(node)
 }
 
 /// The number every return of this body gives, when there is one and it is an integer.
@@ -465,6 +478,37 @@ block0(%0: i32):
 }
 "#);
         assert_eq!(folded, 0, "{text}");
+    }
+
+    /// `@init` as `ALLOW_ERROR_INJECTION` leaves it, `noinline` and named by a global.
+    const HOOK: &str = r#"
+func @init(i32) -> i32, linkage(internal), attrs(noinline) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    return %1
+}
+
+func @list() -> ptr, linkage(external) {
+block0:
+    %0 = global_addr @init
+    return %0
+}
+"#;
+
+    #[test]
+    fn a_noinline_function_whose_address_is_handed_out_leaves_the_call_alone() {
+        let (text, folded) = run(HOOK);
+        assert_eq!(folded, 0, "{text}");
+        assert!(compared(&text).contains("call @init"), "{text}");
+    }
+
+    #[test]
+    fn a_noinline_function_only_called_is_still_read() {
+        let (text, folded) = run(&HOOK
+            .replace("    %0 = global_addr @init\n", "    %0 = iconst.i64 0\n")
+            .replace("-> ptr", "-> i64"));
+        assert_eq!(folded, 1, "{text}");
+        assert!(compared(&text).contains("iconst.i32 0"), "{text}");
     }
 
     #[test]
