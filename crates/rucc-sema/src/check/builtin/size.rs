@@ -653,6 +653,10 @@ impl Checker<'_> {
                     return false;
                 };
                 self.tast.counter(record, name).is_some()
+                    && matches!(
+                        self.types.kind(self.types.canonical(self.tast[expr].ty)),
+                        TypeKind::Array { .. }
+                    )
             }
             _ => false,
         }
