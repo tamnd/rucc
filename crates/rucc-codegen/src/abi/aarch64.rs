@@ -16,6 +16,7 @@ pub static INSTS: Insts = Insts {
     arg: head_of,
     load: load_of,
     store: store_of,
+    word: store_of,
     ret: ret_of,
     call: "a64.bl",
     call_reg: "a64.blr",
