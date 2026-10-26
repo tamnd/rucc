@@ -55,10 +55,10 @@ pub use facts::{Bounds, Facts};
 pub use flags::{Flags, MATH_BUILTINS, MemOrder, Owner, PrefetchHint, RmwOp, StorageClass};
 pub use func::{Builder, Counts, Func, Notices, Start, WasmNames};
 pub use inst::{
-    Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Def, Drains,
-    Extra, Hint, Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Meta, MetaNode, Param,
-    PlaneNode, Restrict, Shuffle, Sig, Signature, SlotList, SwitchInfo, TbaaNode, VaInfo, Value,
-    ValueData, ValueList, ValueRef,
+    Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Counter,
+    Def, Drains, Extra, Hint, Imm, ImmList, Inst, InstData, InstLayout, MemInfo, Meta, MetaNode,
+    Param, PlaneNode, Restrict, Shuffle, Sig, Signature, SlotList, SwitchInfo, TbaaNode, VaInfo,
+    Value, ValueData, ValueList, ValueRef,
 };
 pub use module::{
     Alias, AliasId, AliasKind, Byte, ByteRange, COPIED, Copies, DataLayout, DataList, Datum, Dll,

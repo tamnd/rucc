@@ -79,8 +79,8 @@
 //! the marks are taken off, so no pass after this sees one.
 
 use rucc_ir::{
-    AllocSize, AttrSet, Datum, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred,
-    Module, Opcode, Pic, SymbolRef, Type, Value,
+    AllocSize, AttrSet, Counter, Datum, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData,
+    IntPred, MemInfo, MemOrder, Module, Opcode, Pic, Restrict, SymbolRef, Type, Value,
 };
 
 use std::cell::{Cell, OnceCell, RefCell};
@@ -256,6 +256,10 @@ enum Answer {
     /// An answer less the steps added to the address after it, worked out where the question is
     /// and never below zero.
     Less(Box<Answer>, Vec<Value>),
+    /// The count of a flexible array member with `counted_by` times the size of an element, read
+    /// where the `ptr_add` to the array is, less how far past the start of the array the address
+    /// is and never below zero.
+    Counted(Value, Counter),
 }
 
 /// One edge into a join of [`Answer::Joined`]: the branch, the edge, and the address it passes
@@ -431,6 +435,10 @@ fn worked(func: &mut Func, inst: Inst, address: Value, ty: Type, answer: &Answer
             }
             size
         }
+        &Answer::Counted(start, counter) => {
+            let size = counted(func, start, counter, ty);
+            measure(func, inst, address, ty, Object::Member(start, 0), size)
+        }
         Answer::Less(whole, steps) => {
             let size = worked(func, inst, address, ty, whole);
             let mut offset = steps[0];
@@ -454,6 +462,86 @@ fn worked(func: &mut Func, inst: Inst, address: Value, ty: Type, answer: &Answer
             made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty)
         }
     }
+}
+
+/// How many bytes the count says a flexible array member with `counted_by` has, read right
+/// after the `ptr_add` to it, which is where gcc 16 reads it.
+///
+/// A signed count below zero is no elements, and a signed count of eight bytes is cut to an `int`
+/// after that, which is what gcc 16 gives for a `long`. An unsigned one is read as it is.
+fn counted(func: &mut Func, start: Value, counter: Counter, ty: Type) -> Value {
+    let Def::Result { inst: mut after, .. } = func[start].def else {
+        unreachable!("a counted array is a `ptr_add`")
+    };
+    let span = func.span(after);
+    // From the record rather than from the array where the step to the array is a constant, so
+    // that a store to the count through the record is the same address and its value is read.
+    let (from, delta) = match &func[func[after].args][..] {
+        &[base, step] => match func[step].def {
+            Def::Result { inst, .. } if func[inst].opcode == Opcode::IConst => {
+                let Extra::Imm(imm) = func[inst].extra else { unreachable!("a constant has one") };
+                (base, func[imm].signed(func[step].ty) + i128::from(counter.delta))
+            }
+            _ => (start, i128::from(counter.delta)),
+        },
+        _ => (start, i128::from(counter.delta)),
+    };
+    let mut made = |func: &mut Func, data: InstData, ty: Type| {
+        let at = func.create_inst(data, &[ty], span);
+        func.insert_after(at, after);
+        after = at;
+        func[at].results().next().expect("one result was asked for")
+    };
+    let constant = |func: &mut Func, number: i128, ty: Type| {
+        let imm = func.add_imm(Imm::int(number, ty.lane()));
+        InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }
+    };
+    let at = if delta == 0 {
+        from
+    } else {
+        let data = constant(func, delta, ty);
+        let delta = made(func, data, ty);
+        let args = func.push_values(&[from, delta]);
+        made(func, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+    };
+    let width = Type::int(u32::from(counter.width) * 8);
+    let mem = func.add_mem(MemInfo {
+        size: u64::from(counter.width),
+        align: 1,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    });
+    let args = func.push_values(&[at]);
+    let mut count =
+        made(func, InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Load) }, width);
+    if counter.signed {
+        let data = constant(func, 0, width);
+        let zero = made(func, data, width);
+        let args = func.push_values(&[count, zero]);
+        let test =
+            InstData { args, extra: Extra::IntPred(IntPred::Slt), ..InstData::new(Opcode::ICmp) };
+        let below = made(func, test, Type::I1);
+        let args = func.push_values(&[below, zero, count]);
+        count = made(func, InstData { args, ..InstData::new(Opcode::Select) }, width);
+        if counter.width == 8 {
+            let args = func.push_values(&[count]);
+            count = made(func, InstData { args, ..InstData::new(Opcode::Trunc) }, Type::int(32));
+        }
+    }
+    if func[count].ty != ty {
+        let widen = if counter.signed { Opcode::SExt } else { Opcode::ZExt };
+        let args = func.push_values(&[count]);
+        count = made(func, InstData { args, ..InstData::new(widen) }, ty);
+    }
+    if counter.size == 1 {
+        return count;
+    }
+    let data = constant(func, i128::from(counter.size), ty);
+    let size = made(func, data, ty);
+    let args = func.push_values(&[count, size]);
+    made(func, InstData { args, ..InstData::new(Opcode::Mul) }, ty)
 }
 
 /// What is left behind a [`Running`] address, worked out in front of `inst`.
@@ -537,7 +625,9 @@ fn measure(
         // the ranges see through an `add` and a `mul` and not through a `ptrtoint`. A branch on
         // `i < 8` in front of `&pr->power.lpi_states[i]` is what proves the room left is at least
         // one element, and gcc folds the fortify check in processor_idle.c on that.
-        Some(steps) if !steps.is_empty() => {
+        // The start of the object has all of it in front.
+        Some(steps) if steps.is_empty() => return size,
+        Some(steps) => {
             let mut offset = steps[0];
             for &step in &steps[1..] {
                 let args = func.push_values(&[offset, step]);
@@ -715,6 +805,15 @@ impl Walk<'_> {
         self.through.set(false);
         self.differed.set(false);
         self.ways.set(WAYS);
+        // The count of a flexible array member with `counted_by` comes before anything else for
+        // the dynamic spelling, and for every kind, as gcc 16 reads it off `.ACCESS_WITH_SIZE`.
+        // Only for an address made from the array in a straight line: gcc has no answer where a
+        // join chose between two of them.
+        if dynamic && depth == DEPTH {
+            if let Some((start, counter)) = self.counter(address) {
+                return Answer::Counted(start, counter);
+            }
+        }
         let known = self.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten();
         let unknown = if largest { -1 } else { 0 };
         // Ways into a join that bring different sizes are the PHI of them for the dynamic
@@ -751,6 +850,24 @@ impl Walk<'_> {
                 .unwrap_or(Answer::Known(unknown)),
             None => Answer::Known(unknown),
         }
+    }
+
+    /// The `ptr_add` to a flexible array member with `counted_by` that an address is made from by
+    /// [`STEPS`] or fewer `ptr_add`s that step to no member, with what it says about the count.
+    fn counter(&self, mut value: Value) -> Option<(Value, Counter)> {
+        for _ in 0..=STEPS {
+            let Def::Result { inst, .. } = self.func[value].def else { return None };
+            let data = &self.func[inst];
+            if data.opcode != Opcode::PtrAdd {
+                return None;
+            }
+            match data.extra {
+                Extra::Counted(counter) => return Some((value, counter)),
+                Extra::None => value = *self.func[data.args].first()?,
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// The answer for a block parameter where each way into the block brings one of its own,
@@ -1068,7 +1185,8 @@ impl Walk<'_> {
         }
         let Def::Result { inst, .. } = self.func[base].def else { return false };
         let data = &self.func[inst];
-        data.opcode == Opcode::PtrAdd && matches!(data.extra, Extra::Array(_) | Extra::Trailing(_))
+        data.opcode == Opcode::PtrAdd
+            && matches!(data.extra, Extra::Array(_) | Extra::Trailing(_) | Extra::Counted(_))
     }
 
     /// How many bytes there are from this address to the end of its object.
@@ -2030,7 +2148,7 @@ impl Walk<'_> {
                         match data.extra {
                             _ if !ask.closest => self.object(base, ask, depth, seen),
                             // A member that may run past its end is in the whole object.
-                            Extra::Member(0) | Extra::Array(0) => {
+                            Extra::Member(0) | Extra::Array(0) | Extra::Counted(_) => {
                                 self.object(base, whole, depth, seen)
                             }
                             Extra::Member(size) | Extra::Array(size) => {
@@ -3629,5 +3747,42 @@ block5(%14: ptr):
         let text = printed(&body(1), Some(&[]));
         assert!(text.contains("call @use(%4)"), "{text}");
         assert_eq!(answers(&body(2), true), [-1]);
+    }
+
+    /// A flexible array member with `counted_by` is as long as its count for every kind of the
+    /// dynamic spelling, read right after the step to the array and from the record itself, and
+    /// less how far into the array the address is. The other spelling is left to the whole
+    /// object, which a pointer says nothing about. gcc 16 gives the same at `-O2`.
+    #[test]
+    fn a_counted_flexible_array_is_as_long_as_its_count() {
+        let body = |kind: u8| {
+            format!(
+                "
+func @f(ptr, i64), linkage(external) {{
+block0(%0: ptr, %1: i64):
+    %2 = iconst.i64 4
+    %3 = ptr_add %0, %2, counted i32 -4 2
+    %4 = ptr_add.counted %3, %1
+    %5 = object_size.i64 %4, kind {kind}
+    call @use(%5) : (i64)
+    return
+}}
+"
+            )
+        };
+        let mut names = Interner::new();
+        let module = rucc_ir::parse(&format!("{HEAD}{}", body(5)), &mut names).expect("parses");
+        let text = rucc_ir::print(&module, &names);
+        assert!(text.contains("ptr_add %0, %2, counted i32 -4 2"), "{text}");
+        for kind in 4..8 {
+            let text = printed(&body(kind), Some(&[]));
+            assert!(text.contains("%3 = ptr_add %0, %2\n"), "{text}");
+            assert!(text.contains("= load.i32 %0"), "{text}");
+            assert!(text.contains("icmp slt"), "{text}");
+            assert!(text.contains("= mul"), "{text}");
+            assert!(!text.contains("counted"), "{text}");
+        }
+        assert_eq!(answers(&body(1), true), [-1]);
+        assert_eq!(answers(&body(2), true), [0]);
     }
 }

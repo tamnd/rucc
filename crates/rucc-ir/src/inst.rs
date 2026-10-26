@@ -507,6 +507,25 @@ pub struct AsmInfo {
     pub targets: BlockCallList,
 }
 
+/// What a `ptr_add` to a flexible array member with `counted_by` says about the member that
+/// counts it, for [`Extra::Counted`].
+///
+/// The count is `delta` bytes from the address of the array, which is less than zero where the
+/// count comes first, as it does in most records. It is `width` bytes wide and `signed` says how
+/// it is read, and each element of the array is `size` bytes. An array whose elements are larger
+/// than a `u16` says nothing, which keeps the whole of this beside the other payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Counter {
+    /// How far the count is from the address of the array, in bytes.
+    pub delta: i32,
+    /// How many bytes each element of the array is.
+    pub size: u16,
+    /// How many bytes the count is, which is one, two, four or eight.
+    pub width: u8,
+    /// Whether the count is a signed integer.
+    pub signed: bool,
+}
+
 /// Which lanes a `shuffle` takes and in which order, one lane number per lane of the answer.
 ///
 /// At most eight lanes and each number below sixteen, packed four bits apiece so the whole list
@@ -613,6 +632,11 @@ pub enum Extra {
     /// and with the whole object everywhere else, which is how gcc 16 answers `&p->tail` once its
     /// late pass has folded `p` into `&local`.
     Trailing(u32),
+    /// The same as [`Extra::Array`] of zero for a flexible array member whose `counted_by` names
+    /// the member that counts it. The dynamic `object_size` questions are answered with that
+    /// count of elements, read where the address of the array is taken, which is how gcc 16
+    /// answers them from the `.ACCESS_WITH_SIZE` its front end wraps round the array.
+    Counted(Counter),
     /// Which lane, for `extractlane` and `insertlane`.
     Lane(u8),
     /// Which lanes in which order, for `shuffle`. See [`Shuffle`].
@@ -644,6 +668,7 @@ impl Extra {
     pub const fn member(self) -> Option<u32> {
         match self {
             Self::Member(size) | Self::Array(size) => Some(size),
+            Self::Counted(_) => Some(0),
             _ => None,
         }
     }
@@ -651,7 +676,7 @@ impl Extra {
     /// Whether a `ptr_add` says anything about the member it is the address of.
     #[must_use]
     pub const fn marked(self) -> bool {
-        matches!(self, Self::Member(_) | Self::Array(_) | Self::Trailing(_))
+        matches!(self, Self::Member(_) | Self::Array(_) | Self::Trailing(_) | Self::Counted(_))
     }
 
     /// Which shape this is, without the payload.
@@ -672,7 +697,9 @@ impl Extra {
             Self::Prefetch(_) => ExtraKind::Prefetch,
             Self::Depth(_) => ExtraKind::Depth,
             Self::Question(_) => ExtraKind::Question,
-            Self::Member(_) | Self::Array(_) | Self::Trailing(_) => ExtraKind::Member,
+            Self::Member(_) | Self::Array(_) | Self::Trailing(_) | Self::Counted(_) => {
+                ExtraKind::Member
+            }
             Self::Lane(_) => ExtraKind::Lane,
             Self::Shuffle(_) => ExtraKind::Shuffle,
             Self::Targets(_) => ExtraKind::Targets,
