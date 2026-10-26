@@ -14,7 +14,7 @@
 //! rather than as a marker, which is what GCC does and what keeps the output readable.
 
 use rucc_base::Interner;
-use rucc_diag::{FileId, SourceMap};
+use rucc_diag::{BytePos, FileId, PresumedLoc, SourceMap, Span};
 use rucc_lex::{PpTokenKind, Punct, TokenFlags};
 
 use crate::directive::LineDirective;
@@ -77,6 +77,7 @@ pub fn print(
         lines,
         next: 0,
         directive: false,
+        seen: None,
     };
     printer.start();
     let mut previous: Option<Tok> = None;
@@ -116,9 +117,23 @@ struct Printer<'a> {
     next: usize,
     /// Whether the current output line is a `#pragma` or another directive line.
     directive: bool,
+    /// The source line the last token was on. Most tokens are on the same line as the one
+    /// before them, and for those this is the answer without the two searches of the source
+    /// map. That matters for a large file: `kallsyms.S` has more than half a million lines.
+    seen: Option<Seen<'a>>,
 }
 
-impl Printer<'_> {
+/// A source line, and where it is presented as being.
+#[derive(Clone, Copy)]
+struct Seen<'a> {
+    /// The real line, with its terminator.
+    span: Span,
+    file: FileId,
+    name: &'a str,
+    line: u32,
+}
+
+impl<'a> Printer<'a> {
     /// Writes the marker for every `#line` that was read before the token at `at`.
     ///
     /// GCC prints one of these per directive, where the directive was written, and so does
@@ -150,8 +165,6 @@ impl Printer<'_> {
         // stays on whatever line the output is already on. `_Pragma` produces these.
         // Which file it is in is the real one, since that is what the include stack is kept
         // in, and where it says it is is the presented one, since that is what a marker says.
-        // `sources` is copied out of `self` so that the borrow of the name outlives the call
-        // that needs `self` mutably. It is a shared reference the printer does not own.
         // A directive is a line of its own, and so is whatever comes after one, even when both
         // come from one source line. `_Pragma` makes that happen: a macro that expands to two of
         // them puts both on the line it was used on, and the second `#` read back in the middle
@@ -164,24 +177,21 @@ impl Printer<'_> {
         if starts_line {
             self.directive = hash;
         }
-        let sources = self.sources;
-        if let Some(file) = sources.lookup_file(at) {
-            if let Some(loc) = sources.presumed(at) {
-                // A token further down that does not start a line is one a backslash joined to
-                // the line above, and it stays there, as in gcc. In a `.S` that is not only
-                // looks: `ALTERNATIVE_2 a, \` then `b` has to reach the assembler as one line.
-                let joined = !starts_line
-                    && self.printed
-                    && file == self.file
-                    && loc.name == self.name
-                    && loc.line > self.line;
-                if !joined {
-                    self.move_to(file, loc.name, loc.line, loc.column);
-                }
-                if breaks && self.printed {
-                    self.end_line();
-                    self.jump(loc.name, loc.line);
-                }
+        if let Some((file, loc)) = self.locate(at) {
+            // A token further down that does not start a line is one a backslash joined to
+            // the line above, and it stays there, as in gcc. In a `.S` that is not only
+            // looks: `ALTERNATIVE_2 a, \` then `b` has to reach the assembler as one line.
+            let joined = !starts_line
+                && self.printed
+                && file == self.file
+                && loc.name == self.name
+                && loc.line > self.line;
+            if !joined {
+                self.move_to(file, loc.name, loc.line, loc.column);
+            }
+            if breaks && self.printed {
+                self.end_line();
+                self.jump(loc.name, loc.line);
             }
         }
         let text = spelling(tok, self.interner);
@@ -190,6 +200,18 @@ impl Printer<'_> {
         }
         self.out.push_str(text);
         self.printed = true;
+    }
+
+    /// The file `at` is in and where it is presented as being.
+    fn locate(&mut self, at: BytePos) -> Option<(FileId, PresumedLoc<'a>)> {
+        let real = self.sources.real(at);
+        if let Some(seen) = self.seen.filter(|seen| seen.span.lo <= real && real < seen.span.hi) {
+            let column = real - seen.span.lo + 1;
+            return Some((seen.file, PresumedLoc { name: seen.name, line: seen.line, column }));
+        }
+        let (file, loc, span) = self.sources.presumed_line(at)?;
+        self.seen = Some(Seen { span, file, name: loc.name, line: loc.line });
+        Some((file, loc))
     }
 
     /// Whether a space goes between the previous token and this one.
@@ -337,7 +359,7 @@ impl Printer<'_> {
     }
 
     /// Where the `#include` that read `file` is, if it was read by one.
-    fn included_at(&self, file: FileId) -> Option<rucc_diag::BytePos> {
+    fn included_at(&self, file: FileId) -> Option<BytePos> {
         self.sources.file(file).included_from.map(|from| from.lo)
     }
 

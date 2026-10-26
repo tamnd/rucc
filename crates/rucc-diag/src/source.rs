@@ -546,6 +546,18 @@ impl SourceMap {
         self.file(self.lookup_file(pos)?).presumed_position(pos)
     }
 
+    /// [`SourceMap::presumed`] together with the file and the real line `pos` is on.
+    ///
+    /// A `#line` applies from the start of a line, so every position on that line is presented
+    /// on the same line and under the same name. A caller that asks about many positions in a
+    /// row, as `-E` does for every token, can answer the rest of the line from this without a
+    /// search.
+    pub fn presumed_line(&self, pos: BytePos) -> Option<(FileId, PresumedLoc<'_>, Span)> {
+        let pos = self.real(pos);
+        let file = self.file(self.lookup_file(pos)?);
+        Some((file.id, file.presumed_position(pos)?, file.line_span(pos)?))
+    }
+
     /// Where the line after the one `at` is on is presented as being.
     ///
     /// This is what a `#line` written at `at` did, asked after the fact. `-E` needs it to
