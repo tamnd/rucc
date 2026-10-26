@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A verified riscv64 rule set with 262 rules covering integer and float arithmetic, comparisons, widenings, loads, stores and conversions. Nothing uses it yet (#3885).
 - The riscv64 selector, LP64D argument and return lowering, and the riscv64 machine, so a riscv64 function is now lowered, selected and allocated, and `--emit=mir-final` works for it. `-S` and `-c` are still refused for riscv64. A jump table on a machine with no index register in its addresses shifts and adds the index first (#3891).
 - `-S` writes RISC-V assembly for riscv64. The output assembles with binutils, and a test program built from it runs under qemu and matches gcc on everything but variadic calls (#3892).
+- `rucc_target::riscv64::read` reads one line of RISC-V assembly back into the operands the encoder takes, the first step toward `-c` on riscv64 (#3894).
 
 ### Fixed
 
