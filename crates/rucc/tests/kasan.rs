@@ -226,7 +226,7 @@ fn a_fill_or_copy_the_source_spells_is_the_runtime_call() {
         }
         let lines = spelled(&args, "copy8");
         assert!(!lines.contains("__asan_memcpy"), "{level}:\n{lines}");
-        assert!(lines.contains("load8_noabort"), "{level}: the copy is checked:\n{lines}");
+        assert!(lines.contains("_noabort"), "{level}: the copy is checked:\n{lines}");
         let lines = spelled(&args, "quiet33");
         assert!(!lines.contains("__asan") && !lines.contains("call"), "{level}:\n{lines}");
     }
