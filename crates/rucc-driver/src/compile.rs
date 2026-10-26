@@ -4770,6 +4770,18 @@ mod tests {
         assert!(text.contains("202311"), "{text}");
     }
 
+    /// `<unwind.h>` declares libgcc's unwinder, whose word and pointer are as wide as a pointer.
+    #[test]
+    fn the_unwinder_header_is_shipped() {
+        let text = shipped(concat!(
+            "#include <unwind.h>\n",
+            "_Static_assert(sizeof(_Unwind_Word) == 8 && sizeof(_Unwind_Ptr) == 8, \"\");\n",
+            "_Static_assert(_URC_END_OF_STACK == 5 && _UA_FORCE_UNWIND == 8, \"\");\n",
+            "_Unwind_Reason_Code f(_Unwind_Trace_Fn fn) { return _Unwind_Backtrace(fn, 0); }\n",
+        ));
+        assert!(text.contains("_Unwind_Backtrace"), "{text}");
+    }
+
     /// Including everything twice has to change nothing, because that is what happens in any
     /// program large enough to matter and a guard that is wrong shows up nowhere else.
     ///

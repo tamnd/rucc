@@ -557,8 +557,8 @@ pub enum ExprKind {
     /// A node for the reason the one above is. What it becomes is the instruction, with the mask
     /// split across `edx` and `eax`. See `check/builtin/xstate.rs`.
     XState {
-        /// The instruction, as the assembler spells it.
-        instruction: &'static str,
+        /// The instruction.
+        op: XStateOp,
         /// The address of the area.
         address: ExprId,
         /// The components saved or restored, as a `long long`.
@@ -669,6 +669,58 @@ pub enum JumpAsk {
     Save,
     /// `__builtin_longjmp`, which reads it back and goes there, and never answers at all.
     Restore,
+}
+
+/// Which instruction of the extended state family an [`ExprKind::XState`] is.
+///
+/// An enum and not the spelling, so that the node stays the size of the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XStateOp {
+    /// `xsave`.
+    Xsave,
+    /// `xsave64`.
+    Xsave64,
+    /// `xrstor`.
+    Xrstor,
+    /// `xrstor64`.
+    Xrstor64,
+    /// `xsaveopt`.
+    Xsaveopt,
+    /// `xsaveopt64`.
+    Xsaveopt64,
+    /// `xsavec`.
+    Xsavec,
+    /// `xsavec64`.
+    Xsavec64,
+    /// `xsaves`.
+    Xsaves,
+    /// `xsaves64`.
+    Xsaves64,
+    /// `xrstors`.
+    Xrstors,
+    /// `xrstors64`.
+    Xrstors64,
+}
+
+impl XStateOp {
+    /// The instruction, as the assembler spells it.
+    #[must_use]
+    pub fn instruction(self) -> &'static str {
+        match self {
+            XStateOp::Xsave => "xsave",
+            XStateOp::Xsave64 => "xsave64",
+            XStateOp::Xrstor => "xrstor",
+            XStateOp::Xrstor64 => "xrstor64",
+            XStateOp::Xsaveopt => "xsaveopt",
+            XStateOp::Xsaveopt64 => "xsaveopt64",
+            XStateOp::Xsavec => "xsavec",
+            XStateOp::Xsavec64 => "xsavec64",
+            XStateOp::Xsaves => "xsaves",
+            XStateOp::Xsaves64 => "xsaves64",
+            XStateOp::Xrstors => "xrstors",
+            XStateOp::Xrstors64 => "xrstors64",
+        }
+    }
 }
 
 /// Which of the two objects libgcc keeps what it found out about the processor in.

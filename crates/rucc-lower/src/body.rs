@@ -7655,10 +7655,10 @@ impl<'u> Body<'_, 'u> {
                 self.eflags(value, ty, span)
             }
             // The extended state, saved or restored by the one instruction.
-            ExprKind::XState { instruction, address, mask } => {
+            ExprKind::XState { op, address, mask } => {
                 let address = self.value(address);
                 let mask = self.value(mask);
-                self.xstate(instruction, address, mask, span);
+                self.xstate(op.instruction(), address, mask, span);
                 None
             }
             // One word of what libgcc found out about the processor, read where libgcc keeps it and
