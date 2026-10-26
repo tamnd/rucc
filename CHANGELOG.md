@@ -35,6 +35,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An `asm` that is not `volatile` and whose only operands in memory are inputs now goes away when nothing reads its outputs, as gcc does it. arm64's `__my_cpu_offset` is one, with the stack pointer as an input in memory, and a `this_cpu_ptr` handed to the `local_lock` hooks that are empty without lockdep left a dead `mrs tpidr_el1` with its `HAS_VIRT_HOST_EXTN` alternative in ten 7.2.8 arm64 defconfig objects, among them `kernel/pid.o` and `ipc/util.o`. (#3865)
 - `vmull_p64` and `vmull_high_p64` in `<arm_neon.h>` are now PMULL and PMULL2, where each was a loop of 64 tests and shifts. (#3867)
 - The check of the `ld.lld` version for a Windows GNU or WASI link now tries again when the linker file is busy. On Linux a child that another thread forks holds a copy of each open file until it runs its own program, so a linker that was written a moment ago can fail to start for a short time. The check then read no version and let an `ld.lld` 18 link for Windows GNU. This made the test of that check fail now and then in CI.
+- A `volatile` structure or union that a statement reads and does not use, as in `*p;` or `(void)w->data;`, is now read with one access when its size is 1, 2, 4, 8 or 16 bytes, as gcc does. A record of a different size is not read, as in gcc. rucc did not read it at all. Linux 7.3's KASAN test `workqueue_uaf` reads the `data` member of a freed `work_struct` this way and expects a report, and with rucc it got none.
 
 ## 0.30.12
 
