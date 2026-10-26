@@ -22,6 +22,7 @@ __attribute__((noinline)) void cp(void *d, const void *s, u64 n) { __builtin_mem
 __attribute__((noinline)) int over(int i) { int a[8] = {0}; a[i] = 1; return a[i ^ 1]; }
 __attribute__((no_sanitize_address)) int quiet(int *p) { return *p; }
 int table[10];
+__attribute__((noinline)) int xadd(int *p) { return __atomic_fetch_add(p, 1, 5); }
 __attribute__((noinline)) int at(int i) { return table[i]; }
 #ifdef __SANITIZE_ADDRESS__
 int sanitizes_address;
@@ -48,6 +49,7 @@ QUIET void __asan_report_store4_noabort(void *p) { report(p, 14); }
 QUIET void __asan_report_load8_noabort(void *p) { report(p, 8); }
 QUIET void __asan_report_load16_noabort(void *p) { report(p, 16); }
 QUIET void __asan_report_store16_noabort(void *p) { report(p, 116); }
+QUIET void __asan_store4_noabort(void *p) { report(p, 24); }
 QUIET void __asan_report_load_n_noabort(void *p, u64 n) { report(p, 1000 + (int)n); }
 QUIET void *__asan_memcpy(void *d, const void *s, u64 n) {
     char *to = d;
@@ -99,6 +101,9 @@ QUIET static int globals(void) {
         return 71;
     if (at(10) != 0 || !saw(10, &table[10], 4))
         return 72;
+    // An atomic is a call whatever the shadow says, and the runtime does the check.
+    if (xadd((int *)(BUF + 64)) != 9 || !saw(11, BUF + 64, 24) || *(int *)(BUF + 64) != 10)
+        return 73;
     return 0;
 }
 QUIET int main(void) {
@@ -228,6 +233,9 @@ fn every_access_reads_its_shadow_and_reports_with_gcc_names() {
     let (_, cp16) = listing("x86_64-unknown-linux-gnu", &args, "cp16");
     assert!(cp16.contains("__asan_report_load16_noabort"), "an aligned copy:\n{cp16}");
     assert!(cp16.contains("__asan_report_store16_noabort"), "an aligned copy:\n{cp16}");
+    let (_, xadd) = listing("x86_64-unknown-linux-gnu", &args, "xadd");
+    assert!(xadd.contains("call\t__asan_store4_noabort"), "an atomic is a call:\n{xadd}");
+    assert!(!xadd.contains("shrq"), "and has no inline check:\n{xadd}");
 }
 
 #[test]
