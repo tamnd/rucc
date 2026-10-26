@@ -22,6 +22,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-S` writes RISC-V assembly for riscv64. The output assembles with binutils, and a test program built from it runs under qemu and matches gcc on everything but variadic calls (#3892).
 - `rucc_target::riscv64::read` reads one line of RISC-V assembly back into the operands the encoder takes, the first step toward `-c` on riscv64 (#3894).
 - `rucc --target=riscv64-linux-gnu -c` writes an ELF object with the integrated assembler, with the riscv64 relocations, `.eh_frame` and the double float ABI flag (#3895).
+- riscv64 takes the kernel's `-mabi=lp64`, `-march=`, `-mcmodel=medany`, `-mno-save-restore`, `-mno-relax` and `-mno-riscv-attribute`, keeps floats out of an lp64 unit and marks its objects soft float (#3897).
 
 ### Fixed
 
