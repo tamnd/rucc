@@ -57,6 +57,7 @@ mod machine;
 mod named;
 mod operand;
 mod regs;
+pub mod riscv64;
 mod short;
 pub mod template;
 mod timing;
@@ -1381,15 +1382,16 @@ impl TargetInfo {
         // sixteen bytes and not a `double`: Apple made that change on AArch64 and left the Intel
         // answer alone, and a rule keyed on the operating system takes both.
         let layout = DataLayout::for_target(target);
-        // RISC-V and everything else with a row and no backend have register files and this crate
-        // has not written them down yet. They arrive with the backends that need them. AArch64's is
-        // here ahead of its backend, because the convention over it is what the ABI tests and the
+        // Everything else with a row and no backend has a register file this crate has not written
+        // down yet, and it arrives with the backend that needs it. RISC-V's is here ahead of its
+        // backend, as AArch64's was, because the convention over it is what the ABI tests and the
         // debugging information read, and [`TargetInfo::regs`] having it does not make anything
         // try to generate code: that is `rucc_codegen::Machine::for_target`'s decision.
         let regs = match target.arch() {
             tuple::Arch::X86_64 => &x86_64::REGS,
             tuple::Arch::Aarch64 => &aarch64::REGS,
             tuple::Arch::X86 => &x86::REGS,
+            tuple::Arch::Riscv64 => &riscv64::REGS,
             _ => &RegFile::EMPTY,
         };
         let call_regs = match (target.arch(), target.os(), target.env()) {
@@ -1414,6 +1416,7 @@ impl TargetInfo {
             (tuple::Arch::X86, tuple::Os::Windows, tuple::Env::Msvc) => Some(&x86::MSVC32),
             (tuple::Arch::X86, tuple::Os::Windows, _) => Some(&x86::MINGW32),
             (tuple::Arch::X86, _, _) => Some(&x86::SYSV),
+            (tuple::Arch::Riscv64, _, _) => Some(&riscv64::LP64D),
             _ => None,
         };
         // The same rule as the register file. A model is a measurement of a processor, and there
@@ -2144,9 +2147,13 @@ mod tests {
         assert!(std::ptr::eq(i686_windows.call_regs.expect("mingw"), &x86::MINGW32));
         let i686_msvc = of("i686-pc-windows-msvc");
         assert!(std::ptr::eq(i686_msvc.call_regs.expect("msvc"), &x86::MSVC32));
+        // RV64 has its registers and LP64D ahead of a backend, and WebAssembly has neither.
         let riscv = of("riscv64-unknown-linux-gnu");
-        assert!(riscv.regs.is_empty());
-        assert!(riscv.call_regs.is_none());
+        assert_eq!(riscv.regs.reg_named("a0"), Some((riscv64::GPR, riscv64::A0)));
+        assert!(std::ptr::eq(riscv.call_regs.expect("LP64D"), &riscv64::LP64D));
+        let wasm = of("wasm32-wasip1");
+        assert!(wasm.regs.is_empty());
+        assert!(wasm.call_regs.is_none());
     }
 
     #[test]
