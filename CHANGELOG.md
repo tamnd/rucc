@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - riscv64 takes the kernel's `-mabi=lp64`, `-march=`, `-mcmodel=medany`, `-mno-save-restore`, `-mno-relax` and `-mno-riscv-attribute`, keeps floats out of an lp64 unit and marks its objects soft float (#3897).
 - riscv64 lowers `asm` statements, kept as text with gcc's RISC-V letters `I`, `J`, `K` and `A`, `%z`, clobbers, local register variables and `asm goto` (#3898).
 - The riscv64 integrated assembler encodes the A extension (`lr`, `sc` and the `amo` instructions with `.aq` and `.rl`), the CSR instructions and their pseudos with CSRs read by name, `fence.i`, `fence.tso`, `pause`, `wfi`, `sret`, `mret`, `sfence.vma`, and the swapped and zero branch pseudos (#3899).
+- riscv64 keeps `tp` and `sp` as file-scope register variables, the way the kernel's `asm/current.h` declares `current` and `current_stack_pointer` (#3900).
 
 ### Fixed
 
