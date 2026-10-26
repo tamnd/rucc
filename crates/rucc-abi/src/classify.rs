@@ -134,9 +134,11 @@ impl Call {
 
     /// How the next argument past the `...` travels.
     ///
-    /// Only one of the three policies changes the answer this crate gives. Under
-    /// [`Variadic::AlwaysMemory`] the argument is classified as though no argument registers were
-    /// left, which is Darwin arm64's rule stated in the one form that needs no new mechanism.
+    /// Two of the policies change the answer this crate gives. Under [`Variadic::AlwaysMemory`]
+    /// the argument is classified as though no argument registers were left, which is Darwin
+    /// arm64's rule stated in the one form that needs no new mechanism. Under
+    /// [`Variadic::UnnamedIntegers`] it is classified the way [`Variadic::IntegersOnly`] classifies
+    /// every argument, and the named ones before it are left as they were.
     /// [`Variadic::BothBanks`] is a fact about which registers the backend has to write, not
     /// about the form the value travels in, so the answer here is the same as for a fixed
     /// argument and the description carries the flag for the backend to read.
@@ -147,6 +149,14 @@ impl Call {
                 self.past_dots = true;
                 let pass = self.argument(arg);
                 self.past_dots = false;
+                pass
+            }
+            Variadic::UnnamedIntegers => {
+                self.integers_only = true;
+                self.past_dots = true;
+                let pass = self.argument(arg);
+                self.past_dots = false;
+                self.integers_only = false;
                 pass
             }
             Variadic::AlwaysMemory => {

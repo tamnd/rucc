@@ -528,7 +528,7 @@ pub struct CallRegs {
     /// How many bytes a variadic callee takes at the very top of its own frame, directly below the
     /// arguments the caller left in memory, to home its argument registers in.
     ///
-    /// Sixty four on Windows on AArch64 and nothing anywhere else. It is [`CallRegs::shadow`] with
+    /// Sixty four on Windows on AArch64 and on RISC-V, and nothing anywhere else. It is [`CallRegs::shadow`] with
     /// the other party paying for it: the caller reserves nothing, and the callee's prologue takes
     /// the bytes before it pushes anything, so that the x registers it writes there and the
     /// arguments above them are one run of words a `char *` walks. Microsoft's compiler and clang
@@ -741,17 +741,23 @@ impl CallRegs {
     }
 
     /// The registers as a variadic function that homes its argument registers sees them, which is
-    /// the same set on every convention but Windows on AArch64.
+    /// the same set on every convention but Windows on AArch64 and RISC-V.
     ///
     /// There every argument of such a function, named or not, arrived in an x register or in the
     /// caller's memory, and the function homes the x registers in the [`CallRegs::home`] bytes it
     /// takes directly below that memory. Seen from inside, that is Windows x64 with the callee paying
     /// for the shadow space: one run of positions, no vector file, and the arguments the caller left
     /// in memory starting that many bytes up from the bottom of the homed words.
+    ///
+    /// RISC-V homes a0 to a7 the same way, but a named `double` still arrived in an fa register,
+    /// so the two files keep their own positions and only the shadow space is new.
     #[must_use]
     pub fn homed(&self) -> CallRegs {
         if self.home == 0 {
             return *self;
+        }
+        if self.abi.variadic == rucc_abi::Variadic::UnnamedIntegers {
+            return CallRegs { shadow: self.home, ..*self };
         }
         CallRegs { shadow: self.home, shared_positions: true, sse_args: &[], ..*self }
     }
