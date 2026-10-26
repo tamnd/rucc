@@ -22,7 +22,7 @@
 //! `call`, `ret`, `push`, `pop`, `pushf`, `popf` and `leave` without a width letter are the thirty
 //! two bit ones there.
 
-use crate::instruction::{Written, addressed, one_in};
+use crate::instruction::{Written, addressed, number, one_in};
 use rucc_target::x86_64::{Mode, Width, gpr_name, gpr_named};
 
 /// The bytes of one instruction in sixteen bit code.
@@ -34,12 +34,10 @@ use rucc_target::x86_64::{Mode, Width, gpr_name, gpr_named};
 /// A sentence saying what about the line could not be written, the same as [`one_in`].
 pub(crate) fn one_in16(word: &str, args: &[String], gcc: bool) -> Result<Written, String> {
     // `(%dx)` is the port of an `in` or an `out`, written like an address and not one.
-    if let Some(arg) = args.iter().find(|arg| arg.trim() != "(%dx)" && addressed(arg, Width::Word))
+    if let Some(which) =
+        args.iter().position(|arg| arg.trim() != "(%dx)" && addressed(arg, Width::Word))
     {
-        return Err(format!(
-            "'{}' is an address of sixteen bit registers, which this assembler does not write yet",
-            arg.trim()
-        ));
+        return registers16(word, args, which, gcc);
     }
     let mut written = sized(word, args, gcc)?;
     if args.iter().any(|arg| addressed(arg, Width::Long)) {
@@ -379,6 +377,95 @@ fn absolute(word: &str, args: &[String], written: &mut Written) -> Result<(), St
     Ok(())
 }
 
+/// An instruction whose address is made of sixteen bit registers, `(%bx)` or `4(%bp,%si)`.
+///
+/// Those have an addressing byte of their own, with eight places a register pair can be and no
+/// index byte, so the instruction is written with a name in the place of the address, which gives
+/// the two byte `mod 00 rm 110` form, and that byte is then turned into the pair. The `mov` opcodes
+/// that carry an address with no addressing byte become the ordinary `mov` with one.
+fn registers16(word: &str, args: &[String], which: usize, gcc: bool) -> Result<Written, String> {
+    const MARK: &str = "rucc.sixteen.registers";
+    let text = args[which].trim();
+    let cut = text.rfind('(').unwrap_or_default();
+    let inside = &text[cut + 1..text.len() - 1];
+    let parts: Vec<&str> = inside.split(',').map(str::trim).collect();
+    let pair = match parts[..] {
+        [base] => (base, ""),
+        [base, index] | [base, index, "1"] => (base, index),
+        _ => ("", "?"),
+    };
+    let rm: u8 = match pair {
+        ("%bx", "%si") | ("%si", "%bx") => 0,
+        ("%bx", "%di") | ("%di", "%bx") => 1,
+        ("%bp", "%si") | ("%si", "%bp") => 2,
+        ("%bp", "%di") | ("%di", "%bp") => 3,
+        ("%si", "") | ("", "%si") => 4,
+        ("%di", "") | ("", "%di") => 5,
+        ("%bp", "") => 6,
+        ("%bx", "") => 7,
+        _ => return Err(format!("'{text}' is not one of the eight sixteen bit addresses")),
+    };
+    let front = &text[..cut];
+    let star = if front.starts_with('*') { "*" } else { "" };
+    let front = front.trim_start_matches('*').trim();
+    let (segment, disp) = match front.split_once(':') {
+        Some((segment, disp)) if segment.starts_with('%') => {
+            (&front[..=segment.len()], disp.trim())
+        }
+        _ => ("", front),
+    };
+    let value = if disp.is_empty() { Some(0) } else { number(disp).ok() };
+    let with = |place: &str| -> Vec<String> {
+        let mut list = args.to_vec();
+        list[which] = format!("{star}{segment}{place}");
+        list
+    };
+    let probe = sized(word, &with(MARK), gcc)?;
+    let mut written = if value.is_some() { probe.clone() } else { sized(word, &with(disp), gcc)? };
+    let Some(mut at) = probe.holes.iter().find(|hole| hole.name == MARK).map(|hole| hole.at) else {
+        return Err(format!("'{text}' is an address this instruction cannot have"));
+    };
+    if probe.bytes.len() != written.bytes.len() || at == 0 {
+        return Err(format!("'{text}' is an address this instruction cannot have"));
+    }
+    let before = written.bytes[at - 1];
+    if matches!(before, 0xA0..=0xA3) && written.bytes[..at - 1].iter().all(|&b| legacy(b)) {
+        // `a0` to `a3` load and store the accumulator, which is the register field left at nought.
+        written.bytes[at - 1] = [0x8A, 0x8B, 0x88, 0x89][usize::from(before - 0xA0)];
+        written.bytes.insert(at, 0x06);
+        for hole in &mut written.holes {
+            if hole.at >= at {
+                hole.at += 1;
+            }
+        }
+        at += 1;
+    }
+    let field = written.bytes[at - 1];
+    if field & 0xC7 != 0x06 {
+        return Err(format!("'{text}' is an address this instruction cannot have"));
+    }
+    let (mode, keep) = match value {
+        None => (0x80, 2),
+        Some(0) if rm != 6 => (0x00, 0),
+        Some(value) if (-128..=127).contains(&value) => (0x40, 1),
+        Some(value) if (-32768..=65535).contains(&value) => (0x80, 2),
+        Some(_) => return Err(format!("'{disp}' does not fit in a sixteen bit address")),
+    };
+    written.bytes[at - 1] = mode | (field & 0x38) | rm;
+    if let Some(value) = value {
+        written.holes.retain(|hole| hole.at != at);
+        let bytes = (value as u16).to_le_bytes();
+        written.bytes[at..at + 2].copy_from_slice(&bytes);
+    }
+    written.bytes.drain(at + keep..at + 2);
+    for hole in &mut written.holes {
+        if hole.at > at {
+            hole.at -= 2 - keep;
+        }
+    }
+    Ok(written)
+}
+
 /// The bytes that fill a gap in sixteen bit code, which gas writes as `lea 0(%si), %si` and the
 /// other instructions that do nothing in this mode, the longest five bytes.
 pub(crate) fn nops(mut need: usize, out: &mut Vec<u8>) {
@@ -402,8 +489,21 @@ mod tests {
 
     fn hex(line: &str, gcc: bool) -> String {
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
-        let args: Vec<String> =
-            if rest.is_empty() { Vec::new() } else { rest.split(',').map(str::to_owned).collect() };
+        // The commas between operands, and not the ones inside the brackets of an address.
+        let mut args: Vec<String> = Vec::new();
+        let mut depth = 0;
+        for ch in rest.chars() {
+            match ch {
+                ',' if depth == 0 => args.push(String::new()),
+                _ => {
+                    depth += i32::from(ch == '(') - i32::from(ch == ')');
+                    match args.last_mut() {
+                        Some(arg) => arg.push(ch),
+                        None => args.push(ch.to_string()),
+                    }
+                }
+            }
+        }
         let written = one_in16(word, &args, gcc).unwrap();
         written.bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -449,6 +549,15 @@ mod tests {
             ("andl $0x0ff00f00,%eax", "6625000ff00f"),
             ("movl 4(%esp),%eax", "67668b442404"),
             ("leal 4(%esp),%eax", "67668d442404"),
+            ("smsw (%bx)", "0f0127"),
+            ("sidt (%bx)", "0f010f"),
+            ("movw (%bp),%ax", "8b4600"),
+            ("movw %ax,-2(%bp,%si)", "8942fe"),
+            ("movl 0x1234(%bx,%di),%eax", "668b813412"),
+            ("movw %es:(%si),%ax", "268b04"),
+            ("movw (%di),%ax", "8b05"),
+            ("addb $1,(%bx)", "800701"),
+            ("lcallw *(%bx)", "ff1f"),
         ] {
             assert_eq!(hex(line, false), bytes, "{line}");
         }
@@ -498,6 +607,15 @@ mod tests {
         assert_eq!(written.bytes, [0x2E, 0x66, 0x0F, 0x01, 0x1E, 0, 0]);
         let written = one_in16("lgdt", &args(&["b"]), false).unwrap();
         assert_eq!(written.bytes, [0x0F, 0x01, 0x16, 0, 0]);
+    }
+
+    #[test]
+    fn a_name_beside_sixteen_bit_registers_is_two_bytes() {
+        let args = |list: &[&str]| list.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+        let written = one_in16("movw", &args(&["b+2(%bx)", "%ax"]), false).unwrap();
+        assert_eq!(written.bytes, [0x8B, 0x87, 0, 0]);
+        assert_eq!((written.holes[0].at, written.holes[0].width), (2, 2));
+        assert!(one_in16("movw", &args(&["(%ax)", "%bx"]), false).is_err());
     }
 
     #[test]
