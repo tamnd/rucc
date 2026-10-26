@@ -103,7 +103,7 @@ fn slow(name: &str) -> Option<Timing> {
         "fdiv" => (if wide { 33 } else { 20 }, Unit::FloatDiv),
         "fsqrt" => (if wide { 40 } else { 25 }, Unit::FloatDiv),
         // The address through the global offset table, which is an `auipc` and a load.
-        "got" => (1 + LOAD, Unit::Load),
+        "got" | "gottprel" => (1 + LOAD, Unit::Load),
         _ => return None,
     };
     Some(Timing { latency, unit })

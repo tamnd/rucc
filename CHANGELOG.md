@@ -18,6 +18,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An RV64G instruction encoder in rucc-target, which takes what GNU as takes, pseudo instructions included, for the riscv64 back end (#3882).
 - The riscv64 opcode table, its assembly text, a printer for it, a U74 timing model, and the frame, branch, flag and bit tables the passes read (#3883).
 - A verified riscv64 rule set with 262 rules covering integer and float arithmetic, comparisons, widenings, loads, stores and conversions. Nothing uses it yet (#3885).
+- The riscv64 selector, LP64D argument and return lowering, and the riscv64 machine, so a riscv64 function is now lowered, selected and allocated, and `--emit=mir-final` works for it. `-S` and `-c` are still refused for riscv64. A jump table on a machine with no index register in its addresses shifts and adds the index first (#3891).
+- `-S` writes RISC-V assembly for riscv64. The output assembles with binutils, and a test program built from it runs under qemu and matches gcc on everything but variadic calls (#3892).
 
 ### Fixed
 

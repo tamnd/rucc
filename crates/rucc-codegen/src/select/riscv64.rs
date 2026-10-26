@@ -1,13 +1,48 @@
 //! The RISC-V lowering table.
 //!
 //! Everything below the module comment is generated from `rules/riscv64.rules` by `rucc-rules`
-//! when this crate is built, the same way the other tables are. Nothing hands it to the lowering
-//! yet: the selector, the calling convention and the scratch registers come with the machine.
+//! when this crate is built, the same way the other tables are, and `crate::pipeline::Machine`
+//! hands it to the lowering for any target whose architecture is RISC-V.
 
 // The guards are emitted as the comparisons the rules write, for the reason the x86-64 table gives.
 #![allow(clippy::manual_range_contains)]
 
 include!(concat!(env!("OUT_DIR"), "/riscv64.rs"));
+
+/// What the lowering asks of RISC-V.
+pub static SELECTOR: super::Selector = super::Selector {
+    table: &TABLE,
+    counts: rucc_target::riscv64::COUNTS,
+    fused: Some(""),
+    shapes: &rucc_target::riscv64::MACHINE,
+    address: rucc_target::riscv64::address,
+    frame: &rucc_target::riscv64::FRAME,
+    branch: &rucc_target::riscv64::BRANCH,
+    gpr: rucc_target::riscv64::GPR,
+    fence: "fence",
+    trap: "trap",
+    abi: &crate::abi::riscv64::INSTS,
+    scratch: &crate::pipeline::RISCV64_SCRATCH,
+    symbols: &super::Symbols {
+        near: super::Reach::Own("addr_64"),
+        far: super::Reach::Own("got_64"),
+        // Only COFF reaches a name through a pointer of its own, and there is no COFF here.
+        slot: super::Reach::Own("got_64"),
+        thread: super::Reach::Own("gottprel_64"),
+        pointer: super::Pointer::Own("thread_64"),
+        indexed: None,
+        teb: None,
+        dynamic: None,
+    },
+    // No address scales a register here, so the index is shifted and added to the table first.
+    jumps: &super::Jumps {
+        near: "addr_64",
+        cell: "lds_32",
+        add: "add_rr_64",
+        two_address: false,
+        scale: Some("sll_ri_64"),
+    },
+};
 
 #[cfg(test)]
 mod tests {

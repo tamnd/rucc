@@ -85,7 +85,8 @@ pub struct MachineInsts {
     ///
     /// A list rather than a range because the machines that have an index have a handful of
     /// scales and not an interval, and a pass folding an address into a memory operand has to ask
-    /// whether the number it worked out is one of them.
+    /// whether the number it worked out is one of them. Empty on a machine whose addresses have
+    /// no index at all, which is RISC-V.
     pub scales: &'static [u8],
     /// Whether an addressing mode with an index may have a displacement beside it.
     ///

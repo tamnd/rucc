@@ -365,11 +365,13 @@ pub static INSTS: &[(&str, Form)] = &[
     // The test the layout writes in front of a branch on a byte, which it folds into the branch.
     ("test", Test),
     // Addresses: a base and a constant, a symbol near enough to reach from the code, a symbol
-    // through the global offset table, and the thread pointer.
+    // through the global offset table, a thread-local variable's offset from the thread pointer
+    // through the table, and the thread pointer.
     ("lea_64", Lea),
     ("lea_far_64", Lea),
     ("addr_64", Address),
     ("got_64", Address),
+    ("gottprel_64", Address),
     ("thread_64", Address),
     // Loads, unsigned and signed.
     ("ld_8", Load),

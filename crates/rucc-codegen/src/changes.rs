@@ -560,8 +560,8 @@ fn shaped(
     if addressed.len() != wanted {
         return Some(Refusal::Operands(inst));
     }
-    let scaled = if amode.index.is_some() { amode.scale } else { 1 };
-    if !machine.scales(scaled) || (amode.index.is_none() && amode.scale != 1) {
+    let scaled = amode.index.is_some() && !machine.scales(amode.scale);
+    if scaled || (amode.index.is_none() && amode.scale != 1) {
         return Some(Refusal::Scale(inst));
     }
     if amode.index.is_some() && amode.disp != 0 && !machine.index_and_disp {
