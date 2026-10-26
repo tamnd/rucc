@@ -18,8 +18,8 @@
 //!
 //! The rule set that selects these instructions. Until it arrives
 //! `rucc_codegen::Machine::for_target` has no machine for this target and says so. The opcodes,
-//! their text, the encoder, the printer and the tables the passes read are all here, so each
-//! can be checked against the cross assembler before anything selects them.
+//! their text, the encoder, the printer, the reader and the tables the passes read are all
+//! here, so each can be checked against the cross assembler before anything selects them.
 //!
 //! # No condition state
 //!
@@ -31,6 +31,7 @@
 
 mod encode;
 mod insts;
+mod read;
 mod text;
 mod timing;
 mod write;
@@ -40,6 +41,7 @@ pub use crate::riscv64::encode::{
     reaches,
 };
 pub use crate::riscv64::insts::{ADDRESSES, Form, INSTS, TEMPLATE, address, form};
+pub use crate::riscv64::read::{Error as ReadError, Line, read, register};
 pub use crate::riscv64::text::{Arg, Missing, Operands, Written, fill, operand_width, written};
 pub use crate::riscv64::timing::{LOAD, MODEL, TIMING};
 pub use crate::riscv64::write::write;
@@ -294,7 +296,9 @@ pub static LP64D: CallRegs = CallRegs {
     vector_count: None,
     red_zone: 0,
     shadow: 0,
-    home: 0,
+    // A variadic function stores a0 to a7 just below what the caller left in memory, so that a
+    // `void *` walks the registers and the memory as one run of words.
+    home: 64,
     stack_align: 16,
     trusted_align: 16,
     // A call leaves the return address in `ra`, so it pushes nothing.

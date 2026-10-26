@@ -61,7 +61,11 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Short => elf::R_X86_64_PC16,
         Reference::Tiny => elf::R_X86_64_PC8,
         Reference::Signed => elf::R_X86_64_32S,
-        Reference::Address { .. } | Reference::Image | Reference::Section | Reference::Field(_) => {
+        Reference::Address { .. }
+        | Reference::Image
+        | Reference::Section
+        | Reference::Field(_)
+        | Reference::Riscv(_) => {
             return None;
         }
         // The i386 ways of reaching the global offset table, counted from a register holding it,
@@ -129,6 +133,7 @@ pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
         | Reference::Image
         | Reference::Section
         | Reference::Field(_)
+        | Reference::Riscv(_)
         | Reference::Tls(Tls::Descriptor | Tls::DescriptorCall) => return None,
     })
 }
@@ -180,6 +185,21 @@ pub(crate) fn r_type_aarch64(reference: Reference) -> Option<elf::RelocationType
         Reference::Data | Reference::Away => elf::R_AARCH64_PREL32,
         Reference::AwayWide => elf::R_AARCH64_PREL64,
         Reference::Short => elf::R_AARCH64_PREL16,
+        _ => return None,
+    })
+}
+
+/// The same for RISC-V.
+///
+/// A field of an instruction is the relocation its fixup names, and a table of data holds an
+/// address at eight bytes or four, or a distance from the bytes themselves, which is what the
+/// unwind table says about a function.
+pub(crate) fn r_type_riscv64(reference: Reference) -> Option<elf::RelocationType> {
+    Some(match reference {
+        Reference::Riscv(fixup) => elf::RelocationType(fixup.elf()),
+        Reference::Address { bytes: 8 } => elf::R_RISCV_64,
+        Reference::Address { bytes: 4 } => elf::R_RISCV_32,
+        Reference::Data | Reference::Away => elf::R_RISCV_32_PCREL,
         _ => return None,
     })
 }

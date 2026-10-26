@@ -1097,6 +1097,11 @@ pub enum Reference {
     /// `adrp` for its page and an `add` or a load for the low twelve bits of it. Each of those is
     /// its own relocation, and the fixup is already the name of one.
     Field(rucc_target::aarch64::Fixup),
+    /// Some bits of a RISC-V instruction, for the same reason as [`Reference::Field`]. A name is
+    /// reached with an `auipc` and the instruction after it, each with a relocation of its own,
+    /// and the low half names the `auipc` rather than the name, so it is never moved onto a
+    /// section.
+    Riscv(rucc_target::riscv64::Fixup),
 }
 
 impl Reference {
