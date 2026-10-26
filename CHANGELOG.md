@@ -47,6 +47,10 @@ This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow
 - The driver takes `-T script` and `-z keyword` and hands them to the linker in place, as gcc does, and takes `-ffixed-ebp` and `-ffixed-rbp` on x86, where the frame pointer never holds a value. LTP's configure gave up on its KVM tests over `-T`. (#3872)
 - `__builtin_ia32_readeflags_u32` and `__builtin_ia32_writeeflags_u32` are taken under `-m32`. The check compared the target against `i386` while the tuple spells it `i686`, so every i386 build refused them, and the x86 selftests stopped on helpers.h. (#3874)
 - `__builtin_ia32_xsave`, `__builtin_ia32_xrstor` and the rest of the xsave family become the instruction where the call was, with the mask split across `edx` and `eax`. The mm selftests save and restore the protection keys register with them. (#3875)
+- `into` and `bound` are written in thirty two bit code, where they still have their one byte opcodes. The x86 selftests `mov_ss_trap` and `entry_from_vm86` use them. (#3876)
+- Addresses made of sixteen bit registers, `(%bx)` or `-2(%bp,%si)`, are written after `.code16` with the sixteen bit addressing byte, the same bytes gas writes. The vm86 code in the x86 selftest `entry_from_vm86` uses them. (#3877)
+- `<unwind.h>` is shipped, declaring libgcc's unwinder the way gcc's header does, so a program can walk its own stack with `_Unwind_Backtrace`. The x86 selftest `unwind_vdso` builds with it and passes. (#3878)
+- The long `nop`, `nopw`, `nopl` and `nopq` with a register or an address, is encoded as `0f 1f /0`. The protection keys selftest lays down 512 of them by hand. (#3879)
 
 ## 0.30.12
 

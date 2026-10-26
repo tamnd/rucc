@@ -17,25 +17,25 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_types::TypeId;
 
 use crate::check::Checker;
-use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::expr::{Category, Expr, ExprId, ExprKind, XStateOp};
 
 /// The code a call on another target is refused under, the one the time stamp counter uses.
 const CODE: &str = "E0727";
 
 /// The names, each with the instruction it is and whether it is only on x86-64.
-const NAMES: [(&str, &str, bool); 12] = [
-    ("__builtin_ia32_xsave", "xsave", false),
-    ("__builtin_ia32_xsave64", "xsave64", true),
-    ("__builtin_ia32_xrstor", "xrstor", false),
-    ("__builtin_ia32_xrstor64", "xrstor64", true),
-    ("__builtin_ia32_xsaveopt", "xsaveopt", false),
-    ("__builtin_ia32_xsaveopt64", "xsaveopt64", true),
-    ("__builtin_ia32_xsavec", "xsavec", false),
-    ("__builtin_ia32_xsavec64", "xsavec64", true),
-    ("__builtin_ia32_xsaves", "xsaves", false),
-    ("__builtin_ia32_xsaves64", "xsaves64", true),
-    ("__builtin_ia32_xrstors", "xrstors", false),
-    ("__builtin_ia32_xrstors64", "xrstors64", true),
+const NAMES: [(&str, XStateOp, bool); 12] = [
+    ("__builtin_ia32_xsave", XStateOp::Xsave, false),
+    ("__builtin_ia32_xsave64", XStateOp::Xsave64, true),
+    ("__builtin_ia32_xrstor", XStateOp::Xrstor, false),
+    ("__builtin_ia32_xrstor64", XStateOp::Xrstor64, true),
+    ("__builtin_ia32_xsaveopt", XStateOp::Xsaveopt, false),
+    ("__builtin_ia32_xsaveopt64", XStateOp::Xsaveopt64, true),
+    ("__builtin_ia32_xsavec", XStateOp::Xsavec, false),
+    ("__builtin_ia32_xsavec64", XStateOp::Xsavec64, true),
+    ("__builtin_ia32_xsaves", XStateOp::Xsaves, false),
+    ("__builtin_ia32_xsaves64", XStateOp::Xsaves64, true),
+    ("__builtin_ia32_xrstors", XStateOp::Xrstors, false),
+    ("__builtin_ia32_xrstors64", XStateOp::Xrstors64, true),
 ];
 
 impl Checker<'_> {
@@ -56,7 +56,7 @@ impl Checker<'_> {
         if !spelled.starts_with("__builtin_ia32_x") {
             return None;
         }
-        let &(spelled, instruction, wide) = NAMES.iter().find(|(named, ..)| *named == spelled)?;
+        let &(spelled, op, wide) = NAMES.iter().find(|(named, ..)| *named == spelled)?;
         let arch = self.cx.target.tuple.arch().as_str();
         let here = if wide { arch == "x86_64" } else { matches!(arch, "x86_64" | "i686") };
         if !here {
@@ -71,7 +71,7 @@ impl Checker<'_> {
             return Some(self.poison(span));
         }
         let (&address, &mask) = (args.first()?, args.get(1)?);
-        let kind = ExprKind::XState { instruction, address, mask };
+        let kind = ExprKind::XState { op, address, mask };
         Some(self.tast.expr(Expr::new(kind, ret, Category::Rvalue), span))
     }
 }

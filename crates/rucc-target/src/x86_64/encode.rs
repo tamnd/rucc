@@ -2176,6 +2176,15 @@ static ENCODINGS: &[Encoding] = &[
     // asked for wants a whole number of bytes it can start at, so the reserved space is that many
     // one byte instructions and not the shortest sequence that adds up.
     bytes("nop", &NO_ARGS, Long, &[0x90], NO_MODRM, NO_IMM),
+    // The long forms, `0f 1f /0`, which take an operand only to have something to be as long as.
+    // gas writes them into the gaps it pads, and a program writes them by hand to lay down a run of
+    // code that does nothing, which the protection keys selftest does five hundred times over.
+    bytes("nopw", &R, Word, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopl", &R, Long, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopq", &R, Quad, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopw", &M, Word, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopl", &M, Long, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopq", &M, Quad, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
     // The spin loop hint, which is the byte above with the repeat prefix in front of it. A machine
     // that has never heard of it decodes the prefix as having nothing to repeat and runs the `nop`,
     // which is why the hint could be added to the instruction set without breaking anything that
@@ -5080,6 +5089,12 @@ static ONLY32: &[Encoding] = &[
     takes("pushl", &I, Fits::Long, Long, &[0x68], NO_MODRM, ImmSize::Id),
     bytes("pushfl", &NO_ARGS, Long, &[0x9C], NO_MODRM, NO_IMM),
     bytes("popfl", &NO_ARGS, Long, &[0x9D], NO_MODRM, NO_IMM),
+    // The trap on overflow and the trap on a register outside two limits in memory, which sixty
+    // four bit mode took away and gave the bytes to something else. The x86 selftests raise the
+    // first in mov_ss_trap and the second from the vm86 code in entry_from_vm86.
+    bytes("into", &NO_ARGS, Long, &[0xCE], NO_MODRM, NO_IMM),
+    bytes("boundw", &RM, Word, &[0x62], pair(1, 0), NO_IMM),
+    bytes("boundl", &RM, Long, &[0x62], pair(1, 0), NO_IMM),
     // The descriptor table loads and stores with the suffix that says six bytes, which is what
     // they move in this mode. The EFI mixed mode entry in the kernel saves the firmware's table
     // with `sgdtl`.
@@ -6652,6 +6667,17 @@ mod tests {
     fn the_landing_pad_is_four_bytes_and_none_of_them_are_worked_out() {
         assert_eq!(hex("endbr64", &[]), "f3 0f 1e fa");
         assert_eq!(hex("ud2", &[]), "0f 0b");
+    }
+
+    /// The long `nop`, whose operand is there only to make it longer, as gas writes each width.
+    #[test]
+    fn the_long_nop_is_as_long_as_its_operand_makes_it() {
+        let far = Addr { base: Some(RAX), disp: 0x7eee_eeee, ..Addr::default() };
+        assert_eq!(hex("nopl", &[Value::Mem(far)]), "0f 1f 80 ee ee ee 7e");
+        let near = Addr { base: Some(RAX), disp: 1, ..Addr::default() };
+        assert_eq!(hex("nopq", &[Value::Mem(near)]), "48 0f 1f 40 01");
+        assert_eq!(hex("nopl", &[long(RAX)]), "0f 1f c0");
+        assert_eq!(hex("nopw", &[Value::Reg(RAX, Width::Word)]), "66 0f 1f c0");
     }
 
     /// The two bytes the speculation hardening flags write, each on its own: the breakpoint that
@@ -8415,25 +8441,28 @@ mod tests {
         let sum = mem(Some(RBX), Some(RSI), 2, 4);
         let wide = mem(Some(RBX), Some(RCX), 8, 0x40);
         let tls = Value::Mem(Addr { disp: 0x14, segment: Some(Segment::Gs), ..Addr::default() });
-        let table: [(&str, Vec<Value>, &str); 44] = [
-            ("incl", vec![long(RAX)], "40"),                          // incl %eax
-            ("decl", vec![long(RDI)], "4f"),                          // decl %edi
-            ("incw", vec![word(RCX)], "66 41"),                       // incw %cx
-            ("decw", vec![word(RDX)], "66 4a"),                       // decw %dx
-            ("incb", vec![byte(RAX)], "fe c0"),                       // incb %al
-            ("incl", vec![at(RAX, 0)], "ff 00"),                      // incl (%eax)
-            ("decl", vec![at(RSI, 4)], "ff 4e 04"),                   // decl 4(%esi)
-            ("pushl", vec![long(RBP)], "55"),                         // pushl %ebp
-            ("popl", vec![long(RBP)], "5d"),                          // popl %ebp
-            ("pushl", vec![long(RDI)], "57"),                         // pushl %edi
-            ("pushl", vec![Value::Imm(1)], "6a 01"),                  // pushl $1
-            ("pushl", vec![Value::Imm(0x12345)], "68 45 23 01 00"),   // pushl $0x12345
-            ("pushl", vec![at(RBP, 8)], "ff 75 08"),                  // pushl 8(%ebp)
-            ("popl", vec![at(RAX, 0)], "8f 00"),                      // popl (%eax)
-            ("pushfl", vec![], "9c"),                                 // pushfl
-            ("popfl", vec![], "9d"),                                  // popfl
-            ("movl", vec![long(RSP), long(RBP)], "89 e5"),            // movl %esp, %ebp
-            ("movl", vec![at(RBP, 8), long(RAX)], "8b 45 08"),        // movl 8(%ebp), %eax
+        let table: [(&str, Vec<Value>, &str); 47] = [
+            ("incl", vec![long(RAX)], "40"),                        // incl %eax
+            ("decl", vec![long(RDI)], "4f"),                        // decl %edi
+            ("incw", vec![word(RCX)], "66 41"),                     // incw %cx
+            ("decw", vec![word(RDX)], "66 4a"),                     // decw %dx
+            ("incb", vec![byte(RAX)], "fe c0"),                     // incb %al
+            ("incl", vec![at(RAX, 0)], "ff 00"),                    // incl (%eax)
+            ("decl", vec![at(RSI, 4)], "ff 4e 04"),                 // decl 4(%esi)
+            ("pushl", vec![long(RBP)], "55"),                       // pushl %ebp
+            ("popl", vec![long(RBP)], "5d"),                        // popl %ebp
+            ("pushl", vec![long(RDI)], "57"),                       // pushl %edi
+            ("pushl", vec![Value::Imm(1)], "6a 01"),                // pushl $1
+            ("pushl", vec![Value::Imm(0x12345)], "68 45 23 01 00"), // pushl $0x12345
+            ("pushl", vec![at(RBP, 8)], "ff 75 08"),                // pushl 8(%ebp)
+            ("popl", vec![at(RAX, 0)], "8f 00"),                    // popl (%eax)
+            ("pushfl", vec![], "9c"),                               // pushfl
+            ("popfl", vec![], "9d"),                                // popfl
+            ("into", vec![], "ce"),                                 // into
+            ("boundl", vec![long(RAX), at(RBX, 0)], "62 03"),       // boundl %eax, (%ebx)
+            ("boundw", vec![word(RAX), mem(None, None, 1, 0x1234)], "66 62 05 34 12 00 00"), // boundw %ax, 0x1234
+            ("movl", vec![long(RSP), long(RBP)], "89 e5"), // movl %esp, %ebp
+            ("movl", vec![at(RBP, 8), long(RAX)], "8b 45 08"), // movl 8(%ebp), %eax
             ("movl", vec![absolute, long(RCX)], "8b 0d 34 12 00 00"), // movl 0x1234, %ecx
             ("movl", vec![long(RDX), indexed], "89 14 85 34 12 00 00"), // movl %edx, 0x1234(,%eax,4)
             ("movl", vec![at(RSP, 0), long(RAX)], "8b 04 24"),          // movl (%esp), %eax
