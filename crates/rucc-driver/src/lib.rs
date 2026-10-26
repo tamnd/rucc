@@ -452,9 +452,9 @@ const SANITIZERS: [&str; 35] = [
 
 /// Reads one `--param` of the shadow checks into `kasan`, and says whether `spec` was one.
 ///
-/// gcc's defaults put the stack and the globals under the checks as well. Those are not made yet,
-/// so the two settings that ask for them are refused when they ask, and a build that tests for
-/// them with `cc-option`, as the kernel does, is told so.
+/// gcc's defaults put the globals and the `alloca` memory under the checks as well. Those are not
+/// made yet, so the two settings that ask for them are refused when they ask, and a build that
+/// tests for them with `cc-param`, as the kernel does, is told so.
 fn asan_param(kasan: &mut rucc_session::Kasan, spec: &str) -> Result<bool, String> {
     let Some((name, value)) = spec.split_once('=') else { return Ok(false) };
     if !name.starts_with("asan-") {
@@ -465,8 +465,9 @@ fn asan_param(kasan: &mut rucc_session::Kasan, spec: &str) -> Result<bool, Strin
     match name {
         "asan-instrumentation-with-call-threshold" => kasan.call_threshold = number,
         "asan-kernel-mem-intrinsic-prefix" => kasan.mem_prefix = number != 0,
-        "asan-stack" | "asan-globals" | "asan-instrument-allocas" if number == 0 => {}
-        "asan-stack" | "asan-globals" | "asan-instrument-allocas" => {
+        "asan-stack" => kasan.stack = number != 0,
+        "asan-globals" | "asan-instrument-allocas" if number == 0 => {}
+        "asan-globals" | "asan-instrument-allocas" => {
             return Err(format!(
                 "--param {name}={number}: this compiler does not yet put redzones around the \
                  objects that would check, see spec/04-driver-and-cli.md section 4.7"
