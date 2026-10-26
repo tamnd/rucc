@@ -405,6 +405,51 @@ fn branch(mnemonic: &str) -> Option<u32> {
     })
 }
 
+/// The `funct5`, the `funct3` and the ordering bits of the A extension's instructions, which are
+/// `lr`, `sc` and the `amo` operations, at `.w` or `.d`, with `.aq`, `.rl` or `.aqrl` after it.
+fn atomic(mnemonic: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = mnemonic.split('.');
+    let f5 = match parts.next()? {
+        "lr" => 0x02,
+        "sc" => 0x03,
+        "amoswap" => 0x01,
+        "amoadd" => 0x00,
+        "amoxor" => 0x04,
+        "amoand" => 0x0c,
+        "amoor" => 0x08,
+        "amomin" => 0x10,
+        "amomax" => 0x14,
+        "amominu" => 0x18,
+        "amomaxu" => 0x1c,
+        _ => return None,
+    };
+    let f3 = match parts.next()? {
+        "w" => 2,
+        "d" => 3,
+        _ => return None,
+    };
+    let order = match parts.next() {
+        None => 0,
+        Some("aq") => 2,
+        Some("rl") => 1,
+        Some("aqrl") => 3,
+        Some(_) => return None,
+    };
+    parts.next().is_none().then_some((f5, f3, order))
+}
+
+/// The `funct3` of the CSR instructions that take a register, `csrrw`, `csrrs` and `csrrc`, and
+/// of the pseudo instructions that write those with `zero` as the destination. The form that
+/// takes a five bit constant instead is four more.
+fn csr(mnemonic: &str) -> Option<u32> {
+    Some(match mnemonic {
+        "csrrw" | "csrw" | "csrrwi" | "csrwi" => 1,
+        "csrrs" | "csrs" | "csrrsi" | "csrsi" => 2,
+        "csrrc" | "csrc" | "csrrci" | "csrci" => 3,
+        _ => return None,
+    })
+}
+
 const fn r(op: u32, f3: u32, f7: u32, rd: u8, rs1: u8, rs2: u8) -> u32 {
     (f7 << 25) | ((rs2 as u32) << 20) | ((rs1 as u32) << 15) | (f3 << 12) | ((rd as u32) << 7) | op
 }
@@ -605,7 +650,81 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         }
     }
 
+    if let Some((f5, f3, order)) = atomic(mnemonic) {
+        let (rd, rs2, base) = match *values {
+            [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(0) })] if f5 == 0x02 => (rd, ZERO, base),
+            [Gpr(rd), Gpr(rs2), Mem(Addr { base, offset: Offset::Imm(0) })] if f5 != 0x02 => {
+                (rd, rs2, base)
+            }
+            _ => return Err(unwritten()),
+        };
+        out.words.push(r(0x2f, f3, f5 << 2 | order, rd, base, rs2));
+        return Ok(out);
+    }
+    if let Some(f3) = csr(mnemonic) {
+        // The register form, or the constant form when the source is a number, which is how GNU
+        // as reads `csrs sstatus, 2` as `csrsi`. The pseudo instructions have no destination,
+        // and `csrr` is `csrrs` from `zero`.
+        let (rd, number, source) = match *values {
+            [Gpr(rd), Imm(number), source] if mnemonic.starts_with("csrr") => (rd, number, source),
+            [Imm(number), source] if !mnemonic.starts_with("csrr") => (ZERO, number, source),
+            _ => return Err(unwritten()),
+        };
+        if !(0..1 << 12).contains(&number) {
+            return Err(immediate(number));
+        }
+        let (f3, rs1) = match source {
+            Gpr(rs1) if !mnemonic.ends_with('i') => (f3, rs1),
+            Imm(imm) if (0..32).contains(&imm) => (f3 | 4, imm as u8),
+            Imm(imm) => return Err(immediate(imm)),
+            _ => return Err(unwritten()),
+        };
+        out.words.push(i(0x73, f3, rd, rs1, number));
+        return Ok(out);
+    }
+
     match (mnemonic, values) {
+        ("csrr", [Gpr(rd), Imm(number)]) if (0..1 << 12).contains(number) => {
+            out.words.push(i(0x73, 2, *rd, ZERO, *number));
+        }
+        // The counters, which are `csrr` of `cycle`, `time` and `instret`.
+        ("rdcycle", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc00)),
+        ("rdtime", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc01)),
+        ("rdinstret", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc02)),
+        ("fence.i", []) => out.words.push(0x0000_100f),
+        ("fence.tso", []) => out.words.push(0x8330_000f),
+        ("pause", []) => out.words.push(0x0100_000f),
+        ("wfi", []) => out.words.push(0x1050_0073),
+        ("sret", []) => out.words.push(0x1020_0073),
+        ("mret", []) => out.words.push(0x3020_0073),
+        ("sfence.vma", []) => out.words.push(0x1200_0073),
+        ("sfence.vma", [Gpr(rs1)]) => out.words.push(r(0x73, 0, 0x09, ZERO, *rs1, ZERO)),
+        ("sfence.vma", [Gpr(rs1), Gpr(rs2)]) => out.words.push(r(0x73, 0, 0x09, ZERO, *rs1, *rs2)),
+        // The branches GNU as has as the others with their operands swapped or against `zero`.
+        ("bgt" | "ble" | "bgtu" | "bleu", [Gpr(rs1), Gpr(rs2), to]) => {
+            let f3 = match mnemonic {
+                "bgt" => 4,
+                "ble" => 5,
+                "bgtu" => 6,
+                _ => 7,
+            };
+            let imm = distance(to, 13, &mut out, Fixup::Branch).ok_or_else(unwritten)??;
+            out.words.push(b(f3, *rs2, *rs1, imm));
+        }
+        ("blez" | "bgez" | "bltz" | "bgtz", [Gpr(rs), to]) => {
+            let (f3, rs1, rs2) = match mnemonic {
+                "blez" => (5, ZERO, *rs),
+                "bgez" => (5, *rs, ZERO),
+                "bltz" => (4, *rs, ZERO),
+                _ => (4, ZERO, *rs),
+            };
+            let imm = distance(to, 13, &mut out, Fixup::Branch).ok_or_else(unwritten)??;
+            out.words.push(b(f3, rs1, rs2, imm));
+        }
+        ("zext.b", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 7, *rd, *rs, 0xff)),
+        ("jalr", [Gpr(rd), Gpr(rs), Imm(imm)]) => {
+            out.words.push(i(0x67, 0, *rd, *rs, twelve(*imm)?));
+        }
         ("lui", [Gpr(rd), Imm(imm)]) if (0..1 << 20).contains(imm) => {
             out.words.push(u(0x37, *rd, *imm));
         }
@@ -901,6 +1020,48 @@ mod tests {
         assert_eq!(one("ret", &[]), 0x0000_8067);
         assert_eq!(one("ebreak", &[]), 0x0010_0073);
         assert_eq!(one("fence", &[Value::Order(3), Value::Order(3)]), 0x0330_000f);
+    }
+
+    /// The A extension, the CSR instructions and the system ones the kernel writes, with the words
+    /// GNU as writes for `-march=rv64g_zifencei_zihintpause`.
+    #[test]
+    fn the_atomics_and_the_system_instructions_are_the_words_gnu_as_writes() {
+        let words: &[(&str, &[Value], u32)] = &[
+            ("lr.w", &[Gpr(15), at(10, 0)], 0x1005_27af),
+            ("sc.d.rl", &[Gpr(15), Gpr(11), at(10, 0)], 0x1ab5_37af),
+            ("amoswap.w.aqrl", &[Gpr(15), Gpr(11), at(10, 0)], 0x0eb5_27af),
+            ("amoadd.d", &[Gpr(0), Gpr(11), at(10, 0)], 0x00b5_302f),
+            ("amoor.w.aq", &[Gpr(15), Gpr(11), at(10, 0)], 0x44b5_27af),
+            ("amomaxu.d", &[Gpr(15), Gpr(11), at(10, 0)], 0xe0b5_37af),
+            ("csrr", &[Gpr(10), Imm(0x100)], 0x1000_2573),
+            ("csrw", &[Imm(0x105), Gpr(10)], 0x1055_1073),
+            ("csrs", &[Imm(0x100), Imm(2)], 0x1001_6073),
+            ("csrc", &[Imm(0x104), Gpr(10)], 0x1045_3073),
+            ("csrrw", &[Gpr(10), Imm(0x140), Gpr(11)], 0x1405_9573),
+            ("csrrci", &[Gpr(10), Imm(0x100), Imm(2)], 0x1001_7573),
+            ("rdtime", &[Gpr(10)], 0xc010_2573),
+            ("fence.i", &[], 0x0000_100f),
+            ("fence.tso", &[], 0x8330_000f),
+            ("pause", &[], 0x0100_000f),
+            ("wfi", &[], 0x1050_0073),
+            ("sret", &[], 0x1020_0073),
+            ("sfence.vma", &[], 0x1200_0073),
+            ("sfence.vma", &[Gpr(10)], 0x1205_0073),
+            ("sfence.vma", &[Gpr(10), Gpr(11)], 0x12b5_0073),
+            ("bgt", &[Gpr(10), Gpr(11), Imm(8)], 0x00a5_c463),
+            ("bleu", &[Gpr(10), Gpr(11), Imm(8)], 0x00a5_f463),
+            ("blez", &[Gpr(10), Imm(8)], 0x00a0_5463),
+            ("bgtz", &[Gpr(10), Imm(8)], 0x00a0_4463),
+            ("zext.b", &[Gpr(10), Gpr(11)], 0x0ff5_f513),
+            ("jalr", &[Gpr(1), Gpr(10), Imm(4)], 0x0045_00e7),
+        ];
+        for &(mnemonic, values, word) in words {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
+        }
+        // An atomic takes no distance, and a CSR number past twelve bits is refused.
+        assert!(encode("amoadd.w", &[Gpr(15), Gpr(11), at(10, 4)]).is_err());
+        assert!(encode("csrr", &[Gpr(10), Imm(0x1000)]).is_err());
+        assert!(encode("csrsi", &[Imm(0x100), Imm(32)]).is_err());
     }
 
     #[test]
