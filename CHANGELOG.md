@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The RISC-V 64 register file and the LP64D calling convention, so `--print-config` for a riscv64 target now lists its registers. This is the first part of the riscv64 back end, and code generation for riscv64 is still refused. (#3881)
 - An RV64G instruction encoder in rucc-target, which takes what GNU as takes, pseudo instructions included, for the riscv64 back end (#3882).
 - The riscv64 opcode table, its assembly text, a printer for it, a U74 timing model, and the frame, branch, flag and bit tables the passes read (#3883).
+- A verified riscv64 rule set with 262 rules covering integer and float arithmetic, comparisons, widenings, loads, stores and conversions. Nothing uses it yet (#3885).
 
 ### Fixed
 
