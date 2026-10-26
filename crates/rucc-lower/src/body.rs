@@ -384,6 +384,9 @@ fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
     if flags.contains(DeclFlags::NO_UBSAN_UNREACHABLE) {
         sanitize.unreachable = Check::Off;
     }
+    if flags.contains(DeclFlags::NO_ASAN) || flags.contains(DeclFlags::NAKED) {
+        sanitize.address = false;
+    }
     sanitize
 }
 
@@ -11401,7 +11404,7 @@ impl<'u> Body<'_, 'u> {
         let inline =
             opcode == Opcode::Memset && self.unit.environment.contains(AttrSet::INLINE_MEMSET);
         let Some(size) = self.small_length(length) else {
-            if !inline {
+            if !inline || self.sanitize.address {
                 return None;
             }
             let with = self.fill_byte(with, span);
@@ -11419,6 +11422,15 @@ impl<'u> Body<'_, 'u> {
             build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(opcode) }, &[]);
             return Some(matches!(plan.ret.pass, Pass::Direct).then_some(to));
         };
+        // Under `-fsanitize=kernel-address` gcc keeps every fill a call and every copy or move a
+        // call unless it is one access of 1, 2, 4 or 8 bytes. The call is `__asan_memset` and
+        // the others, which check the bytes before they touch them. The inline code would report
+        // a fill of a freed object and then write it anyway, and the kernel's KASAN test
+        // `kmalloc_uaf_memset` frees an object and fills it, so the fill wrote over the link
+        // that keeps the object in the quarantine and other objects were lost from it.
+        if self.sanitize.address && (opcode == Opcode::Memset || !matches!(size, 1 | 2 | 4 | 8)) {
+            return None;
+        }
         // One that runs off the array member it was handed stays a call, the way gcc leaves it to
         // `__memcpy_chk` under `_FORTIFY_SOURCE`, so that a safety build's wrapper judges it
         // against the member. A correct program never gets here.

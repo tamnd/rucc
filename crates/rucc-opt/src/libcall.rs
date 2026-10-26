@@ -546,7 +546,7 @@ pub fn fold(
     pic: Pic,
     fuel: &mut Fuel,
 ) -> Vec<(FuncId, Stats)> {
-    visit(module, names, no_builtin, pic, fuel, false)
+    visit(module, names, no_builtin, pic, fuel, false, false)
 }
 
 /// Writes out every `memcpy`, `memset` and `memmove` of a small known length as the IR's own copy,
@@ -555,14 +555,20 @@ pub fn fold(
 /// Separate from [`fold`] and run after it, because a fold leaves a `memcpy` behind as the call it
 /// is, and that call is what the fold's own tests and the rounds inside it read. What is left once
 /// the folds are done is what this writes out.
+///
+/// Under `-fsanitize=kernel-address`, which `kasan` says, a fill is never written out, and a copy
+/// or a move only when it is one access of 1, 2, 4 or 8 bytes, as gcc does. The rest stay calls,
+/// which [`crate::asan`] points at the runtime's routines that check the bytes before they touch
+/// them.
 pub fn write_out(
     module: &mut Module,
     names: &mut Interner,
     no_builtin: &[String],
     pic: Pic,
+    kasan: bool,
     fuel: &mut Fuel,
 ) -> Vec<(FuncId, Stats)> {
-    visit(module, names, no_builtin, pic, fuel, true)
+    visit(module, names, no_builtin, pic, fuel, true, kasan)
 }
 
 /// [`fold`] or [`write_out`], as `small` says.
@@ -573,6 +579,7 @@ fn visit(
     pic: Pic,
     fuel: &mut Fuel,
     small: bool,
+    kasan: bool,
 ) -> Vec<(FuncId, Stats)> {
     let shapes = Shapes::of(module, names);
     // What each symbol was called in the source, for the declarations where the two differ. A call
@@ -640,6 +647,7 @@ fn visit(
                     no_builtin,
                     pic,
                     small,
+                    kasan,
                 };
                 site.survey(fuel, &mut stats)
             };
@@ -704,6 +712,8 @@ struct Site<'a> {
     /// Whether this is [`write_out`] rather than [`fold`], which looks at nothing but the three
     /// bulk calls.
     small: bool,
+    /// Whether the unit is built with `-fsanitize=kernel-address`. See [`write_out`].
+    kasan: bool,
 }
 
 impl Site<'_> {
@@ -1758,6 +1768,9 @@ impl Site<'_> {
         let size = u64::try_from(self.count(count)?).ok().filter(|&size| size <= SMALL)?;
         if size == 0 {
             return Some(Plan::Answer(Answer::Along(into, 0)));
+        }
+        if self.kasan && (opcode == Opcode::Memset || !matches!(size, 1 | 2 | 4 | 8)) {
+            return None;
         }
         Some(Plan::Bulk { opcode, into, with, size })
     }
@@ -3419,7 +3432,7 @@ block0:
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        write_out(&mut module, &mut names, &[], Pic::Executable, &mut Fuel::unlimited());
+        write_out(&mut module, &mut names, &[], Pic::Executable, false, &mut Fuel::unlimited());
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }

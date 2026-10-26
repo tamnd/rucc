@@ -29,7 +29,9 @@
 //! A copy or a fill the compiler makes is checked as a read of the bytes it reads and a write of
 //! the bytes it writes. One whose length the program works out is a call to `__asan_memcpy`,
 //! `__asan_memmove` or `__asan_memset` under `--param asan-kernel-mem-intrinsic-prefix=1`, and so
-//! is a call to `memcpy`, `memmove` or `memset` itself. Those check what they touch.
+//! is a call to `memcpy`, `memmove` or `memset` itself. Those check what they touch. The front end
+//! and [`crate::libcall`] keep every fill the source spells as a call, and every copy or move it
+//! spells that is not one access of 1, 2, 4 or 8 bytes, as gcc does, so those are calls here too.
 //!
 //! # What is left alone
 //!

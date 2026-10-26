@@ -184,6 +184,56 @@ fn the_settings_the_kernel_gives_are_read() {
     assert!(!text.contains("sanitizes_address"), "{text}");
 }
 
+/// A fill and copies of constant lengths that the source spelled as calls.
+const SPELLED: &str = r#"
+void fill33(char *p) { __builtin_memset(p, 0, 33); }
+void fill8(long *p) { __builtin_memset(p, 0, 8); }
+void copy33(char *d, const char *s) { __builtin_memcpy(d, s, 33); }
+void copy8(char *d, const char *s) { __builtin_memcpy(d, s, 8); }
+__attribute__((no_sanitize_address)) void quiet33(char *p) { __builtin_memset(p, 0, 33); }
+"#;
+
+/// The lines of one function in the listing of [`SPELLED`] for x86-64 with those flags.
+fn spelled(args: &[&str], function: &str) -> String {
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir = std::env::temp_dir()
+        .join(format!("rucc-kasan-spelled-{}-{function}-{tag}", std::process::id()));
+    let mut all = vec!["--target=x86_64-unknown-linux-gnu", "-S", "-o", "-"];
+    all.extend(args);
+    let out = compile(&dir, SPELLED, &all);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).expect("a listing is text");
+    let start = text.find(&format!("\n{function}:")).expect("the function is defined");
+    let end = text[start..].find(&format!(".size\t{function}")).map_or(text.len(), |at| start + at);
+    text[start..end].to_owned()
+}
+
+/// gcc keeps every fill the source spells and every copy that is not one access of 1, 2, 4 or 8
+/// bytes as a call to the runtime, which checks the bytes before it touches them. Inline code
+/// reports a bad fill and then writes it anyway, and the kernel's `kmalloc_uaf_memset` fills a
+/// freed object, so the write went over the link that keeps the object in the quarantine.
+#[test]
+fn a_fill_or_copy_the_source_spells_is_the_runtime_call() {
+    for level in ["-O0", "-O2"] {
+        let mut args = vec![level];
+        args.extend(KERNEL);
+        for (function, call) in
+            [("fill33", "__asan_memset"), ("fill8", "__asan_memset"), ("copy33", "__asan_memcpy")]
+        {
+            let lines = spelled(&args, function);
+            assert!(lines.contains(call), "{level} {function}:\n{lines}");
+        }
+        let lines = spelled(&args, "copy8");
+        assert!(!lines.contains("__asan_memcpy"), "{level}:\n{lines}");
+        assert!(lines.contains("load8_noabort"), "{level}: the copy is checked:\n{lines}");
+        let lines = spelled(&args, "quiet33");
+        assert!(!lines.contains("__asan") && !lines.contains("call"), "{level}:\n{lines}");
+    }
+    let lines = spelled(&["-O2"], "fill33");
+    assert!(!lines.contains("call"), "without the sanitizer the fill is inline:\n{lines}");
+}
+
 #[test]
 fn what_is_not_made_yet_is_refused() {
     let on = "-fsanitize=kernel-address";
