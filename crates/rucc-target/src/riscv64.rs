@@ -41,7 +41,7 @@ pub use crate::riscv64::encode::{
     reaches,
 };
 pub use crate::riscv64::insts::{ADDRESSES, Form, INSTS, TEMPLATE, address, form};
-pub use crate::riscv64::read::{Error as ReadError, Line, read};
+pub use crate::riscv64::read::{Error as ReadError, Line, read, register};
 pub use crate::riscv64::text::{Arg, Missing, Operands, Written, fill, operand_width, written};
 pub use crate::riscv64::timing::{LOAD, MODEL, TIMING};
 pub use crate::riscv64::write::write;
