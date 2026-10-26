@@ -23,12 +23,13 @@ use crate::expr::{Category, Expr, ExprId, ExprKind};
 /// The code a call on another target is refused under, the one the time stamp counter uses.
 const CODE: &str = "E0727";
 
-/// The four names, each with whether it writes and the architecture it is on.
+/// The four names, each with whether it writes and the architecture it is on, spelled as the
+/// target tuple spells it. i386 is `i686` there, which is what `-m32` on x86-64 selects.
 const NAMES: [(&str, bool, &str); 4] = [
     ("__builtin_ia32_readeflags_u64", false, "x86_64"),
     ("__builtin_ia32_writeeflags_u64", true, "x86_64"),
-    ("__builtin_ia32_readeflags_u32", false, "i386"),
-    ("__builtin_ia32_writeeflags_u32", true, "i386"),
+    ("__builtin_ia32_readeflags_u32", false, "i686"),
+    ("__builtin_ia32_writeeflags_u32", true, "i686"),
 ];
 
 impl Checker<'_> {
@@ -51,7 +52,8 @@ impl Checker<'_> {
         }
         let &(spelled, writes, arch) = NAMES.iter().find(|(named, ..)| *named == spelled)?;
         if self.cx.target.tuple.arch().as_str() != arch {
-            let what = format!("`{spelled}` is only available on {arch}");
+            let shown = if arch == "i686" { "i386" } else { arch };
+            let what = format!("`{spelled}` is only available on {shown}");
             let note = "it is a push and a pop of the flags register in that mode, and there is no \
                         function of the name anywhere for a call on this target to reach";
             self.report(Diagnostic::error(what, span).with_code(CODE).note(note, span));

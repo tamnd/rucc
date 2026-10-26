@@ -8141,6 +8141,19 @@ decl #0 x : int object external static defined
         opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         let said = run(&opts, read).messages.join("\n");
         assert!(said.contains("only available on x86_64"), "{said}");
+
+        // The x86 selftests build helpers.h with -m32 as well, where the pair is the _u32 one.
+        opts.target = "i686-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let said = run(&opts, read).messages.join("\n");
+        assert!(said.contains("only available on x86_64"), "{said}");
+        let pair = "unsigned int f(unsigned int v) {\n\
+                    __builtin_ia32_writeeflags_u32(v | 0x100);\n\
+                    return __builtin_ia32_readeflags_u32();\n}\n";
+        let ran = run(&opts, pair);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        let text = ran.text();
+        assert!(text.contains("\tpopfl\n") && text.contains("\tpushfl\n"), "{text}");
+        assert!(!text.contains("\tcall\t"), "{text}");
     }
 
     /// rseq's `param_test` keeps a `pthread_t` array as long as the number of threads next to a
