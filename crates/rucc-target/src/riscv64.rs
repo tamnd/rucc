@@ -463,7 +463,7 @@ fn machine_commutes(_name: &str) -> bool {
 /// What a RISC-V conditional branch becomes once the blocks are in an order.
 ///
 /// The test and the two jumps on it are always folded into `beqz` or `bnez`, which is what
-/// [`FOLDS`] says. Those reach four kilobytes either side, and a function longer than [`NEAR`]
+/// `FOLDS` says. Those reach four kilobytes either side, and a function longer than `NEAR`
 /// opcodes has its far branches written around a `j` instead.
 pub static BRANCH: BranchInsts = BranchInsts {
     prefix: "rv.",
