@@ -189,8 +189,9 @@ fn split(text: &str) -> Option<Vec<&str>> {
     out.iter().all(|operand| !operand.is_empty()).then_some(out)
 }
 
-/// A register by any of its names.
-fn register(text: &str) -> Option<Value> {
+/// A register by any of its names, `a0`, `x10` or `fp`, as the operand the encoder takes.
+#[must_use]
+pub fn register(text: &str) -> Option<Value> {
     if text == "fp" {
         return Some(Value::Gpr(8));
     }
