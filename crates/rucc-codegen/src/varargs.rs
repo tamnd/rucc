@@ -151,11 +151,15 @@ impl Area {
     /// caller's argument area that belongs to its position, and that run of words is the area. The
     /// vector file has nothing in it there: a float beyond the ones the signature names travels in
     /// the general purpose register at its position as well, so the copy a walk reads is that one.
+    ///
+    /// RISC-V is the second shape with the positions counted apart. A function there homes its a
+    /// registers in the shadow space [`CallRegs::homed`] gives it, and a float past the `...`
+    /// arrived in one of those, so the vector file has nothing in that area either.
     #[must_use]
     pub fn of(conv: &CallRegs) -> Self {
         let ints = u32::try_from(conv.int_args.len()).unwrap_or(0);
         let floats = u32::try_from(conv.sse_args.len()).unwrap_or(0);
-        if conv.shared_positions {
+        if conv.shared_positions || conv.shadow > 0 {
             let size = conv.word * ints;
             return Self { floats_at: size, size, counts: (ints, 0), word: conv.word };
         }
@@ -177,7 +181,7 @@ impl Area {
     /// register and nowhere else.
     #[must_use]
     pub fn every(conv: &CallRegs) -> Self {
-        Self::of(&CallRegs { shared_positions: false, ..*conv })
+        Self::of(&CallRegs { shared_positions: false, shadow: 0, ..*conv })
     }
 
     /// How far apart two of a file's slots are.
@@ -234,7 +238,7 @@ impl Area {
 /// same walk, but an object there is as many words as it needs rather than one, which is the
 /// memory half of the AAPCS64 walk and is `aapcs::stacked`. Windows on AArch64 walks objects the
 /// same way, since its homed x registers and the caller's memory above them are one run of words
-/// and an object of up to sixteen bytes takes as many of them as it needs.
+/// and an object of up to sixteen bytes takes as many of them as it needs, and so does RISC-V.
 pub fn lists(func: &mut Func, conv: &CallRegs) {
     let area = Area::of(conv);
     let word = u64::from(conv.word);
@@ -246,8 +250,11 @@ pub fn lists(func: &mut Func, conv: &CallRegs) {
             (Opcode::VaArg, VaList::CharPointer | VaList::VoidPointer) => value(func, inst, word),
             (Opcode::VaObject, VaList::SysV) => object(func, inst, area),
             (Opcode::VaObject, VaList::Aapcs) => aapcs::object(func, inst),
-            (Opcode::VaObject, VaList::CharPointer)
-                if matches!(conv.abi.variadic, Variadic::AlwaysMemory | Variadic::IntegersOnly) =>
+            (Opcode::VaObject, VaList::CharPointer | VaList::VoidPointer)
+                if matches!(
+                    conv.abi.variadic,
+                    Variadic::AlwaysMemory | Variadic::IntegersOnly | Variadic::UnnamedIntegers
+                ) =>
             {
                 aapcs::stacked(func, inst);
             }
