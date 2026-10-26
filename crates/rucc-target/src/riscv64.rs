@@ -294,7 +294,9 @@ pub static LP64D: CallRegs = CallRegs {
     vector_count: None,
     red_zone: 0,
     shadow: 0,
-    home: 0,
+    // A variadic function stores a0 to a7 just below what the caller left in memory, so that a
+    // `void *` walks the registers and the memory as one run of words.
+    home: 64,
     stack_align: 16,
     trusted_align: 16,
     // A call leaves the return address in `ra`, so it pushes nothing.

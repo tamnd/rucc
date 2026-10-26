@@ -433,8 +433,11 @@ pub fn entry(
     // a convention that homes its register arguments, so a position multiplied by a word is the
     // answer there until the positions run out and the named parameters start taking room of their
     // own, at which point what they took is the answer again.
-    let reached = took.0 + took.1;
-    let beyond = match conv.shared_positions && reached < conv.int_args.len() {
+    // RISC-V homes only its a registers and counts the two files apart, so there the position is
+    // how many of those the named parameters took.
+    let homes = conv.shared_positions || conv.shadow > 0;
+    let reached = if conv.shared_positions { took.0 + took.1 } else { took.0 };
+    let beyond = match homes && reached < conv.int_args.len() {
         true => conv.word * u32::try_from(reached).unwrap_or(0),
         false => places.size(),
     };

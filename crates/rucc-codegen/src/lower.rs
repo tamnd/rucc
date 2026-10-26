@@ -9043,7 +9043,7 @@ impl<'a> Lowering<'a> {
         // here all the same would be refused rather than read the wrong list.
         let variadic = variadic && !foreign;
         if let (true, Some(area)) = (variadic && !in_memory, area) {
-            self.save_area(out, &arrived, area, conv.shared_positions);
+            self.save_area(out, &arrived, area, conv.shared_positions || conv.shadow > 0);
         } else if variadic {
             let incoming = arrived.beyond.next_multiple_of(self.conv.word);
             self.varargs = Some(Varargs::Pointer { incoming });
