@@ -75,6 +75,7 @@ use rucc_mir::{
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
+use rucc_target::x86_64;
 use rucc_target::{
     BranchInsts, CallRegs, Chkstk, ClassMoves, FrameInsts, Guard, PhysReg, Probe, RegClass,
     SignReturn, Signing, SpillMove,
@@ -314,6 +315,28 @@ pub fn finish(
         func[mem].disp += at;
         if frame.grows() {
             rebase(func, inst, conv.frame_pointer);
+        }
+    }
+
+    // The locals a kept template names in its text besides its own memory operand, which are
+    // spelled from the register the rest of the frame is counted from. Only x86 writes these. A
+    // template whose text a local is missing from keeps the hole, which the assembler refuses.
+    let width = if conv.word == 8 { x86_64::Width::Quad } else { x86_64::Width::Long };
+    let from = if frame.grows() { conv.frame_pointer } else { conv.stack_pointer };
+    let from = x86_64::gpr_name(from, width).unwrap_or_default();
+    let mut filled: Vec<Inst> = Vec::new();
+    for &(inst, _) in &stack.framed {
+        if filled.contains(&inst) {
+            continue;
+        }
+        filled.push(inst);
+        let Some(text) = func[inst].symbol else { continue };
+        let at = |local: usize, offset: i64| {
+            let at = i64::from(frame.local(local)?) + offset;
+            Some(format!("{at}(%{from})"))
+        };
+        if let Some(text) = x86_64::template_locals(names.resolve(text), at) {
+            func[inst].symbol = Some(names.intern(&text));
         }
     }
 

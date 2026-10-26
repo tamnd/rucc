@@ -13,6 +13,7 @@
 //! file refers to them through `super` and that is the whole of the contract between the two.
 
 pub mod aarch64;
+pub mod riscv64;
 pub mod x86;
 pub mod x86_64;
 
@@ -88,6 +89,10 @@ pub struct Jumps {
     pub add: &'static str,
     /// Whether the add writes its first operand, the way it does on x86-64.
     pub two_address: bool,
+    /// The shift that multiplies the index by the four bytes a cell takes, on a machine whose
+    /// addresses cannot scale a register, which is RISC-V. `None` where the cell is read with the
+    /// index scaled in its address.
+    pub scale: Option<&'static str>,
 }
 
 /// The two ways the address of a symbol is come by.

@@ -6046,26 +6046,43 @@ decl #0 x : int object external static defined
         assert!(asked.messages.is_empty(), "{:?}", asked.messages);
     }
 
-    /// A target with no back end says so rather than generating something for another machine.
+    /// A RISC-V function is selected and allocated with the RISC-V machine, and none of its
+    /// instructions are another machine's. No address has an index, since this machine has none.
+    /// `-S` writes it as RISC-V assembly.
     #[test]
-    fn a_target_this_has_no_back_end_for_is_reported_rather_than_generated() {
-        let mut opts = options();
-        opts.emit = EmitKind::MirFinal;
-        opts.target = "riscv64-unknown-linux-gnu".parse::<Triple>().unwrap();
-        let result = run(&opts, "int f(int a) { return a; }\n");
-        assert!(result.failed());
-        assert!(result.messages[0].contains("no back end for riscv64"), "{:?}", result.messages);
-        assert!(result.text().is_empty());
+    fn a_riscv_function_is_lowered_for_riscv() {
+        let source = "int f(int a, int b) { return a + b; }\n\
+                      int g(int *p, long i) { return p[i] + p[i + 1]; }\n";
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = options();
+            opts.emit = EmitKind::MirFinal;
+            opts.opt_level = level;
+            opts.target = "riscv64-unknown-linux-gnu".parse::<Triple>().unwrap();
+            let result = run(&opts, source);
+            assert!(!result.failed(), "{:?}", result.messages);
+            let text = result.text();
+            assert!(text.contains("rv.add_rr_32"), "{text}");
+            assert!(!text.contains("x64."), "{text}");
+            assert!(!text.contains(" + $"), "{text}");
+            opts.emit = EmitKind::Asm;
+            let result = run(&opts, source);
+            assert!(!result.failed(), "{:?}", result.messages);
+            let text = result.text();
+            assert!(text.contains("\taddw a0, a0, a1\n"), "{text}");
+            assert!(text.contains("\tret\n"), "{text}");
+        }
     }
 
     /// The link asks the same question before it compiles, and a target with a back end, wasm
     /// included, has no answer.
     #[test]
     fn the_link_can_ask_whether_a_target_has_a_back_end() {
-        let riscv = "riscv64-unknown-linux-gnu".parse::<Triple>().unwrap();
-        let why = no_back_end(riscv).unwrap();
-        assert!(why.contains("no back end for riscv64"), "{why}");
-        for tuple in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "wasm32-wasip1"] {
+        for tuple in [
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-gnu",
+            "riscv64-unknown-linux-gnu",
+            "wasm32-wasip1",
+        ] {
             assert_eq!(no_back_end(tuple.parse::<Triple>().unwrap()), None, "{tuple}");
         }
     }

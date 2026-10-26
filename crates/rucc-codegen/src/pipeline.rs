@@ -33,8 +33,8 @@ use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
     BitInsts, BranchInsts, BranchProtection, CallRegs, CodeModel, FlagInsts, FrameInsts, Isa,
-    MachineInsts, PhysReg, RegFile, ShortInsts, Speculation, TargetInfo, TimingInsts, aarch64, x86,
-    x86_64,
+    MachineInsts, PhysReg, RegFile, ShortInsts, Speculation, TargetInfo, TimingInsts, aarch64,
+    riscv64, x86, x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -158,6 +158,9 @@ pub(crate) const SCRATCH: [PhysReg; 2] = [x86_64::R10, x86_64::R11];
 
 /// The scratch registers held back from the allocator on AArch64. See [`Machine::aarch64`].
 pub(crate) const AARCH64_SCRATCH: [PhysReg; 2] = [aarch64::X16, aarch64::X17];
+
+/// The scratch registers held back from the allocator on RISC-V. See [`Machine::riscv64`].
+pub(crate) const RISCV64_SCRATCH: [PhysReg; 2] = [riscv64::T5, riscv64::T6];
 
 /// The scratch registers held back from the allocator on i386.
 ///
@@ -283,6 +286,40 @@ impl Machine {
         }
     }
 
+    /// The RISC-V machine under that convention.
+    ///
+    /// `t5` and `t6` are held back, which LP64D's allocation order already leaves out. A call
+    /// destroys both and nothing the convention names passes anything in either, so they are free
+    /// for a move the rewriter puts in, the same way `x16` and `x17` are on AArch64. The float
+    /// file's two are picked the way the other machines pick theirs.
+    #[must_use]
+    pub fn riscv64(conv: &'static CallRegs) -> Self {
+        let order: Vec<PhysReg> =
+            conv.int_order.iter().copied().filter(|reg| !RISCV64_SCRATCH.contains(reg)).collect();
+        let (fp_order, fp_scratch) = held_back(conv);
+        Self {
+            conv,
+            file: riscv64::REGS,
+            insts: &riscv64::FRAME,
+            branch: &riscv64::BRANCH,
+            bits: &riscv64::BITS,
+            flags: &riscv64::FLAGS,
+            shapes: &riscv64::MACHINE,
+            timing: &riscv64::TIMING,
+            short: &riscv64::SHORT,
+            selector: &select::riscv64::SELECTOR,
+            env: Env::new().with(riscv64::GPR, &order, &RISCV64_SCRATCH).with(
+                riscv64::FPR,
+                &fp_order,
+                &fp_scratch,
+            ),
+            spare: None,
+            wide: None,
+            middle: None,
+            last: None,
+        }
+    }
+
     /// The machine for i386 under that convention.
     ///
     /// x86-64's tables for everything the two machines share, and the i386 ones for the frame, the
@@ -382,6 +419,8 @@ impl Machine {
         }
         if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
             Some(Self::aarch64(conv))
+        } else if std::ptr::eq(self.selector, &select::riscv64::SELECTOR) {
+            Some(Self::riscv64(conv))
         } else if std::ptr::eq(self.selector, &select::x86::SELECTOR) {
             Some(Self::x86(conv))
         } else {
@@ -396,6 +435,8 @@ impl Machine {
         let conv = self.conv.interrupted(code);
         if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
             Self::aarch64(conv)
+        } else if std::ptr::eq(self.selector, &select::riscv64::SELECTOR) {
+            Self::riscv64(conv)
         } else if std::ptr::eq(self.selector, &select::x86::SELECTOR) {
             Self::x86(conv)
         } else {
@@ -407,8 +448,8 @@ impl Machine {
     ///
     /// [`TargetInfo`] already carries the convention, because the front end needs it to lay a
     /// `va_list` out, so the only thing this decides is which architecture's frame instructions
-    /// and register file go with it. RISC-V is `None` until it has a rule file, and a caller that
-    /// gets one reports a target it cannot compile for rather than compiling wrongly.
+    /// and register file go with it. Anything else is `None`, and a caller that gets that reports
+    /// a target it cannot compile for rather than compiling wrongly.
     #[must_use]
     pub fn for_target(target: &TargetInfo) -> Option<Self> {
         let conv = target.call_regs?;
@@ -416,6 +457,7 @@ impl Machine {
             Arch::X86_64 => Some(Self::x86_64(conv)),
             Arch::Aarch64 => Some(Self::aarch64(conv)),
             Arch::X86 => Some(Self::x86(conv)),
+            Arch::Riscv64 => Some(Self::riscv64(conv)),
             _ => None,
         }
     }
@@ -1250,7 +1292,10 @@ pub fn compile_recording(
     // them.
     let reach = (flags.reuse && !alone).then(|| {
         let count = stack.locals.len();
-        slots::reach(&func, &stack.addresses, &stack.ends, count, machine.insts, names)
+        // A template that names a local in its text touches it where it stands, the way a reader
+        // the address was folded into does.
+        let touched: Vec<_> = stack.addresses.iter().chain(&stack.framed).copied().collect();
+        slots::reach(&func, &touched, &stack.ends, count, machine.insts, names)
     });
 
     // The instructions as they are now, for the locals the front end kept in values. The
@@ -3267,8 +3312,13 @@ mod tests {
         assert!(std::ptr::eq(machine.conv, &aarch64::AAPCS64));
         assert!(std::ptr::eq(machine.selector, &select::aarch64::SELECTOR));
 
-        // Not a target this crate has a back end for, and saying so is the whole point.
         let info = TargetInfo::new(triple("riscv64-unknown-linux-gnu"));
+        let machine = Machine::for_target(&info).expect("riscv64 has a back end");
+        assert!(std::ptr::eq(machine.conv, &riscv64::LP64D));
+        assert!(std::ptr::eq(machine.selector, &select::riscv64::SELECTOR));
+
+        // Not a target this crate has a back end for, and saying so is the whole point.
+        let info = TargetInfo::new(triple("wasm32-unknown-unknown"));
         assert!(Machine::for_target(&info).is_none());
     }
 }

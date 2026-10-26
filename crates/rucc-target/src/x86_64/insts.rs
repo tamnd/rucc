@@ -1520,8 +1520,8 @@ pub const LITERAL: &str = "byte";
 pub const TEMPLATE: &str = "template";
 
 pub use crate::template::{
-    TEMPLATE_MEM, template_arm, template_arms, template_filled, template_jumps, template_mem_at,
-    template_name, template_reg,
+    TEMPLATE_MEM, template_arm, template_arms, template_filled, template_frame, template_jumps,
+    template_locals, template_mem_at, template_name, template_reg,
 };
 
 /// The most bytes one `.byte` directive may carry, which is how many fit beside the opcode.
@@ -2760,6 +2760,18 @@ mod tests {
         assert_eq!(template_filled(&text, "", |name| name.to_owned(), spelled), "add %k12,%q0");
         let kept = template_filled("1: jmp 1b", "", |name| name.to_owned(), spelled);
         assert_eq!(kept, "1: jmp 1b");
+    }
+
+    #[test]
+    fn a_local_in_a_kept_template_is_filled_before_the_other_holes() {
+        let text = format!("mov {},%ax; mov %ax,{}", template_frame(3, 0), template_frame(12, 8));
+        let at = |local: usize, offset: i64| Some(format!("{}(%rsp)", local as i64 * 4 + offset));
+        let filled = template_locals(&text, at).expect("both locals have an address");
+        assert_eq!(filled, "mov 12(%rsp),%ax; mov %ax,56(%rsp)");
+        assert_eq!(template_locals(&text, |_, _| None), None);
+        let spelled = |at: usize, width: char| format!("%{width}{at}");
+        let left = template_filled(&text, "", |name| name.to_owned(), spelled);
+        assert!(left.contains('\u{1}'), "a local nothing filled is not dropped: {left:?}");
     }
 
     use super::*;

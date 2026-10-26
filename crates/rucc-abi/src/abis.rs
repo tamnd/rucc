@@ -322,7 +322,9 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
     return_pointer: ReturnPointer::FirstArgument,
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
-    narrow: Narrow::Unspecified,
+    // The psABI extends anything narrower than a word to 32 bits by its own sign and then to the
+    // whole register, for an argument by the caller and for a return value by the callee.
+    narrow: Narrow::ToInt,
     bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
 };
