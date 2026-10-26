@@ -7012,9 +7012,9 @@ mod tests {
         assert!(text.contains("char-signed: false"), "{text}");
         assert!(text.contains("object-format: elf"), "{text}");
         assert!(text.contains("va-list: void-pointer"), "{text}");
-        // RISC-V has a register file and this compiler has not written it down yet, and the
-        // dump says which of those two it is rather than leaving the line out.
-        assert!(text.contains("registers: none"), "{text}");
+        // RISC-V's register file is written down ahead of its backend, and its timing model is
+        // not, and the dump says which of those two it is rather than leaving the line out.
+        assert!(text.contains("registers: gpr 32, fpr 32"), "{text}");
         assert!(text.contains("timing-model: none"), "{text}");
     }
 
