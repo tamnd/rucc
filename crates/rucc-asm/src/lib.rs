@@ -51,6 +51,7 @@ mod data;
 mod format;
 mod hook;
 mod instruction;
+mod intel;
 mod lines;
 mod sixteen;
 mod source;
