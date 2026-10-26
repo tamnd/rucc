@@ -3850,9 +3850,13 @@ impl Reader {
 
     /// The same, with `.` meaning `here`.
     fn expression_at(&mut self, text: &str, here: (usize, i64)) -> Result<Sum, Trouble> {
+        let text = text.trim();
+        if let Some(constant) = plain_number(text) {
+            return Ok(Sum::just(constant));
+        }
         let mut guessed = Vec::new();
         let parsed = Parser {
-            text: text.trim(),
+            text,
             at: 0,
             here,
             values: Some(&self.values),
@@ -6083,66 +6087,75 @@ fn wide(text: &str) -> Option<u128> {
     Some(if negative { value.wrapping_neg() } else { value })
 }
 
+/// A plain decimal or hexadecimal number, read without the parser.
+///
+/// Most operands of a long `.byte` or `.long` list are one, as in `kallsyms.S`, and the parser
+/// goes down through every level of precedence to find it. Anything else is `None` and goes to
+/// the parser: a leading zero is octal, and `1f` is a label.
+fn plain_number(text: &str) -> Option<i64> {
+    let (digits, radix) = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => (hex, 16),
+        None if text == "0" || !text.starts_with('0') => (text, 10),
+        None => return None,
+    };
+    let digit = |b: u8| if radix == 16 { b.is_ascii_hexdigit() } else { b.is_ascii_digit() };
+    if digits.is_empty() || digits.len() > 16 || !digits.bytes().all(digit) {
+        return None;
+    }
+    i64::from_str_radix(digits, radix).ok()
+}
+
 /// The brackets matter as much as the quotes: `.long (1 + 2), 3` is two operands and splitting on
 /// every comma would be right here and wrong the moment one turns up inside brackets.
 pub(crate) fn split(text: &str, on: char) -> Vec<String> {
+    // Every separator, quote and bracket is ASCII, and no byte of a longer UTF-8 character is,
+    // so the scan is over bytes and each piece is a slice of the text. Each piece is then
+    // copied once, which matters on a line that is a long list of `.byte` operands.
+    debug_assert!(on.is_ascii(), "{on:?} is not a separator split knows");
+    let on = u8::try_from(on).unwrap_or(0);
+    let bytes = text.as_bytes();
     let mut out = Vec::new();
-    let mut piece = String::new();
+    let mut start = 0;
     let mut depth = 0i32;
-    let mut quote = None;
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
-        if let Some(mark) = quote {
-            piece.push(ch);
-            if ch == '\\' {
-                if let Some(next) = chars.next() {
-                    piece.push(next);
-                }
-                continue;
-            }
-            if ch == mark {
-                quote = None;
+    let mut quoted = false;
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        at += 1;
+        if quoted {
+            match byte {
+                b'\\' => at += 1,
+                b'"' => quoted = false,
+                _ => {}
             }
             continue;
         }
-        match ch {
-            '"' => {
-                quote = Some(ch);
-                piece.push(ch);
-            }
+        match byte {
+            b'"' => quoted = true,
             // A character constant, which is one character whatever it is, so `','` is not the
             // end of an operand. Its closing quote is optional, as it is to gas.
-            '\'' => {
-                piece.push(ch);
-                let mut next = chars.next();
-                if next == Some('\\') {
-                    piece.push('\\');
-                    next = chars.next();
+            b'\'' => {
+                if bytes.get(at) == Some(&b'\\') {
+                    at += 1;
                 }
-                piece.extend(next);
-                if chars.clone().next() == Some('\'') {
-                    piece.push('\'');
-                    chars.next();
+                at += text.get(at..).and_then(|rest| rest.chars().next()).map_or(0, char::len_utf8);
+                if bytes.get(at) == Some(&b'\'') {
+                    at += 1;
                 }
             }
-            '(' => {
-                depth += 1;
-                piece.push(ch);
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ if byte == on && depth == 0 => {
+                out.push(text[start..at - 1].trim().to_owned());
+                start = at;
             }
-            ')' => {
-                depth -= 1;
-                piece.push(ch);
-            }
-            _ if ch == on && depth == 0 => {
-                out.push(std::mem::take(&mut piece));
-            }
-            _ => piece.push(ch),
+            _ => {}
         }
     }
-    if !piece.trim().is_empty() || !out.is_empty() {
-        out.push(piece);
+    let piece = text.get(start..).unwrap_or("").trim();
+    if !piece.is_empty() || !out.is_empty() {
+        out.push(piece.to_owned());
     }
-    out.into_iter().map(|piece| piece.trim().to_owned()).collect()
+    out
 }
 
 /// The byte a prefix written as a word is, for the ones a line may write in front of an instruction.
@@ -9372,5 +9385,36 @@ nop
         let kinds: Vec<_> =
             relocs(&read, ".text").into_iter().map(|(_, _, kind, _)| kind).collect();
         assert_eq!(kinds[..2], [Reference::Call, Reference::Call]);
+    }
+
+    /// Operands split on the commas outside brackets, quotes and character constants, each
+    /// trimmed, with a character that is longer than a byte kept whole.
+    #[test]
+    fn operands_split_on_the_commas_outside_brackets_and_quotes() {
+        assert_eq!(split(" 0x10, 0x54 ,0x73", ','), ["0x10", "0x54", "0x73"]);
+        assert_eq!(split("(1, 2), \"a,b\", ',', '\\,', 'é, x", ','), [
+            "(1, 2)",
+            "\"a,b\"",
+            "','",
+            "'\\,'",
+            "'é",
+            "x"
+        ]);
+        assert_eq!(split("\"a\\\",b\", c", ','), ["\"a\\\",b\"", "c"]);
+        assert_eq!(split("a;;b", ';'), ["a", "", "b"]);
+        assert!(split("  ", ',').is_empty());
+        assert_eq!(split("a,", ','), ["a", ""]);
+    }
+
+    /// The numbers read without the parser are the ones it would read the same way, and the
+    /// rest are left to it.
+    #[test]
+    fn a_plain_number_is_read_without_the_parser_and_nothing_else_is() {
+        for text in ["0", "7", "206766", "0x10", "0XfF", "0x7fffffffffffffff"] {
+            assert_eq!(plain_number(text), constant(text), "{text}");
+        }
+        for text in ["010", "1f", "2b", "0b1", "0x", "", "1_0", "10h", "-1", "0x1ffffffffffffffff"] {
+            assert_eq!(plain_number(text), None, "{text}");
+        }
     }
 }
