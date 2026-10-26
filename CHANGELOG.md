@@ -46,6 +46,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `into` and `bound` are written in thirty two bit code, where they still have their one byte opcodes. The x86 selftests `mov_ss_trap` and `entry_from_vm86` use them. (#3876)
 - Addresses made of sixteen bit registers, `(%bx)` or `-2(%bp,%si)`, are written after `.code16` with the sixteen bit addressing byte, the same bytes gas writes. The vm86 code in the x86 selftest `entry_from_vm86` uses them. (#3877)
 - `<unwind.h>` is shipped, declaring libgcc's unwinder the way gcc's header does, so a program can walk its own stack with `_Unwind_Backtrace`. The x86 selftest `unwind_vdso` builds with it and passes. (#3878)
+- The long `nop`, `nopw`, `nopl` and `nopq` with a register or an address, is encoded as `0f 1f /0`. The protection keys selftest lays down 512 of them by hand. (#3879)
 
 ## 0.30.12
 

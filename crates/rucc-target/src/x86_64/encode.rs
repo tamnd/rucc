@@ -2176,6 +2176,15 @@ static ENCODINGS: &[Encoding] = &[
     // asked for wants a whole number of bytes it can start at, so the reserved space is that many
     // one byte instructions and not the shortest sequence that adds up.
     bytes("nop", &NO_ARGS, Long, &[0x90], NO_MODRM, NO_IMM),
+    // The long forms, `0f 1f /0`, which take an operand only to have something to be as long as.
+    // gas writes them into the gaps it pads, and a program writes them by hand to lay down a run of
+    // code that does nothing, which the protection keys selftest does five hundred times over.
+    bytes("nopw", &R, Word, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopl", &R, Long, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopq", &R, Quad, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopw", &M, Word, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopl", &M, Long, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
+    bytes("nopq", &M, Quad, &[0x0F, 0x1F], ext(0, 0), NO_IMM),
     // The spin loop hint, which is the byte above with the repeat prefix in front of it. A machine
     // that has never heard of it decodes the prefix as having nothing to repeat and runs the `nop`,
     // which is why the hint could be added to the instruction set without breaking anything that
@@ -6658,6 +6667,17 @@ mod tests {
     fn the_landing_pad_is_four_bytes_and_none_of_them_are_worked_out() {
         assert_eq!(hex("endbr64", &[]), "f3 0f 1e fa");
         assert_eq!(hex("ud2", &[]), "0f 0b");
+    }
+
+    /// The long `nop`, whose operand is there only to make it longer, as gas writes each width.
+    #[test]
+    fn the_long_nop_is_as_long_as_its_operand_makes_it() {
+        let far = Addr { base: Some(RAX), disp: 0x7eee_eeee, ..Addr::default() };
+        assert_eq!(hex("nopl", &[Value::Mem(far)]), "0f 1f 80 ee ee ee 7e");
+        let near = Addr { base: Some(RAX), disp: 1, ..Addr::default() };
+        assert_eq!(hex("nopq", &[Value::Mem(near)]), "48 0f 1f 40 01");
+        assert_eq!(hex("nopl", &[long(RAX)]), "0f 1f c0");
+        assert_eq!(hex("nopw", &[Value::Reg(RAX, Width::Word)]), "66 0f 1f c0");
     }
 
     /// The two bytes the speculation hardening flags write, each on its own: the breakpoint that
