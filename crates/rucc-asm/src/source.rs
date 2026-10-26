@@ -9392,14 +9392,10 @@ nop
     #[test]
     fn operands_split_on_the_commas_outside_brackets_and_quotes() {
         assert_eq!(split(" 0x10, 0x54 ,0x73", ','), ["0x10", "0x54", "0x73"]);
-        assert_eq!(split("(1, 2), \"a,b\", ',', '\\,', 'é, x", ','), [
-            "(1, 2)",
-            "\"a,b\"",
-            "','",
-            "'\\,'",
-            "'é",
-            "x"
-        ]);
+        assert_eq!(
+            split("(1, 2), \"a,b\", ',', '\\,', 'é, x", ','),
+            ["(1, 2)", "\"a,b\"", "','", "'\\,'", "'é", "x"]
+        );
         assert_eq!(split("\"a\\\",b\", c", ','), ["\"a\\\",b\"", "c"]);
         assert_eq!(split("a;;b", ';'), ["a", "", "b"]);
         assert!(split("  ", ',').is_empty());
@@ -9413,7 +9409,8 @@ nop
         for text in ["0", "7", "206766", "0x10", "0XfF", "0x7fffffffffffffff"] {
             assert_eq!(plain_number(text), constant(text), "{text}");
         }
-        for text in ["010", "1f", "2b", "0b1", "0x", "", "1_0", "10h", "-1", "0x1ffffffffffffffff"] {
+        for text in ["010", "1f", "2b", "0b1", "0x", "", "1_0", "10h", "-1", "0x1ffffffffffffffff"]
+        {
             assert_eq!(plain_number(text), None, "{text}");
         }
     }
