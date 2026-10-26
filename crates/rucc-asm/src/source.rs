@@ -631,6 +631,9 @@ struct Reader {
     /// Whether `.code16` or `.code16gcc` is the mode instead, which is thirty two bit code with the
     /// defaults turned round (see [`crate::sixteen`]), and if so whether it was the gcc one.
     sixteen: Option<bool>,
+    /// Whether `.intel_syntax` is in effect, which an `asm` template says for its own lines and
+    /// takes back with `.att_syntax` (see [`crate::intel`]).
+    intel: bool,
     /// Whether the file is for Mach-O, where a section is named by its segment as well.
     macho: bool,
     /// Whether the file is for COFF, whose `.section` flags are letters of their own.
@@ -1326,6 +1329,12 @@ impl Reader {
             None => rest,
         };
         let mut args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
+        let intel;
+        let mut word = word;
+        if self.intel {
+            (intel, args) = crate::intel::att(word, &args).map_err(|why| self.bad(&why))?;
+            word = &intel;
+        }
         for arg in &mut args {
             if let Some(value) = self.fixed_now(arg) {
                 *arg = format!("${value}");
@@ -2322,8 +2331,8 @@ impl Reader {
             // rather than refused, because a file that carries them is otherwise readable and
             // refusing would turn a note into a failure.
             "ident" if self.elf() => self.ident(&args)?,
-            "ident" | "loc_mark_labels" | "version" | "arch" | "arch_extension" | "cpu"
-            | "att_syntax" | "intel_syntax" => {}
+            "ident" | "loc_mark_labels" | "version" | "arch" | "arch_extension" | "cpu" => {}
+            "att_syntax" | "intel_syntax" => self.intel = !self.aarch64 && word == "intel_syntax",
             "code32" | "code64" if !self.aarch64 => {
                 self.code = Some(if word == "code32" { Mode::Bits32 } else { Mode::Bits64 });
                 self.sixteen = None;
@@ -7151,6 +7160,22 @@ _tls$tlv$init:
         let mut want = vec![1, 2, 0, 3, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0];
         want.extend_from_slice(&[0x7f, 0xff, b'a', b'\n']);
         assert_eq!(bytes(&out, ".data"), want);
+    }
+
+    /// The lines between `.intel_syntax` and `.att_syntax` are read the other way round, which is
+    /// how bcachefs writes the template of its key comparison.
+    #[test]
+    fn intel_syntax_lasts_until_att_syntax() {
+        let intel = assembled(
+            "\t.text\n\t.intel_syntax noprefix\n\txor eax, eax\n\tmov r8, [rdi]\n\
+             \tlea rsi, [rsi - 8]\n\tsub ecx, 64\n\tshr r9, cl\n\t.att_syntax prefix\n\
+             \tmovl $1, %eax\n",
+        );
+        let att = assembled(
+            "\t.text\n\txorl %eax, %eax\n\tmovq (%rdi), %r8\n\tleaq -8(%rsi), %rsi\n\
+             \tsubl $64, %ecx\n\tshrq %cl, %r9\n\tmovl $1, %eax\n",
+        );
+        assert_eq!(bytes(&intel, ".text"), bytes(&att, ".text"));
     }
 
     #[test]
