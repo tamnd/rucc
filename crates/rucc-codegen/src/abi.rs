@@ -107,6 +107,7 @@ use crate::capability;
 use crate::varargs::Area;
 
 pub mod aarch64;
+pub mod riscv64;
 
 /// Why a parameter could not be brought in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

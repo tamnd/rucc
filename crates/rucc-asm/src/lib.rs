@@ -53,6 +53,7 @@ mod hook;
 mod instruction;
 mod intel;
 mod lines;
+mod rv;
 mod sixteen;
 mod source;
 mod unwind;
