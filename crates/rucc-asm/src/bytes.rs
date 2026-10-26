@@ -1156,7 +1156,8 @@ impl Assembler<'_> {
                     | Reference::AwayWide
                     | Reference::Short
                     | Reference::Tiny
-                    | Reference::Field(_) => {
+                    | Reference::Field(_)
+                    | Reference::Riscv(_) => {
                         unreachable!("an instruction wanting an address")
                     }
                     // The ways i386 reaches the global offset table and thread-local storage,

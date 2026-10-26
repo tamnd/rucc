@@ -199,6 +199,45 @@ impl Fixup {
             Fixup::TprelAdd => "R_RISCV_TPREL_ADD",
         }
     }
+
+    /// Whether it reaches a thread-local variable, which makes the name it reaches one.
+    #[must_use]
+    pub const fn thread(self) -> bool {
+        matches!(
+            self,
+            Fixup::TlsGotHi20
+                | Fixup::TprelHi20
+                | Fixup::TprelLo12I
+                | Fixup::TprelLo12S
+                | Fixup::TprelAdd
+        )
+    }
+
+    /// Whether it is a distance from the instruction it is in to somewhere in the same section,
+    /// which an assembler can work out on its own.
+    ///
+    /// Only the branches and `jal`. The `auipc` pairs are distances too, but gas leaves them to
+    /// the linker however near the name is, and so does this.
+    #[must_use]
+    pub const fn relative(self) -> bool {
+        matches!(self, Fixup::Branch | Fixup::Jal)
+    }
+
+    /// The word with the distance filled in, or `None` when it is odd, does not fit, or the
+    /// fixup is not one [`Fixup::relative`] says is worked out here.
+    #[must_use]
+    pub const fn apply(self, word: u32, value: i64) -> Option<u32> {
+        if value % 2 != 0 {
+            return None;
+        }
+        // The opcode bits are the only ones the two forms put anything in when every register is
+        // zero, so masking them off leaves just where the distance goes.
+        match self {
+            Fixup::Branch if fits(value, 13) => Some(word | (b(0, 0, 0, value) & !0x7f)),
+            Fixup::Jal if fits(value, 21) => Some(word | (j(0, value) & !0x7f)),
+            _ => None,
+        }
+    }
 }
 
 /// One instruction as words, and what is left to fill in.
@@ -421,12 +460,18 @@ pub const FAR: u8 = 30;
 /// The words `li` writes for a constant, which are the ones GNU as writes for it in the cases a
 /// program usually has: one `addi` for twelve bits, a `lui` and an `addiw` for thirty two, and
 /// for anything wider the upper part built the same way, shifted up and the low twelve bits added.
+/// An upper part of twelve bits is an `addiw`, which is what gas builds it with.
 fn li(rd: u8, imm: i64, words: &mut Vec<u32>) {
+    build(rd, imm, false, words);
+}
+
+/// The words for `li`, where `upper` says this is the upper part of a wider constant.
+fn build(rd: u8, imm: i64, upper: bool, words: &mut Vec<u32>) {
     if let Ok(small) = i32::try_from(imm) {
         let lo = low12(imm);
         let hi = (i64::from(small) - lo) >> 12;
         if hi == 0 {
-            words.push(i(0x13, 0, rd, ZERO, lo));
+            words.push(i(if upper { 0x1b } else { 0x13 }, 0, rd, ZERO, lo));
         } else {
             words.push(u(0x37, rd, hi));
             if lo != 0 {
@@ -440,7 +485,7 @@ fn li(rd: u8, imm: i64, words: &mut Vec<u32>) {
     let lo = low12(imm);
     let hi = imm.wrapping_sub(lo) >> 12;
     let shift = 12 + hi.trailing_zeros();
-    li(rd, hi >> (shift - 12), words);
+    build(rd, hi >> (shift - 12), true, words);
     words.push(i(0x13, 1, rd, rd, i64::from(shift)));
     if lo != 0 {
         words.push(i(0x13, 0, rd, rd, lo));
@@ -866,6 +911,10 @@ mod tests {
         assert_eq!(words(0x0012_3000), [0x0012_3537]);
         assert_eq!(li_words(0x1234_5678_9abc_def0), 8);
         assert_eq!(li_words(0x8000_0000), 2);
+        // Wider than thirty two bits, where the upper part of twelve bits is an `addiw`.
+        assert_eq!(words(0x3fe0_0000_0000_0000), [0x1ff0_051b, 0x0355_1513]);
+        assert_eq!(words(-0x8000_0001), [0xfff0_051b, 0x01f5_1513, 0xfff5_0513]);
+        assert_eq!(words(0x1_2345_6789), [0x0009_2537, 0xa2b5_051b, 0x00d5_1513, 0x7895_0513]);
     }
 
     /// Every constant `li` builds is the constant, which is checked by running the words.
@@ -877,7 +926,10 @@ mod tests {
                 let imm = i64::from((word as i32) >> 20);
                 reg = match word & 0x7f {
                     0x37 => i64::from((word & 0xffff_f000) as i32),
-                    0x1b => i64::from((reg.wrapping_add(imm)) as i32),
+                    0x1b => {
+                        let from = if (word >> 15) & 31 == 0 { 0 } else { reg };
+                        i64::from(from.wrapping_add(imm) as i32)
+                    }
                     0x13 if (word >> 12) & 7 == 1 => reg << (imm & 63),
                     0x13 => {
                         let from = if (word >> 15) & 31 == 0 { 0 } else { reg };
@@ -954,5 +1006,29 @@ mod tests {
         assert!(encode("b.ne", &[Value::Symbol(Operator::Plain)]).is_err());
         assert!(encode("add", &[Gpr(10), Fpr(10), Gpr(10)]).is_err());
         assert!(reaches(-2048) && !reaches(2048));
+    }
+
+    /// A distance filled in later is the word the encoder writes for the same distance now.
+    #[test]
+    fn a_distance_filled_in_later_is_the_word_written_with_it() {
+        let named = |mnemonic, values: &[Value]| {
+            let encoded = encode(mnemonic, values).unwrap_or_else(|why| panic!("{why}"));
+            (encoded.words[0], encoded.fixups[0].1)
+        };
+        let symbol = Value::Symbol(Operator::Plain);
+        for distance in [-4096, -2, 8, 4094] {
+            let (word, fixup) = named("bne", &[Gpr(10), Gpr(11), symbol]);
+            let filled = fixup.apply(word, distance);
+            assert_eq!(filled, Some(one("bne", &[Gpr(10), Gpr(11), Imm(distance)])), "{distance}");
+        }
+        for distance in [-(1 << 20), -2, 16, (1 << 20) - 2] {
+            let (word, fixup) = named("jal", &[Gpr(1), symbol]);
+            assert_eq!(fixup.apply(word, distance), Some(one("jal", &[Gpr(1), Imm(distance)])));
+        }
+        let (word, fixup) = named("beqz", &[Gpr(10), symbol]);
+        assert_eq!(fixup.apply(word, 4096), None);
+        assert_eq!(fixup.apply(word, 3), None);
+        assert_eq!(Fixup::CallPlt.apply(0, 8), None);
+        assert!(Fixup::TprelAdd.thread() && !Fixup::PcrelHi20.thread());
     }
 }

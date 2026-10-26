@@ -20,6 +20,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A verified riscv64 rule set with 262 rules covering integer and float arithmetic, comparisons, widenings, loads, stores and conversions. Nothing uses it yet (#3885).
 - The riscv64 selector, LP64D argument and return lowering, and the riscv64 machine, so a riscv64 function is now lowered, selected and allocated, and `--emit=mir-final` works for it. `-S` and `-c` are still refused for riscv64. A jump table on a machine with no index register in its addresses shifts and adds the index first (#3891).
 - `-S` writes RISC-V assembly for riscv64. The output assembles with binutils, and a test program built from it runs under qemu and matches gcc on everything but variadic calls (#3892).
+- `rucc_target::riscv64::read` reads one line of RISC-V assembly back into the operands the encoder takes, the first step toward `-c` on riscv64 (#3894).
+- `rucc --target=riscv64-linux-gnu -c` writes an ELF object with the integrated assembler, with the riscv64 relocations, `.eh_frame` and the double float ABI flag (#3895).
 
 ### Fixed
 
@@ -55,6 +57,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The long `nop`, `nopw`, `nopl` and `nopq` with a register or an address, is encoded as `0f 1f /0`. The protection keys selftest lays down 512 of them by hand. (#3879)
 - The assembler reads `.intel_syntax noprefix` blocks inside inline asm, which bcachefs uses for its key comparison, and takes the Intel names of the widening instructions such as `cdq`, which the Xen entry code in head_64.S uses (#3886).
 - An x86 inline asm template that names several locals in memory reads each one from the stack pointer, instead of putting every address but one in a register. `smapi.o` in the kernel names nine locals and clobbers six registers, and the allocator panicked on it (#3888).
+- A variadic call on riscv64 passes the unnamed arguments in the integer registers, as LP64D says, and a variadic function homes a0 to a7 below the caller's stack arguments so `va_arg` walks them with a `void *` (#3893).
 
 ## 0.30.12
 
