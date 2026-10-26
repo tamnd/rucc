@@ -419,7 +419,7 @@ pub static MACHINE: MachineInsts = MachineInsts {
     touches_mem: machine_touches_mem,
     calls: machine_calls,
     commutes: machine_commutes,
-    scales: &[1],
+    scales: &[],
     index_and_disp: false,
 };
 

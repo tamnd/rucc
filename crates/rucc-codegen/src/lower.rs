@@ -4489,8 +4489,34 @@ impl<'a> Lowering<'a> {
         let mem = self.counted_from_table(mir::Mem::table(table));
         self.out.build(block, near).at(span).def(base, gpr).mem(mem).finish();
         let offset = self.out.new_vreg(gpr);
-        let cell =
-            mir::Mem::at(mir::Operand::read(base, gpr)).indexed(mir::Operand::read(reg, gpr), 4);
+        let cell = match jumps.scale {
+            None => {
+                mir::Mem::at(mir::Operand::read(base, gpr)).indexed(mir::Operand::read(reg, gpr), 4)
+            }
+            // The index times four and the table's address added, where no address scales.
+            Some(shift) => {
+                let scaled = self.out.new_vreg(gpr);
+                let shift = self.named(shift);
+                let read = mir::Operand::read(reg, gpr);
+                self.out
+                    .build(block, shift)
+                    .at(span)
+                    .def(scaled, gpr)
+                    .operand(read)
+                    .imm(2)
+                    .finish();
+                let at = self.out.new_vreg(gpr);
+                let add = self.named(jumps.add);
+                self.out
+                    .build(block, add)
+                    .at(span)
+                    .def(at, gpr)
+                    .operand(mir::Operand::read(scaled, gpr))
+                    .operand(mir::Operand::read(base, gpr))
+                    .finish();
+                mir::Mem::at(mir::Operand::read(at, gpr))
+            }
+        };
         let load = self.named(jumps.cell);
         self.out.build(block, load).at(span).def(offset, gpr).mem(cell).finish();
         // Two address on x86-64, for the reason `thread_pointer` gives.

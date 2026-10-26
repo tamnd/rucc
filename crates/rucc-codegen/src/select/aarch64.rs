@@ -40,6 +40,7 @@ pub static SELECTOR: super::Selector = super::Selector {
         cell: "ldrs_32_64",
         add: "add_rr_64",
         two_address: false,
+        scale: None,
     },
 };
 

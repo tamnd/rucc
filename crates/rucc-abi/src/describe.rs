@@ -305,8 +305,8 @@ pub enum Narrow {
 /// What the bits above a `_BitInt` narrower than its register are when it travels in one.
 ///
 /// A separate question from [`Narrow`], because the documents answer it separately. RISC-V
-/// leaves the bits above a `char` alone and extends a `_BitInt(N)` to the whole register, and
-/// AAPCS64 has a `_BitInt` section of its own that is not the one for `char`.
+/// extends a `char` to 32 bits and a `_BitInt(N)` to the whole register, and AAPCS64 has a
+/// `_BitInt` section of its own that is not the one for `char`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitInts {
     /// Anything, both ways. The side that receives the value reads only its own bits, and the
