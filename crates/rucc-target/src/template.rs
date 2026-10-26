@@ -21,6 +21,36 @@ pub fn template_mem_at(offset: i64) -> String {
     format!("\u{1}m{offset}\u{2}")
 }
 
+/// A local in the function's frame a kept template names, that many bytes into it, held the same
+/// way. The instruction has one memory operand and the text may name more than one local, so the
+/// others are spelled into the text by [`template_locals`] once the frame is laid out. See
+/// [`TEMPLATE_MEM`].
+#[must_use]
+pub fn template_frame(local: usize, offset: i64) -> String {
+    format!("\u{1}f{local}{offset:+}\u{2}")
+}
+
+/// A kept template's text with the locals in it filled by `at`, which is handed the local and the
+/// offset [`template_frame`] kept and says the address, and every other hole left for
+/// [`template_filled`]. `None` when a local is one `at` has no address for.
+#[must_use]
+pub fn template_locals(text: &str, at: impl Fn(usize, i64) -> Option<String>) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\u{1}f") {
+        out.push_str(&rest[..start]);
+        let hole = &rest[start + 2..];
+        let end = hole.find('\u{2}').unwrap_or(hole.len());
+        let sign = hole[..end].find(['+', '-'])?;
+        let local = hole[..sign].parse().ok()?;
+        let offset = hole[sign..end].trim_start_matches('+').parse().ok()?;
+        out.push_str(&at(local, offset)?);
+        rest = hole.get(end + 1..).unwrap_or("");
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
 /// A name a kept template names, held the same way so the writer can spell it the way the object
 /// format wants names spelled. See [`TEMPLATE_MEM`].
 #[must_use]
@@ -96,6 +126,9 @@ pub fn template_filled(
                 Err(_) => out.push_str(mem),
             },
             Some(("n", named)) => out.push_str(&name(named)),
+            // A local [`template_locals`] did not fill is left as it is, for the assembler to
+            // refuse, rather than dropped from the text.
+            Some(("f", _)) => out.push_str(&rest[at..=at + end + 1]),
             Some(("r", held)) => {
                 let (at, width) = held.split_at(held.len().saturating_sub(1));
                 if let (Ok(at), Some(width)) = (at.parse(), width.chars().next()) {

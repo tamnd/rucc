@@ -351,20 +351,31 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_set_ls_64", CmpSet),
     ("cmp_set_hi_64", CmpSet),
     ("cmp_set_hs_64", CmpSet),
+    ("cmp_set_lt_32", CmpSet),
+    ("cmp_set_le_32", CmpSet),
+    ("cmp_set_gt_32", CmpSet),
+    ("cmp_set_ge_32", CmpSet),
+    ("cmp_set_lo_32", CmpSet),
+    ("cmp_set_ls_32", CmpSet),
+    ("cmp_set_hi_32", CmpSet),
+    ("cmp_set_hs_32", CmpSet),
     // A choice between two registers on a byte, which is a copy and a branch around a second one.
     ("sel_32", Select),
     ("sel_64", Select),
     // The test the layout writes in front of a branch on a byte, which it folds into the branch.
     ("test", Test),
     // Addresses: a base and a constant, a symbol near enough to reach from the code, a symbol
-    // through the global offset table, and the thread pointer.
+    // through the global offset table, a thread-local variable's offset from the thread pointer
+    // through the table, and the thread pointer.
     ("lea_64", Lea),
     ("lea_far_64", Lea),
     ("addr_64", Address),
     ("got_64", Address),
+    ("gottprel_64", Address),
     ("thread_64", Address),
     // Loads, unsigned and signed.
     ("ld_8", Load),
+    ("ld_bit", Load),
     ("ld_16", Load),
     ("ld_32", Load),
     ("ld_64", Load),
@@ -374,6 +385,7 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ldu_32", Load),
     // Stores.
     ("st_8", Store),
+    ("st_bit", Store),
     ("st_16", Store),
     ("st_32", Store),
     ("st_64", Store),
@@ -406,8 +418,8 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fmv_f32", FMove),
     ("fmv_f64", FMove),
     // Between the two floating point widths.
-    ("fcvt_f64_f32", FConvert),
     ("fcvt_f32_f64", FConvert),
+    ("fcvt_f64_f32", FConvert),
     // From an integer to a float, and back, rounding toward zero the way C does. The names are the
     // AArch64 ones, the source and then the destination.
     ("scvtf_32_f32", IntToFp),

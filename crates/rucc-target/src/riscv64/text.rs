@@ -250,9 +250,11 @@ static TEXT: &[(&str, &[Written])] = &[
     ("bit_to_16", &[spell("andi", &[Reg(0, H), Reg(1, B), Lit(1)])]),
     ("bit_to_32", &[spell("andi", &[Reg(0, W), Reg(1, B), Lit(1)])]),
     ("bit_to_64", &[spell("andi", &[Reg(0, X), Reg(1, B), Lit(1)])]),
+    // Narrowing. Above a byte or a half nothing is promised, so those are a copy. A word is kept
+    // sign extended, which is what every reader of one on this machine counts on.
     ("low_8", &[spell("mv", &[Reg(0, B), Reg(1, B)])]),
     ("low_16", &[spell("mv", &[Reg(0, H), Reg(1, H)])]),
-    ("low_32", &[spell("mv", &[Reg(0, W), Reg(1, W)])]),
+    ("low_32", &[spell("sext.w", &[Reg(0, W), Reg(1, W)])]),
     ("bit_of_32", &[spell("andi", &[Reg(0, W), Reg(1, W), Imm])]),
     ("bit_of_64", &[spell("andi", &[Reg(0, W), Reg(1, X), Imm])]),
     // Comparisons that keep their answer. Equality is whether the difference is zero, which for
@@ -282,6 +284,16 @@ static TEXT: &[(&str, &[Written])] = &[
     ("cmp_set_ls_64", &[spell("sltu", RRR_X_SWAPPED), FLIP]),
     ("cmp_set_hi_64", &[spell("sltu", RRR_X_SWAPPED)]),
     ("cmp_set_hs_64", &[spell("sltu", RRR_X), FLIP]),
+    // A thirty two bit value is kept sign extended in its register, so the comparisons of the
+    // whole register give the answer for the low half, signed and unsigned.
+    ("cmp_set_lt_32", &[spell("slt", RRR_XW)]),
+    ("cmp_set_le_32", &[spell("slt", RRR_XW_SWAPPED), FLIP]),
+    ("cmp_set_gt_32", &[spell("slt", RRR_XW_SWAPPED)]),
+    ("cmp_set_ge_32", &[spell("slt", RRR_XW), FLIP]),
+    ("cmp_set_lo_32", &[spell("sltu", RRR_XW)]),
+    ("cmp_set_ls_32", &[spell("sltu", RRR_XW_SWAPPED), FLIP]),
+    ("cmp_set_hi_32", &[spell("sltu", RRR_XW_SWAPPED)]),
+    ("cmp_set_hs_32", &[spell("sltu", RRR_XW), FLIP]),
     // The second source when the byte is not zero, and the first when it is.
     (
         "sel_32",
@@ -307,10 +319,12 @@ static TEXT: &[(&str, &[Written])] = &[
     ("lea_far_64", &[spell("lea.far", &[Reg(0, X), Mem])]),
     ("addr_64", &[spell("lla", &[Reg(0, X), Symbol])]),
     ("got_64", &[spell("la", &[Reg(0, X), Symbol])]),
+    ("gottprel_64", &[spell("la.tls.ie", &[Reg(0, X), Symbol])]),
     ("thread_64", &[spell("mv", &[Reg(0, X), Fixed(TP)])]),
     // Loads. A load of thirty two bits sign extends, which is the right answer for an `int` and a
     // harmless one for anything that reads only the low half.
     ("ld_8", &[spell("lbu", &[Reg(0, X), Mem])]),
+    ("ld_bit", &[spell("lbu", &[Reg(0, B), Mem])]),
     ("ld_16", &[spell("lhu", &[Reg(0, X), Mem])]),
     ("ld_32", &[spell("lw", &[Reg(0, W), Mem])]),
     ("ld_64", &[spell("ld", &[Reg(0, X), Mem])]),
@@ -320,6 +334,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ldu_32", &[spell("lwu", &[Reg(0, X), Mem])]),
     // Stores.
     ("st_8", &[spell("sb", &[Reg(0, B), Mem])]),
+    ("st_bit", &[spell("sb", &[Reg(0, B), Mem])]),
     ("st_16", &[spell("sh", &[Reg(0, H), Mem])]),
     ("st_32", &[spell("sw", &[Reg(0, W), Mem])]),
     ("st_64", &[spell("sd", &[Reg(0, X), Mem])]),
@@ -350,8 +365,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("fabs_f64", &[spell("fabs.d", FF)]),
     ("fmv_f32", &[spell("fmv.s", FF)]),
     ("fmv_f64", &[spell("fmv.d", FF)]),
-    ("fcvt_f64_f32", &[spell("fcvt.d.s", FF)]),
-    ("fcvt_f32_f64", &[spell("fcvt.s.d", FF)]),
+    ("fcvt_f32_f64", &[spell("fcvt.d.s", FF)]),
+    ("fcvt_f64_f32", &[spell("fcvt.s.d", FF)]),
     ("scvtf_32_f32", &[spell("fcvt.s.w", &[Fp(0), Reg(1, W)])]),
     ("scvtf_32_f64", &[spell("fcvt.d.w", &[Fp(0), Reg(1, W)])]),
     ("scvtf_64_f32", &[spell("fcvt.s.l", &[Fp(0), Reg(1, X)])]),
@@ -460,6 +475,8 @@ static TEXT: &[(&str, &[Written])] = &[
 
 const RR_X0: &[Arg] = &[Reg(0, X), Reg(0, X)];
 const RRR_X_SWAPPED: &[Arg] = &[Reg(0, X), Reg(2, X), Reg(1, X)];
+const RRR_XW: &[Arg] = &[Reg(0, X), Reg(1, W), Reg(2, W)];
+const RRR_XW_SWAPPED: &[Arg] = &[Reg(0, X), Reg(2, W), Reg(1, W)];
 
 /// The instructions the opcode of that name is written as.
 ///
@@ -666,6 +683,7 @@ mod tests {
         assert_eq!(listing("sra_ri_8", &shift), ["slli a0, a1, 56", "srai a0, a0, 59"]);
         assert_eq!(listing("addr_64", &with), ["lla a0, s"]);
         assert_eq!(listing("got_64", &with), ["la a0, s"]);
+        assert_eq!(listing("gottprel_64", &with), ["la.tls.ie a0, s"]);
         assert_eq!(listing("thread_64", &with), ["mv a0, tp"]);
         assert_eq!(listing("call", &with), ["call s"]);
         assert_eq!(listing("call_reg", &with), ["jalr a1"]);

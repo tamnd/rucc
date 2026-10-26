@@ -316,11 +316,85 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
     ("cttz.i64", "the same", "tamnd/rucc#310"),
 ];
 
+/// [`NAMES`] for `riscv64.rules`, a list of its own for the reason [`AARCH64_NAMES`] gives.
+pub static RISCV64_NAMES: &[(&str, &str, &str)] = &[
+    (
+        "add.i16x8",
+        "an integer vector, which nothing on this machine carries yet",
+        "tamnd/rucc#3284",
+    ),
+    ("add.i32x4", "the same", "tamnd/rucc#3284"),
+    ("add.i64x2", "the same", "tamnd/rucc#3284"),
+    ("add.i8x16", "the same", "tamnd/rucc#3284"),
+    ("and.i16x8", "the same", "tamnd/rucc#3284"),
+    ("and.i32x4", "the same", "tamnd/rucc#3284"),
+    ("and.i64x2", "the same", "tamnd/rucc#3284"),
+    ("and.i8x16", "the same", "tamnd/rucc#3284"),
+    ("load.i16x8", "the same", "tamnd/rucc#3284"),
+    ("load.i32x4", "the same", "tamnd/rucc#3284"),
+    ("load.i64x2", "the same", "tamnd/rucc#3284"),
+    ("load.i8x16", "the same", "tamnd/rucc#3284"),
+    ("or.i16x8", "the same", "tamnd/rucc#3284"),
+    ("or.i32x4", "the same", "tamnd/rucc#3284"),
+    ("or.i64x2", "the same", "tamnd/rucc#3284"),
+    ("or.i8x16", "the same", "tamnd/rucc#3284"),
+    ("store.i16x8", "the same", "tamnd/rucc#3284"),
+    ("store.i32x4", "the same", "tamnd/rucc#3284"),
+    ("store.i64x2", "the same", "tamnd/rucc#3284"),
+    ("store.i8x16", "the same", "tamnd/rucc#3284"),
+    ("sub.i16x8", "the same", "tamnd/rucc#3284"),
+    ("sub.i32x4", "the same", "tamnd/rucc#3284"),
+    ("sub.i64x2", "the same", "tamnd/rucc#3284"),
+    ("sub.i8x16", "the same", "tamnd/rucc#3284"),
+    ("xor.i16x8", "the same", "tamnd/rucc#3284"),
+    ("xor.i32x4", "the same", "tamnd/rucc#3284"),
+    ("xor.i64x2", "the same", "tamnd/rucc#3284"),
+    ("xor.i8x16", "the same", "tamnd/rucc#3284"),
+    ("load.f16", "a half, which nothing on this machine carries yet", "tamnd/rucc#3284"),
+    ("ret.f16", "the same, returned in `fa0`", "tamnd/rucc#3284"),
+    ("bitcast.f16.i16", "the same, as the bits a constant or a negation is", "tamnd/rucc#3284"),
+    ("bitcast.i16.f16", "the same, the other way", "tamnd/rucc#3284"),
+    (
+        "load.f128",
+        "a `long double`, which is a quad here and has no rules on this machine yet",
+        "tamnd/rucc#3284",
+    ),
+    ("store.f128", "the same", "tamnd/rucc#3284"),
+    ("ret.f128", "the same, returned in `a0` and `a1`", "tamnd/rucc#3284"),
+    (
+        "umulh.i32",
+        "the high half of a thirty two bit product, which only a division by a constant on a \
+         machine of thirty two bits writes: this one divides a word by multiplying at sixty four",
+        "tamnd/rucc#2247",
+    ),
+    ("smulh.i32", "the same, signed", "tamnd/rucc#2247"),
+    (
+        "ctlz.i32",
+        "a bit count, which `expand::counts` writes as arithmetic before selection on a machine \
+         with no count instruction",
+        "tamnd/rucc#310",
+    ),
+    ("ctlz.i64", "the same", "tamnd/rucc#310"),
+    ("ctpop.i32", "the same", "tamnd/rucc#310"),
+    ("ctpop.i64", "the same", "tamnd/rucc#310"),
+    ("cttz.i32", "the same", "tamnd/rucc#310"),
+    ("cttz.i64", "the same", "tamnd/rucc#310"),
+    (
+        "bswap.i16",
+        "a byte swap, which `expand::bytes` writes out as shifts and masks before selection",
+        "tamnd/rucc#307",
+    ),
+    ("bswap.i32", "the same", "tamnd/rucc#307"),
+    ("bswap.i64", "the same", "tamnd/rucc#307"),
+];
+
 /// The names left for later in the rule file `table` is built from.
 #[must_use]
 pub fn names(table: &Table) -> &'static [(&'static str, &'static str, &'static str)] {
     if table.source == crate::select::aarch64::TABLE.source {
         AARCH64_NAMES
+    } else if table.source == crate::select::riscv64::TABLE.source {
+        RISCV64_NAMES
     } else if table.source == crate::select::x86::TABLE.source {
         X86_NAMES
     } else {
@@ -452,7 +526,8 @@ pub fn table(arch: Arch) -> Option<&'static Table> {
         Arch::X86_64 => Some(&crate::select::x86_64::TABLE),
         Arch::Aarch64 => Some(&crate::select::aarch64::TABLE),
         Arch::X86 => Some(&crate::select::x86::TABLE),
-        Arch::Riscv64 | Arch::Wasm32 => None,
+        Arch::Riscv64 => Some(&crate::select::riscv64::TABLE),
+        Arch::Wasm32 => None,
     }
 }
 
@@ -547,8 +622,13 @@ mod tests {
     use crate::select::x86_64::TABLE;
 
     /// Every rule file there is, since each claim below is about a rule set and holds for each.
-    fn tables() -> [&'static Table; 3] {
-        [&TABLE, &crate::select::aarch64::TABLE, &crate::select::x86::TABLE]
+    fn tables() -> [&'static Table; 4] {
+        [
+            &TABLE,
+            &crate::select::aarch64::TABLE,
+            &crate::select::riscv64::TABLE,
+            &crate::select::x86::TABLE,
+        ]
     }
 
     /// The claim the whole module is for, in the direction that matters: a name an instruction
@@ -676,6 +756,7 @@ mod tests {
             .chain(WIDTHS.iter().map(|&(_, _, issue)| issue))
             .chain(NAMES.iter().map(|&(_, _, issue)| issue))
             .chain(AARCH64_NAMES.iter().map(|&(_, _, issue)| issue))
+            .chain(RISCV64_NAMES.iter().map(|&(_, _, issue)| issue))
             .chain(X86_NAMES.iter().map(|&(_, _, issue)| issue));
         for issue in issues {
             let number = issue
@@ -734,7 +815,7 @@ mod tests {
         }
     }
 
-    /// The three targets with a rule file, and the one still waiting for one. A machine that can be
+    /// The four targets with a rule file, and the one still waiting for one. A machine that can be
     /// compiled for has rules to report the coverage of, and one that cannot has none rather than
     /// an empty set of them, which are different answers and would read the same as a number.
     #[test]
@@ -748,7 +829,10 @@ mod tests {
         let i386 = table(Arch::X86).expect("i386 has a rule file");
         assert_eq!(i386.source, crate::select::x86::TABLE.source);
         assert!(!i386.rules.is_empty());
-        assert!(table(Arch::Riscv64).is_none(), "there is no riscv64 rule file yet");
+        let rv = table(Arch::Riscv64).expect("riscv64 has a rule file");
+        assert_eq!(rv.source, crate::select::riscv64::TABLE.source);
+        assert!(!rv.rules.is_empty());
+        assert!(table(Arch::Wasm32).is_none(), "there is no wasm32 rule file");
     }
 
     /// What a rule is called outside this process. The index is not it: a rule added at the top of

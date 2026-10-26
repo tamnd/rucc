@@ -137,9 +137,9 @@ fn an_operand_in_memory_is_the_object_it_names() {
 
 #[test]
 fn two_locals_in_memory_are_each_written_where_they_are() {
-    // The kernel's `has_fpu` in `arch/x86/boot/cpuflags.c`. Only one operand can be the
-    // instruction's own and be named from the stack pointer, so the other has its address put in
-    // a register first, and each store goes to the object it names.
+    // The kernel's `has_fpu` in `arch/x86/boot/cpuflags.c`. Both are named from the stack pointer,
+    // the first as the instruction's own operand and the second through a hole the frame fills,
+    // and each store goes to the object it names.
     let source = "int f(void) { unsigned short fcw = -1, fsw = -1;\n\
                   asm volatile (\"fninit ; fnstsw %0 ; fnstcw %1\" : \"+m\" (fsw), \"+m\" (fcw));\n\
                   return fsw == 0 && (fcw & 0x103f) == 0x003f; }\n";
@@ -147,10 +147,43 @@ fn two_locals_in_memory_are_each_written_where_they_are() {
         let (ok, text, said) = run_with("two-locals", source, &[level]);
         assert!(ok, "the compiler refused the fixture at {level}:\n{said}");
         let body = body(&text, "f");
-        let lea = body.lines().find(|line| line.contains("leaq")).expect("an address is taken");
-        let reg = lea.rsplit(", ").next().expect("the lea names a register").trim();
-        assert!(body.contains("fnstsw -") && body.contains("(%rsp) ;"), "{level}:\n{body}");
-        assert!(body.contains(&format!("fnstcw ({reg})")), "{level}:\n{body}");
+        let at = |word: &str| {
+            let line =
+                body.lines().find(|line| line.contains(word)).expect("the template is there");
+            let after = &line[line.find(word).expect("found") + word.len()..];
+            after.trim_start().split([' ', ';']).next().expect("an operand").to_owned()
+        };
+        let (status, control) = (at("fnstsw"), at("fnstcw"));
+        assert!(status.ends_with("(%rsp)") && control.ends_with("(%rsp)"), "{level}:\n{body}");
+        assert_ne!(status, control, "{level}:\n{body}");
+        assert!(!body.contains("leaq"), "{level}:\n{body}");
+    }
+}
+
+#[test]
+fn a_template_naming_more_locals_than_there_are_registers_left_compiles() {
+    // The kernel's `smapi_request` in `drivers/char/mwave/smapi.c`: seven locals written as `"=m"`
+    // through pointers to them, two read as `"m"`, a static, and six registers clobbered. An
+    // address in a register for each local is more registers than x86-64 has.
+    let source = "static unsigned short port;\n\
+        int f(unsigned short a, unsigned short b) {\n\
+        unsigned short o1 = 2, *p1 = &o1, o2 = 3, *p2 = &o2, o3 = 4, *p3 = &o3, o4 = 5, *p4 = &o4;\n\
+        unsigned short o5 = 6, *p5 = &o5, o6 = 7, *p6 = &o6, o7 = 8, *p7 = &o7;\n\
+        unsigned int x = (a << 16) | b, y = (b << 16) | a;\n\
+        __asm__ __volatile__(\"movl %7,%%ebx\\n\\tmovw %9,%%dx\\n\\tmovw %%ax,%0\\n\\tmovw $1,%6\"\n\
+            : \"=m\"(*p1), \"=m\"(*p2), \"=m\"(*p3), \"=m\"(*p4), \"=m\"(*p5), \"=m\"(*p6), \"=m\"(*p7)\n\
+            : \"m\"(x), \"m\"(y), \"m\"(port)\n\
+            : \"%eax\", \"%ebx\", \"%ecx\", \"%edx\", \"%edi\", \"%esi\");\n\
+        return o1 + o2 + o3 + o4 + o5 + o6 + o7; }\n";
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = run_with("many-locals", source, &[level]);
+        assert!(ok, "the compiler refused the fixture at {level}:\n{said}");
+        let body = body(&text, "f");
+        assert!(!body.contains('\u{1}'), "every hole is filled at {level}:\n{body}");
+        // At -O2 the pointers are gone and each output is the local itself.
+        if level == "-O2" {
+            assert!(body.contains("movw %ax,-") && body.contains("movw $1,-"), "{body}");
+        }
     }
 }
 

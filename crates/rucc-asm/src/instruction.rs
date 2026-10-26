@@ -1271,6 +1271,19 @@ fn aliased(word: &str, mode: Mode) -> Option<String> {
     if word == "ud2a" {
         return Some("ud2".to_owned());
     }
+    // The Intel names for the widenings a division needs, which gas takes in AT&T mode too. The
+    // Xen entry in `head_64.S` writes `cdq` before a `wrmsr`.
+    let intel = [
+        ("cbw", "cbtw"),
+        ("cwd", "cwtd"),
+        ("cdq", "cltd"),
+        ("cqo", "cqto"),
+        ("cwde", "cwtl"),
+        ("cdqe", "cltq"),
+    ];
+    if let Some((_, known)) = intel.iter().find(|(written, _)| *written == word) {
+        return Some((*known).to_owned());
+    }
     // A push and a pop move eight bytes in long mode and there is no other width of either, so the
     // letter is not a thing a file has to write and mostly is not written. The letter cannot be
     // worked out from the operands the way every other one is, because an address says nothing
@@ -1666,6 +1679,21 @@ fn joined(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Whether a name with no sigil is a register, and for a general purpose one the letter gas puts on
+/// an instruction of its width. What [`crate::intel`] needs to tell a register from a name.
+pub(crate) fn named_register(name: &str) -> Option<Option<char>> {
+    match register(name).ok()? {
+        Operand::Reg(_, width) => Some(Some(match width {
+            Width::Byte => 'b',
+            Width::Word => 'w',
+            Width::Long => 'l',
+            Width::Quad => 'q',
+        })),
+        Operand::High(_) => Some(Some('b')),
+        _ => Some(None),
+    }
 }
 
 /// A register, without its sigil.
@@ -2401,6 +2429,12 @@ mod tests {
         assert_eq!(bytes("retq"), [0xc3]);
         assert_eq!(bytes("callq *%rax"), [0xff, 0xd0]);
         assert_eq!(bytes("leaveq"), [0xc9]);
+        assert_eq!(bytes("cdq"), [0x99]);
+        assert_eq!(bytes("cqo"), [0x48, 0x99]);
+        assert_eq!(bytes("cdqe"), [0x48, 0x98]);
+        assert_eq!(bytes("cwde"), [0x98]);
+        assert_eq!(bytes("cbw"), [0x66, 0x98]);
+        assert_eq!(bytes("cwd"), [0x66, 0x99]);
     }
 
     #[test]
