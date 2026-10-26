@@ -136,6 +136,9 @@ pub enum Fixup {
     PcrelLo12S,
     /// The upper twenty bits of the distance to the symbol's global offset table entry.
     GotHi20,
+    /// The upper twenty bits of the distance to the global offset table entry that holds a
+    /// thread-local variable's offset from the thread pointer, which is `la.tls.ie`.
+    TlsGotHi20,
     /// The upper twenty bits of the address, in a `lui`.
     Hi20,
     /// The low twelve bits of the address, in an `addi` or a load.
@@ -161,6 +164,7 @@ impl Fixup {
             Fixup::Jal => 17,
             Fixup::CallPlt => 19,
             Fixup::GotHi20 => 20,
+            Fixup::TlsGotHi20 => 21,
             Fixup::PcrelHi20 => 23,
             Fixup::PcrelLo12I => 24,
             Fixup::PcrelLo12S => 25,
@@ -182,6 +186,7 @@ impl Fixup {
             Fixup::Jal => "R_RISCV_JAL",
             Fixup::CallPlt => "R_RISCV_CALL_PLT",
             Fixup::GotHi20 => "R_RISCV_GOT_HI20",
+            Fixup::TlsGotHi20 => "R_RISCV_TLS_GOT_HI20",
             Fixup::PcrelHi20 => "R_RISCV_PCREL_HI20",
             Fixup::PcrelLo12I => "R_RISCV_PCREL_LO12_I",
             Fixup::PcrelLo12S => "R_RISCV_PCREL_LO12_S",
@@ -608,9 +613,14 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
             out.words.push(u(0x17, through, 0));
             out.words.push(i(0x67, 0, link, through, 0));
         }
-        ("lla" | "la", [Gpr(rd), Symbol(Operator::Plain)]) => {
-            let got = mnemonic == "la";
-            out.fixups.push((0, if got { Fixup::GotHi20 } else { Fixup::PcrelHi20 }));
+        ("lla" | "la" | "la.tls.ie", [Gpr(rd), Symbol(Operator::Plain)]) => {
+            let got = mnemonic != "lla";
+            let hi = match mnemonic {
+                "lla" => Fixup::PcrelHi20,
+                "la" => Fixup::GotHi20,
+                _ => Fixup::TlsGotHi20,
+            };
+            out.fixups.push((0, hi));
             out.fixups.push((1, Fixup::PcrelLo12I));
             out.words.push(u(0x17, *rd, 0));
             out.words.push(if got { i(0x03, 3, *rd, *rd, 0) } else { i(0x13, 0, *rd, *rd, 0) });
@@ -910,6 +920,10 @@ mod tests {
         assert_eq!(tail.words, [0x0000_0317, 0x0003_0067]);
         let la = encode("lla", &[Gpr(10), Value::Symbol(Operator::Plain)]).unwrap();
         assert_eq!(la.fixups, [(0, Fixup::PcrelHi20), (1, Fixup::PcrelLo12I)]);
+        let ie = encode("la.tls.ie", &[Gpr(10), Value::Symbol(Operator::Plain)]).unwrap();
+        assert_eq!(ie.words, [0x0000_0517, 0x0005_3503]);
+        assert_eq!(ie.fixups, [(0, Fixup::TlsGotHi20), (1, Fixup::PcrelLo12I)]);
+        assert_eq!(Fixup::TlsGotHi20.elf(), 21);
         let branch = encode("bnez", &[Gpr(10), Value::Symbol(Operator::Plain)]).unwrap();
         assert_eq!((branch.words[0], branch.fixups[0].1.elf()), (0x0005_1063, 16));
         assert_eq!(one("beqz", &[Gpr(10), Imm(8)]), 0x0005_0463);

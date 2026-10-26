@@ -319,6 +319,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("lea_far_64", &[spell("lea.far", &[Reg(0, X), Mem])]),
     ("addr_64", &[spell("lla", &[Reg(0, X), Symbol])]),
     ("got_64", &[spell("la", &[Reg(0, X), Symbol])]),
+    ("gottprel_64", &[spell("la.tls.ie", &[Reg(0, X), Symbol])]),
     ("thread_64", &[spell("mv", &[Reg(0, X), Fixed(TP)])]),
     // Loads. A load of thirty two bits sign extends, which is the right answer for an `int` and a
     // harmless one for anything that reads only the low half.
@@ -682,6 +683,7 @@ mod tests {
         assert_eq!(listing("sra_ri_8", &shift), ["slli a0, a1, 56", "srai a0, a0, 59"]);
         assert_eq!(listing("addr_64", &with), ["lla a0, s"]);
         assert_eq!(listing("got_64", &with), ["la a0, s"]);
+        assert_eq!(listing("gottprel_64", &with), ["la.tls.ie a0, s"]);
         assert_eq!(listing("thread_64", &with), ["mv a0, tp"]);
         assert_eq!(listing("call", &with), ["call s"]);
         assert_eq!(listing("call_reg", &with), ["jalr a1"]);
