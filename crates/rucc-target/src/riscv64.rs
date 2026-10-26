@@ -16,9 +16,17 @@
 //!
 //! # What is not here yet
 //!
-//! Everything a pass reads besides the registers: the instructions, the frame, the branches and
-//! the encoder. Those arrive with the rule set that selects them, and until then
-//! `rucc_codegen::Machine::for_target` has no machine for this target and says so.
+//! Everything a pass reads besides the registers and the encoder: the instructions, the frame
+//! and the branches. Those arrive with the rule set that selects them, and until then
+//! `rucc_codegen::Machine::for_target` has no machine for this target and says so. The encoder
+//! in [`encode`] takes RV64G as GNU as writes it, pseudo instructions included, so the words
+//! can be checked against the cross assembler before anything selects them.
+
+mod encode;
+
+pub use crate::riscv64::encode::{
+    Addr, Encoded, Error, Fixup, Offset, Operator, Round, Value, encode, fits, li_words, reaches,
+};
 
 use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile};
 
