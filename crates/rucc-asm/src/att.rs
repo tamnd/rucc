@@ -82,6 +82,7 @@ use crate::a64;
 use crate::bytes::absolute_only;
 use crate::data::{Globals, Piece, Variable};
 use crate::format::{Directives, binding, visibility};
+use crate::rv;
 use crate::unwind::Prologue;
 
 /// The prefix every x86-64 opcode carries in the machine IR.
@@ -177,7 +178,7 @@ fn listing(
 ) -> Result<String, Error> {
     let Output { sections, property, isa, ident } = output;
     let arch = target.tuple.arch();
-    if !matches!(arch, Arch::X86_64 | Arch::X86 | Arch::Aarch64) {
+    if !matches!(arch, Arch::X86_64 | Arch::X86 | Arch::Aarch64 | Arch::Riscv64) {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
     let directives = Directives::for_target(target);
@@ -987,6 +988,15 @@ impl Writer<'_> {
             self.out.push_str(&line);
             return Ok(());
         }
+        if self.arch == Arch::Riscv64 {
+            let at = rv::Context { names: self.names, func_name };
+            let label = |to| self.label(func_name, to);
+            let table = |at: u32| self.table(func_name, at as usize);
+            let mut line = String::new();
+            rv::inst(&mut line, &at, func, block, inst, label, table)?;
+            self.out.push_str(&line);
+            return Ok(());
+        }
         let data = func[inst];
         let spelled = self.names.resolve(data.opcode.name());
         let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
@@ -1427,13 +1437,17 @@ impl Writer<'_> {
 
     /// What the machine IR puts in front of an opcode of this machine.
     fn prefix(&self) -> &'static str {
-        if self.arch == Arch::Aarch64 { a64::PREFIX } else { PREFIX }
+        match self.arch {
+            Arch::Aarch64 => a64::PREFIX,
+            Arch::Riscv64 => rv::PREFIX,
+            _ => PREFIX,
+        }
     }
 
-    /// The byte padding inside code is made of, which is the one byte `nop` on x86-64. AArch64 has
-    /// no one byte instruction, so the assembler is left to pad with its own `nop`.
+    /// The byte padding inside code is made of, which is the one byte `nop` on x86-64. AArch64 and
+    /// RISC-V have no one byte instruction, so the assembler is left to pad with its own `nop`.
     fn fill(&self) -> Option<u8> {
-        if self.arch == Arch::Aarch64 { None } else { Some(0x90) }
+        if matches!(self.arch, Arch::Aarch64 | Arch::Riscv64) { None } else { Some(0x90) }
     }
 
     /// The label one block of one function carries.
@@ -2417,8 +2431,8 @@ mod tests {
     #[test]
     fn a_machine_with_no_writer_here_is_said_so_rather_than_written_as_x86_64() {
         let names = Interner::new();
-        let riscv = TargetInfo::new(Triple::new(Arch::Riscv64, Os::Linux, Env::Gnu));
-        let error = print(&[], &Globals::default(), &[], &names, &riscv, true, Output::default())
+        let wasm = TargetInfo::new("wasm32-wasip1".parse::<Triple>().expect("a triple"));
+        let error = print(&[], &Globals::default(), &[], &names, &wasm, true, Output::default())
             .expect_err("no writer");
         assert!(matches!(error, Error::Machine { .. }), "{error:?}");
     }

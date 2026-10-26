@@ -427,7 +427,7 @@ fn folds(
                     _ => {}
                 }
             } else if named {
-            } else if func[inst].opcode == sum {
+            } else if func[inst].opcode == sum && machine.scales(1) {
                 let Some(address) = summed(func, inst) else { continue };
                 if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
                     open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
