@@ -66,6 +66,7 @@ const fn since(major: u32, row: Row) -> Row {
 
 const X86: Arch = Arch::X86_64;
 const A64: Arch = Arch::Aarch64;
+const RV: Arch = Arch::Riscv64;
 
 /// The table, searched in order, so a spelling that means the default comes before the family it
 /// belongs to.
@@ -251,6 +252,20 @@ pub(crate) const TABLE: &[Row] = &[
              that are not, and a copy moves no wider than its two sides are aligned",
         ),
     ),
+    // RISC-V.
+    only(
+        RV,
+        same(
+            "-mno-save-restore",
+            "every prologue here saves the registers it uses itself, and none calls a helper such \
+             as __riscv_save_0",
+        ),
+    ),
+    only(
+        RV,
+        same("-mno-relax", "no instruction here is marked for the linker to relax, R_RISCV_RELAX"),
+    ),
+    only(RV, same("-mno-riscv-attribute", "no object here has a .riscv.attributes section")),
 ];
 
 impl Row {
@@ -289,6 +304,8 @@ mod tests {
         assert!(row("-mno-outline-atomics", Arch::Aarch64).is_some());
         assert!(row("-mno-outline-atomics", Arch::X86_64).is_none());
         assert!(row("-mskip-rax-setup", Arch::Aarch64).is_none());
+        assert!(row("-mno-save-restore", Arch::Riscv64).is_some());
+        assert!(row("-mno-save-restore", Arch::Aarch64).is_none());
     }
 
     #[test]
@@ -307,9 +324,9 @@ mod tests {
         // with and that says nothing.
         for (at, row) in TABLE.iter().enumerate() {
             let arg = row.flag.strip_suffix('*').map_or(row.flag.to_owned(), |s| format!("{s}x"));
-            // No row is limited to RISC-V, so a row for every architecture is looked for there,
+            // No row is limited to wasm32, so a row for every architecture is looked for there,
             // where no row limited to another one can stand in front of it.
-            let arch = row.arch.unwrap_or(Arch::Riscv64);
+            let arch = row.arch.unwrap_or(Arch::Wasm32);
             let found = TABLE.iter().position(|other| other.covers(&arg, arch));
             assert_eq!(found, Some(at), "{} is answered by an earlier row", row.flag);
         }

@@ -602,14 +602,15 @@ pub fn assembled_described(
     // relocation, which is what a format without addends does. See [`crate::coff::carry`].
     let carried = machine == Architecture::Aarch64 && flavour == Flavour::Coff;
     let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
-    // LP64D, which passes a `double` in a float register, and no compressed instructions, since
-    // nothing here writes one. ld refuses to link objects that disagree about the first.
+    // The float convention, which is LP64D unless `-mabi=lp64` asked for floats in the integer
+    // registers, and no compressed instructions, since nothing here writes one. ld refuses to
+    // link objects that disagree about the first.
     if machine == Architecture::Riscv64 {
-        obj.flags = object::FileFlags::Elf {
-            os_abi: elf::ELFOSABI_NONE,
-            abi_version: 0,
-            e_flags: elf::EF_RISCV_FLOAT_ABI_DOUBLE,
+        let e_flags = match target.tuple.resolved_abi() {
+            rucc_tuple::Abi::DoubleFloat => elf::EF_RISCV_FLOAT_ABI_DOUBLE,
+            _ => elf::EF_RISCV_FLOAT_ABI_SOFT,
         };
+        obj.flags = object::FileFlags::Elf { os_abi: elf::ELFOSABI_NONE, abi_version: 0, e_flags };
     }
     // A name in a file of assembly is already the name in the object, underscore and all, which the
     // writer underneath would otherwise put a second one on for COFF on i386.
@@ -1543,6 +1544,16 @@ mod tests {
         assert_eq!(file.architecture(), Architecture::Riscv64);
         let object::FileFlags::Elf { e_flags, .. } = file.flags() else { panic!("ELF") };
         assert_eq!(e_flags, elf::EF_RISCV_FLOAT_ABI_DOUBLE);
+        // And no float bits when the unit passes floats in the integer registers.
+        let mut soft = target.clone();
+        soft.tuple = soft.tuple.with_abi(rucc_tuple::Abi::SoftFloat);
+        let bytes = assembled(&input, &soft).expect("an object");
+        let object::FileFlags::Elf { e_flags, .. } =
+            object::File::parse(&bytes[..]).expect("a readable object").flags()
+        else {
+            panic!("ELF")
+        };
+        assert_eq!(e_flags, elf::EF_RISCV_FLOAT_ABI_SOFT);
         let relocs = |name: &str| -> Vec<(u64, elf::RelocationType, Option<String>, i64)> {
             let section = file.section_by_name(name).expect("the section");
             section

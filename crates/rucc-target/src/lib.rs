@@ -320,6 +320,11 @@ pub enum CodeModel {
     /// only changes which `__AARCH64_CMODEL_*__` is defined. The arm64 kernel builds its vDSO
     /// with it.
     Tiny,
+    /// RISC-V's model for a program that may run anywhere, where every name is reached from the
+    /// pc with `auipc`. That is what this compiler writes for the small model too, so this only
+    /// changes which `__riscv_cmodel_*` is defined. The riscv kernel builds with it because its
+    /// early boot code runs at the physical address, before the page tables are set up.
+    Medany,
 }
 
 impl CodeModel {
@@ -330,6 +335,7 @@ impl CodeModel {
             CodeModel::Small => "small",
             CodeModel::Kernel => "kernel",
             CodeModel::Tiny => "tiny",
+            CodeModel::Medany => "medany",
         }
     }
 }
@@ -703,6 +709,8 @@ impl Triple {
                 .ok()?,
             _ => target.without_versions(),
         };
+        // A triple has no float ABI, so RISC-V `-mabi=lp64` is still the triple it was given.
+        let target = target.with_abi(tuple::Abi::Default);
         // Four triples narrow onto `x86_64-linux-gnu`, because a Darwin triple claiming glibc is
         // a string somebody can type and not a machine. So a match is not enough on its own: the
         // answer is the candidate whose environment came through the narrowing unchanged, and
@@ -1959,6 +1967,12 @@ mod tests {
             let target = tuple.parse().unwrap();
             assert_eq!(Triple::from_tuple(target), None, "{tuple}");
         }
+        // The float ABI is not part of a triple, so `-mabi=lp64` keeps the riscv64 one.
+        let rv: TargetTuple = "riscv64-linux-gnu".parse().unwrap();
+        assert_eq!(
+            Triple::from_tuple(rv.with_abi(tuple::Abi::SoftFloat)),
+            Some(Triple::new(Arch::Riscv64, Os::Linux, Env::Gnu))
+        );
         // i686 has a triple now, and it is the machine and not x86-64's.
         let i686 = Triple::from_tuple("i686-linux-gnu".parse().unwrap()).unwrap();
         assert_eq!(i686, Triple::new(Arch::X86, Os::Linux, Env::Gnu));

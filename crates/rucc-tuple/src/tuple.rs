@@ -252,6 +252,14 @@ impl TargetTuple {
         self
     }
 
+    /// The same target with `abi` as its float ABI. A convention named apart from the tuple, the
+    /// way RISC-V's `-mabi=lp64` names one, joins it here.
+    #[must_use]
+    pub const fn with_abi(mut self, abi: Abi) -> Self {
+        self.abi = abi;
+        self
+    }
+
     /// The same target with no OS or environment version, which is the machine and the ABI
     /// without the release of either that the program is promised to run on.
     #[must_use]
