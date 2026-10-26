@@ -75,6 +75,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("stdnoreturn.h", include_str!("../runtime/include/stdnoreturn.h")),
     ("tgmath.h", include_str!("../runtime/include/tgmath.h")),
     ("tmmintrin.h", include_str!("../runtime/include/tmmintrin.h")),
+    ("unwind.h", include_str!("../runtime/include/unwind.h")),
     ("vadefs.h", include_str!("../runtime/include/vadefs.h")),
     ("vpclmulqdqintrin.h", include_str!("../runtime/include/vpclmulqdqintrin.h")),
     ("wasm_simd128.h", include_str!("../runtime/include/wasm_simd128.h")),
