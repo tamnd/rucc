@@ -1250,7 +1250,10 @@ pub fn compile_recording(
     // them.
     let reach = (flags.reuse && !alone).then(|| {
         let count = stack.locals.len();
-        slots::reach(&func, &stack.addresses, &stack.ends, count, machine.insts, names)
+        // A template that names a local in its text touches it where it stands, the way a reader
+        // the address was folded into does.
+        let touched: Vec<_> = stack.addresses.iter().chain(&stack.framed).copied().collect();
+        slots::reach(&func, &touched, &stack.ends, count, machine.insts, names)
     });
 
     // The instructions as they are now, for the locals the front end kept in values. The

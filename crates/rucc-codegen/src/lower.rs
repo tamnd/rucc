@@ -1347,6 +1347,13 @@ pub struct Stack {
     /// after allocation, so the instruction is written here with nothing in its displacement and
     /// [`crate::finish`] writes the number in once [`crate::frame::Frame`] knows it.
     pub addresses: Vec<(mir::Inst, usize)>,
+    /// Which kept template names which of those locals in its text, for every local one names
+    /// other than the one that is its memory operand.
+    ///
+    /// The text holds a hole for each, which [`crate::finish`] fills with where the local is once
+    /// the frame is laid out, so the template reads it from the stack pointer and needs no register
+    /// for its address. See [`rucc_target::template::template_frame`].
+    pub framed: Vec<(mir::Inst, usize)>,
     /// Where the lifetime of which of those locals ends, one entry for every `lifetime_end` the
     /// front end wrote.
     ///
@@ -6753,6 +6760,9 @@ impl<'a> Lowering<'a> {
                     if self.segment(inst).is_some() {
                         return Err(refused());
                     }
+                    if self.local_of(value).is_some() {
+                        continue;
+                    }
                     let read = mir::Operand::read(self.reg_of(value)?, self.gpr);
                     use_of[index] = Some(uses.len());
                     uses.push(read);
@@ -6988,6 +6998,7 @@ impl<'a> Lowering<'a> {
 
         let mut text = String::with_capacity(template.len());
         let mut memory: Option<usize> = None;
+        let mut framed: Vec<usize> = Vec::new();
         if basic {
             text.push_str(template);
         } else {
@@ -7063,6 +7074,20 @@ impl<'a> Lowering<'a> {
                     text.push('[');
                     text.push_str(&template_reg(at, 'x'));
                     text.push(']');
+                    continue;
+                }
+                // A local that is not the instruction's own memory operand is named from the stack
+                // pointer too, by a hole the frame fills in. smapi.o in the kernel hands one
+                // template nine locals as `"m"` and clobbers six registers, and nine addresses in
+                // registers on top of that is more than x86-64 has.
+                let local = operand.value.and_then(|value| self.local_of(value));
+                if let Some(local) = local.filter(|_| operand.memory && hole != Some(index)) {
+                    match modifier {
+                        None | Some('P') => text.push_str(&x86_64::template_frame(local, 0)),
+                        Some('H') => text.push_str(&x86_64::template_frame(local, 8)),
+                        Some(_) => return Err(refused()),
+                    }
+                    framed.push(local);
                     continue;
                 }
                 if operand.memory && hole != Some(index) {
@@ -7286,6 +7311,7 @@ impl<'a> Lowering<'a> {
         if let Some(local) = local {
             self.stack.addresses.push((made, local));
         }
+        self.stack.framed.extend(framed.into_iter().map(|local| (made, local)));
         Ok(())
     }
 
