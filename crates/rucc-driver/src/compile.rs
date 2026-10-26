@@ -6048,6 +6048,7 @@ decl #0 x : int object external static defined
 
     /// A RISC-V function is selected and allocated with the RISC-V machine, and none of its
     /// instructions are another machine's. No address has an index, since this machine has none.
+    /// `-S` writes it as RISC-V assembly.
     #[test]
     fn a_riscv_function_is_lowered_for_riscv() {
         let source = "int f(int a, int b) { return a + b; }\n\
@@ -6063,6 +6064,12 @@ decl #0 x : int object external static defined
             assert!(text.contains("rv.add_rr_32"), "{text}");
             assert!(!text.contains("x64."), "{text}");
             assert!(!text.contains(" + $"), "{text}");
+            opts.emit = EmitKind::Asm;
+            let result = run(&opts, source);
+            assert!(!result.failed(), "{:?}", result.messages);
+            let text = result.text();
+            assert!(text.contains("\taddw a0, a0, a1\n"), "{text}");
+            assert!(text.contains("\tret\n"), "{text}");
         }
     }
 
