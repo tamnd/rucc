@@ -8156,6 +8156,36 @@ decl #0 x : int object external static defined
         assert!(!text.contains("\tcall\t"), "{text}");
     }
 
+    /// protection_keys.c in the mm selftests saves the extended state with
+    /// `__builtin_ia32_xsave` and puts it back with `__builtin_ia32_xrstor`. Each is the
+    /// instruction on the area, with the mask's high half in `edx` and its low half in `eax`.
+    #[test]
+    fn the_extended_state_is_saved_and_restored_by_the_instruction_in_place() {
+        let source = "void f(unsigned long long *p) {\n\
+                      __builtin_ia32_xsave(p, 0x200);\n\
+                      __builtin_ia32_xrstor(p, 1ULL << 33);\n\
+                      __builtin_ia32_xsaves64(p, -1);\n}\n";
+        let text = asm(source);
+        for instruction in ["xsave", "xrstor", "xsaves64"] {
+            assert!(text.contains(&format!("\t{instruction} (%")), "{instruction}: {text}");
+        }
+        assert!(text.contains("shrq\t$32, %"), "the high half: {text}");
+        assert!(text.contains(", %edx\n"), "{text}");
+        assert!(!text.contains("\tcall\t"), "{text}");
+
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "i686-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let ran = run(&opts, "void f(void *p) { __builtin_ia32_xsave(p, 7); }\n");
+        assert_eq!(ran.messages, Vec::<String>::new());
+        assert!(ran.text().contains("\txsave (%"), "{}", ran.text());
+        let said = run(&opts, source).messages.join("\n");
+        assert!(said.contains("`__builtin_ia32_xsaves64` is only available on x86_64"), "{said}");
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let said = run(&opts, source).messages.join("\n");
+        assert!(said.contains("`__builtin_ia32_xsave` is only available on x86"), "{said}");
+    }
+
     /// rseq's `param_test` keeps a `pthread_t` array as long as the number of threads next to a
     /// record aligned to 128. The record takes its alignment out of extra bytes rather than from
     /// the prologue, since the array moves the stack pointer after the prologue is done.

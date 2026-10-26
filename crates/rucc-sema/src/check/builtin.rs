@@ -89,6 +89,7 @@ mod thread;
 mod trap;
 mod tsc;
 mod unreachable;
+mod xstate;
 
 pub use size::{open_to_pointer, unbounded_member};
 
