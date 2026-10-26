@@ -663,6 +663,7 @@ impl<'a> Printer<'a> {
             ExprKind::TimeStamp { aux: None } => "time-stamp".to_owned(),
             ExprKind::Eflags { value: Some(_) } => "eflags write".to_owned(),
             ExprKind::Eflags { value: None } => "eflags read".to_owned(),
+            ExprKind::XState { instruction, .. } => instruction.to_owned(),
             ExprKind::CpuModel { object, word, test } => {
                 let asked = match test {
                     CpuTest::Bit(bit) => format!("bit {bit}"),
@@ -702,6 +703,10 @@ impl<'a> Printer<'a> {
             ExprKind::Apply { function, args, .. } => {
                 self.expr(function);
                 self.expr(args);
+            }
+            ExprKind::XState { address, mask, .. } => {
+                self.expr(address);
+                self.expr(mask);
             }
             // A compound literal is a declaration of its own, printed where it is used, since
             // it has no other place in the tree to be printed from.

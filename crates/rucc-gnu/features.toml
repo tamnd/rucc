@@ -5357,6 +5357,126 @@ tests = ["rucc-driver::the_flags_register_is_a_push_and_a_pop_in_place"]
 notes = "The flags register, written with a push and popfl where the call was. i386 only."
 
 [[feature]]
+name = "__builtin_ia32_xsave"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xsave` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 and i386."
+
+[[feature]]
+name = "__builtin_ia32_xsave64"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xsave64` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 only."
+
+[[feature]]
+name = "__builtin_ia32_xrstor"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xrstor` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 and i386."
+
+[[feature]]
+name = "__builtin_ia32_xrstor64"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xrstor64` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 only."
+
+[[feature]]
+name = "__builtin_ia32_xsaveopt"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xsaveopt` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 and i386."
+
+[[feature]]
+name = "__builtin_ia32_xsaveopt64"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xsaveopt64` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 only."
+
+[[feature]]
+name = "__builtin_ia32_xsavec"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xsavec` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 and i386."
+
+[[feature]]
+name = "__builtin_ia32_xsavec64"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xsavec64` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 only."
+
+[[feature]]
+name = "__builtin_ia32_xsaves"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xsaves` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 and i386."
+
+[[feature]]
+name = "__builtin_ia32_xsaves64"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xsaves64` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 only."
+
+[[feature]]
+name = "__builtin_ia32_xrstors"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xrstors` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 and i386."
+
+[[feature]]
+name = "__builtin_ia32_xrstors64"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(void *, long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_extended_state_is_saved_and_restored_by_the_instruction_in_place"]
+notes = "`xrstors64` on the area the pointer points at, with the mask split across edx and eax, where the call was, in check/builtin/xstate.rs. x86-64 only."
+
+[[feature]]
 name = "__sync_fetch_and_add"
 kind = "builtin"
 gcc_version = "4.1"

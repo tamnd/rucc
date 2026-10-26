@@ -551,6 +551,19 @@ pub enum ExprKind {
         /// read.
         value: Option<ExprId>,
     },
+    /// `__builtin_ia32_xsave(area, mask)` and the rest of its family, the processor's extended
+    /// state saved to the area or restored from it.
+    ///
+    /// A node for the reason the one above is. What it becomes is the instruction, with the mask
+    /// split across `edx` and `eax`. See `check/builtin/xstate.rs`.
+    XState {
+        /// The instruction, as the assembler spells it.
+        instruction: &'static str,
+        /// The address of the area.
+        address: ExprId,
+        /// The components saved or restored, as a `long long`.
+        mask: ExprId,
+    },
     /// `__builtin_cpu_supports("name")` and `__builtin_cpu_is("name")`, one word of what libgcc
     /// found out about the processor, tested.
     ///
