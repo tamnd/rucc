@@ -1032,6 +1032,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // loop: the vector registers are off once the extensions they belong to are, whichever flag
     // took those away, whichever flag took them, and in whichever order they came.
     let mut general_regs_only = false;
+    // RISC-V's `-mabi=`, which is `Some(true)` for `lp64` and `Some(false)` for `lp64d`, weighed
+    // after the loop against what `-march=` says the machine has.
+    let mut riscv_soft: Option<bool> = None;
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
     // Where the stack protector's canary is, which is put together after the loop because the
@@ -3126,6 +3129,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-mtune=") || arg.starts_with("-mcpu=") => {}
             // The calling convention, which is not safe to ignore. Taken when it names the one
             // the target already uses and refused otherwise.
+            _ if arg.starts_with("-mabi=") && arch == rucc_target::Arch::Riscv64 => {
+                riscv_soft = match &arg["-mabi=".len()..] {
+                    "lp64" => Some(true),
+                    "lp64d" => Some(false),
+                    _ => {
+                        return Err(err(format!(
+                            "{arg}: riscv64 has the lp64 and lp64d conventions here and no other"
+                        )));
+                    }
+                };
+            }
             _ if arg.starts_with("-mabi=") => {
                 let want = &arg["-mabi=".len()..];
                 let have = match opts.target.arch {
@@ -3157,6 +3171,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-mcmodel=small" => cmodel = rucc_target::CodeModel::Small,
             "-mcmodel=kernel" => cmodel = rucc_target::CodeModel::Kernel,
             "-mcmodel=tiny" => cmodel = rucc_target::CodeModel::Tiny,
+            // RISC-V's two names. Every name is reached from the pc under either, so the code is the
+            // same and what changes is the macro, which the riscv kernel checks for.
+            "-mcmodel=medlow" if arch == rucc_target::Arch::Riscv64 => {
+                cmodel = rucc_target::CodeModel::Small;
+            }
+            "-mcmodel=medany" if arch == rucc_target::Arch::Riscv64 => {
+                cmodel = rucc_target::CodeModel::Medany;
+            }
             // clang's spellings of the deployment target, which it takes over a version in the
             // tuple. gcc on a Mac takes the first. A target that is not Apple ignores it, as
             // clang does, so a makefile that always passes it still builds for Linux.
@@ -3640,6 +3662,28 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         rucc_target::Arch::X86_64 => sse("sse2"),
         _ => !general_regs_only,
     };
+    // On RISC-V the float registers are the D extension's, which `-march=` names or leaves out,
+    // and a unit keeps a float in them only under the convention that passes one there. Under
+    // `-mabi=lp64` a float would have to travel in the integer registers, which this compiler does
+    // not do, so a unit built for it holds no float at all, the way a kernel unit on x86-64 holds
+    // none. That is every C file of the riscv kernel, and its files of assembly name D in
+    // `-march=` and still pass `lp64`, which is taken since they hold no C float either.
+    if opts.target.arch == rucc_target::Arch::Riscv64 {
+        let double = match march {
+            Some(name) => riscv_double(name).ok_or_else(|| {
+                err(format!("-march={name}: not a name for a 64 bit RISC-V machine"))
+            })?,
+            None => true,
+        };
+        let soft = riscv_soft.unwrap_or(false);
+        if !soft && !double {
+            return Err(err(
+                "requested ABI requires '-march' to subsume the 'D' extension".to_owned()
+            ));
+        }
+        opts.soft_float = soft;
+        opts.vector = opts.vector && double && !soft;
+    }
     opts.x87 = x87;
     opts.x87_return = fp_ret_in_387;
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
@@ -3676,6 +3720,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 "code model kernel does not support PIC mode: add -fno-pie or -fno-pic".to_owned(),
             ));
         }
+    }
+    // And medany is RISC-V's.
+    if cmodel == rucc_target::CodeModel::Medany && opts.target.arch != rucc_target::Arch::Riscv64 {
+        return Err(err(format!("-mcmodel=medany: {} has no medany code model", opts.target)));
     }
     // The tiny model is AArch64's, and gcc for any other machine refuses it.
     if cmodel == rucc_target::CodeModel::Tiny
@@ -5434,6 +5482,20 @@ fn write_out(output: &Output, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
+/// Whether a RISC-V `-march=` names the D extension, or `None` when it does not name a 64 bit
+/// machine.
+///
+/// The single letter extensions come first, after `rv64` and up to the first `_`, and `g` is short
+/// for `imafd` with `zicsr` and `zifencei`. `rv64imac_zicsr_zifencei` is the kernel's, with no D,
+/// and `rv64imafdc_zicsr_zifencei` is what it assembles with.
+fn riscv_double(name: &str) -> Option<bool> {
+    let base = name.strip_prefix("rv64")?.split('_').next()?;
+    if !base.starts_with(['i', 'e', 'g']) {
+        return None;
+    }
+    Some(base.contains(['d', 'g']))
+}
+
 /// The target a program name asks for, the way `aarch64-linux-gnu-gcc` is gcc for that target.
 ///
 /// `program` is the path the compiler was started as. The name without its directory and without a
@@ -5580,6 +5642,7 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
     let i386 = target.arch == rucc_target::Arch::X86;
     let x86 = i386 || target.arch == rucc_target::Arch::X86_64;
     let aarch64 = target.arch == rucc_target::Arch::Aarch64;
+    let riscv = target.arch == rucc_target::Arch::Riscv64;
     let mut words = words.iter();
     while let Some((word, from)) = words.next() {
         let refuse = |why: &str| err(format!("`{word}` in `{from}`: {why}"));
@@ -5619,6 +5682,11 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
             // The data model gas assembles for on AArch64, where LP64 is the only one this compiler
             // has.
             "-mabi=lp64" if aarch64 => {}
+            // The version of the RISC-V spec gas reads `-march=` by. The kernel asks for 2.2, where
+            // the CSR and fence.i instructions are part of the base, and this assembler takes them
+            // whatever the version. And the `.riscv.attributes` section, which this assembler
+            // never writes.
+            "-misa-spec=2.2" | "-mno-arch-attr" if riscv => {}
             // A directory for `.include` and `.incbin`. The assembler reads no file but its input,
             // and refuses both directives, so a place to look for one changes nothing.
             "-I" => {
@@ -10535,6 +10603,44 @@ mod tests {
         assert_eq!(compile(&i386).0.speculation, all);
         // A jump table is a question every target answers.
         assert!(!compile(&[KERNEL_ARM64, "-fno-jump-tables", "-c", "a.c"]).0.jump_tables);
+    }
+
+    /// The machine flags the riscv kernel builds its C with, and the ones its files of assembly
+    /// add. A unit under `-mabi=lp64` holds no float, and `lp64d` needs the D extension.
+    #[test]
+    fn the_riscv_kernel_flags_are_taken_and_lp64_keeps_floats_out() {
+        const RV: &str = "--target=riscv64-linux-gnu";
+        let kernel = [
+            RV,
+            "-mabi=lp64",
+            "-march=rv64imac_zicsr_zifencei",
+            "-mcmodel=medany",
+            "-mno-save-restore",
+            "-mno-riscv-attribute",
+            "-mno-relax",
+            "-Wa,-misa-spec=2.2",
+            "-Wa,-mno-arch-attr",
+            "-c",
+            "a.c",
+        ];
+        let (opts, _) = compile(&kernel);
+        assert!(opts.soft_float && !opts.vector);
+        assert_eq!(opts.code_model, rucc_target::CodeModel::Medany);
+        let (opts, _) =
+            compile(&[RV, "-mabi=lp64", "-march=rv64imafdc_zicsr_zifencei", "-c", "a.c"]);
+        assert!(opts.soft_float && !opts.vector);
+        for line in [&[RV, "-c", "a.c"][..], &[RV, "-march=rv64gc", "-mabi=lp64d", "-c", "a.c"]] {
+            let (opts, _) = compile(line);
+            assert!(!opts.soft_float && opts.vector);
+            assert_eq!(opts.code_model, rucc_target::CodeModel::Small);
+        }
+        let no_d = refused(&[RV, "-march=rv64imac", "-c", "a.c"]);
+        assert!(no_d.contains("subsume the 'D' extension"), "{no_d}");
+        assert!(refused(&[RV, "-march=rv32gc", "-c", "a.c"]).contains("64 bit RISC-V"));
+        assert!(refused(&[RV, "-mabi=ilp32", "-c", "a.c"]).contains("lp64 and lp64d"));
+        let x86 = refused(&[KERNEL_X86, "-mcmodel=medany", "-c", "a.c"]);
+        assert!(x86.contains("medany"), "{x86}");
+        assert!(!refused(&[KERNEL_ARM64, "-mno-save-restore", "-c", "a.c"]).is_empty());
     }
 
     /// The boundary is a power of two, as gcc spells it, and only on x86, where gcc has the flag.
