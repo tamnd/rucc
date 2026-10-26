@@ -1143,6 +1143,7 @@ fn optimize(
     // call to `puts` needs both of those to be off.
     settings.builtins = opts.builtins && opts.hosted;
     settings.no_builtin.clone_from(&opts.no_builtin);
+    settings.kasan = opts.kasan.on;
     // What a function with no `target` attribute is built for, which the inliner compares a
     // callee with one against.
     settings.isa = opts.isa;

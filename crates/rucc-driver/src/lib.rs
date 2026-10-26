@@ -1067,6 +1067,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let Some(number) = fixed_vector(arg) else { continue };
                 opts.fixed_vectors |= 1 << number;
             }
+            // The frame pointer kept from the allocator on x86, which LTP asks for when it builds
+            // its i386 KVM guest. Nothing here gives it to a value whether or not a function keeps
+            // a frame, so the promise is kept already. Any other register is still refused.
+            "-ffixed-ebp" | "-ffixed-rbp" if x86 => {}
             _ if kbuild::row(arg, arch).is_some() => {
                 let Some(row) = kbuild::row(arg, arch) else { continue };
                 if let kbuild::Answer::Refused(why, issue) = row.answer {
@@ -1956,6 +1960,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let next = args.get(i).ok_or_else(|| err("-Xlinker requires an argument"))?;
                 i += 1;
                 inputs.push(Input::linker(next));
+            }
+            // A linker script and a `-z` keyword, which gcc hands to the linker as they are, in
+            // their place among the inputs, and takes joined or as two words. LTP's configure
+            // links with `-T` to find out whether it can build its KVM guests.
+            _ if arg.starts_with("-T") || arg.starts_with("-z") => {
+                let value = joined_or_next(arg, 2, args, &mut i)?;
+                inputs.push(Input::linker(&arg[..2]));
+                inputs.push(Input::linker(&value));
             }
             _ if arg.starts_with("-Wl,") => {
                 // Commas separate arguments rather than being part of one, which is what makes
@@ -4057,11 +4069,21 @@ fn harden(
     // The link. gcc leaves out `-z now` and `-z relro` when the line asks for a link that is not
     // a PIE, or asks the linker for lazy binding or for no relro.
     let mut words = Vec::new();
-    for (i, arg) in args.iter().enumerate() {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        i += 1;
         if let Some(list) = arg.strip_prefix("-Wl,") {
             words.extend(list.split(','));
-        } else if arg == "-Xlinker" {
-            words.extend(args.get(i + 1).map(String::as_str));
+        } else if arg == "-Xlinker" || arg == "-z" {
+            // The word after each is the linker's, and is not read again as one of the driver's.
+            if arg == "-z" {
+                words.push(arg);
+            }
+            words.extend(args.get(i).map(String::as_str));
+            i += 1;
+        } else if arg.starts_with("-z") {
+            words.push(arg);
         }
     }
     let weaker = words.iter().any(|word| matches!(*word, "-zlazy" | "-znorelro"))
@@ -8103,6 +8125,20 @@ mod tests {
             assert!(said[0].starts_with("linker hardening options"), "{other}: {said:?}");
         }
         assert!(notes(&[LINUX, "-c", "-O2", "-fhardened", "-Wl,-z,lazy", "a.c"]).is_empty());
+
+        let weaker: [&[&str]; 4] = [
+            &["-zlazy"],
+            &["-z", "norelro"],
+            &["-Xlinker", "-z", "-Xlinker", "lazy"],
+            &["-Xlinker", "-znorelro"],
+        ];
+        for other in weaker {
+            let line = [&[LINUX, "-O2", "-fhardened"][..], other, &["a.c"]].concat();
+            let (link, _) = linking(&line);
+            assert!(!link.hardened, "{other:?}");
+        }
+        let (link, _) = linking(&[LINUX, "-O2", "-fhardened", "-z", "noexecstack", "a.c"]);
+        assert!(link.hardened);
     }
 
     /// The Ubuntu flag line, with the paths, the macros, the warnings and the link flags left out,
@@ -8559,6 +8595,34 @@ mod tests {
         assert_eq!(plan.jobs[0].output, Output::File("x".into()));
         let (_, plan) = linking(&[LINUX, "a.c", "-o", "foo"]);
         assert_eq!(plan.link.expect("expected a link step").output, "foo");
+    }
+
+    #[test]
+    fn a_linker_script_and_a_z_keyword_go_to_the_linker_in_place() {
+        let (_, plan) = linking(&[LINUX, "-T", "x.lds", "-znoexecstack", "a.c", "-z", "now"]);
+        let link = plan.link.expect("expected a link step");
+        assert_eq!(
+            link.inputs,
+            vec![
+                link::Item::Linker("-T".into()),
+                link::Item::Linker("x.lds".into()),
+                link::Item::Linker("-z".into()),
+                link::Item::Linker("noexecstack".into()),
+                link::Item::File("a.o".into()),
+                link::Item::Linker("-z".into()),
+                link::Item::Linker("now".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_frame_pointer_may_be_fixed_on_x86_and_nothing_else_is() {
+        for target in ["--target=x86_64-linux-gnu", "--target=i686-linux-gnu"] {
+            for flag in ["-ffixed-ebp", "-ffixed-rbp"] {
+                assert!(parse_args(&args(&[target, "-c", flag, "a.c"])).is_ok(), "{target} {flag}");
+            }
+            assert!(parse_args(&args(&[target, "-c", "-ffixed-esi", "a.c"])).is_err(), "{target}");
+        }
     }
 
     #[test]

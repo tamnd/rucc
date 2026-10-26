@@ -877,6 +877,10 @@ pub struct Options {
     pub builtins: bool,
     /// The library names `-fno-builtin-<name>` took away one at a time.
     pub no_builtin: Vec<String>,
+    /// Whether the unit is built with `-fsanitize=kernel-address`, under which a `memset` and a
+    /// `memcpy` or `memmove` that is not one small access stay calls. See
+    /// [`libcall::write_out`].
+    pub kasan: bool,
     /// The x86-64 extensions the module is built for, which a function without a `target`
     /// attribute of its own is built for.
     ///
@@ -915,6 +919,7 @@ impl Default for Options {
             interposition: Pic::Executable,
             builtins: true,
             no_builtin: Vec::new(),
+            kasan: false,
             isa: Isa::NONE,
             simd128: false,
             neon: false,
@@ -1287,8 +1292,14 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         let started = Instant::now();
         let mut folded =
             libcall::fold(module, names, &opts.no_builtin, opts.interposition, &mut fuel);
-        let written =
-            libcall::write_out(module, names, &opts.no_builtin, opts.interposition, &mut fuel);
+        let written = libcall::write_out(
+            module,
+            names,
+            &opts.no_builtin,
+            opts.interposition,
+            opts.kasan,
+            &mut fuel,
+        );
         for (id, stats) in written {
             match folded.iter_mut().find(|(at, _)| *at == id) {
                 Some((_, have)) => have.merge(&stats),
