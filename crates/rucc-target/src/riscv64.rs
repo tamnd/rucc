@@ -136,6 +136,20 @@ pub fn named(name: &str) -> Option<(PhysReg, RegClass)> {
     }
 }
 
+/// Whether one of gcc's RISC-V immediate letters in an `asm` constraint takes that constant. `I`
+/// is the twelve bit signed number an `addi` carries, `J` is zero, and `K` is the five bit unsigned
+/// number a `csrrsi` carries, which is what the kernel's `csr_set` hands `"rK"`. A constant a letter
+/// does not take goes in a register. Any other letter takes any constant.
+#[must_use]
+pub fn takes(letter: char, number: i128) -> bool {
+    match letter {
+        'I' => (-2048..=2047).contains(&number),
+        'J' => number == 0,
+        'K' => (0..=31).contains(&number),
+        _ => true,
+    }
+}
+
 /// The integer registers by number, as their ABI names, which is how GNU as and objdump write them.
 pub static GPR_NAMES: [&str; 32] = [
     "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
