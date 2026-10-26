@@ -1539,14 +1539,27 @@ fn specialized_size(
         &crate::simplify_cfg::SimplifyCfg,
         &crate::dce::Dce,
     ];
+    // How many times a pass changed the copy so far, and that count as each pass that changed
+    // nothing left it. Such a pass has nothing new to look at while the count stays the same, so
+    // the second round leaves it out. In nl80211.c the second round changed nothing for two
+    // thirds of the callees it weighed.
+    let mut changes = 0_usize;
+    let mut quiet = [None; 9];
     for _ in 0..2 {
-        for pass in passes {
+        for (at, pass) in passes.into_iter().enumerate() {
+            if quiet[at] == Some(changes) {
+                continue;
+            }
             // The manager's rule, so a pass that changed nothing leaves the next one the graph
             // it was given rather than one to build again, and one that changed something keeps
             // what it says it kept and what the graph read again says it did not move.
             if pass.run(&mut copy, &mut an, &mut fuel).changed() {
                 let keeps = an.unmoved(&copy, pass.preserves());
                 an.settle(&copy, keeps, false);
+                changes += 1;
+                quiet[at] = None;
+            } else {
+                quiet[at] = Some(changes);
             }
         }
     }
