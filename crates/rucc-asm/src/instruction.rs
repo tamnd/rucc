@@ -2042,7 +2042,7 @@ fn unquoted(term: &str) -> String {
 }
 
 /// A number written the way an assembler writes one.
-fn number(text: &str) -> Result<i64, String> {
+pub(crate) fn number(text: &str) -> Result<i64, String> {
     let text = text.trim();
     let (sign, digits) = match text.strip_prefix('-') {
         Some(rest) => (-1i64, rest.trim()),
