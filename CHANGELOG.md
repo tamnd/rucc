@@ -43,6 +43,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The driver takes `-T script` and `-z keyword` and hands them to the linker in place, as gcc does, and takes `-ffixed-ebp` and `-ffixed-rbp` on x86, where the frame pointer never holds a value. LTP's configure gave up on its KVM tests over `-T`. (#3872)
 - `__builtin_ia32_readeflags_u32` and `__builtin_ia32_writeeflags_u32` are taken under `-m32`. The check compared the target against `i386` while the tuple spells it `i686`, so every i386 build refused them, and the x86 selftests stopped on helpers.h. (#3874)
 - `__builtin_ia32_xsave`, `__builtin_ia32_xrstor` and the rest of the xsave family become the instruction where the call was, with the mask split across `edx` and `eax`. The mm selftests save and restore the protection keys register with them. (#3875)
+- `into` and `bound` are written in thirty two bit code, where they still have their one byte opcodes. The x86 selftests `mov_ss_trap` and `entry_from_vm86` use them. (#3876)
 
 ## 0.30.12
 
