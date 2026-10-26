@@ -31,9 +31,9 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Interner, Symbol, dfp};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Abi, AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Def, Extra, Flags, FloatPred, Func,
-    Imm, Inst, InstData, IntPred, MATH_BUILTINS, MemInfo, MemOrder, Opcode, Param, PrefetchHint,
-    Restrict, RmwOp, Signature, StorageClass, Type, VaInfo, Value, twice_by_name,
+    Abi, AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Counter, Def, Extra, Flags,
+    FloatPred, Func, Imm, Inst, InstData, IntPred, MATH_BUILTINS, MemInfo, MemOrder, Opcode, Param,
+    PrefetchHint, Restrict, RmwOp, Signature, StorageClass, Type, VaInfo, Value, twice_by_name,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind,
@@ -6601,6 +6601,12 @@ impl<'u> Body<'_, 'u> {
         let last = self.types().record_info(id).fields.len() == field as usize + 1;
         let level = self.tast().strict_flex(id, member.name);
         let mark = self.closest(holder, field, kind, last, level, ty);
+        let mark = match (mark, member.name) {
+            (Some(Extra::Array(0)), Some(name)) => {
+                Some(self.counted(id, name, byte, ty).map_or(Extra::Array(0), Extra::Counted))
+            }
+            _ => mark,
+        };
         if byte != 0 {
             if let Some(extra) = mark {
                 self.measured(addr, extra);
@@ -6670,6 +6676,52 @@ impl<'u> Body<'_, 'u> {
             (true, None) => Some(whole),
             (false, size) => size.map(sized),
         }
+    }
+
+    /// Where the member that counts a flexible array member is, for an array whose `counted_by`
+    /// named one, which is what gcc 16's front end hands `.ACCESS_WITH_SIZE`.
+    ///
+    /// The count may be a member of the record itself or of an anonymous structure or union in
+    /// it, and `byte` is where the array is. Nothing is said for a count that is a bit-field or
+    /// for elements longer than a [`Counter`] holds.
+    fn counted(&self, id: RecordId, array: Symbol, byte: u64, ty: TypeId) -> Option<Counter> {
+        if self.tast().gnuc() < 15 {
+            return None;
+        }
+        let name = self.tast().counter(id, array)?;
+        let (at, counter) = self.count_in(id, name)?;
+        let TypeKind::Array { elem, len: ArrayLen::Unknown } =
+            self.types().kind(self.types().canonical(ty))
+        else {
+            return None;
+        };
+        let size = u16::try_from(repr::size_of(self.types(), self.target(), elem)).ok()?;
+        let info = integer_info(self.types(), counter, self.target())?;
+        let width = u8::try_from(repr::size_of(self.types(), self.target(), counter)).ok()?;
+        if !matches!(width, 1 | 2 | 4 | 8) {
+            return None;
+        }
+        let delta = i32::try_from(i128::from(at) - i128::from(byte)).ok()?;
+        Some(Counter { delta, size, width, signed: info.signed })
+    }
+
+    /// Where member `name` of a record is and its type, looked for in the anonymous structures
+    /// and unions in it too.
+    fn count_in(&self, id: RecordId, name: Symbol) -> Option<(u64, TypeId)> {
+        let fields = &self.types().record_info(id).fields;
+        if let Some(field) = fields.iter().find(|field| field.name == Some(name)) {
+            return field.bits.is_none().then_some((field.offset, field.ty));
+        }
+        fields.iter().filter(|field| field.name.is_none() && field.bits.is_none()).find_map(
+            |field| {
+                let TypeKind::Record(inner) = self.types().kind(self.types().canonical(field.ty))
+                else {
+                    return None;
+                };
+                let (at, ty) = self.count_in(inner, name)?;
+                Some((field.offset + at, ty))
+            },
+        )
     }
 
     /// Writes on the `ptr_add` that stepped to a member what [`Self::closest`] says about it.

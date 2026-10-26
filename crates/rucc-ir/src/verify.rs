@@ -724,6 +724,15 @@ impl<'a> Verifier<'a> {
                 return;
             }
             Extra::Member(_) | Extra::Array(_) | Extra::Trailing(_) => return,
+            Extra::Counted(counter) => {
+                if !matches!(counter.width, 1 | 2 | 4 | 8) {
+                    self.error(format!(
+                        "a count is 1, 2, 4 or 8 bytes and this is {}",
+                        counter.width
+                    ));
+                }
+                return;
+            }
             Extra::Prefetch(hint) => {
                 if !hint.is_valid() {
                     self.error(format!(

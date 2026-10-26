@@ -757,6 +757,13 @@ impl<'a> Printer<'a> {
                 self.value_list_spaced(args);
                 let _ = write!(self.out, ", trailing {size}");
             }
+            Extra::Counted(counter) => {
+                self.value_list_spaced(args);
+                let sign = if counter.signed { 'i' } else { 'u' };
+                let (delta, size) = (counter.delta, counter.size);
+                let width = u32::from(counter.width) * 8;
+                let _ = write!(self.out, ", counted {sign}{width} {delta} {size}");
+            }
             Extra::Lane(lane) => {
                 self.value_list_spaced(args);
                 let _ = write!(self.out, ", lane {lane}");
