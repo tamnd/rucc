@@ -52,6 +52,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `<unwind.h>` is shipped, declaring libgcc's unwinder the way gcc's header does, so a program can walk its own stack with `_Unwind_Backtrace`. The x86 selftest `unwind_vdso` builds with it and passes. (#3878)
 - The long `nop`, `nopw`, `nopl` and `nopq` with a register or an address, is encoded as `0f 1f /0`. The protection keys selftest lays down 512 of them by hand. (#3879)
 - The assembler reads `.intel_syntax noprefix` blocks inside inline asm, which bcachefs uses for its key comparison, and takes the Intel names of the widening instructions such as `cdq`, which the Xen entry code in head_64.S uses (#3886).
+- An x86 inline asm template that names several locals in memory reads each one from the stack pointer, instead of putting every address but one in a register. `smapi.o` in the kernel names nine locals and clobbers six registers, and the allocator panicked on it (#3888).
 
 ## 0.30.12
 
