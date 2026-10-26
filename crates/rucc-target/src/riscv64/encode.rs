@@ -410,6 +410,9 @@ const RA: u8 = 1;
 const T1: u8 = 6;
 const ZERO: u8 = 0;
 
+/// The scratch register a far constant goes through, `t5`.
+pub const FAR: u8 = 30;
+
 /// The words `li` writes for a constant, which are the ones GNU as writes for it in the cases a
 /// program usually has: one `addi` for twelve bits, a `lui` and an `addiw` for thirty two, and
 /// for anything wider the upper part built the same way, shifted up and the low twelve bits added.
@@ -611,6 +614,34 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
             out.fixups.push((1, Fixup::PcrelLo12I));
             out.words.push(u(0x17, *rd, 0));
             out.words.push(if got { i(0x03, 3, *rd, *rd, 0) } else { i(0x13, 0, *rd, *rd, 0) });
+        }
+        // A constant added to or taken from a register when it may not fit twelve bits, which is
+        // how the frame moves the stack pointer. Not a mnemonic GNU as has: the listing writes it
+        // as the instructions here, and the constant goes through `t5` when it does not fit, which
+        // is the scratch register held back for this.
+        ("addi.far" | "subi.far", [Gpr(rd), Gpr(rs), Imm(imm)]) => {
+            let sub = mnemonic == "subi.far";
+            let near = if sub { imm.checked_neg() } else { Some(*imm) };
+            match near.filter(|&near| fits(near, 12)) {
+                Some(near) => out.words.push(i(0x13, 0, *rd, *rs, near)),
+                None => {
+                    li(FAR, *imm, &mut out.words);
+                    out.words.push(r(0x33, 0, if sub { 0x20 } else { 0 }, *rd, *rs, FAR));
+                }
+            }
+        }
+        // An address any distance from a base register, which is how the frame reaches a slot far
+        // from the stack pointer. The constant is built in the register the address goes in, so
+        // that one may not be the base when it does not fit.
+        ("lea.far", [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(imm) })]) => {
+            if fits(*imm, 12) {
+                out.words.push(i(0x13, 0, *rd, *base, *imm));
+            } else if rd != base {
+                li(*rd, *imm, &mut out.words);
+                out.words.push(r(0x33, 0, 0, *rd, *base, *rd));
+            } else {
+                return Err(immediate(*imm));
+            }
         }
         ("add", [Gpr(rd), Gpr(rs1), Gpr(rs2), Symbol(Operator::TprelAdd)]) => {
             out.fixups.push((0, Fixup::TprelAdd));
@@ -883,6 +914,20 @@ mod tests {
         assert_eq!((branch.words[0], branch.fixups[0].1.elf()), (0x0005_1063, 16));
         assert_eq!(one("beqz", &[Gpr(10), Imm(8)]), 0x0005_0463);
         assert_eq!(one("j", &[Imm(-4)]), 0xffdf_f06f);
+    }
+
+    #[test]
+    fn a_far_constant_goes_through_t5_and_a_far_address_through_its_own_register() {
+        let words = |mnemonic, imm| encode(mnemonic, &[Gpr(2), Gpr(2), Imm(imm)]).unwrap().words;
+        assert_eq!(words("addi.far", 16), [0x0101_0113]);
+        assert_eq!(words("subi.far", 2048), [0x8001_0113]);
+        // li t5, 4096 and sub sp, sp, t5.
+        assert_eq!(words("subi.far", 4096), [0x0000_1f37, 0x41e1_0133]);
+        let lea = |rd, disp| encode("lea.far", &[Gpr(rd), at(8, disp)]);
+        assert_eq!(lea(10, -16).unwrap().words, [0xff04_0513]);
+        // li a0, 8192 and add a0, s0, a0.
+        assert_eq!(lea(10, 8192).unwrap().words, [0x0000_2537, 0x00a4_0533]);
+        assert!(lea(8, 8192).is_err());
     }
 
     #[test]
