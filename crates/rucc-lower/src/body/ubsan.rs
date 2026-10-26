@@ -16,7 +16,7 @@ use rucc_ir::{
 };
 use rucc_sema::{Const, Conversion, ExprId, ExprKind};
 use rucc_tuple::Arch;
-use rucc_types::{ArrayLen, FloatKind, IntKind, TypeId, TypeKind};
+use rucc_types::{ArrayLen, FloatKind, IntKind, RecordId, TypeId, TypeKind};
 
 use super::{Body, MemInfo, Ordered, Place, Where};
 use crate::repr;
@@ -30,7 +30,6 @@ pub(super) struct Operand {
 }
 
 /// How the length a subscript is checked against is found.
-#[derive(Clone, Copy)]
 enum Length {
     /// An array of a fixed length.
     Fixed(u64),
@@ -41,12 +40,12 @@ enum Length {
 }
 
 /// A member that `counted_by` says another member counts: the object they are members of, the
-/// member itself, and the member that counts it with its type.
-#[derive(Clone, Copy)]
+/// member itself, and the member that counts it with its type. The counter can be in an
+/// anonymous member, so it is the indices that reach it from the object.
 struct Counted {
     holder: ExprId,
     field: u32,
-    counter: u32,
+    counter: Vec<u32>,
     ty: TypeId,
 }
 
@@ -285,6 +284,7 @@ impl Body<'_, '_> {
         };
         let check = self.sanitize.bounds;
         let address = self.address;
+        let fixed = matches!(length, Length::Fixed(_));
         let (pointer, bound) = match length {
             Length::Fixed(count) => {
                 let place = self.place(object);
@@ -303,7 +303,16 @@ impl Body<'_, '_> {
                 let holder = self.place(counted.holder);
                 let at = self.member_at(holder, counted.holder, counted.field, object_ty, span);
                 let pointer = if decayed { self.taken(at, span) } else { self.read(at, span)? };
-                let at = self.member_at(holder, counted.holder, counted.counter, counted.ty, span);
+                let at = match counted.counter[..] {
+                    [index] => self.member_at(holder, counted.holder, index, counted.ty, span),
+                    _ => self.nested_member(
+                        holder,
+                        counted.holder,
+                        &counted.counter,
+                        counted.ty,
+                        span,
+                    ),
+                };
                 let count = self.read(at, span)?;
                 // gcc counts a negative number as none.
                 let signed = repr::is_signed(self.types(), self.target(), counted.ty);
@@ -319,7 +328,7 @@ impl Body<'_, '_> {
                 (pointer, self.widen(count, false, address, span))
             }
         };
-        let bound = if past && !matches!(length, Length::Fixed(_)) {
+        let bound = if past && !fixed {
             let mut build = self.build(span);
             let one = build.iconst(address, 1);
             build.binary(Opcode::Add, bound, one, Flags::NONE)
@@ -355,10 +364,68 @@ impl Body<'_, '_> {
         let fields = &self.types().record_info(id).fields;
         let name = fields.get(field as usize)?.name?;
         let counter = self.tast().counter(id, name)?;
-        let at = fields.iter().position(|field| field.name == Some(counter))?;
-        let ty = fields[at].ty;
+        let path = self.field_path(id, counter)?;
+        let mut record = id;
+        let mut ty = None;
+        for &index in &path {
+            let found = self.types().record_info(record).fields.get(index as usize)?;
+            if found.bits.is_some() {
+                return None;
+            }
+            ty = Some(found.ty);
+            if let TypeKind::Record(next) = self.types().kind(self.types().canonical(found.ty)) {
+                record = next;
+            }
+        }
+        let ty = ty?;
         self.int_kind(ty)?;
-        Some(Counted { holder, field, counter: u32::try_from(at).ok()?, ty })
+        Some(Counted { holder, field, counter: path, ty })
+    }
+
+    /// The indices that reach member `name` of a record, through anonymous members, with a named
+    /// member of the record itself first, as the checker finds it.
+    fn field_path(&self, record: RecordId, name: Symbol) -> Option<Vec<u32>> {
+        let fields = &self.types().record_info(record).fields;
+        if let Some(index) = fields.iter().position(|field| field.name == Some(name)) {
+            return Some(vec![u32::try_from(index).ok()?]);
+        }
+        fields.iter().enumerate().filter(|(_, field)| field.name.is_none()).find_map(
+            |(index, field)| {
+                let TypeKind::Record(inner) = self.types().kind(self.types().canonical(field.ty))
+                else {
+                    return None;
+                };
+                let mut path = self.field_path(inner, name)?;
+                path.insert(0, u32::try_from(index).ok()?);
+                Some(path)
+            },
+        )
+    }
+
+    /// A member reached from the object at `place` through anonymous members, at the sum of their
+    /// offsets. The members on the way are in a union as often as not, so the place is punned.
+    fn nested_member(
+        &mut self,
+        place: Place,
+        holder: ExprId,
+        path: &[u32],
+        ty: TypeId,
+        span: Span,
+    ) -> Place {
+        let mut record = self.types().canonical(self.tast()[holder].ty);
+        let mut byte = 0;
+        for &index in path {
+            let TypeKind::Record(id) = self.types().kind(record) else { break };
+            let Some(found) = self.types().record_info(id).fields.get(index as usize).copied()
+            else {
+                break;
+            };
+            byte += found.offset;
+            record = self.types().canonical(found.ty);
+        }
+        let addr = self.address_of(place, span);
+        let addr = self.offset(addr, byte, span);
+        Place { punned: true, restrict: place.restrict, ..Place::new(Where::Addr(addr), ty) }
     }
 
     /// The integer kind of a type the checks are made in, and [`None`] for any other type.
