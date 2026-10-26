@@ -3162,6 +3162,27 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
+    /// The processor's extended state saved to the area at `address` or restored from it, for
+    /// the components in `mask`.
+    ///
+    /// The instruction takes the mask in `edx` and `eax`, the high half in the first, so the
+    /// `long long` is split in two on the way in. It reads or writes the area, which is why
+    /// memory is clobbered, and a restore can change any register it names, which is the
+    /// program's business and not the compiler's, as it is with gcc.
+    fn xstate(&mut self, instruction: &str, address: Value, mask: Value, span: Span) {
+        let template = format!("{instruction} (%0)");
+        let high = self.shift(Opcode::LShr, mask, 32, span);
+        let high = self.build(span).unary(Opcode::Trunc, high, Type::int(32));
+        let low = self.build(span).unary(Opcode::Trunc, mask, Type::int(32));
+        let info = AsmInfo {
+            template: self.unit.names.intern(&template),
+            constraints: self.unit.names.intern("r,a,d"),
+            clobbers: self.unit.names.intern("memory"),
+            targets: rucc_ir::BlockCallList::EMPTY,
+        };
+        self.build(span).inline_asm(info, &[address, low, high], &[], Flags::VOLATILE);
+    }
+
     /// The machine register an operand of an assembly statement is kept in, for an operand that
     /// names a local declared to be in one.
     ///
@@ -7633,6 +7654,13 @@ impl<'u> Body<'_, 'u> {
                 let value = value.map(|value| self.value(value));
                 self.eflags(value, ty, span)
             }
+            // The extended state, saved or restored by the one instruction.
+            ExprKind::XState { instruction, address, mask } => {
+                let address = self.value(address);
+                let mask = self.value(mask);
+                self.xstate(instruction, address, mask, span);
+                None
+            }
             // One word of what libgcc found out about the processor, read where libgcc keeps it and
             // tested. The object is declared on the way, so that a unit that never wrote a
             // declaration of it still hands the linker a name to resolve against libgcc.a.
@@ -12067,6 +12095,10 @@ impl<'a> Scan<'a> {
             ExprKind::Apply { function, args, .. } => {
                 self.expr(function);
                 self.expr(args);
+            }
+            ExprKind::XState { address, mask, .. } => {
+                self.expr(address);
+                self.expr(mask);
             }
             // The one node that moves the stack pointer without being a declaration, which is why
             // the question above about what the function declares does not find it.

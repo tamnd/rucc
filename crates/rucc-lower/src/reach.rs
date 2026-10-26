@@ -430,6 +430,10 @@ impl Reach<'_> {
                 self.expr(function);
                 self.expr(args);
             }
+            ExprKind::XState { address, mask, .. } => {
+                self.expr(address);
+                self.expr(mask);
+            }
             // The one node that is a reference. Whether it is a call, an address or a read is
             // not asked, because a definition has to exist for all three.
             ExprKind::Decl(_) | ExprKind::CompoundLiteral(_) if self.unlowered => {}
