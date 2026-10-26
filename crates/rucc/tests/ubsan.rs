@@ -334,3 +334,21 @@ fn reaching_an_unreachable_builtin_calls_the_runtime() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("is not supported"));
 }
+
+/// The length of a counted array whose counter is in an anonymous member is read at its offset.
+#[test]
+fn a_counter_in_an_anonymous_member_bounds_the_index() {
+    let source = "struct e { int x; };\n\
+        struct acl { union { struct { int r; unsigned int a_count; }; \
+        struct hdr { int r; unsigned int a_count; } hdr; }; \
+        struct e a_entries[] __attribute__((__counted_by__(a_count))); };\n\
+        int f(struct acl *a, int i) { return a->a_entries[i].x; }\n";
+    let dir = std::env::temp_dir().join(format!("rucc-ubsan-anonymous-{}", std::process::id()));
+    let args = ["--target=x86_64-unknown-linux-gnu", "-fsanitize=bounds-strict", "-O2", "-S"];
+    let out = compile(&dir, source, &[&args[..], &["-o", "-"]].concat());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).expect("a listing is text");
+    assert_eq!(text.matches("call\t__ubsan_handle_out_of_bounds").count(), 1, "{text}");
+    assert!(text.contains("\tmovl\t4(%r"), "the counter is not read:\n{text}");
+}
