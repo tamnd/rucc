@@ -176,14 +176,20 @@ fn follow_until(func: &mut Func, an: &mut Analyses, stats: &mut Stats, no: bool)
         round.merge(&choose(func));
         let (known, pins) = known(func, an);
         round.record(Kind::Optimized, ANSWERED, count(known.len()));
-        let operands: Vec<Value> =
-            known.into_iter().filter_map(|inst| write(func, inst, 1)).collect();
+        let answers: Vec<(Inst, bool)> = known.into_iter().map(|inst| (inst, true)).collect();
+        let operands = write(func, &answers);
         bury(func, operands);
         round.record(Kind::Optimized, PINNED, count(pin(func, an, &pins)));
         // The ranges again, for the branches on the value a yes was about. The kernel's
         // `statically_true(x)` is `__builtin_constant_p(x) && (x)`, and the second `x` is a branch
         // of its own that only the ranges settle when they are what settled the first.
-        round.merge(&Prune.run(func, an, &mut fuel));
+        // Only in a round that folded, chose or answered something, since that is what gives
+        // the ranges a branch to settle that they could not settle the round before. Asking
+        // them every round was four percent of the instructions of a build of tg3.c, most of it
+        // in the inliner's measure of the copies of callees that ask.
+        if round.changed() {
+            round.merge(&Prune.run(func, an, &mut fuel));
+        }
         an.clear();
         round.merge(&SimplifyCfg.run(func, an, &mut fuel));
         // The control flow pass leaves clearing the cache to the manager, and the next round is
@@ -412,16 +418,21 @@ fn asked(func: &Func) -> Vec<Inst> {
 /// Answers the `is_constant` questions in the function `how` says to and says how many it
 /// answered.
 fn settle(func: &mut Func, how: Answering) -> usize {
-    let mut answered = 0;
-    let mut operands = Vec::new();
-    for inst in asked(func) {
-        let known = how != Answering::Zero
-            && func[func[inst].args].first().is_some_and(|&value| is_constant(func, value));
-        operands.extend(write(func, inst, i128::from(known)));
-        answered += 1;
-    }
+    let answers: Vec<(Inst, bool)> = asked(func)
+        .into_iter()
+        .map(|inst| {
+            // A question about the answer to another is a question about a constant, since that
+            // answer is written in the same batch.
+            let known = how != Answering::Zero
+                && func[func[inst].args].first().is_some_and(|&value| {
+                    is_constant(func, value) || defined_by(func, value, Opcode::IsConstant)
+                });
+            (inst, known)
+        })
+        .collect();
+    let operands = write(func, &answers);
     bury(func, operands);
-    answered
+    answers.len()
 }
 
 /// Takes out what was worked out only to be asked about, now that nothing reads it.
@@ -461,21 +472,38 @@ fn is_constant(func: &Func, value: Value) -> bool {
     matches!(func[inst].opcode, Opcode::IConst | Opcode::FConst)
 }
 
-/// Puts the answer where the question was, and says what the question was about.
-fn write(func: &mut Func, inst: Inst, number: i128) -> Option<Value> {
-    let operand = func[func[inst].args].first().copied();
-    let result = func[inst].results().next().expect("an answer is one value");
-    let ty = func[result].ty;
-    let span = func.span(inst);
-    let imm = func.add_imm(Imm::int(number, ty.lane()));
-    let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
-    let made = func.create_inst(data, &[ty], span);
-    func.insert_before(made, inst);
-    let value = func[made].results().next().expect("a constant is one value");
-    let forward: Map<_, _> = [(result, value)].into_iter().collect();
-    uses::substitute(func, &forward);
-    func.remove_inst(inst);
-    operand
+/// Whether `value` is the result of an instruction with this opcode.
+fn defined_by(func: &Func, value: Value, opcode: Opcode) -> bool {
+    matches!(func[value].def, Def::Result { inst, .. } if func[inst].opcode == opcode)
+}
+
+/// Puts each answer where its question was, and says what the questions were about.
+///
+/// The readers are pointed at the answers in one walk of the function. A walk for each question
+/// was four percent of the instructions of a build of drivers/net/ethernet/broadcom/tg3.c, where
+/// the inliner measures a copy of each callee that asks, and some ask a dozen times.
+fn write(func: &mut Func, answers: &[(Inst, bool)]) -> Vec<Value> {
+    let mut forward = Map::default();
+    let mut operands = Vec::new();
+    for &(inst, known) in answers {
+        operands.extend(func[func[inst].args].first().copied());
+        let result = func[inst].results().next().expect("an answer is one value");
+        let ty = func[result].ty;
+        let span = func.span(inst);
+        let imm = func.add_imm(Imm::int(i128::from(known), ty.lane()));
+        let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+        let made = func.create_inst(data, &[ty], span);
+        func.insert_before(made, inst);
+        let value = func[made].results().next().expect("a constant is one value");
+        forward.insert(result, value);
+    }
+    if !forward.is_empty() {
+        uses::substitute(func, &forward);
+    }
+    for &(inst, _) in answers {
+        func.remove_inst(inst);
+    }
+    operands.iter().map(|&value| uses::chase(&forward, value)).collect()
 }
 
 #[cfg(test)]
