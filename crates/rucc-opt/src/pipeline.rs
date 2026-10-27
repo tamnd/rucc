@@ -154,6 +154,14 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// `switch` in `__feature_translate`, and the call to the function declared `error` is only gone
 /// once the load is a number.
 ///
+/// `simplify-cfg` runs once between `image` and the first `sroa`. A `switch` on a `sizeof`, which
+/// is every `this_cpu_*` macro in the kernel, comes from the front end with one arm for each size,
+/// and the arms that cannot run still read the local the macro works on as a `u8` and a `u16`.
+/// `sroa` cuts a local at every access it finds, so the `s64` that `percpu_counter_add_batch`
+/// reads four bytes at a time in the live arm became pieces of one, one, two and four bytes, put
+/// back together with shifts and ors on each pass of its loop. With the arms that cannot run taken
+/// out first, the pieces are the ones the live arm names (tamnd/rucc-kernel#109).
+///
 /// The peephole runs on both sides of `narrow`, which is the one place in this list where a pass
 /// is named twice, so the reason is worth stating. The rewrite table is written at a width, and
 /// the widths below `int` are unreachable from C source: the integer promotions mean an addition
@@ -320,6 +328,7 @@ const O1: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "simplify-cfg",
     "sroa",
     "fold",
     "simplify",
@@ -429,6 +438,7 @@ const O2: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "simplify-cfg",
     "sroa",
     "fold",
     "simplify",
@@ -499,6 +509,7 @@ const O3: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "simplify-cfg",
     "sroa",
     "fold",
     "simplify",
@@ -602,6 +613,7 @@ const OS: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "simplify-cfg",
     "sroa",
     "fold",
     "simplify",
@@ -656,6 +668,7 @@ const OZ: &[&str] = &[
     "expect",
     "fold",
     "image",
+    "simplify-cfg",
     "sroa",
     "fold",
     "simplify",
