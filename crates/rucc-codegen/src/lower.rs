@@ -5193,6 +5193,11 @@ impl<'a> Lowering<'a> {
         };
         let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
         let [address] = args[..] else { return Err(self.unsupported(inst)) };
+        // RISC-V has a prefetch only in Zicbop, which nothing here asks for, and gcc writes no
+        // instruction at all for the hint without it.
+        if self.on_riscv64() {
+            return Ok(());
+        }
         // AArch64 has the write hint in the base instruction set, and gcc 16.2.0 writes it there.
         let write = hint.write && self.on_aarch64();
         let name = match (hint.locality, write) {
@@ -10495,6 +10500,17 @@ mod tests {
         let out = super::func(func, names, selector, conv, &Elsewhere::default())
             .map_err(|why| why.to_string())?;
         Ok(mir::print_func(&out.func, names, &riscv64::REGS))
+    }
+
+    /// RISC-V without Zicbop has no prefetch, so the hint is no instruction, as in gcc.
+    #[test]
+    fn a_prefetch_on_riscv64_is_dropped() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR]);
+        let hint = PrefetchHint { write: false, locality: PrefetchHint::MOST };
+        Builder::new(&mut source, block).prefetch(args[0], hint);
+        Builder::new(&mut source, block).ret(&[]);
+        let text = lower_rv(&mut names, &source).expect("lowered");
+        assert!(!text.contains("prefetch"), "{text}");
     }
 
     /// A template on RISC-V is kept as text the way one on AArch64 is. `A` is the address in a
