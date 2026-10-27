@@ -787,11 +787,30 @@ pub fn assembled_described(
         obj.add_comdat(object::write::Comdat { kind: group.keep.kind(), symbol, sections });
     }
 
+    let mut nothing = None;
     for (part, id) in input.parts.iter().zip(&made) {
         for reloc in &part.relocs {
             let (symbol, addend) = match onto(reloc) {
                 Some((part, offset)) => {
                     (obj.section_symbol(made[part]), reloc.addend + offset as i64)
+                }
+                // A relocation against no name, which `.reloc` writes for a plain number. ELF
+                // means symbol zero by that, and a local symbol at the absolute address zero is
+                // the same to a linker.
+                None if reloc.symbol.is_empty() => {
+                    let zero = *nothing.get_or_insert_with(|| {
+                        obj.add_symbol(Symbol {
+                            name: Vec::new(),
+                            value: 0,
+                            size: 0,
+                            kind: SymbolKind::Label,
+                            scope: SymbolScope::Compilation,
+                            weak: false,
+                            section: SymbolSection::Absolute,
+                            flags: SymbolFlags::None,
+                        })
+                    });
+                    (zero, reloc.addend)
                 }
                 None => {
                     let Some(&symbol) = symbols.get(&reloc.symbol) else {

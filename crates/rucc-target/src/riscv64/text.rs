@@ -371,6 +371,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("fabs_f64", &[spell("fabs.d", FF)]),
     ("fmv_f32", &[spell("fmv.s", FF)]),
     ("fmv_f64", &[spell("fmv.d", FF)]),
+    ("fzero_f64", &[spell("fmv.d.x", &[Fp(0), Fixed(0)])]),
     ("fcvt_f32_f64", &[spell("fcvt.d.s", FF)]),
     ("fcvt_f64_f32", &[spell("fcvt.s.d", FF)]),
     ("scvtf_32_f32", &[spell("fcvt.s.w", &[Fp(0), Reg(1, W)])]),
