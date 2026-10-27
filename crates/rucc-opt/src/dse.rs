@@ -110,9 +110,7 @@ impl Pass for Dse {
             };
             for block in func.blocks() {
                 for (at, inst) in func.insts(block).enumerate() {
-                    let Some(store) = walk.candidate(inst) else {
-                        continue;
-                    };
+                    let Some(store) = walk.candidate(inst) else { continue };
                     match walk.fate(&store, block, at + 1) {
                         Fate::Kept => {}
                         Fate::TooFar => stats.missed(TOO_FAR),
@@ -194,10 +192,7 @@ impl Walk<'_> {
     /// and one carrying a memory token is one some pass is still reasoning about.
     fn candidate(&self, inst: Inst) -> Option<Store> {
         let data = &self.func[inst];
-        let bulk = matches!(
-            data.opcode,
-            Opcode::Memset | Opcode::Memcpy | Opcode::Memmove
-        );
+        let bulk = matches!(data.opcode, Opcode::Memset | Opcode::Memcpy | Opcode::Memmove);
         if !(bulk || data.opcode == Opcode::Store) || data.flags.contains(Flags::VOLATILE) {
             return None;
         }
@@ -213,24 +208,13 @@ impl Walk<'_> {
             Origin::Local(local) => !self.alias.escapes().escaped(local),
             _ => false,
         };
-        Some(Store {
-            inst,
-            access,
-            lo,
-            hi,
-            private,
-            bulk,
-        })
+        Some(Store { inst, access, lo, hi, private, bulk })
     }
 
     /// Whether this is the end of the lifetime of the local the store writes.
     fn ends(&self, store: &Store, inst: Inst) -> bool {
-        let Origin::Local(_) = store.access.origin else {
-            return false;
-        };
-        self.alias
-            .writes(inst)
-            .is_some_and(|ended| ended.origin == store.access.origin)
+        let Origin::Local(_) = store.access.origin else { return false };
+        self.alias.writes(inst).is_some_and(|ended| ended.origin == store.access.origin)
     }
 
     /// Walks every path from just after the store, which is in this block at this index.
@@ -364,16 +348,10 @@ impl Walk<'_> {
             // write of the whole of it that nothing may read back.
             Opcode::Store | Opcode::Memset | Opcode::AtomicStore | Opcode::LifetimeEnd => None,
             Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
-                if self.alias.read_by(&narrowed, inst).is_no() {
-                    None
-                } else {
-                    live
-                }
+                if self.alias.read_by(&narrowed, inst).is_no() { None } else { live }
             }
             _ => {
-                let Some(access) = self.alias.reads(inst) else {
-                    return live;
-                };
+                let Some(access) = self.alias.reads(inst) else { return live };
                 // The same object at offsets both know is a question the offsets answer, and the
                 // answer is which of the live bytes, not only whether.
                 let same = access.origin == store.access.origin;
@@ -381,11 +359,7 @@ impl Walk<'_> {
                     let (start, end) = (start.max(lo), end.min(hi));
                     return (start < end).then_some((start, end));
                 }
-                if self.alias.query(&narrowed, &access).is_no() {
-                    None
-                } else {
-                    live
-                }
+                if self.alias.query(&narrowed, &access).is_no() { None } else { live }
             }
         }
     }
@@ -474,9 +448,7 @@ impl Live {
 
     /// Whether every live byte here is live in `other` as well.
     fn within_all(&self, other: &Self) -> bool {
-        self.0
-            .iter()
-            .all(|&(lo, hi)| other.0.iter().any(|&(start, end)| start <= lo && hi <= end))
+        self.0.iter().all(|&(lo, hi)| other.0.iter().any(|&(start, end)| start <= lo && hi <= end))
     }
 }
 
@@ -500,40 +472,22 @@ fn trim(func: &mut Func, inst: Inst, skip: i64, size: u64, bits: u32) {
     if skip != 0 {
         let ty = Type::int(bits);
         let imm = func.add_imm(Imm::int(i128::from(skip), ty.lane()));
-        let data = InstData {
-            extra: Extra::Imm(imm),
-            ..InstData::new(Opcode::IConst)
-        };
+        let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
         let by = emit(func, inst, data, ty);
         for arg in &mut args[..moved] {
             let pair = func.push_values(&[*arg, by]);
             *arg = emit(
                 func,
                 inst,
-                InstData {
-                    args: pair,
-                    ..InstData::new(Opcode::PtrAdd)
-                },
+                InstData { args: pair, ..InstData::new(Opcode::PtrAdd) },
                 Type::PTR,
             );
         }
         align = align.min(1u32 << skip.trailing_zeros().min(31)).max(1);
     }
-    let mem = func.add_mem(MemInfo {
-        size,
-        align,
-        ..info
-    });
+    let mem = func.add_mem(MemInfo { size, align, ..info });
     let args = func.push_values(&args);
-    let made = func.create_inst(
-        InstData {
-            args,
-            extra: Extra::Mem(mem),
-            ..data
-        },
-        &[],
-        span,
-    );
+    let made = func.create_inst(InstData { args, extra: Extra::Mem(mem), ..data }, &[], span);
     func.insert_before(made, inst);
     func.remove_inst(inst);
 }
@@ -543,10 +497,7 @@ fn emit(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value {
     let span = func.span(before);
     let made = func.create_inst(data, &[ty], span);
     func.insert_before(made, before);
-    func[made]
-        .results()
-        .next()
-        .expect("one result was asked for")
+    func[made].results().next().expect("one result was asked for")
 }
 
 #[cfg(test)]
@@ -576,10 +527,7 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
             Dse.run(&mut module[id], &mut an, fuel);
         }
         if let Err(errors) = rucc_ir::verify(&module, &names) {
-            panic!(
-                "the pass left invalid IR, {errors:?}\n{}",
-                rucc_ir::print(&module, &names)
-            );
+            panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
         rucc_ir::print(&module, &names)
     }
@@ -589,9 +537,7 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
     }
 
     fn stores(out: &str) -> usize {
-        out.lines()
-            .filter(|line| line.trim_start().starts_with("store"))
-            .count()
+        out.lines().filter(|line| line.trim_start().starts_with("store")).count()
     }
 
     const TWICE: &str = r#"
@@ -693,10 +639,7 @@ block0(%0: ptr):
         assert!(!out.contains("memset"), "{out}");
         assert_eq!(stores(&out), 3, "{out}");
         let out = cleaned(&fill("%5 = load.i32 %0, align 4"));
-        assert!(
-            out.contains("memset"),
-            "the load reads the first word, {out}"
-        );
+        assert!(out.contains("memset"), "the load reads the first word, {out}");
     }
 
     /// A fill whose first half is overwritten becomes a fill of the second half.
