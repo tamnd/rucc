@@ -32,6 +32,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 integrated assembler encodes Zbc, Zbkb's `pack`, `packh`, `packw` and `brev8`, Zabha's byte and halfword atomics, `amocas.q`, the floating point CSR pseudo instructions, `c.li`, `c.nop` and `c.ebreak`, and loads and stores from a label, and reads `-(288)` as a number instead of an address (#3906).
 - The riscv64 assembler encodes the vector instructions the kernel writes by hand, `vsetvli`, `vsetivli`, `vsetvl`, the unit stride `vle` and `vse` loads and stores and `vmv.v.v`, `vmv.v.x` and `vmv.v.i`, and refuses `.option arch` for an extension it has no instructions for (#3909).
 - `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=tp` and `-mstack-protector-guard-offset=` on riscv64 put the canary in the running task the way a riscv kernel asks, and `-mstack-protector-guard=global` is taken there too (#3911).
+- The riscv64 assembler writes `vadd`, `vsub`, `vand`, `vor` and `vxor` with `.vv`, `.vx` and `.vi`, which `arch/riscv/lib/xor.S` on 6.12 needs (#3915).
+- The riscv64 assembler takes `.insn` as a number and in the `r`, `i` and `s` formats, so the kernel's `AS_HAS_INSN` probe passes the way it does with gas (#3916).
+- A riscv64 target assembles files of assembly for a 32 bit machine under `-march=rv32...` with `-mabi=ilp32` or `-mabi=ilp32d`, writing ELF32 objects, so the kernel's compat vDSO builds. C and links for a 32 bit machine are refused, since there is no back end for one (#3917).
+- The riscv64 assembler takes the vector crypto extensions the kernel's crypto code is written with (Zvkned, Zvknha, Zvknhb, Zvkg, Zvksed, Zvksh, Zvkb and Zvbb), along with the strided, segment and indexed loads and stores, slides, merges and widening moves that code uses, and a constant operand of a vector instruction can be an expression (#3919).
+- The riscv64 assembler takes `.reloc` with `R_RISCV_SET_ULEB128` and `R_RISCV_SUB_ULEB128` and writes them as they were asked for, so the kernel's `AS_HAS_ULEB128` probe passes and its module loader test for the pair is built (#3920).
 
 ### Fixed
 
@@ -75,6 +80,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 assembler writes a difference of two names it cannot work out, `.long a - b` with `b` in no section of the file, as an `R_RISCV_ADD` and `R_RISCV_SUB` pair on the same bytes the way gas does, in one, two, four or eight bytes (#3910).
 - The riscv64 assembler reads `la` in a file built without position independence as `lla`, the address worked out from the instruction, the way gas does without `-fpic`, rather than a read of the global offset table (#3912).
 - A 32-bit comparison on riscv64 keeps the `sext.w` in front of it when the word was cut out of a wider register, so `(int)(x >> 32)` or an `int` field of a small struct passed in a register no longer compares as an unsigned number (#3913).
+- An answer written before the instruction has read all of its sources, like the riscv64 select, no longer gets the same scratch register as a spilled source, which made the select pick the wrong value (#3914).
+- The riscv64 `.insn s` form takes an offset in brackets of its own, as in `((32) & 0xfe0)(a0)` from the kernel's prefetch macros (#3918).
 
 ## 0.30.12
 

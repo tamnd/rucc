@@ -66,7 +66,8 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         | Reference::Section
         | Reference::Field(_)
         | Reference::Riscv(_)
-        | Reference::Sum { .. } => {
+        | Reference::Sum { .. }
+        | Reference::Leb { .. } => {
             return None;
         }
         // The i386 ways of reaching the global offset table, counted from a register holding it,
@@ -136,6 +137,7 @@ pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
         | Reference::Field(_)
         | Reference::Riscv(_)
         | Reference::Sum { .. }
+        | Reference::Leb { .. }
         | Reference::Tls(Tls::Descriptor | Tls::DescriptorCall) => return None,
     })
 }
@@ -216,6 +218,8 @@ pub(crate) fn r_type_riscv64(reference: Reference) -> Option<elf::RelocationType
             (8, true) => elf::R_RISCV_SUB64,
             _ => return None,
         },
+        Reference::Leb { minus: false } => elf::R_RISCV_SET_ULEB128,
+        Reference::Leb { minus: true } => elf::R_RISCV_SUB_ULEB128,
         _ => return None,
     })
 }

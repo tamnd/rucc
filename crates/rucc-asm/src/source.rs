@@ -204,7 +204,7 @@ pub fn read_with_debug(
     loop {
         passes += 1;
         let aarch64 = arch == Arch::Aarch64;
-        let riscv = arch == Arch::Riscv64;
+        let riscv = matches!(arch, Arch::Riscv64 | Arch::Riscv32);
         let i386 = arch == Arch::X86;
         let macho = format == ObjectFormat::MachO;
         let coff = format == ObjectFormat::Coff;
@@ -373,6 +373,14 @@ const RV_EXTENSIONS: &[&str] = &[
     "zicbom",
     "zicboz",
     "zawrs",
+    "zvbb",
+    "zvkb",
+    "zvkg",
+    "zvkned",
+    "zvknha",
+    "zvknhb",
+    "zvksed",
+    "zvksh",
 ];
 
 /// The most bytes a count worked out from guessed places may come to.
@@ -448,6 +456,9 @@ struct Fixup {
     /// Whether these bytes are a LEB128 number, and a signed one, which is written in all of them
     /// however few it needs. See [`Reader::leb`].
     leb: Option<bool>,
+    /// The relocation `.reloc` asked for by a name that fills no bytes here, written as the file
+    /// said it rather than worked out. See [`Reader::reloc`].
+    named: Option<Reference>,
     line: usize,
 }
 
@@ -1559,6 +1570,7 @@ impl Reader {
                 jump,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -1576,6 +1588,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -1628,9 +1641,109 @@ impl Reader {
             jump,
             field: Some(Field::A64(field)),
             leb: None,
+            named: None,
             line: self.line,
         });
         Ok(())
+    }
+
+    /// `.insn`, an instruction given by its fields or as its number, which is how the kernel
+    /// writes the ones an older assembler does not know. The forms are the ones the kernel uses:
+    /// the bare number, with its length in front or not, and the `r`, `i` and `s` formats with
+    /// the opcode and the functions as numbers. An `i` takes its constant after the registers
+    /// or in front of the base the way a load writes it.
+    fn rv_insn(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let first = args.first().map_or("", |arg| arg.trim());
+        let (format, first) = match first.split_once(char::is_whitespace) {
+            Some((format @ ("r" | "i" | "s"), rest)) => (format, rest.trim()),
+            _ => ("", first),
+        };
+        let mut fields = std::iter::once(first)
+            .chain(args.iter().skip(1).map(|arg| arg.trim()))
+            .collect::<Vec<_>>();
+        if format.is_empty() {
+            let value = self.number(fields.last().copied().unwrap_or_default())?;
+            let length = if value & 3 == 3 { 4 } else { 2 };
+            let asked = match *fields {
+                [_] => length,
+                [length, _] => self.number(length)?,
+                _ => return Err(self.bad(".insn takes a number, or a length and a number")),
+            };
+            if asked != length || !(0..1 << (8 * length)).contains(&value) {
+                return Err(
+                    self.bad(&format!(".insn {value:#x} is not a {asked} byte instruction"))
+                );
+            }
+            self.generated();
+            self.row()?;
+            return self.put(&value.to_le_bytes()[..length as usize]);
+        }
+        // `simm12(rs1)` is two of the fields. The offset can be in brackets of its own, as in the
+        // kernel's `((offset) & 0xfe0)(a0)` for a prefetch, so the register is in the last pair.
+        if let Some(last) = fields.pop() {
+            match last.strip_suffix(')').and_then(|inner| inner.rsplit_once('(')) {
+                Some((offset, base)) if format != "r" => {
+                    fields.push(base.trim());
+                    fields.push(if offset.trim().is_empty() { "0" } else { offset.trim() });
+                }
+                _ => fields.push(last),
+            }
+        }
+        let field = |reader: &mut Self, text: &str, bits: u32| -> Result<u32, Trouble> {
+            let value = reader.number(text)?;
+            u32::try_from(value)
+                .ok()
+                .filter(|&value| value >> bits == 0)
+                .ok_or_else(|| reader.bad(&format!("{value} does not fit in {bits} bits in .insn")))
+        };
+        let gpr = |reader: &Self, text: &str| match riscv64::register(&text.to_ascii_lowercase()) {
+            Some(riscv64::Value::Gpr(number)) => Ok(u32::from(number)),
+            _ => Err(reader.bad(&format!("'{text}' is not a register in .insn"))),
+        };
+        let simm12 = |reader: &mut Self, text: &str| -> Result<u32, Trouble> {
+            let value = reader.number(text)?;
+            if !(-2048..2048).contains(&value) {
+                return Err(reader.bad(&format!("{value} does not fit in 12 bits in .insn")));
+            }
+            Ok((value as u32) & 0xfff)
+        };
+        let word = match (format, &fields[..]) {
+            ("r", &[opcode, func3, func7, rd, rs1, rs2]) => {
+                field(self, func7, 7)? << 25
+                    | gpr(self, rs2)? << 20
+                    | gpr(self, rs1)? << 15
+                    | field(self, func3, 3)? << 12
+                    | gpr(self, rd)? << 7
+                    | field(self, opcode, 7)?
+            }
+            ("i", &[opcode, func3, rd, rs1, imm]) => {
+                simm12(self, imm)? << 20
+                    | gpr(self, rs1)? << 15
+                    | field(self, func3, 3)? << 12
+                    | gpr(self, rd)? << 7
+                    | field(self, opcode, 7)?
+            }
+            ("s", &[opcode, func3, rs2, rs1, imm]) => {
+                let imm = simm12(self, imm)?;
+                (imm >> 5) << 25
+                    | gpr(self, rs2)? << 20
+                    | gpr(self, rs1)? << 15
+                    | field(self, func3, 3)? << 12
+                    | (imm & 0x1f) << 7
+                    | field(self, opcode, 7)?
+            }
+            _ => {
+                return Err(
+                    self.bad(&format!("this .insn {format} is not one this assembler takes"))
+                );
+            }
+        };
+        if word & 3 != 3 {
+            return Err(self.bad(&format!("the opcode of .insn {format} has to end in two ones")));
+        }
+        self.generated();
+        self.row()?;
+        self.put(&word.to_le_bytes())
     }
 
     /// One RISC-V instruction, as the one or more words of it.
@@ -1640,7 +1753,7 @@ impl Reader {
     /// `auipc` pair does not name the symbol: it names a label on the `auipc`, which the linker
     /// finds the high half by, so the `auipc` is given one. gas makes the same kind of label.
     fn rv64(&mut self, text: &str) -> Result<(), Trouble> {
-        if let Some(word) = riscv64::vector(text) {
+        if let Some(word) = riscv64::vector_with(text, &mut |text| self.number(text).ok()) {
             let word = word.map_err(|why| self.bad(&why.to_string()))?;
             self.generated();
             self.row()?;
@@ -1713,6 +1826,7 @@ impl Reader {
                 jump: field.relative(),
                 field: Some(Field::Rv(field)),
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -2394,6 +2508,7 @@ impl Reader {
                     }
                 }
             }
+            "insn" if self.riscv => self.rv_insn(&args)?,
             "ltorg" | "pool" if self.aarch64 => self.literal_pool()?,
             // An instruction written as its number, which is how the arm64 kernel writes one the
             // assembler may not know.
@@ -3274,6 +3389,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -3286,12 +3402,49 @@ impl Reader {
     ///
     /// Only the relocations that fill bytes of data with an address or a distance are taken, and
     /// they are written as the same expression would be in `.long` or `.quad` at that place, so the
-    /// writer picks the same relocation the name asks for.
+    /// writer picks the same relocation the name asks for. The one exception is RISC-V's ULEB128
+    /// pair, which the linker writes a number of its own length for and so is passed on as it is.
     fn reloc(&mut self, args: &[String]) -> Result<(), Trouble> {
         let [place, name, rest @ ..] = args else {
             return Err(self.bad(".reloc wants a place, a relocation and an expression"));
         };
         let name = name.trim();
+        // The ULEB128 pair writes no bytes of its own here and the linker writes as many as the
+        // number takes, so it is written as it was asked for, at a place that may come later.
+        let leb = match name {
+            "R_RISCV_SET_ULEB128" if self.riscv => Some(false),
+            "R_RISCV_SUB_ULEB128" if self.riscv => Some(true),
+            _ => None,
+        };
+        if let Some(minus) = leb {
+            let at = self.origin(place)?;
+            let sum = match rest {
+                [] => Sum::default(),
+                [one] => self.expression(one)?,
+                _ => return Err(self.bad(".reloc wants one expression after the relocation")),
+            };
+            for term in &sum.terms {
+                if let What::Symbol(name) = &term.what {
+                    let name = name.clone();
+                    self.sym(&name);
+                }
+            }
+            self.fixups.push(Fixup {
+                part: self.here,
+                at,
+                width: 0,
+                sum,
+                reach: Reach::Near,
+                slot: Reference::Got,
+                branch: None,
+                jump: false,
+                field: None,
+                leb: None,
+                named: Some(Reference::Leb { minus }),
+                line: self.line,
+            });
+            return Ok(());
+        }
         let (width, relative) = match name {
             "R_AARCH64_ABS64" | "R_X86_64_64" | "BFD_RELOC_64" => (8, false),
             "R_AARCH64_ABS32" | "R_X86_64_32" | "R_386_32" | "BFD_RELOC_32" => (4, false),
@@ -3329,6 +3482,7 @@ impl Reader {
             jump: false,
             field: None,
             leb: None,
+            named: None,
             line: self.line,
         });
         Ok(())
@@ -3357,6 +3511,7 @@ impl Reader {
             jump: false,
             field: Some(Field::A64(aarch64::Fixup::TlsdescCall)),
             leb: None,
+            named: None,
             line: self.line,
         });
         Ok(())
@@ -3425,6 +3580,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: Some(signed),
+                named: None,
                 line: self.line,
             });
         }
@@ -4491,6 +4647,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -5003,6 +5160,10 @@ impl Reader {
                 self.padded_leb(&fixup, signed)?;
                 continue;
             }
+            if let Some(kind) = fixup.named {
+                self.named_reloc(&fixup, kind)?;
+                continue;
+            }
             let line = fixup.line;
             let bad = |why: String| Trouble { line, why };
             // A name reached through the global offset table, or through the one entry of it a
@@ -5323,6 +5484,25 @@ impl Reader {
             return Err(Trouble { line, why });
         }
         Ok(Reference::GotFront)
+    }
+
+    /// A relocation `.reloc` named and this file does not work out, against the name in the
+    /// expression or, for a plain number, against no name at all, which is what gas writes.
+    fn named_reloc(&mut self, fixup: &Fixup, kind: Reference) -> Result<(), Trouble> {
+        let symbol = match fixup.sum.terms.as_slice() {
+            [] => String::new(),
+            [Term { coeff: 1, what: What::Symbol(name) }] => name.clone(),
+            _ => {
+                let why =
+                    "'.reloc' of a ULEB128 relocation wants a name, a number, or a name and a \
+                           number"
+                        .to_owned();
+                return Err(Trouble { line: fixup.line, why });
+            }
+        };
+        let (at, addend) = (fixup.at as usize, fixup.sum.constant);
+        self.parts[fixup.part].relocs.push(Reloc { at, symbol, kind, addend, after: 0 });
+        Ok(())
     }
 
     /// A LEB128 number that was waiting for a label further on, written into the bytes the pass
@@ -7194,6 +7374,101 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn a_riscv_uleb128_reloc_is_passed_on_as_it_was_asked_for() {
+        // The kernel's arch/riscv/kernel/tests/module_test/test_uleb128.S and the AS_HAS_ULEB128
+        // probe, which GNU as writes as these relocations, the probe's against no name at all.
+        let out = match read(
+            concat!(
+                "\t.data\n",
+                "first:\n",
+                "\t.space 127\n",
+                "second:\n",
+                "\t.reloc second, R_RISCV_SET_ULEB128, second\n",
+                "\t.reloc second, R_RISCV_SUB_ULEB128, first\n",
+                "\t.dword 0\n",
+                "\t.reloc ., R_RISCV_SET_ULEB128, 127\n",
+                "\t.byte 0\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let part = out.parts.iter().find(|part| part.name == ".data").unwrap();
+        assert_eq!(part.bytes.len(), 127 + 8 + 1);
+        let relocs: Vec<_> = part
+            .relocs
+            .iter()
+            .map(|reloc| (reloc.at, reloc.symbol.as_str(), reloc.kind, reloc.addend))
+            .collect();
+        assert_eq!(
+            relocs,
+            [
+                (127, "second", Reference::Leb { minus: false }, 0),
+                (127, "first", Reference::Leb { minus: true }, 0),
+                (135, "", Reference::Leb { minus: false }, 127),
+            ]
+        );
+        for line in [
+            "\t.data\nfirst:\n\t.reloc ., R_RISCV_SET_ULEB128, first + first\n",
+            "\t.data\n\t.reloc ., R_RISCV_SET_ULEB128, 2 * first\n",
+        ] {
+            assert!(read(line, Arch::Riscv64).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_riscv_insn_is_the_instruction_its_fields_or_its_number_make() {
+        // How the kernel's insn-def.h writes `pause`, `wrs.nto`, `hfence.vvma` and the rest once
+        // the probe for `.insn` passes, and the probe itself.
+        let read = match read(
+            concat!(
+                "\t.insn 0x100000f\n",
+                "\t.insn 4, 0x00d00073\n",
+                "\t.insn r 51, 0, 0, t0, t0, zero\n",
+                "\t.insn r 115, 0, 17, x0, a0, a1\n",
+                "\t.insn i 19, 6, x0, a0, -32\n",
+                "\t.insn i 3, 3, a0, 8(sp)\n",
+                "\t.insn s 35, 3, a1, -8(sp)\n",
+                "\t.insn s 19, 6, x3, ((32) & 0xfe0)(a0)\n",
+                "\t.insn 0x0001\n",
+                "\t.insn 2, 0x4505\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        // The bytes GNU as writes for the same lines.
+        let mut bytes = Vec::new();
+        for word in [
+            0x0100_000f_u32,
+            0x00d0_0073,
+            0x0002_82b3,
+            0x22b5_0073,
+            0xfe05_6013,
+            0x0081_3503,
+            0xfeb1_3c23,
+            0x0235_6013,
+        ] {
+            bytes.extend(word.to_le_bytes());
+        }
+        bytes.extend([0x01, 0x00, 0x05, 0x45]);
+        let part = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        assert_eq!(part.bytes, bytes);
+        for line in [
+            "\t.insn 0x13, 1\n",
+            "\t.insn 2, 0x13\n",
+            "\t.insn r 51, 8, 0, t0, t0, zero\n",
+            "\t.insn i 19, 0, a0, a0, 2048\n",
+            "\t.insn r 50, 0, 0, t0, t0, zero\n",
+            "\t.insn b 99, 0, a0, a1, 8\n",
+        ] {
+            assert!(super::read(line, Arch::Riscv64).is_err(), "{line}");
+        }
+    }
+
+    #[test]
     fn a_riscv_operand_worked_out_from_constants_is_its_number() {
         // How the kernel's vDSO ChaCha sets up its frame once `SZREG` is through the preprocessor,
         // inside the `.option` lines its alternatives write. A `.word` is four bytes here.
@@ -7231,8 +7506,8 @@ _tls$tlv$init:
         );
         assert!(super::read(".option pic\n", Arch::Riscv64).is_err());
         // The vector instructions the kernel writes go through, and an extension the encoder has
-        // nothing for is refused where it is asked for, which is what the kernel's probe for the
-        // vector crypto code reads.
+        // nothing for is refused where it is asked for, which is what the kernel's probes for
+        // the vector extensions read.
         let vector = concat!(
             "\t.option arch, +zve32x\n",
             "\tvsetvli t1, x0, e8, m8, ta, ma\n",
@@ -7240,7 +7515,12 @@ _tls$tlv$init:
         );
         let read = super::read(vector, Arch::Riscv64).expect("the vector lines are read");
         assert_eq!(words(&read, ".text"), [0x0c30_7357, 0x0205_8007]);
-        assert!(super::read("\t.option arch, +v, +zvkb\n", Arch::Riscv64).is_err());
+        assert!(super::read("\t.option arch, +v, +zvkb\n", Arch::Riscv64).is_ok());
+        assert!(super::read("\t.option arch, +v, +zvbc\n", Arch::Riscv64).is_err());
+        // The SM4 key schedule counts its round constant with a `.set` in a `.rept`.
+        let rounds = "\t.set i, 0\n.rept 2\n\tvsm4k.vi v1, v1, i\n\t.set i, i + 1\n.endr\n";
+        let read = super::read(rounds, Arch::Riscv64).expect("the rounds are read");
+        assert_eq!(words(&read, ".text"), [0x8610_20f7, 0x8610_a0f7]);
     }
 
     #[test]
