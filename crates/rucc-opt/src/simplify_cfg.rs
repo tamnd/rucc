@@ -280,8 +280,15 @@ impl Pass for SimplifyCfg {
         // function had one forwarder ago. The parameters nothing reads go first, for the reason
         // this module's documentation gives, which is that a block they leave empty is a forwarder
         // and the worklist below is what takes forwarders out.
-        let dropped = drop_unread(func, fuel, &mut stats);
-        if straighten(func, fuel, &mut stats, &mut forward) || dropped {
+        // One look at the edges and at the blocks whose address is taken for both steps. Taking a
+        // parameter changes what an edge passes and not where it goes, and what it strands is
+        // never a terminator or a `blockaddr`, so the second step finds them as the first left
+        // them. Each step worked them out for itself, and with the walk for the parameters that
+        // was three walks over every edge on each run.
+        let addressed = addressed(func);
+        let edges = incoming(func);
+        let dropped = drop_unread(func, &addressed, &edges, fuel, &mut stats);
+        if straighten(func, &addressed, edges, fuel, &mut stats, &mut forward) || dropped {
             an.clear();
         }
         // Merging reads which blocks have one predecessor, so it has to run on the graph as it is
@@ -865,10 +872,15 @@ pub(crate) fn incoming(func: &Func) -> Edges {
 /// step can do because it has already worked out the whole answer. The parameters of a block are
 /// taken together once they have all been paid for, since an argument list that has lost some of
 /// its entries and not others is a function the verifier refuses.
-fn drop_unread(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+fn drop_unread(
+    func: &mut Func,
+    addressed: &Set<Block>,
+    edges: &Edges,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+) -> bool {
     let Some(entry) = func.entry() else { return false };
-    let live = live(func, entry, &addressed(func));
-    let edges = incoming(func);
+    let live = live(func, entry, addressed, edges);
     let mut changed = false;
     let mut gone: Set<Value> = Set::default();
     for block in func.blocks().collect::<Vec<Block>>() {
@@ -957,7 +969,7 @@ fn strand(func: &mut Func, mut gone: Set<Value>) {
 /// The entry block's parameters are the function's own and are live by declaration rather than by
 /// use, and so are the parameters of a block whose address is taken, because an `indirect_br` is a
 /// way in that this reads from the wrong end.
-fn live(func: &Func, entry: Block, addressed: &Set<Block>) -> Set<Value> {
+fn live(func: &Func, entry: Block, addressed: &Set<Block>, edges: &Edges) -> Set<Value> {
     let mut where_from: Map<Value, (Block, usize)> = Map::default();
     let mut live: Set<Value> = Set::default();
     let mut work: Vec<Value> = Vec::new();
@@ -984,7 +996,6 @@ fn live(func: &Func, entry: Block, addressed: &Set<Block>) -> Set<Value> {
         }
     }
 
-    let edges = incoming(func);
     while let Some(value) = work.pop() {
         match func[value].def {
             Def::Result { inst, .. } => {
@@ -1031,13 +1042,13 @@ fn live(func: &Func, entry: Block, addressed: &Set<Block>) -> Set<Value> {
 /// to have anything in it later, so there is one refusal recorded and it is the true one.
 fn straighten(
     func: &mut Func,
+    addressed: &Set<Block>,
+    mut edges: Edges,
     fuel: &mut Fuel,
     stats: &mut Stats,
     forward: &mut Map<Value, Value>,
 ) -> bool {
     let Some(entry) = func.entry() else { return false };
-    let addressed = addressed(func);
-    let mut edges = incoming(func);
     let mut work: VecDeque<Block> = func.blocks().collect();
     let mut queued: Set<Block> = work.iter().copied().collect();
     let mut gone: Set<Block> = Set::default();
@@ -1088,7 +1099,7 @@ fn straighten(
         if starved {
             break;
         }
-        let Some((term, into, args)) = forwards(func, block, entry, &addressed, &edges) else {
+        let Some((term, into, args)) = forwards(func, block, entry, addressed, &edges) else {
             continue;
         };
         if !fuel.take() {
