@@ -2377,9 +2377,16 @@ impl<'u> Body<'_, 'u> {
             Stmt::Expr(expr) => self.discard(expr),
             Stmt::Block(list) => {
                 self.open();
-                for index in 0..tast[list].len() {
+                let mut index = 0;
+                while index < tast[list].len() {
+                    let merged = self.merged_stores(&tast[list][index..]);
+                    if merged > 0 {
+                        index += merged;
+                        continue;
+                    }
                     let stmt = tast[list][index];
                     self.stmt(stmt);
+                    index += 1;
                 }
                 self.close(span);
             }
@@ -9885,28 +9892,7 @@ impl<'u> Body<'_, 'u> {
     fn bit_test(&self, expr: ExprId) -> Option<Test> {
         let tast = self.tast();
         match tast[expr].kind {
-            ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
-                let ExprKind::Member { base, field } = tast[operand].kind else { return None };
-                if !self.target().little_endian
-                    || self.is_volatile(tast[operand].ty)
-                    || self.is_volatile(tast[base].ty)
-                    || !self.place_reads_nothing(base, u64::MAX)
-                {
-                    return None;
-                }
-                let TypeKind::Record(id) = self.types().kind(self.types().canonical(tast[base].ty))
-                else {
-                    return None;
-                };
-                let info = self.types().record_info(id);
-                if info.reverse || info.variable.is_some() {
-                    return None;
-                }
-                let member = info.fields.get(field as usize)?;
-                let width = member.bits.filter(|&width| width > 0)?;
-                let at = member.offset * 8 + u64::from(member.bit);
-                Some(Test { base, at, width, nonzero: true, ty: tast[operand].ty })
-            }
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => self.bit_field(operand),
             ExprKind::Convert { kind: Conversion::Bool, operand } => self.bit_test(operand),
             // A widening keeps whether the value is zero, and a narrowing may not.
             ExprKind::Convert { kind: Conversion::Arithmetic, operand } => {
@@ -9928,6 +9914,138 @@ impl<'u> Body<'_, 'u> {
             }
             _ => None,
         }
+    }
+
+    /// The bit-field `expr` names, as a [`Test`] of it being other than zero, when it is one that
+    /// can be read or written with the fields next to it: not volatile, of a structure laid out
+    /// the usual way, and reached by a road that reads nothing in memory.
+    fn bit_field(&self, expr: ExprId) -> Option<Test> {
+        let tast = self.tast();
+        let ExprKind::Member { base, field } = tast[expr].kind else { return None };
+        if !self.target().little_endian
+            || self.is_volatile(tast[expr].ty)
+            || self.is_volatile(tast[base].ty)
+            || !self.place_reads_nothing(base, u64::MAX)
+        {
+            return None;
+        }
+        let TypeKind::Record(id) = self.types().kind(self.types().canonical(tast[base].ty)) else {
+            return None;
+        };
+        let info = self.types().record_info(id);
+        if info.reverse || info.variable.is_some() {
+            return None;
+        }
+        let member = info.fields.get(field as usize)?;
+        let width = member.bits.filter(|&width| width > 0)?;
+        let at = member.offset * 8 + u64::from(member.bit);
+        Some(Test { base, at, width, nonzero: true, ty: tast[expr].ty })
+    }
+
+    /// How many of `list` from its start are a constant given to a bit-field of one object, the
+    /// same one for each, when there are two or more and they were written as one read of the
+    /// bytes they lie in and one write. Nothing is written when the answer is zero.
+    ///
+    /// This is the clearing of the six flags at the end of `__tlb_reset_range` in the kernel,
+    /// which was eighteen instructions here to gcc's six and kept `tlb_flush_mmu_tlbonly`, the
+    /// helper it is inlined into, over the inline limit by two where gcc copies it everywhere.
+    fn merged_stores(&mut self, list: &[StmtId]) -> usize {
+        if self.at.is_none() {
+            return 0;
+        }
+        let mut stores: Vec<(Test, i128)> = Vec::new();
+        for &stmt in list {
+            let Some(store) = self.constant_store(stmt) else { break };
+            if let Some((first, _)) = stores.first() {
+                let mut tests: Vec<Test> = stores.iter().map(|&(test, _)| test).collect();
+                tests.push(store.0);
+                if !self.same_object(first.base, store.0.base) || !self.one_location(&tests) {
+                    break;
+                }
+            }
+            stores.push(store);
+        }
+        if stores.len() < 2 {
+            return 0;
+        }
+        let span = self.tast().stmt_span(list[0]);
+        self.stores_bit(&stores, span);
+        stores.len()
+    }
+
+    /// The field and the value when `stmt` is `object.field = constant;` with a bit-field that
+    /// [`Self::bit_field`] takes.
+    fn constant_store(&self, stmt: StmtId) -> Option<(Test, i128)> {
+        let tast = self.tast();
+        let Stmt::Expr(expr) = tast[stmt] else { return None };
+        let ExprKind::Assign { op: None, lhs, rhs, .. } = tast[expr].kind else { return None };
+        let test = self.bit_field(lhs)?;
+        let mut eval = Eval::new(tast, self.types(), self.target(), self.unit.names);
+        let value = eval.integer(rhs).ok().filter(|_| !eval.addressed())?;
+        eval.finish().is_empty().then_some((test, value))
+    }
+
+    /// Whether the bytes a run of fields of a structure lie in hold nothing but bit-fields, with
+    /// no field of zero width between them, so writing them all is writing one memory location
+    /// as C 3.14 has it, which is what a write of any one of them already does.
+    fn one_location(&self, tests: &[Test]) -> bool {
+        let lo = tests.iter().map(|test| test.at).min().unwrap_or(0);
+        let hi = tests.iter().map(|test| test.at + u64::from(test.width)).max().unwrap_or(lo);
+        let (first, last) = (lo / 8, hi.div_ceil(8));
+        if last - first > 8 {
+            return false;
+        }
+        let ty = self.types().canonical(self.tast()[tests[0].base].ty);
+        let TypeKind::Record(id) = self.types().kind(ty) else { return false };
+        let info = self.types().record_info(id);
+        info.kind == RecordKind::Struct
+            && info.fields.iter().all(|member| match member.bits {
+                Some(0) => {
+                    let at = member.offset * 8 + u64::from(member.bit);
+                    at <= lo || at >= hi
+                }
+                Some(_) => true,
+                None => {
+                    let size = repr::size_of(self.types(), self.target(), member.ty);
+                    member.offset + size <= first || member.offset >= last
+                }
+            })
+    }
+
+    /// A run of constants given to bit-fields of one object, written as one read of the bytes
+    /// they lie in, the fields cleared and set in it, and one write.
+    fn stores_bit(&mut self, stores: &[(Test, i128)], span: Span) {
+        let lo = stores.iter().map(|(test, _)| test.at).min().unwrap_or(0);
+        let hi = stores.iter().map(|(test, _)| test.at + u64::from(test.width)).max().unwrap_or(lo);
+        let (base, ty) = (stores[0].0.base, stores[0].0.ty);
+        let record = self.types().canonical(self.tast()[base].ty);
+        let place = self.place(base);
+        let addr = self.address_of(place, span);
+        let align =
+            self.alignment(addr).unwrap_or(repr::align_of(self.types(), self.target(), record));
+        // Whole bytes, so every piece of the write is all this run's and none of them is read
+        // again to keep what is around it.
+        let byte = lo / 8;
+        let at = self.offset(addr, byte, span);
+        let width = u32::try_from((hi.div_ceil(8) - byte) * 8).unwrap_or(u32::MAX);
+        let run = Run::at(align, byte, 0, width);
+        let into = Type::int(run.unit());
+        let word = self.read_bits(at, run, ty, into, span);
+        let (mut mask, mut set) = (0i128, 0i128);
+        // In the order they were written, so a field given twice keeps the second.
+        for &(test, value) in stores {
+            let bits = ((1i128 << test.width) - 1) << (test.at - byte * 8);
+            mask |= bits;
+            set = set & !bits | (value << (test.at - byte * 8)) & bits;
+        }
+        let mut build = self.build(span);
+        let keep = build.iconst(into, !mask);
+        let mut word = build.binary(Opcode::And, word, keep, Flags::NONE);
+        if set != 0 {
+            let set = build.iconst(into, set);
+            word = build.binary(Opcode::Or, word, set, Flags::NONE);
+        }
+        self.store_bits(at, run, ty, word, span);
     }
 
     /// Whether two expressions name the same object by the same road, which [`Self::bit_test`]
