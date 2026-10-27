@@ -28,6 +28,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - riscv64 keeps `tp` and `sp` as file-scope register variables, the way the kernel's `asm/current.h` declares `current` and `current_stack_pointer` (#3900).
 - The riscv64 integrated assembler works out an operand written as a constant expression or a `.set` name, takes `.option push`, `pop`, `rvc`, `norvc`, `relax`, `norelax` and `arch`, makes `.word` four bytes as gas does, and takes `.half` (#3901).
 - The riscv64 integrated assembler encodes Zicfilp's `lpad` and Zicfiss's `sspush`, `sspopchk`, `ssrdp` and `ssamoswap` (#3902).
+- The riscv64 integrated assembler encodes Zba, Zbb, Zbs and Zacas's `amocas.w` and `amocas.d`, reads `move` as `mv`, and reads a register instruction written with a constant, `and t2, t2, 7`, as its form with an immediate (#3904).
+- The riscv64 integrated assembler encodes Zbc, Zbkb's `pack`, `packh`, `packw` and `brev8`, Zabha's byte and halfword atomics, `amocas.q`, the floating point CSR pseudo instructions, `c.li`, `c.nop` and `c.ebreak`, and loads and stores from a label, and reads `-(288)` as a number instead of an address (#3906).
 
 ### Fixed
 
@@ -64,6 +66,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The assembler reads `.intel_syntax noprefix` blocks inside inline asm, which bcachefs uses for its key comparison, and takes the Intel names of the widening instructions such as `cdq`, which the Xen entry code in head_64.S uses (#3886).
 - An x86 inline asm template that names several locals in memory reads each one from the stack pointer, instead of putting every address but one in a register. `smapi.o` in the kernel names nine locals and clobbers six registers, and the allocator panicked on it (#3888).
 - A variadic call on riscv64 passes the unnamed arguments in the integer registers, as LP64D says, and a variadic function homes a0 to a7 below the caller's stack arguments so `va_arg` walks them with a `void *` (#3893).
+- A riscv64 object writes `.dword sym - .` as an `R_RISCV_ADD64` and `R_RISCV_SUB64` pair against a local label on the place, as gas does, where it was refused (#3903).
+- The riscv64 integrated assembler grows a conditional branch to a label more than 4 KiB away into the opposite branch over a `jal`, as gas does, instead of refusing the file (#3905).
+- `__builtin_prefetch` on riscv64 writes no instruction, as gcc does without Zicbop, instead of stopping on an opcode the target has no spelling for (#3907).
 
 ## 0.30.12
 

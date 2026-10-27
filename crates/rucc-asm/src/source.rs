@@ -1073,11 +1073,13 @@ impl Reader {
         let mut pieces = Vec::new();
         for piece in split(rest, ',') {
             let text = piece.trim();
-            // An address is a displacement in front of a register in brackets, and `~(1 << 3)` is
-            // not one.
+            // An address is a displacement in front of a register in brackets, so neither
+            // `~(1 << 3)` nor `-(288)` is one.
             let at = text.strip_suffix(')').and_then(|inner| inner.rfind('(')).filter(|&open| {
                 let base = &text[open + 1..text.len() - 1];
-                open > 0 && base.bytes().all(|b| b.is_ascii_alphanumeric()) && !base.is_empty()
+                open > 0
+                    && base.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && base.bytes().all(|b| b.is_ascii_alphanumeric())
             });
             let worked = match at {
                 Some(open) => {
@@ -1585,8 +1587,28 @@ impl Reader {
     /// finds the high half by, so the `auipc` is given one. gas makes the same kind of label.
     fn rv64(&mut self, text: &str) -> Result<(), Trouble> {
         let line = riscv64::read(text).map_err(|why| self.bad(&why.to_string()))?;
-        let encoded = riscv64::encode(&line.mnemonic, &line.values)
+        if line.mnemonic.starts_with("c.") {
+            let half = riscv64::compressed(&line.mnemonic, &line.values)
+                .map_err(|why| self.bad(&why.to_string()))?;
+            self.generated();
+            self.row()?;
+            return self.put(&half.to_le_bytes());
+        }
+        let mut encoded = riscv64::encode(&line.mnemonic, &line.values)
             .map_err(|why| self.bad(&why.to_string()))?;
+        // A conditional branch to a label reaches 4 KiB either way. One that turns out further
+        // is grown the way gas grows it, into the opposite branch over a `jal` to the label.
+        let mut branch = None;
+        if encoded.fixups == [(0, riscv64::Fixup::Branch)] && line.symbol.as_deref() != Some(".") {
+            if self.long.contains(&self.branches) {
+                let over = riscv64::Fixup::Branch.apply(encoded.words[0] ^ (1 << 12), 8);
+                encoded.words = vec![over.expect("8 is in reach"), 0x6f];
+                encoded.fixups = vec![(1, riscv64::Fixup::Jal)];
+            } else {
+                branch = Some(self.branches);
+            }
+            self.branches += 1;
+        }
         let (part, at) = (self.here, self.at());
         self.generated();
         self.row()?;
@@ -1626,7 +1648,7 @@ impl Reader {
                 sum: Sum { constant: if low { 0 } else { line.addend }, terms },
                 reach: Reach::Near,
                 slot: Reference::Data,
-                branch: None,
+                branch,
                 jump: field.relative(),
                 field: Some(Field::Rv(field)),
                 leb: None,
@@ -4814,6 +4836,9 @@ impl Reader {
     /// leaves short, and each one grown moves the padding behind it and the file comes out
     /// different. Whatever is guessed wrong is put right on the next pass, as it is in gas.
     fn too_far(&self) -> Result<Vec<usize>, Trouble> {
+        if self.riscv {
+            return self.too_far_riscv();
+        }
         let mut away = Vec::new();
         // Where each jump ends, how far it goes, and which it is.
         let mut jumps: Vec<(usize, i64, i64, usize)> = Vec::new();
@@ -4873,6 +4898,25 @@ impl Reader {
                     stretch += if self.parts[part].bytes[end as usize - 2] == 0xEB { 3 } else { 4 };
                     moved.push((end, stretch));
                 }
+            }
+        }
+        Ok(far)
+    }
+
+    /// The riscv64 branches to a label in the same section that is more than 4 KiB away.
+    ///
+    /// gas lets the linker catch a branch to anywhere else, and so does this. A grown branch only
+    /// pushes the others further apart, so growing every one that does not reach on this pass
+    /// and looking again settles.
+    fn too_far_riscv(&self) -> Result<Vec<usize>, Trouble> {
+        let mut far = Vec::new();
+        for fixup in &self.fixups {
+            let Some(nth) = fixup.branch else { continue };
+            let residue = self
+                .reduce_kept(&fixup.sum, fixup.jump)
+                .map_err(|why| Trouble { line: fixup.line, why })?;
+            if residue.left.is_empty() && !(-4096..4096).contains(&residue.constant) {
+                far.push(nth);
             }
         }
         Ok(far)
@@ -6906,6 +6950,65 @@ _tls$tlv$init:
         );
         let label = read.names.iter().find(|name| name.name == ".Lpcrel_hi0").unwrap();
         assert!(matches!(label.at, Held::In { offset: 12, .. }), "{:?}", label.at);
+    }
+
+    #[test]
+    fn the_riscv_kernel_entry_reads_its_compressed_magic_and_loads_from_a_label() {
+        // The start of `head.S`, a frame size the preprocessor left in brackets, and the loads
+        // and stores from a label that `clear_page.S` and `uaccess.S` write.
+        let read = match read(
+            concat!(
+                "\tc.li s4, -13\n",
+                "\tc.nop\n",
+                "\taddi sp, sp, -(288)\n",
+                "\tld a1, size\n",
+                "\tsd a1, size, t0\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        // The words GNU as writes for the same lines.
+        assert_eq!(
+            words(&read, ".text"),
+            [0x0001_5a4d, 0xee01_0113, 0x0000_0597, 0x0005_b583, 0x0000_0297, 0x00b2_b023]
+        );
+        let text = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        assert_eq!(
+            relocs,
+            [
+                (8, "size", Reference::Riscv(riscv64::Fixup::PcrelHi20), 0),
+                (12, ".Lpcrel_hi0", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
+                (16, "size", Reference::Riscv(riscv64::Fixup::PcrelHi20), 0),
+                (20, ".Lpcrel_hi1", Reference::Riscv(riscv64::Fixup::PcrelLo12S), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_riscv_branch_past_its_reach_goes_the_other_way_over_a_jal() {
+        let read = match read(
+            concat!(
+                "1:\tbeq a0, a1, 2f\n",
+                "\tbltu a2, a3, 2f\n",
+                "\t.skip 4096\n",
+                "\tbge a0, a1, 1b\n",
+                "2:\tret\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        // The words GNU as writes for the same lines. The second branch alone would reach, but
+        // the first one growing puts it out of reach too.
+        let text = words(&read, ".text");
+        assert_eq!(text.len(), 6 + 1024 + 1);
+        assert_eq!(text[..4], [0x00b5_1463, 0x0140_106f, 0x00d6_7463, 0x00c0_106f]);
+        assert_eq!(text[1028..], [0x00b5_4463, 0xfedf_e06f, 0x0000_8067]);
     }
 
     #[test]

@@ -37,8 +37,8 @@ mod timing;
 mod write;
 
 pub use crate::riscv64::encode::{
-    Addr, Encoded, Error, FAR, Fixup, Offset, Operator, Round, Value, encode, fits, li_words,
-    reaches,
+    Addr, Encoded, Error, FAR, Fixup, Offset, Operator, Round, Value, compressed, encode, fits,
+    li_words, reaches,
 };
 pub use crate::riscv64::insts::{ADDRESSES, Form, INSTS, TEMPLATE, address, form};
 pub use crate::riscv64::read::{Error as ReadError, Line, read, register};
