@@ -65,8 +65,8 @@ use rucc_target::{CallRegs, CountInst};
 
 use crate::switch::{Force, Lowered};
 use crate::{
-    decimal, divide, expand, fills, forks, half, locked, maths, quad, retry, switch, varargs, wide,
-    widths,
+    decimal, divide, expand, fills, forks, half, locked, maths, quad, retry, rolled, switch,
+    varargs, wide, widths,
 };
 
 /// One member of the group.
@@ -89,6 +89,12 @@ pub enum Step {
     ///
     /// Beside the retries for the reason they are here: it makes blocks.
     Fills,
+    /// A copy or fill of a known size too large for a run of moves, as a loop of four words, in a
+    /// function without the vector registers on a machine that says how large, which is x86-64.
+    ///
+    /// Beside the fills for the reason they are here: it makes blocks. After them, so a fill
+    /// `-finline-stringops=memset` asked for is theirs.
+    Rolled,
     /// An ordered load or store, as the plain access and a barrier.
     ///
     /// Above everything below it, since what an ordered access becomes here is a plain one and
@@ -192,6 +198,7 @@ impl Step {
         Self::Switches,
         Self::Retries,
         Self::Fills,
+        Self::Rolled,
         Self::Orderings,
         Self::Overflows,
         Self::Decimals,
@@ -217,6 +224,7 @@ impl Step {
             Self::Switches => "switches",
             Self::Retries => "retries",
             Self::Fills => "fills",
+            Self::Rolled => "rolled",
             Self::Orderings => "orderings",
             Self::Overflows => "overflows",
             Self::Decimals => "decimals",
@@ -243,6 +251,7 @@ impl Step {
             Self::Switches => "a switch",
             Self::Retries => "a read modify write with no instruction behind it",
             Self::Fills => "a fill that has to be written inline",
+            Self::Rolled => "a copy or fill gcc writes as a loop",
             Self::Orderings => "an ordered load or store",
             Self::Overflows => "arithmetic that reports whether it overflowed",
             Self::Decimals => "a decimal float",
@@ -279,7 +288,7 @@ impl Step {
         match self {
             Self::Switches => &[Opcode::Switch],
             // A fill belongs to [`Step::Bulk`], which answers for every one this leaves.
-            Self::Retries | Self::Fills => &[],
+            Self::Retries | Self::Fills | Self::Rolled => &[],
             Self::Orderings => &[Opcode::AtomicLoad, Opcode::AtomicStore],
             Self::Overflows => &[
                 Opcode::UAddOverflow,
@@ -351,6 +360,9 @@ impl Step {
             }
             Self::Retries => retry::loops(func, conv.word, conv.rmw_bits),
             Self::Fills => fills::loops(func, names, conv.word, conv.unaligned, goal),
+            Self::Rolled => {
+                rolled::loops(func, names, (conv.word, conv.unaligned, conv.rolled), goal)
+            }
             Self::Orderings => {
                 expand::orderings(func, conv.word, conv.total_store_order, conv.fenced);
                 locked::ordered(func, names, conv);
@@ -654,6 +666,8 @@ mod tests {
                 "retries",
                 // Beside the retries, since both make blocks.
                 "fills",
+                // After the fills, so a fill the flag asked for is theirs.
+                "rolled",
                 "orderings",
                 "overflows",
                 // Ahead of the half floats, which would otherwise widen a decimal's `_Float16`.
