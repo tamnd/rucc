@@ -89,6 +89,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - With `-fcf-protection=branch` and optimization on, a `static` function that only a direct call reaches no longer starts with `endbr64`, as gcc does. Nothing takes its address, no `used` or alias names it, and so no indirect branch can land there. At `-O0` every function still gets one, also as gcc does (#3928).
 - A loop that runs once is now unrolled even when it has inline assembly in it, since only one copy is made and nothing is duplicated. The kernel's `mk_vma_flags` loops over a compound literal and calls `__set_bit`, and with the loop left in place the literal stayed on the stack and the bit number reached the `bts` in a register (#3931).
 - On x86-64 a constant handed to `asm` under a constraint that allows one, such as `"i"`, `"ir"` or `"Ir"`, is now written into the instruction the way gcc prints it, so the kernel's `__set_bit` is `btsq $8, (%rdi)` rather than a `mov` into a register and the `bts` that takes one. An `int` constant against a `q` instruction, as in `addq %1, %0` with `"i" (5)`, is no longer refused (#3932).
+- A `static` function called once where it can run and again behind a branch that never runs, such as `if (unlikely(!userfaultfd_wp(vma)))` in a kernel built without `CONFIG_USERFAULTFD`, now counts as called once and is inlined, as gcc does. In mm/memory.c this brings `do_anonymous_page` and `do_fault` into `handle_pte_fault` (#3933).
 
 ## 0.30.12
 
