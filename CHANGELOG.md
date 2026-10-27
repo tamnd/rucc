@@ -94,6 +94,7 @@ This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow
 - A loop that runs once is now unrolled even when it has inline assembly in it, since only one copy is made and nothing is duplicated. The kernel's `mk_vma_flags` loops over a compound literal and calls `__set_bit`, and with the loop left in place the literal stayed on the stack and the bit number reached the `bts` in a register (#3931).
 - On x86-64 a constant handed to `asm` under a constraint that allows one, such as `"i"`, `"ir"` or `"Ir"`, is now written into the instruction the way gcc prints it, so the kernel's `__set_bit` is `btsq $8, (%rdi)` rather than a `mov` into a register and the `bts` that takes one. An `int` constant against a `q` instruction, as in `addq %1, %0` with `"i" (5)`, is no longer refused (#3932).
 - A `static` function called once where it can run and again behind a branch that never runs, such as `if (unlikely(!userfaultfd_wp(vma)))` in a kernel built without `CONFIG_USERFAULTFD`, now counts as called once and is inlined, as gcc does. In mm/memory.c this brings `do_anonymous_page` and `do_fault` into `handle_pte_fault` (#3933).
+- A `static` function called once is now weighed against `max-inline-functions-called-once-insns` the way gcc estimates it, not one instruction at a time, so a large body that gcc copies into its one caller is copied here too. `change_pte_range` in the kernel's mm/mprotect.c went from 11554 counted instructions to 3149 weighed ones and is now inlined (#3934).
 
 ## 0.30.12
 
