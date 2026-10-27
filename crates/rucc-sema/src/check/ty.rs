@@ -70,7 +70,10 @@ pub(crate) struct Built {
     /// declares one structure and not two, so building the type a second time is not a slow way
     /// to get the same answer, it is a different answer. Every specifier list is written at one
     /// place in the source and is checked once, so remembering what it named is enough.
-    specified: Map<ast::DeclSpecsId, TypeId>,
+    ///
+    /// Kept by the list's index rather than in a map. Every declaration asks, so this is one of
+    /// the most frequent lookups in a header-heavy unit, and in a map each was a cache miss.
+    specified: Vec<Option<TypeId>>,
     /// The tag types whose body has been read.
     ///
     /// This is what tells a redefinition from a completion, and the type table cannot answer it
@@ -295,13 +298,17 @@ impl Checker<'_> {
     /// structure. Building it twice would not be a slow way to the same answer, it would be two
     /// structures and a second warning about anything the specifiers themselves got wrong.
     fn specified_type(&mut self, id: ast::DeclSpecsId, subject: Subject, place: Place) -> TypeId {
-        if let Some(&ty) = self.built.specified.get(&id) {
+        if let Some(&Some(ty)) = self.built.specified.get(id.index()) {
             return ty;
         }
         let specs = self.ast[id];
         let base = self.type_spec(specs.ty, specs.span, subject, place);
         let ty = self.qualify(base, specs.quals, specs.span);
-        self.built.specified.insert(id, ty);
+        let specified = &mut self.built.specified;
+        if specified.len() <= id.index() {
+            specified.resize(id.index() + 1, None);
+        }
+        specified[id.index()] = Some(ty);
         ty
     }
 
