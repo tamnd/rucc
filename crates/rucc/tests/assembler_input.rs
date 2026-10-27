@@ -374,6 +374,24 @@ fn a_riscv_file_for_a_32_bit_machine_is_an_elf32_object() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn the_riscv_kernel_probe_for_uleb128_relocations_assembles() {
+    // AS_HAS_ULEB128 in arch/riscv/kernel/tests/Kconfig.debug, word for word. Without it the
+    // module loader test for the ULEB128 pair is left out of a rucc build and kept in a gcc one.
+    let dir = dir("uleb128");
+    let text = ".reloc label, R_RISCV_SET_ULEB128, 127\n.reloc label, R_RISCV_SUB_ULEB128, \
+                127\nlabel:\n.word 0\n";
+    write(&dir, "a.s", text);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=riscv64-linux-gnu", "-c", "a.s"])
+        .current_dir(&dir)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(dir.join("a.o").exists(), "no object");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_link_takes_the_object_the_assembly_produced() {

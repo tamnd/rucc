@@ -1111,6 +1111,13 @@ pub enum Reference {
         /// Whether this is the name taken off.
         minus: bool,
     },
+    /// One side of a difference written as a ULEB128 number on RISC-V, `R_RISCV_SET_ULEB128` and
+    /// `R_RISCV_SUB_ULEB128`. Only `.reloc` asks for these, which is how the kernel's test of
+    /// module linking writes them and how its Kconfig asks whether the assembler has them.
+    Leb {
+        /// Whether this is the name taken off.
+        minus: bool,
+    },
 }
 
 impl Reference {
