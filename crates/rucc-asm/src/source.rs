@@ -373,6 +373,14 @@ const RV_EXTENSIONS: &[&str] = &[
     "zicbom",
     "zicboz",
     "zawrs",
+    "zvbb",
+    "zvkb",
+    "zvkg",
+    "zvkned",
+    "zvknha",
+    "zvknhb",
+    "zvksed",
+    "zvksh",
 ];
 
 /// The most bytes a count worked out from guessed places may come to.
@@ -1739,7 +1747,7 @@ impl Reader {
     /// `auipc` pair does not name the symbol: it names a label on the `auipc`, which the linker
     /// finds the high half by, so the `auipc` is given one. gas makes the same kind of label.
     fn rv64(&mut self, text: &str) -> Result<(), Trouble> {
-        if let Some(word) = riscv64::vector(text) {
+        if let Some(word) = riscv64::vector_with(text, &mut |text| self.number(text).ok()) {
             let word = word.map_err(|why| self.bad(&why.to_string()))?;
             self.generated();
             self.row()?;
@@ -7382,8 +7390,8 @@ _tls$tlv$init:
         );
         assert!(super::read(".option pic\n", Arch::Riscv64).is_err());
         // The vector instructions the kernel writes go through, and an extension the encoder has
-        // nothing for is refused where it is asked for, which is what the kernel's probe for the
-        // vector crypto code reads.
+        // nothing for is refused where it is asked for, which is what the kernel's probes for
+        // the vector extensions read.
         let vector = concat!(
             "\t.option arch, +zve32x\n",
             "\tvsetvli t1, x0, e8, m8, ta, ma\n",
@@ -7391,7 +7399,12 @@ _tls$tlv$init:
         );
         let read = super::read(vector, Arch::Riscv64).expect("the vector lines are read");
         assert_eq!(words(&read, ".text"), [0x0c30_7357, 0x0205_8007]);
-        assert!(super::read("\t.option arch, +v, +zvkb\n", Arch::Riscv64).is_err());
+        assert!(super::read("\t.option arch, +v, +zvkb\n", Arch::Riscv64).is_ok());
+        assert!(super::read("\t.option arch, +v, +zvbc\n", Arch::Riscv64).is_err());
+        // The SM4 key schedule counts its round constant with a `.set` in a `.rept`.
+        let rounds = "\t.set i, 0\n.rept 2\n\tvsm4k.vi v1, v1, i\n\t.set i, i + 1\n.endr\n";
+        let read = super::read(rounds, Arch::Riscv64).expect("the rounds are read");
+        assert_eq!(words(&read, ".text"), [0x8610_20f7, 0x8610_a0f7]);
     }
 
     #[test]
