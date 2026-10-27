@@ -34,6 +34,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=tp` and `-mstack-protector-guard-offset=` on riscv64 put the canary in the running task the way a riscv kernel asks, and `-mstack-protector-guard=global` is taken there too (#3911).
 - The riscv64 assembler writes `vadd`, `vsub`, `vand`, `vor` and `vxor` with `.vv`, `.vx` and `.vi`, which `arch/riscv/lib/xor.S` on 6.12 needs (#3915).
 - The riscv64 assembler takes `.insn` as a number and in the `r`, `i` and `s` formats, so the kernel's `AS_HAS_INSN` probe passes the way it does with gas (#3916).
+- A riscv64 target assembles files of assembly for a 32 bit machine under `-march=rv32...` with `-mabi=ilp32` or `-mabi=ilp32d`, writing ELF32 objects, so the kernel's compat vDSO builds. C and links for a 32 bit machine are refused, since there is no back end for one (#3917).
 
 ### Fixed
 

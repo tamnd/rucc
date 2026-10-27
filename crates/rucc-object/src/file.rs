@@ -101,7 +101,9 @@ impl Flavour {
         match (self, machine) {
             (Flavour::Elf, Architecture::I386) => elf::r_type_i386(reference).map(flags),
             (Flavour::Elf, Architecture::Aarch64) => elf::r_type_aarch64(reference).map(flags),
-            (Flavour::Elf, Architecture::Riscv64) => elf::r_type_riscv64(reference).map(flags),
+            (Flavour::Elf, Architecture::Riscv64 | Architecture::Riscv32) => {
+                elf::r_type_riscv64(reference).map(flags)
+            }
             (Flavour::Elf, _) => elf::r_type(reference).map(flags),
             (Flavour::Coff, Architecture::Aarch64) => {
                 coff::arm64(reference).map(|typ| RelocationFlags::Coff { typ })
@@ -125,6 +127,7 @@ impl Flavour {
             (Flavour::Elf | Flavour::Coff, Arch::Aarch64) => Some(Architecture::Aarch64),
             (Flavour::Elf | Flavour::Coff, Arch::X86) => Some(Architecture::I386),
             (Flavour::Elf, Arch::Riscv64) => Some(Architecture::Riscv64),
+            (Flavour::Elf, Arch::Riscv32) => Some(Architecture::Riscv32),
             _ => None,
         }
     }
@@ -1476,7 +1479,8 @@ pub(crate) fn relocate(
 fn written(target: &TargetInfo) -> Option<(Flavour, Architecture)> {
     let flavour = Flavour::of(target)?;
     let machine = flavour.machine(target.tuple.arch())?;
-    let listed = matches!(machine, Architecture::Aarch64 | Architecture::Riscv64);
+    let listed =
+        matches!(machine, Architecture::Aarch64 | Architecture::Riscv64 | Architecture::Riscv32);
     (!listed).then_some((flavour, machine))
 }
 
