@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A store of zero into bytes that already hold zero on every path to it is now removed, as gcc's dead store pass does it. Under `-ftrivial-auto-var-init=zero` the kernel fills each local with zeros and then sets many fields to zero again. In Linux 7.2.8 this takes 708 bytes out of `lib/maple_tree.o`, 192 out of `kernel/signal.o`, 176 out of `fs/read_write.o` and 176 out of `mm/vma.o` (#3938).
+- `||` and `&&` chains that test several one-bit fields of the same object now load the word once and do a single masked test, the same fold gcc does, so small helpers like `tlb_flush_mmu_tlbonly` fit under the inline limit again (#3942)
 
 ## 0.30.13
 
