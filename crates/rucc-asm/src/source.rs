@@ -204,7 +204,7 @@ pub fn read_with_debug(
     loop {
         passes += 1;
         let aarch64 = arch == Arch::Aarch64;
-        let riscv = arch == Arch::Riscv64;
+        let riscv = matches!(arch, Arch::Riscv64 | Arch::Riscv32);
         let i386 = arch == Arch::X86;
         let macho = format == ObjectFormat::MachO;
         let coff = format == ObjectFormat::Coff;

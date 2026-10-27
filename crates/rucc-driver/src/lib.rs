@@ -1033,9 +1033,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // loop: the vector registers are off once the extensions they belong to are, whichever flag
     // took those away, whichever flag took them, and in whichever order they came.
     let mut general_regs_only = false;
-    // RISC-V's `-mabi=`, which is `Some(true)` for `lp64` and `Some(false)` for `lp64d`, weighed
-    // after the loop against what `-march=` says the machine has.
+    // RISC-V's `-mabi=`, which is `Some(true)` for `lp64` and `ilp32` and `Some(false)` for
+    // `lp64d` and `ilp32d`, weighed after the loop against what `-march=` says the machine has.
     let mut riscv_soft: Option<bool> = None;
+    // Whether `-mabi=` named one of the 32 bit conventions, which only a file of assembly may
+    // be built for. See [`Options::rv32`].
+    let mut riscv_ilp32 = false;
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
     // Where the stack protector's canary is, which is put together after the loop because the
@@ -3146,17 +3149,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-march=") => march = Some(&arg["-march=".len()..]),
             _ if arg.starts_with("-mtune=") || arg.starts_with("-mcpu=") => {}
             // The calling convention, which is not safe to ignore. Taken when it names the one
-            // the target already uses and refused otherwise.
+            // the target already uses and refused otherwise. The 32 bit ones are taken for the
+            // compat vDSO of the riscv kernel, which is four files of assembly.
             _ if arg.starts_with("-mabi=") && arch == rucc_target::Arch::Riscv64 => {
-                riscv_soft = match &arg["-mabi=".len()..] {
-                    "lp64" => Some(true),
-                    "lp64d" => Some(false),
+                let abi = &arg["-mabi=".len()..];
+                riscv_soft = match abi {
+                    "lp64" | "ilp32" => Some(true),
+                    "lp64d" | "ilp32d" => Some(false),
                     _ => {
                         return Err(err(format!(
-                            "{arg}: riscv64 has the lp64 and lp64d conventions here and no other"
+                            "{arg}: riscv64 has the lp64 and lp64d conventions here, and ilp32 \
+                             and ilp32d for a file of assembly, and no other"
                         )));
                     }
                 };
+                riscv_ilp32 = abi.starts_with("ilp32");
             }
             _ if arg.starts_with("-mabi=") => {
                 let want = &arg["-mabi=".len()..];
@@ -3688,11 +3695,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `-march=` and still pass `lp64`, which is taken since they hold no C float either.
     if opts.target.arch == rucc_target::Arch::Riscv64 {
         let double = match march {
-            Some(name) => riscv_double(name).ok_or_else(|| {
-                err(format!("-march={name}: not a name for a 64 bit RISC-V machine"))
-            })?,
+            Some(name) => riscv_double(name)
+                .ok_or_else(|| err(format!("-march={name}: not a name for a RISC-V machine")))?,
             None => true,
         };
+        let rv32 = march.is_some_and(|name| name.starts_with("rv32"));
+        if rv32 && !riscv_ilp32 {
+            return Err(err(format!(
+                "-march={}: a 32 bit machine needs -mabi=ilp32 or -mabi=ilp32d",
+                march.unwrap_or_default()
+            )));
+        }
+        if riscv_ilp32 && !rv32 {
+            return Err(err("-mabi=ilp32 and -mabi=ilp32d need a 32 bit machine in -march="));
+        }
+        opts.rv32 = rv32;
         let soft = riscv_soft.unwrap_or(false);
         if !soft && !double {
             return Err(err(
@@ -4051,6 +4068,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         harden(&mut opts, &mut link, args, &mut notes)?;
     }
     let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
+    if opts.rv32
+        && (plan.link.is_some() || plan.jobs.iter().any(|job| job.phases.contains(&Phase::Compile)))
+    {
+        return Err(err(
+            "a 32 bit RISC-V machine is only for preprocessing and assembling files of assembly \
+             here, since there is no 32 bit back end to compile C or link with",
+        ));
+    }
     if print_plan {
         return Ok(Action::PrintPlan {
             opts: Box::new(opts),
@@ -5522,14 +5547,15 @@ fn write_out(output: &Output, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Whether a RISC-V `-march=` names the D extension, or `None` when it does not name a 64 bit
-/// machine.
+/// Whether a RISC-V `-march=` names the D extension, or `None` when it does not name a 64 or a 32
+/// bit machine.
 ///
-/// The single letter extensions come first, after `rv64` and up to the first `_`, and `g` is short
+/// The single letter extensions come first, after `rv64` or `rv32` and up to the first `_`, and `g` is short
 /// for `imafd` with `zicsr` and `zifencei`. `rv64imac_zicsr_zifencei` is the kernel's, with no D,
 /// and `rv64imafdc_zicsr_zifencei` is what it assembles with.
 fn riscv_double(name: &str) -> Option<bool> {
-    let base = name.strip_prefix("rv64")?.split('_').next()?;
+    let base = name.strip_prefix("rv64").or_else(|| name.strip_prefix("rv32"))?;
+    let base = base.split('_').next()?;
     if !base.starts_with(['i', 'e', 'g']) {
         return None;
     }
@@ -10676,8 +10702,17 @@ mod tests {
         }
         let no_d = refused(&[RV, "-march=rv64imac", "-c", "a.c"]);
         assert!(no_d.contains("subsume the 'D' extension"), "{no_d}");
-        assert!(refused(&[RV, "-march=rv32gc", "-c", "a.c"]).contains("64 bit RISC-V"));
-        assert!(refused(&[RV, "-mabi=ilp32", "-c", "a.c"]).contains("lp64 and lp64d"));
+        assert!(refused(&[RV, "-march=rv32gc", "-c", "a.c"]).contains("-mabi=ilp32"));
+        assert!(refused(&[RV, "-mabi=ilp32", "-c", "a.c"]).contains("32 bit machine"));
+        assert!(refused(&[RV, "-mabi=ilp64", "-c", "a.c"]).contains("lp64 and lp64d"));
+        assert!(refused(&[RV, "-march=rv128g", "-c", "a.c"]).contains("RISC-V machine"));
+        // The compat vDSO's files of assembly, and nothing that needs a 32 bit back end.
+        let compat = [RV, "-march=rv32imafd", "-mabi=ilp32", "-c", "a.S"];
+        let (opts, _) = compile(&compat);
+        assert!(opts.rv32 && opts.soft_float);
+        let c = refused(&[RV, "-march=rv32imafd", "-mabi=ilp32", "-c", "a.c"]);
+        assert!(c.contains("32 bit RISC-V"), "{c}");
+        assert!(refused(&[RV, "-march=rv32g", "-mabi=ilp32d", "a.S"]).contains("32 bit RISC-V"));
         let x86 = refused(&[KERNEL_X86, "-mcmodel=medany", "-c", "a.c"]);
         assert!(x86.contains("medany"), "{x86}");
         assert!(!refused(&[KERNEL_ARM64, "-mno-save-restore", "-c", "a.c"]).is_empty());

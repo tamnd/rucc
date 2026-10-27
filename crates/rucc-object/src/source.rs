@@ -602,10 +602,11 @@ pub fn assembled_described(
     // relocation, which is what a format without addends does. See [`crate::coff::carry`].
     let carried = machine == Architecture::Aarch64 && flavour == Flavour::Coff;
     let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
-    // The float convention, which is LP64D unless `-mabi=lp64` asked for floats in the integer
-    // registers, and no compressed instructions, since nothing here writes one. ld refuses to
+    // The float convention, which is LP64D (or ILP32D) unless `-mabi=lp64` asked for floats in the
+    // integer registers, and no compressed instructions, since nothing here writes one. ld refuses to
     // link objects that disagree about the first.
-    if machine == Architecture::Riscv64 {
+    let riscv = matches!(machine, Architecture::Riscv64 | Architecture::Riscv32);
+    if riscv {
         let e_flags = match target.tuple.resolved_abi() {
             rucc_tuple::Abi::DoubleFloat => elf::EF_RISCV_FLOAT_ABI_DOUBLE,
             _ => elf::EF_RISCV_FLOAT_ABI_SOFT,
@@ -827,8 +828,7 @@ pub fn assembled_described(
             // off. The place is a local label on the bytes, `.L0 ` as gas calls it, and not the
             // section and an addend, because ld takes the addend of a subtraction the wrong way
             // round and lands sixteen bytes off for a place eight bytes in.
-            if machine == Architecture::Riscv64 && reloc.kind == crate::section::Reference::AwayWide
-            {
+            if riscv && reloc.kind == crate::section::Reference::AwayWide {
                 let here = obj.add_symbol(Symbol {
                     name: b".L0 ".to_vec(),
                     value: reloc.at as u64,
