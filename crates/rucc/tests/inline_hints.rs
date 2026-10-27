@@ -356,3 +356,19 @@ fn a_static_function_called_a_few_times_is_weighed_by_the_body_it_leaves_once_cl
         assert_eq!(reaches(&listing, caller, "alloc_box"), 1, "{caller}:\n{listing}");
     }
 }
+
+/// A `static` function called once that is under gcc's limit as gcc weighs it and over it counted
+/// one instruction apiece. Each line is a constant, its widening and a call, and the first two
+/// cost nothing in the copy. `change_pte_range` in the kernel's mm/mprotect.c was this, 11554
+/// instructions as lowered against a limit of 4000, and gcc has it in `change_protection`.
+#[test]
+fn a_function_called_once_is_weighed_as_gcc_weighs_it() {
+    let mut source = String::from("extern void work(long);\nstatic void many(void)\n{\n");
+    for k in 0..1500 {
+        source.push_str(&format!("  work({k});\n"));
+    }
+    source.push_str("}\nvoid run(void) { many(); }\n");
+    let listing = asm("weighed", &["-O2"], &source);
+    assert_eq!(reaches(&listing, "run", "many"), 0, "{listing}");
+    assert_eq!(reaches(&listing, "run", "work"), 1500);
+}
