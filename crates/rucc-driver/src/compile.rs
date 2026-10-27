@@ -1921,6 +1921,8 @@ fn generate(
                     keep_slots: opts.asm_keep_slots,
                     before_2_42: opts.gnu_as
                         < rucc_session::GasVersion { major: 2, minor: 42, patch: 0 },
+                    // The listing writes `la` for a slot of the table and `lla` for the rest.
+                    nopic: false,
                 };
                 let read = rucc_asm::read_with(&listing, arch, target.object_format, flags)
                     .map_err(|trouble| {

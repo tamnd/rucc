@@ -1102,6 +1102,22 @@ pub enum Reference {
     /// and the low half names the `auipc` rather than the name, so it is never moved onto a
     /// section.
     Riscv(rucc_target::riscv64::Fixup),
+    /// One side of a difference on RISC-V, in one, two, four or eight bytes. `.long a - b` with
+    /// `b` in no section here is two of these on the same bytes, `a` added and `b` taken off,
+    /// which is `R_RISCV_ADD32` and `R_RISCV_SUB32`.
+    Sum {
+        /// How many bytes the difference is written into.
+        bytes: u8,
+        /// Whether this is the name taken off.
+        minus: bool,
+    },
+    /// One side of a difference written as a ULEB128 number on RISC-V, `R_RISCV_SET_ULEB128` and
+    /// `R_RISCV_SUB_ULEB128`. Only `.reloc` asks for these, which is how the kernel's test of
+    /// module linking writes them and how its Kconfig asks whether the assembler has them.
+    Leb {
+        /// Whether this is the name taken off.
+        minus: bool,
+    },
 }
 
 impl Reference {

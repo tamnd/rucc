@@ -69,12 +69,22 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
             }
         };
     }
-    let target = rucc_target::TargetInfo::new(opts.target);
+    // A 32 bit RISC-V file is written as an ELF32 object for the riscv32 row.
+    let mut target = if opts.rv32 {
+        rucc_target::TargetInfo::for_tuple(rucc_session::rv32(opts.target))
+    } else {
+        rucc_target::TargetInfo::new(opts.target)
+    };
+    // `-mabi=lp64` is in the object's flags as it is for C, or ld refuses to link the two.
+    if opts.soft_float {
+        target.tuple = target.tuple.with_abi(rucc_tuple::Abi::SoftFloat);
+    }
     let flags = rucc_asm::Flags {
         fatal_warnings: opts.asm_fatal_warnings,
         noexecstack: opts.asm_noexecstack,
         keep_slots: opts.asm_keep_slots,
         before_2_42: opts.gnu_as < rucc_session::GasVersion { major: 2, minor: 42, patch: 0 },
+        nopic: opts.pic == rucc_session::Pic::Absolute,
     };
     // Under `-g` gas writes a line table for the file and a unit naming its functions, which is
     // where the BTF of a function written in assembly comes from.

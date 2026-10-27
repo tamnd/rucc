@@ -131,6 +131,12 @@ impl Line {
                 return number(distance).map(|imm| Ok(Value::Imm(imm)));
             }
         }
+        // A CSR by its name, which is a number to the instruction rather than a symbol.
+        if self.mnemonic.starts_with("csr") {
+            if let Some(number) = csr_named(text) {
+                return Some(Ok(Value::Imm(number)));
+            }
+        }
         self.symbol(text)
     }
 
@@ -161,6 +167,44 @@ impl Line {
         self.addend = addend;
         Some(Ok(Value::Symbol(operator)))
     }
+}
+
+/// The number of a CSR GNU as knows by name, for the ones a kernel or a program reads: the float
+/// status, the counters, and the supervisor and machine registers.
+fn csr_named(name: &str) -> Option<i64> {
+    Some(match name {
+        "fflags" => 0x001,
+        "frm" => 0x002,
+        "fcsr" => 0x003,
+        "sstatus" => 0x100,
+        "sie" => 0x104,
+        "stvec" => 0x105,
+        "scounteren" => 0x106,
+        "senvcfg" => 0x10a,
+        "sscratch" => 0x140,
+        "sepc" => 0x141,
+        "scause" => 0x142,
+        "stval" => 0x143,
+        "sip" => 0x144,
+        "stimecmp" => 0x14d,
+        "satp" => 0x180,
+        "mstatus" => 0x300,
+        "misa" => 0x301,
+        "medeleg" => 0x302,
+        "mideleg" => 0x303,
+        "mie" => 0x304,
+        "mtvec" => 0x305,
+        "mscratch" => 0x340,
+        "mepc" => 0x341,
+        "mcause" => 0x342,
+        "mtval" => 0x343,
+        "mip" => 0x344,
+        "cycle" => 0xc00,
+        "time" => 0xc01,
+        "instret" => 0xc02,
+        "mhartid" => 0xf14,
+        _ => return None,
+    })
 }
 
 /// The operands, split at the commas that are not inside parentheses, or `None` when the
@@ -333,6 +377,17 @@ mod tests {
         assert_eq!(read_ok("bnez a3, .+8").values, [Gpr(13), Imm(8)]);
         assert_eq!(read_ok("j .-12").values, [Imm(-12)]);
         assert_eq!(read_ok("j .").values, [Imm(0)]);
+    }
+
+    #[test]
+    fn a_csr_is_read_by_its_name_or_its_number() {
+        assert_eq!(read_ok("csrr a0, sstatus").values, [Gpr(10), Imm(0x100)]);
+        assert_eq!(read_ok("csrw 0x105, a0").values, [Imm(0x105), Gpr(10)]);
+        assert_eq!(read_ok("csrrs a0, time, zero").values, [Gpr(10), Imm(0xc01), Gpr(0)]);
+        // Only a CSR instruction reads one, so anywhere else the name is a symbol.
+        assert_eq!(read_ok("call time").symbol.as_deref(), Some("time"));
+        let held = Mem(Addr { base: 10, offset: Offset::Imm(0) });
+        assert_eq!(read_ok("lr.w.aq a5, (a0)").values, [Gpr(15), held]);
     }
 
     #[test]

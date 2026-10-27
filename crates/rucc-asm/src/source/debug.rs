@@ -396,6 +396,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }

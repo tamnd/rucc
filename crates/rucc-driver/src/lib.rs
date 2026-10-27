@@ -1018,6 +1018,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // Either x86, since `-m32` on an x86-64 target only changes the machine once the loop is done.
     let x86 = matches!(arch, rucc_target::Arch::X86_64 | rucc_target::Arch::X86);
     let aarch64 = arch == rucc_target::Arch::Aarch64;
+    let riscv = arch == rucc_target::Arch::Riscv64;
     // The WebAssembly features. `-mcpu=` names a set, and `-m<feature>` and `-mno-<feature>` change
     // one feature. They are weighed after the loop, where the set comes first and the flags come
     // after it in the order written, whatever the order of `-mcpu=` and the flags. That is clang's
@@ -1032,9 +1033,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // loop: the vector registers are off once the extensions they belong to are, whichever flag
     // took those away, whichever flag took them, and in whichever order they came.
     let mut general_regs_only = false;
-    // RISC-V's `-mabi=`, which is `Some(true)` for `lp64` and `Some(false)` for `lp64d`, weighed
-    // after the loop against what `-march=` says the machine has.
+    // RISC-V's `-mabi=`, which is `Some(true)` for `lp64` and `ilp32` and `Some(false)` for
+    // `lp64d` and `ilp32d`, weighed after the loop against what `-march=` says the machine has.
     let mut riscv_soft: Option<bool> = None;
+    // Whether `-mabi=` named one of the 32 bit conventions, which only a file of assembly may
+    // be built for. See [`Options::rv32`].
+    let mut riscv_ilp32 = false;
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
     // Where the stack protector's canary is, which is put together after the loop because the
@@ -1047,6 +1051,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `sp_el0` is the copy an arm64 kernel keeps in each task.
     let mut guard_task = false;
     let mut guard_sp_el0 = false;
+    // The RISC-V one, `-mstack-protector-guard=tls` with `tp` as the register. That is where a
+    // riscv kernel keeps the task that is running, and the offset is the canary's place in it.
+    let mut guard_tls = false;
+    let mut guard_tp = false;
     // `-mpreferred-stack-boundary=`, weighed once the machine is settled.
     let mut boundary: Option<&str> = None;
 
@@ -2723,9 +2731,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-mstack-protector-guard=tls" if x86 => {
                 guard_global = false;
             }
-            "-mstack-protector-guard=global" if x86 || aarch64 => {
+            "-mstack-protector-guard=global" if x86 || aarch64 || riscv => {
                 guard_global = true;
                 guard_task = false;
+                guard_tls = false;
+            }
+            "-mstack-protector-guard=tls" if riscv => {
+                guard_global = false;
+                guard_tls = true;
+            }
+            _ if riscv && arg.starts_with("-mstack-protector-guard-reg=") => {
+                if &arg["-mstack-protector-guard-reg=".len()..] != "tp" {
+                    return Err(err(format!("{arg}: the register is tp")));
+                }
+                guard_tp = true;
             }
             "-mstack-protector-guard=sysreg" if aarch64 => {
                 guard_global = false;
@@ -2744,7 +2763,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     _ => return Err(err(format!("{arg}: the register is fs or gs"))),
                 });
             }
-            _ if (x86 || aarch64) && arg.starts_with("-mstack-protector-guard-offset=") => {
+            _ if (x86 || aarch64 || riscv)
+                && arg.starts_with("-mstack-protector-guard-offset=") =>
+            {
                 let text = &arg["-mstack-protector-guard-offset=".len()..];
                 // gcc reads it as C reads a number, so `0x28` is 40 too.
                 let (sign, digits) = text.strip_prefix('-').map_or((1, text), |rest| (-1, rest));
@@ -2764,7 +2785,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 guard_symbol = Some(name);
             }
-            // Every one of gcc's choices, on the two back ends that clear registers. The four
+            // Every one of gcc's choices, on the back ends that clear registers. The four
             // without `-gpr` in them clear the vector registers and the x87 stack as well.
             _ if arg.starts_with("-fzero-call-used-regs=") => {
                 let choice = &arg["-fzero-call-used-regs=".len()..];
@@ -2787,11 +2808,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 };
                 let here = matches!(
                     arch,
-                    rucc_target::Arch::X86_64 | rucc_target::Arch::X86 | rucc_target::Arch::Aarch64
+                    rucc_target::Arch::X86_64
+                        | rucc_target::Arch::X86
+                        | rucc_target::Arch::Aarch64
+                        | rucc_target::Arch::Riscv64
                 );
                 if opts.zero_regs.is_some() && !here {
                     return Err(err(format!(
-                        "{arg}: registers are only cleared on return on x86-64, i386 and AArch64"
+                        "{arg}: registers are only cleared on return on x86-64, i386, AArch64 and RISC-V"
                     )));
                 }
             }
@@ -3128,17 +3152,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-march=") => march = Some(&arg["-march=".len()..]),
             _ if arg.starts_with("-mtune=") || arg.starts_with("-mcpu=") => {}
             // The calling convention, which is not safe to ignore. Taken when it names the one
-            // the target already uses and refused otherwise.
+            // the target already uses and refused otherwise. The 32 bit ones are taken for the
+            // compat vDSO of the riscv kernel, which is four files of assembly.
             _ if arg.starts_with("-mabi=") && arch == rucc_target::Arch::Riscv64 => {
-                riscv_soft = match &arg["-mabi=".len()..] {
-                    "lp64" => Some(true),
-                    "lp64d" => Some(false),
+                let abi = &arg["-mabi=".len()..];
+                riscv_soft = match abi {
+                    "lp64" | "ilp32" => Some(true),
+                    "lp64d" | "ilp32d" => Some(false),
                     _ => {
                         return Err(err(format!(
-                            "{arg}: riscv64 has the lp64 and lp64d conventions here and no other"
+                            "{arg}: riscv64 has the lp64 and lp64d conventions here, and ilp32 \
+                             and ilp32d for a file of assembly, and no other"
                         )));
                     }
                 };
+                riscv_ilp32 = abi.starts_with("ilp32");
             }
             _ if arg.starts_with("-mabi=") => {
                 let want = &arg["-mabi=".len()..];
@@ -3670,11 +3698,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `-march=` and still pass `lp64`, which is taken since they hold no C float either.
     if opts.target.arch == rucc_target::Arch::Riscv64 {
         let double = match march {
-            Some(name) => riscv_double(name).ok_or_else(|| {
-                err(format!("-march={name}: not a name for a 64 bit RISC-V machine"))
-            })?,
+            Some(name) => riscv_double(name)
+                .ok_or_else(|| err(format!("-march={name}: not a name for a RISC-V machine")))?,
             None => true,
         };
+        let rv32 = march.is_some_and(|name| name.starts_with("rv32"));
+        if rv32 && !riscv_ilp32 {
+            return Err(err(format!(
+                "-march={}: a 32 bit machine needs -mabi=ilp32 or -mabi=ilp32d",
+                march.unwrap_or_default()
+            )));
+        }
+        if riscv_ilp32 && !rv32 {
+            return Err(err("-mabi=ilp32 and -mabi=ilp32d need a 32 bit machine in -march="));
+        }
+        opts.rv32 = rv32;
         let soft = riscv_soft.unwrap_or(false);
         if !soft && !double {
             return Err(err(
@@ -3808,6 +3846,28 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         } else {
             rucc_target::Guard::global("__stack_chk_guard", opts.pic != Pic::Absolute)
         });
+    }
+    // RISC-V reads the canary from the running task under `tls`, which gcc wants the register and
+    // the offset for, and the offset is one a load carries in its twelve bits. `global` is the
+    // plain `__stack_chk_guard`, which is also where the canary is with none of the flags.
+    if opts.target.arch == rucc_target::Arch::Riscv64 && elf {
+        if guard_tls {
+            let Some(at) = guard_offset.filter(|_| guard_tp) else {
+                return Err(err("both -mstack-protector-guard-offset and \
+                     -mstack-protector-guard-reg must be used with -mstack-protector-guard=tls"
+                    .to_owned()));
+            };
+            if !(-2048..2048).contains(&at) {
+                return Err(err(format!(
+                    "-mstack-protector-guard-offset={at}: the offset is from -2048 to 2047"
+                )));
+            }
+            opts.guard = Some(rucc_target::Guard::in_task(at));
+        } else if guard_global && guard_offset.is_some() {
+            return Err(err("-mstack-protector-guard=global and \
+                 -mstack-protector-guard-offset are not used together"
+                .to_owned()));
+        }
     }
     // i386 position independent code calls the hidden copy of the failure routine that the C
     // library's static half carries, as gcc does: a call to the shared one would go through the
@@ -4010,7 +4070,27 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if hardened {
         harden(&mut opts, &mut link, args, &mut notes)?;
     }
+    // gcc 14 writes the landing pads and the shadow stack note on x86 alone and refuses the three
+    // choices that ask for them anywhere else, in these words. The riscv kernel's RISCV_USER_CFI
+    // asks for `-fcf-protection=full` with Zicfiss and Zicfilp, which only gcc 15 takes, and a yes
+    // here would build its CFI vDSO with no `lpad` in it.
+    if matches!(opts.control, Control::Branch | Control::Return | Control::Full)
+        && !matches!(opts.target.arch, rucc_target::Arch::X86_64 | rucc_target::Arch::X86)
+    {
+        return Err(err(format!(
+            "'-fcf-protection={}' is not supported for this target",
+            opts.control
+        )));
+    }
     let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
+    if opts.rv32
+        && (plan.link.is_some() || plan.jobs.iter().any(|job| job.phases.contains(&Phase::Compile)))
+    {
+        return Err(err(
+            "a 32 bit RISC-V machine is only for preprocessing and assembling files of assembly \
+             here, since there is no 32 bit back end to compile C or link with",
+        ));
+    }
     if print_plan {
         return Ok(Action::PrintPlan {
             opts: Box::new(opts),
@@ -5482,14 +5562,15 @@ fn write_out(output: &Output, bytes: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Whether a RISC-V `-march=` names the D extension, or `None` when it does not name a 64 bit
-/// machine.
+/// Whether a RISC-V `-march=` names the D extension, or `None` when it does not name a 64 or a 32
+/// bit machine.
 ///
-/// The single letter extensions come first, after `rv64` and up to the first `_`, and `g` is short
+/// The single letter extensions come first, after `rv64` or `rv32` and up to the first `_`, and `g` is short
 /// for `imafd` with `zicsr` and `zifencei`. `rv64imac_zicsr_zifencei` is the kernel's, with no D,
 /// and `rv64imafdc_zicsr_zifencei` is what it assembles with.
 fn riscv_double(name: &str) -> Option<bool> {
-    let base = name.strip_prefix("rv64")?.split('_').next()?;
+    let base = name.strip_prefix("rv64").or_else(|| name.strip_prefix("rv32"))?;
+    let base = base.split('_').next()?;
     if !base.starts_with(['i', 'e', 'g']) {
         return None;
     }
@@ -5687,6 +5768,10 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
             // whatever the version. And the `.riscv.attributes` section, which this assembler
             // never writes.
             "-misa-spec=2.2" | "-mno-arch-attr" if riscv => {}
+            // That no instruction is marked for the linker to relax, which this assembler never
+            // does. The kernel asks for it on modules, which are linked by the module loader and
+            // not by `ld`. `-mrelax` is the opposite and is refused.
+            "-mno-relax" if riscv => {}
             // A directory for `.include` and `.incbin`. The assembler reads no file but its input,
             // and refuses both directives, so a place to look for one changes nothing.
             "-I" => {
@@ -8237,7 +8322,7 @@ mod tests {
             "-std=gnu11",
             "a.c",
         ];
-        let (opts, _) = compile(&line);
+        let (opts, _) = compile(&[&[LINUX][..], &line].concat());
         assert_eq!(
             opts.switches,
             [
@@ -8332,7 +8417,7 @@ mod tests {
     /// questions to the hardware.
     #[test]
     fn which_control_flow_edges_are_checked_is_asked_for_by_name() {
-        let (opts, _) = compile(&["-c", "a.c"]);
+        let (opts, _) = compile(&[LINUX, "-c", "a.c"]);
         assert_eq!(opts.control, Control::None, "gcc's default on the targets this compiler has");
 
         for (arg, want) in [
@@ -8343,15 +8428,30 @@ mod tests {
             ("-fcf-protection=none", Control::None),
             ("-fcf-protection=check", Control::Check),
         ] {
-            let (opts, _) = compile(&["-c", arg, "a.c"]);
+            let (opts, _) = compile(&[LINUX, "-c", arg, "a.c"]);
             assert_eq!(opts.control, want, "{arg}");
+        }
+        // Only x86 has them, as in gcc 14, which takes `none` and `check` everywhere.
+        for target in ["--target=aarch64-linux-gnu", "--target=riscv64-linux-gnu"] {
+            for arg in ["-fcf-protection", "-fcf-protection=branch", "-fcf-protection=return"] {
+                let said = refused(&[target, "-c", arg, "a.c"]);
+                assert!(
+                    said.contains("is not supported for this target"),
+                    "{target} {arg}: {said}"
+                );
+            }
+            for arg in ["-fcf-protection=none", "-fcf-protection=check"] {
+                assert_eq!(compile(&[target, "-c", arg, "a.c"]).0.control.as_str(), &arg[16..]);
+            }
         }
 
         // The shape a package build uses: on in the global flags and off for the one directory
         // that cannot have it, whichever of the two spellings of off it reaches for.
-        let (opts, _) = compile(&["-c", "-fcf-protection=full", "-fno-cf-protection", "a.c"]);
+        let (opts, _) =
+            compile(&[LINUX, "-c", "-fcf-protection=full", "-fno-cf-protection", "a.c"]);
         assert_eq!(opts.control, Control::None);
-        let (opts, _) = compile(&["-c", "-fno-cf-protection", "-fcf-protection=branch", "a.c"]);
+        let (opts, _) =
+            compile(&[LINUX, "-c", "-fno-cf-protection", "-fcf-protection=branch", "a.c"]);
         assert_eq!(opts.control, Control::Branch, "the last one wins either way round");
 
         // Which functions open with a pad is a second question, asked apart from the first, and
@@ -10620,6 +10720,7 @@ mod tests {
             "-mno-relax",
             "-Wa,-misa-spec=2.2",
             "-Wa,-mno-arch-attr",
+            "-Wa,-mno-relax",
             "-c",
             "a.c",
         ];
@@ -10636,8 +10737,17 @@ mod tests {
         }
         let no_d = refused(&[RV, "-march=rv64imac", "-c", "a.c"]);
         assert!(no_d.contains("subsume the 'D' extension"), "{no_d}");
-        assert!(refused(&[RV, "-march=rv32gc", "-c", "a.c"]).contains("64 bit RISC-V"));
-        assert!(refused(&[RV, "-mabi=ilp32", "-c", "a.c"]).contains("lp64 and lp64d"));
+        assert!(refused(&[RV, "-march=rv32gc", "-c", "a.c"]).contains("-mabi=ilp32"));
+        assert!(refused(&[RV, "-mabi=ilp32", "-c", "a.c"]).contains("32 bit machine"));
+        assert!(refused(&[RV, "-mabi=ilp64", "-c", "a.c"]).contains("lp64 and lp64d"));
+        assert!(refused(&[RV, "-march=rv128g", "-c", "a.c"]).contains("RISC-V machine"));
+        // The compat vDSO's files of assembly, and nothing that needs a 32 bit back end.
+        let compat = [RV, "-march=rv32imafd", "-mabi=ilp32", "-c", "a.S"];
+        let (opts, _) = compile(&compat);
+        assert!(opts.rv32 && opts.soft_float);
+        let c = refused(&[RV, "-march=rv32imafd", "-mabi=ilp32", "-c", "a.c"]);
+        assert!(c.contains("32 bit RISC-V"), "{c}");
+        assert!(refused(&[RV, "-march=rv32g", "-mabi=ilp32d", "a.S"]).contains("32 bit RISC-V"));
         let x86 = refused(&[KERNEL_X86, "-mcmodel=medany", "-c", "a.c"]);
         assert!(x86.contains("medany"), "{x86}");
         assert!(!refused(&[KERNEL_ARM64, "-mno-save-restore", "-c", "a.c"]).is_empty());
@@ -10882,6 +10992,41 @@ mod tests {
         }
     }
 
+    /// A riscv kernel keeps its canary in the task `tp` points at, and says so with all three flags
+    /// the way gcc wants them.
+    #[test]
+    fn a_riscv_kernel_can_move_the_canary_into_the_task() {
+        use rucc_target::Guard;
+
+        const RISCV: &str = "--target=riscv64-linux-gnu";
+        let guard = |more: &[&str]| {
+            let line = [&[RISCV, "-mabi=lp64", "-march=rv64imac", "-c", "a.c"], more].concat();
+            compile(&line).0.guard
+        };
+        let task = [
+            "-mstack-protector-guard=tls",
+            "-mstack-protector-guard-reg=tp",
+            "-mstack-protector-guard-offset=1080",
+        ];
+        assert_eq!(guard(&task), Some(Guard::in_task(1080)));
+        let global = guard(&["-mstack-protector-guard=global"]);
+        assert_eq!(global, guard(&[]));
+
+        for bad in [
+            &task[..1],
+            &task[..2],
+            &[task[0], "-mstack-protector-guard-offset=8"],
+            &[task[0], task[1], "-mstack-protector-guard-offset=2048"],
+            &["-mstack-protector-guard-reg=gp"],
+            &["-mstack-protector-guard=global", "-mstack-protector-guard-offset=8"],
+            &["-mstack-protector-guard=sysreg"],
+        ] {
+            let line = [&[RISCV, "-c", "a.c"], bad].concat();
+            let said = refused(&line);
+            assert!(said.contains("-mstack-protector-guard"), "{bad:?}: {said}");
+        }
+    }
+
     /// tamnd/rucc#2282. The last choice written wins, and one gcc does not have is refused.
     #[test]
     fn the_choices_of_trivial_auto_var_init_are_read() {
@@ -10901,7 +11046,7 @@ mod tests {
         let zero = |target: &str, flags: &[&str]| {
             compile(&[&[target, "-c", "a.c"], flags].concat()).0.zero_regs
         };
-        for target in [KERNEL_X86, KERNEL_ARM64] {
+        for target in [KERNEL_X86, KERNEL_ARM64, "--target=riscv64-linux-gnu"] {
             assert_eq!(zero(target, &[]), None);
             for (choice, read) in [
                 ("used-gpr", (false, false, false)),

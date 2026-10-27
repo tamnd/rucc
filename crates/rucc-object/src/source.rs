@@ -602,10 +602,11 @@ pub fn assembled_described(
     // relocation, which is what a format without addends does. See [`crate::coff::carry`].
     let carried = machine == Architecture::Aarch64 && flavour == Flavour::Coff;
     let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
-    // The float convention, which is LP64D unless `-mabi=lp64` asked for floats in the integer
-    // registers, and no compressed instructions, since nothing here writes one. ld refuses to
+    // The float convention, which is LP64D (or ILP32D) unless `-mabi=lp64` asked for floats in the
+    // integer registers, and no compressed instructions, since nothing here writes one. ld refuses to
     // link objects that disagree about the first.
-    if machine == Architecture::Riscv64 {
+    let riscv = matches!(machine, Architecture::Riscv64 | Architecture::Riscv32);
+    if riscv {
         let e_flags = match target.tuple.resolved_abi() {
             rucc_tuple::Abi::DoubleFloat => elf::EF_RISCV_FLOAT_ABI_DOUBLE,
             _ => elf::EF_RISCV_FLOAT_ABI_SOFT,
@@ -786,11 +787,30 @@ pub fn assembled_described(
         obj.add_comdat(object::write::Comdat { kind: group.keep.kind(), symbol, sections });
     }
 
+    let mut nothing = None;
     for (part, id) in input.parts.iter().zip(&made) {
         for reloc in &part.relocs {
             let (symbol, addend) = match onto(reloc) {
                 Some((part, offset)) => {
                     (obj.section_symbol(made[part]), reloc.addend + offset as i64)
+                }
+                // A relocation against no name, which `.reloc` writes for a plain number. ELF
+                // means symbol zero by that, and a local symbol at the absolute address zero is
+                // the same to a linker.
+                None if reloc.symbol.is_empty() => {
+                    let zero = *nothing.get_or_insert_with(|| {
+                        obj.add_symbol(Symbol {
+                            name: Vec::new(),
+                            value: 0,
+                            size: 0,
+                            kind: SymbolKind::Label,
+                            scope: SymbolScope::Compilation,
+                            weak: false,
+                            section: SymbolSection::Absolute,
+                            flags: SymbolFlags::None,
+                        })
+                    });
+                    (zero, reloc.addend)
                 }
                 None => {
                     let Some(&symbol) = symbols.get(&reloc.symbol) else {
@@ -823,6 +843,29 @@ pub fn assembled_described(
             };
             let record = Relocation { offset: reloc.at as u64, symbol, addend, flags };
             crate::file::relocate(&mut obj, *id, record)?;
+            // `.dword key - .` on RISC-V, which gas writes as the name added and the place taken
+            // off. The place is a local label on the bytes, `.L0 ` as gas calls it, and not the
+            // section and an addend, because ld takes the addend of a subtraction the wrong way
+            // round and lands sixteen bytes off for a place eight bytes in.
+            if riscv && reloc.kind == crate::section::Reference::AwayWide {
+                let here = obj.add_symbol(Symbol {
+                    name: b".L0 ".to_vec(),
+                    value: reloc.at as u64,
+                    size: 0,
+                    kind: SymbolKind::Label,
+                    scope: SymbolScope::Compilation,
+                    weak: false,
+                    section: SymbolSection::Section(*id),
+                    flags: SymbolFlags::None,
+                });
+                let place = Relocation {
+                    offset: reloc.at as u64,
+                    symbol: here,
+                    addend: 0,
+                    flags: object::RelocationFlags::Elf { r_type: elf::R_RISCV_SUB64 },
+                };
+                crate::file::relocate(&mut obj, *id, place)?;
+            }
         }
     }
 
@@ -1519,14 +1562,24 @@ mod tests {
             field(4, ".Lpcrel_hi0", RvFixup::PcrelLo12I, 0),
             field(8, "g", RvFixup::CallPlt, 0),
         ];
-        let mut data = part(".data", vec![0; 16]);
-        data.relocs = vec![Reloc {
-            at: 8,
-            symbol: ".Ltable".to_owned(),
-            kind: Reference::Address { bytes: 8 },
-            addend: 0,
-            after: 0,
-        }];
+        // And `.dword g - .` after it, which is a pair, the name added and the place taken off.
+        let mut data = part(".data", vec![0; 24]);
+        data.relocs = vec![
+            Reloc {
+                at: 8,
+                symbol: ".Ltable".to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 0,
+                after: 0,
+            },
+            Reloc {
+                at: 16,
+                symbol: "g".to_owned(),
+                kind: Reference::AwayWide,
+                addend: 0,
+                after: 0,
+            },
+        ];
         let mut table = at(".Ltable", 0, Sort::Object, Binding::Local);
         table.at = Held::In { part: 1, offset: 0 };
         let input = Assembled {
@@ -1578,7 +1631,14 @@ mod tests {
                 (8, elf::R_RISCV_CALL_PLT, Some("g".to_owned()), 0),
             ]
         );
-        assert_eq!(relocs(".data"), [(8, elf::R_RISCV_64, None, 0)]);
+        assert_eq!(
+            relocs(".data"),
+            [
+                (8, elf::R_RISCV_64, None, 0),
+                (16, elf::R_RISCV_ADD64, Some("g".to_owned()), 0),
+                (16, elf::R_RISCV_SUB64, Some(".L0 ".to_owned()), 0),
+            ]
+        );
     }
 
     #[test]

@@ -328,6 +328,70 @@ fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line(
     assert!(!dir.join("hot.o").exists(), "a half-written object was left behind");
 }
 
+#[test]
+fn a_riscv_file_assembled_under_lp64_says_soft_float_like_the_c_beside_it() {
+    // The kernel builds with `-mabi=lp64`, and ld refuses to link its vDSO when the objects from
+    // assembly say double float and the ones from C say soft float.
+    let dir = dir("lp64");
+    write(&dir, "a.s", "\t.text\n\tret\n");
+    let flags = |abi: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=riscv64-linux-gnu", "-c", "a.s", "-o", "a.o"])
+            .args(abi)
+            .current_dir(&dir)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let bytes = std::fs::read(dir.join("a.o")).expect("the object can be read back");
+        u32::from_le_bytes(bytes[48..52].try_into().expect("four bytes"))
+    };
+    // EF_RISCV_FLOAT_ABI_SOFT is zero and EF_RISCV_FLOAT_ABI_DOUBLE is four.
+    assert_eq!(flags(&["-mabi=lp64"]), 0);
+    assert_eq!(flags(&[]), 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_riscv_file_for_a_32_bit_machine_is_an_elf32_object() {
+    // The riscv kernel builds its compat vDSO, four files of assembly, with `-march=rv32imafd
+    // -mabi=ilp32` and links them with `-melf32lriscv`, so the objects have to be ELF32 with the
+    // soft float flags. The preprocessor says the machine is 32 bits wide as well.
+    let dir = dir("rv32");
+    let text = "#if __riscv_xlen != 32\n#error xlen\n#endif\n\t.text\n\t.globl go\ngo:\n\tli \
+                a7, 139\n\tecall\n\tret\n";
+    write(&dir, "a.S", text);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=riscv64-linux-gnu", "-march=rv32imafd", "-mabi=ilp32", "-c", "a.S"])
+        .current_dir(&dir)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let bytes = std::fs::read(dir.join("a.o")).expect("the object can be read back");
+    // ELFCLASS32, EM_RISCV, and e_flags with no float bits.
+    assert_eq!(bytes[4], 1, "not ELF32");
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 243);
+    assert_eq!(u32::from_le_bytes(bytes[36..40].try_into().expect("four bytes")), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_riscv_kernel_probe_for_uleb128_relocations_assembles() {
+    // AS_HAS_ULEB128 in arch/riscv/kernel/tests/Kconfig.debug, word for word. Without it the
+    // module loader test for the ULEB128 pair is left out of a rucc build and kept in a gcc one.
+    let dir = dir("uleb128");
+    let text = ".reloc label, R_RISCV_SET_ULEB128, 127\n.reloc label, R_RISCV_SUB_ULEB128, \
+                127\nlabel:\n.word 0\n";
+    write(&dir, "a.s", text);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=riscv64-linux-gnu", "-c", "a.s"])
+        .current_dir(&dir)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(dir.join("a.o").exists(), "no object");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_link_takes_the_object_the_assembly_produced() {
