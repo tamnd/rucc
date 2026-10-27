@@ -568,6 +568,19 @@ pub struct CallRegs {
     /// accesses around them and an acquire or a release has an instruction of its own. Here beside
     /// the word because the same pass asks both questions about the same access.
     pub total_store_order: bool,
+    /// Whether an ordered access is the plain one with fences around it, which is how a machine
+    /// with no ordered load or store of its own keeps the ordering.
+    ///
+    /// True on RISC-V, where gcc writes `fence r, rw` behind an acquiring load and `fence rw, w` in
+    /// front of a releasing store. False on x86, which [`CallRegs::total_store_order`] already
+    /// orders, and on AArch64, which has `ldar` and `stlr`.
+    pub fenced: bool,
+    /// The narrowest integer in bits a read modify write is one instruction at.
+    ///
+    /// Eight on x86 and AArch64. Thirty two on RISC-V, whose `amo`, `lr` and `sc` come in words
+    /// and doublewords only, so an exchange or an add of a byte or a half there is a loop around a
+    /// compare and exchange, and that is a masked loop on the word the byte is in.
+    pub rmw_bits: u32,
     /// Whether a plain load or store of a word may be at any address, as fast and as correct as
     /// an aligned one, so a copy of bytes may move them a word at a time whatever the alignment.
     ///
@@ -1255,6 +1268,8 @@ mod tests {
             return_address: 8,
             word: 8,
             total_store_order: true,
+            fenced: false,
+            rmw_bits: 8,
             unaligned: true,
             byte_swaps: &[16, 32, 64],
             push: 8,

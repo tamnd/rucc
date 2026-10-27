@@ -10,6 +10,7 @@
 //! - Only a register a call may clobber, since the ones a call keeps are restored by the epilogue
 //!   already. On x86-64 that is `rax`, `rdx`, `rcx`, `rsi`, `rdi` and `r8` to `r11`, and on AArch64
 //!   `x0` to `x17`. gcc also clears `x18` there, which this compiler always keeps for the platform.
+//!   On RISC-V it is `t0` to `t2`, `a0` to `a7` and `t3` to `t6`.
 //!   On i386 it is `eax`, `edx` and `ecx`, and `xmm0` to `xmm7` after them, all eight of which a
 //!   call clobbers there.
 //! - Never a register the return value is in.
@@ -23,8 +24,10 @@
 //! - For the choices without `-gpr` in them, the vector registers as well, by the same three
 //!   rules: `xmm0` to `xmm15` on x86-64, with the eight arguments are passed in coming in gcc's
 //!   order between `rdi` and `r8`, and `v0` to `v7` and `v16` to `v31` on AArch64 after every
-//!   general purpose one, since the low halves of `v8` to `v15` are kept by a call there. A unit
-//!   built with `-mno-sse` or `-mgeneral-regs-only` has no vector registers to clear.
+//!   general purpose one, since the low halves of `v8` to `v15` are kept by a call there. On
+//!   RISC-V the float registers a call clobbers, `ft0` to `ft7`, `fa0` to `fa7` and `ft8` to
+//!   `ft11`, cleared with `fmv.d.x` from `zero`. A unit built with `-mno-sse` or
+//!   `-mgeneral-regs-only`, or for RISC-V's `lp64`, has no vector registers to clear.
 //! - And the x87 stack on x86-64, for `used` and `all` but never for an `-arg` choice, since no
 //!   argument is passed on it. All eight registers are cleared, less the ones a `long double` is
 //!   being returned in, with as many `fldz` followed by as many `fstp %st(0)`, and that comes
@@ -250,14 +253,61 @@ const AARCH64: Plan = Plan {
     upper: false,
 };
 
+/// gcc's numbers on RISC-V put the integer registers first and the float registers after them, and
+/// a call through the PLT writes `t1` and `t3` on its way but gcc does not count them as used.
+const RISCV64: Plan = Plan {
+    clobbered: &[
+        gpr("t0", false),
+        gpr("t1", false),
+        gpr("t2", false),
+        gpr("a0", true),
+        gpr("a1", true),
+        gpr("a2", true),
+        gpr("a3", true),
+        gpr("a4", true),
+        gpr("a5", true),
+        gpr("a6", true),
+        gpr("a7", true),
+        gpr("t3", false),
+        gpr("t4", false),
+        gpr("t5", false),
+        gpr("t6", false),
+        vec("ft0", false),
+        vec("ft1", false),
+        vec("ft2", false),
+        vec("ft3", false),
+        vec("ft4", false),
+        vec("ft5", false),
+        vec("ft6", false),
+        vec("ft7", false),
+        vec("fa0", true),
+        vec("fa1", true),
+        vec("fa2", true),
+        vec("fa3", true),
+        vec("fa4", true),
+        vec("fa5", true),
+        vec("fa6", true),
+        vec("fa7", true),
+        vec("ft8", false),
+        vec("ft9", false),
+        vec("ft10", false),
+        vec("ft11", false),
+    ],
+    veneers: &[],
+    clear: "li_64",
+    imm: Some(0),
+    clear_vector: "fzero_f64",
+    upper: false,
+};
+
 /// How many registers the x87 stack has, all of which `all` clears.
 const X87_DEPTH: usize = 8;
 
 /// Clears the registers `how` asks for in front of every `ret` in `func`, and says how many
 /// instructions it put in.
 ///
-/// Nothing is done on a target other than x86-64, i386 and AArch64, which the driver does not take
-/// the flag for.
+/// Nothing is done on a target other than x86-64, i386, AArch64 and RISC-V, which the driver does
+/// not take the flag for.
 ///
 /// # Panics
 ///
@@ -278,6 +328,7 @@ pub fn apply(
         "x64." if file.reg_named("rax").is_none() => &I386,
         "x64." => &X86_64,
         "a64." => &AARCH64,
+        "rv." => &RISCV64,
         _ => return 0,
     };
     let ret = mir::Opcode::new(names.intern(&format!("{}ret", insts.prefix)));
