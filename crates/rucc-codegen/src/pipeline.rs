@@ -178,11 +178,20 @@ const SCRATCH_COUNT: usize = SCRATCH.len();
 /// The second register file's allocation order and the scratch registers taken out of it, which
 /// are the last two in the order that the convention does not preserve.
 fn held_back(conv: &CallRegs) -> (Vec<PhysReg>, Vec<PhysReg>) {
-    let free: Vec<PhysReg> =
-        conv.sse_order.iter().copied().filter(|&reg| !conv.preserves_sse(reg)).collect();
+    let free: Vec<PhysReg> = conv
+        .sse_order
+        .iter()
+        .copied()
+        .filter(|&reg| !conv.preserves_sse(reg))
+        .collect();
     let at = free.len().saturating_sub(SCRATCH_COUNT);
     let scratch: Vec<PhysReg> = free[at..].to_vec();
-    let order = conv.sse_order.iter().copied().filter(|reg| !scratch.contains(reg)).collect();
+    let order = conv
+        .sse_order
+        .iter()
+        .copied()
+        .filter(|reg| !scratch.contains(reg))
+        .collect();
     (order, scratch)
 }
 
@@ -195,8 +204,12 @@ impl Machine {
     /// no move goes between them.
     #[must_use]
     pub fn x86_64(conv: &'static CallRegs) -> Self {
-        let order: Vec<PhysReg> =
-            conv.int_order.iter().copied().filter(|reg| !SCRATCH.contains(reg)).collect();
+        let order: Vec<PhysReg> = conv
+            .int_order
+            .iter()
+            .copied()
+            .filter(|reg| !SCRATCH.contains(reg))
+            .collect();
         // The vector file wants its own two, for the same two jobs, and they have to be two the
         // convention does not preserve: a scratch register is written by a move the rewriter puts
         // in, which is after the prologue has already been decided, so one the callee owes back
@@ -218,7 +231,9 @@ impl Machine {
         // Every register the convention hands out, `r10` and `r11` where it put them, which is
         // ahead of the ones a call preserves. tamnd/rucc#1994.
         let wide = |order: &[PhysReg]| {
-            Env::new().with(x86_64::GPR, order, &[]).with(x86_64::XMM, &sse_order, &sse_scratch)
+            Env::new()
+                .with(x86_64::GPR, order, &[])
+                .with(x86_64::XMM, &sse_order, &sse_scratch)
         };
         let every: Vec<PhysReg> = conv.int_order.to_vec();
         let spared_every: Vec<PhysReg> =
@@ -227,10 +242,16 @@ impl Machine {
         // spilled values back one at a time, and that is nearly every function that spills.
         let held = &SCRATCH[..1];
         let middle = |order: &[PhysReg]| {
-            Env::new().with(x86_64::GPR, order, held).with(x86_64::XMM, &sse_order, &sse_scratch)
+            Env::new()
+                .with(x86_64::GPR, order, held)
+                .with(x86_64::XMM, &sse_order, &sse_scratch)
         };
-        let some: Vec<PhysReg> =
-            conv.int_order.iter().copied().filter(|reg| !held.contains(reg)).collect();
+        let some: Vec<PhysReg> = conv
+            .int_order
+            .iter()
+            .copied()
+            .filter(|reg| !held.contains(reg))
+            .collect();
         let spared_some: Vec<PhysReg> = some.iter().copied().chain([conv.frame_pointer]).collect();
         Self {
             conv,
@@ -260,8 +281,12 @@ impl Machine {
     /// file's two are picked the way the x86 ones are, which lands on `v30` and `v31`.
     #[must_use]
     pub fn aarch64(conv: &'static CallRegs) -> Self {
-        let order: Vec<PhysReg> =
-            conv.int_order.iter().copied().filter(|reg| !AARCH64_SCRATCH.contains(reg)).collect();
+        let order: Vec<PhysReg> = conv
+            .int_order
+            .iter()
+            .copied()
+            .filter(|reg| !AARCH64_SCRATCH.contains(reg))
+            .collect();
         let (fp_order, fp_scratch) = held_back(conv);
         Self {
             conv,
@@ -274,11 +299,9 @@ impl Machine {
             timing: &aarch64::TIMING,
             short: &aarch64::SHORT,
             selector: &select::aarch64::SELECTOR,
-            env: Env::new().with(aarch64::GPR, &order, &AARCH64_SCRATCH).with(
-                aarch64::FPR,
-                &fp_order,
-                &fp_scratch,
-            ),
+            env: Env::new()
+                .with(aarch64::GPR, &order, &AARCH64_SCRATCH)
+                .with(aarch64::FPR, &fp_order, &fp_scratch),
             spare: None,
             wide: None,
             middle: None,
@@ -294,8 +317,12 @@ impl Machine {
     /// file's two are picked the way the other machines pick theirs.
     #[must_use]
     pub fn riscv64(conv: &'static CallRegs) -> Self {
-        let order: Vec<PhysReg> =
-            conv.int_order.iter().copied().filter(|reg| !RISCV64_SCRATCH.contains(reg)).collect();
+        let order: Vec<PhysReg> = conv
+            .int_order
+            .iter()
+            .copied()
+            .filter(|reg| !RISCV64_SCRATCH.contains(reg))
+            .collect();
         let (fp_order, fp_scratch) = held_back(conv);
         Self {
             conv,
@@ -308,11 +335,9 @@ impl Machine {
             timing: &riscv64::TIMING,
             short: &riscv64::SHORT,
             selector: &select::riscv64::SELECTOR,
-            env: Env::new().with(riscv64::GPR, &order, &RISCV64_SCRATCH).with(
-                riscv64::FPR,
-                &fp_order,
-                &fp_scratch,
-            ),
+            env: Env::new()
+                .with(riscv64::GPR, &order, &RISCV64_SCRATCH)
+                .with(riscv64::FPR, &fp_order, &fp_scratch),
             spare: None,
             wide: None,
             middle: None,
@@ -328,11 +353,17 @@ impl Machine {
     /// x86-64.
     #[must_use]
     pub fn x86(conv: &'static CallRegs) -> Self {
-        let order: Vec<PhysReg> =
-            conv.int_order.iter().copied().filter(|reg| !X86_SCRATCH.contains(reg)).collect();
+        let order: Vec<PhysReg> = conv
+            .int_order
+            .iter()
+            .copied()
+            .filter(|reg| !X86_SCRATCH.contains(reg))
+            .collect();
         let (sse_order, sse_scratch) = held_back(conv);
         let env = |order: &[PhysReg], scratch: &[PhysReg]| {
-            Env::new().with(x86::GPR, order, scratch).with(x86::XMM, &sse_order, &sse_scratch)
+            Env::new()
+                .with(x86::GPR, order, scratch)
+                .with(x86::XMM, &sse_order, &sse_scratch)
         };
         // Both scratch registers handed out after every other one, and then one register held
         // back, which is the same pair of tries x86-64 makes. Neither of the two has a low byte,
@@ -341,16 +372,29 @@ impl Machine {
         // where `edi` would need an exchange on either side of the instruction. `edi` where `ebx`
         // holds the address of the GOT.
         let every: Vec<PhysReg> = order.iter().copied().chain(X86_SCRATCH).collect();
-        let held: &[PhysReg] =
-            if order.contains(&x86::EBX) { &[x86::EBX] } else { &X86_SCRATCH[1..] };
-        let some: Vec<PhysReg> = every.iter().copied().filter(|reg| !held.contains(reg)).collect();
+        let held: &[PhysReg] = if order.contains(&x86::EBX) {
+            &[x86::EBX]
+        } else {
+            &X86_SCRATCH[1..]
+        };
+        let some: Vec<PhysReg> = every
+            .iter()
+            .copied()
+            .filter(|reg| !held.contains(reg))
+            .collect();
         // And where neither fits, `ebx` and `esi` held back rather than `esi` and `edi`, so that
         // `edi` holds a value and what is read back for `cmpb` or `sete` is read into a register
         // with a low byte. Each of those went through `esi` with an exchange either side. Not where
         // `ebx` holds the address of the GOT.
         let low = [x86::EBX, x86::ESI];
-        let rest: Vec<PhysReg> = every.iter().copied().filter(|reg| !low.contains(reg)).collect();
-        let last = order.contains(&x86::EBX).then(|| [env(&rest, &low), env(&rest, &low)]);
+        let rest: Vec<PhysReg> = every
+            .iter()
+            .copied()
+            .filter(|reg| !low.contains(reg))
+            .collect();
+        let last = order
+            .contains(&x86::EBX)
+            .then(|| [env(&rest, &low), env(&rest, &low)]);
         Self {
             conv,
             file: x86::REGS,
@@ -407,7 +451,10 @@ impl Machine {
     /// and [`rucc_target::CallRegs::guarded_by`].
     #[must_use]
     pub fn under(&self, convention: rucc_target::Convention) -> Option<Self> {
-        let mut conv = self.conv.under(convention)?.aligned_to(self.conv.stack_align);
+        let mut conv = self
+            .conv
+            .under(convention)?
+            .aligned_to(self.conv.stack_align);
         if self.conv.sse_args.is_empty() {
             conv = conv.without_vectors();
         }
@@ -748,8 +795,12 @@ pub fn compile(
     elsewhere: &Elsewhere,
     flags: Flags,
 ) -> Result<mir::Func, Unsupported> {
-    let (mut fired, mut pressure, mut lowerings, mut stack) =
-        (Fired::new(), Pressure::new(), Lowerings::new(), StackUsage::new());
+    let (mut fired, mut pressure, mut lowerings, mut stack) = (
+        Fired::new(),
+        Pressure::new(),
+        Lowerings::new(),
+        StackUsage::new(),
+    );
     compile_recording(
         source,
         names,
@@ -807,7 +858,10 @@ impl Spent {
     /// Adds the time from now until the guard it hands back is dropped to [`Spent::emission`],
     /// for the end of a function with more than one way out of it.
     pub fn emitting(&mut self) -> Emitting<'_> {
-        Emitting { from: Instant::now(), into: &mut self.emission }
+        Emitting {
+            from: Instant::now(),
+            into: &mut self.emission,
+        }
     }
 }
 
@@ -859,9 +913,10 @@ pub fn compile_recording(
     let machine = match source.signature().convention {
         rucc_target::Convention::Target => machine,
         convention => {
-            foreign = machine
-                .under(convention)
-                .ok_or(Unsupported::Unported { inst: None, what: lower::Unported::Convention })?;
+            foreign = machine.under(convention).ok_or(Unsupported::Unported {
+                inst: None,
+                what: lower::Unported::Convention,
+            })?;
             &foreign
         }
     };
@@ -913,7 +968,15 @@ pub fn compile_recording(
     // way it reaches a block the unwinder starts. Before the lowerings, so that a load or a store
     // at a width the machine does not have is rewritten with the rest. See [`pads`].
     pads::spill(source, machine.conv.word);
-    let ran = lowering::group(source, names, machine.conv, switching, &counts, fused, counting);
+    let ran = lowering::group(
+        source,
+        names,
+        machine.conv,
+        switching,
+        &counts,
+        fused,
+        counting,
+    );
     // An `asm` input that may go in memory goes there when the statement has taken every register
     // it could go in. Only on x86, the one machine here that names an operand in the frame without a
     // register for its address. See [`expand::crowded`].
@@ -962,7 +1025,10 @@ pub fn compile_recording(
     let able = machine.insts.away.is_some() && !saves_all;
     let asked = tail::asked(source);
     if let (false, Some(inst)) = (able, asked) {
-        return Err(Unsupported::MustTail { inst, reason: tail::UNABLE });
+        return Err(Unsupported::MustTail {
+            inst,
+            reason: tail::UNABLE,
+        });
     }
     if able && (flags.sibling || asked.is_some()) {
         let guarded = flags.landing
@@ -1003,7 +1069,12 @@ pub fn compile_recording(
         hold,
     )?;
     recording.fired.merge(&lowered.fired);
-    let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
+    let lower::Lowered {
+        mut func,
+        mut stack,
+        blocks,
+        ..
+    } = lowered;
     recording.spent.selection += started.elapsed();
     // Straight after selection, because this is the last moment the machine blocks and the IR
     // blocks still stand one for one, and the pass that reads the numbers is the very last one
@@ -1022,8 +1093,16 @@ pub fn compile_recording(
     // this is what says so if one ever starts.
     let vector =
         |number| func.class_of(rucc_mir::Reg::virtual_reg(number)) == Some(machine.conv.sse_class);
-    if !vectors && (0..func.vregs()).filter_map(|n| u32::try_from(n).ok()).any(vector) {
-        return Err(Unsupported::Registers { inst: None, ty: None, off: lower::Off::Vector });
+    if !vectors
+        && (0..func.vregs())
+            .filter_map(|n| u32::try_from(n).ok())
+            .any(vector)
+    {
+        return Err(Unsupported::Registers {
+            inst: None,
+            ty: None,
+            off: lower::Off::Vector,
+        });
     }
     // The one thing a frame that grows while it runs cannot be asked for, which is a refusal rather
     // than wrong code.
@@ -1033,15 +1112,25 @@ pub fn compile_recording(
         // and there is no prologue here, so the address the array hands out would be counted from a
         // register holding whatever the caller left in it.
         if naked {
-            return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Naked });
+            return Err(Unsupported::Dynamic {
+                inst,
+                growing: lower::Growing::Naked,
+            });
         }
         // The lowering refuses a variable length array that asks for more alignment than a call
         // leaves the stack pointer on. A fixed local asking for it in the same function is the same
         // refusal arrived at from the other side: the prologue would force the alignment, and
         // forcing it and moving the stack pointer afterwards are two frames that each want the one
         // register that still reaches the rest of the frame. See `Growing` in [`crate::frame`].
-        if stack.locals.iter().any(|local| local.align > machine.conv.stack_align) {
-            return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Aligned });
+        if stack
+            .locals
+            .iter()
+            .any(|local| local.align > machine.conv.stack_align)
+        {
+            return Err(Unsupported::Dynamic {
+                inst,
+                growing: lower::Growing::Aligned,
+            });
         }
     }
 
@@ -1095,11 +1184,24 @@ pub fn compile_recording(
     if flags.code_model == CodeModel::Kernel {
         fold::spread(&mut func, machine.insts, names);
     }
-    fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending, absolute);
+    fold::addresses(
+        &mut func,
+        machine.insts,
+        machine.shapes,
+        names,
+        &mut pending,
+        absolute,
+    );
     // Where the address of a name is a number, the names the first run left behind a sum it
     // folded, see `fold::names`.
     if absolute {
-        fold::names(&mut func, machine.insts, machine.shapes, names, &mut pending);
+        fold::names(
+            &mut func,
+            machine.insts,
+            machine.shapes,
+            names,
+            &mut pending,
+        );
     }
 
     // After that fold rather than before it, because what this puts inside an arithmetic
@@ -1110,7 +1212,13 @@ pub fn compile_recording(
     // The run that reads a place, computes on it and writes it back goes first, because it is three
     // instructions the selector wrote and taking the load out of the middle one first would leave
     // the same run written a second way.
-    combine::stores(&mut func, machine.shapes, machine.flags, names, &mut pending);
+    combine::stores(
+        &mut func,
+        machine.shapes,
+        machine.flags,
+        names,
+        &mut pending,
+    );
     combine::loads(&mut func, machine.shapes, names, &mut pending);
     // After both, which may have taken a read of an argument into the instruction that wanted it.
     // Not at `-O0`, whose arguments are all stored to their slots and so all read.
@@ -1147,10 +1255,13 @@ pub fn compile_recording(
     // A local the front end said wants one counts only while its slot is still in the frame, so a
     // function whose arrays and escaping locals were all turned into values has none, as with gcc.
     let guarded = || {
-        source.blocks().flat_map(|block| source.insts(block)).any(|inst| {
-            source[inst].opcode == ir::Opcode::Alloca
-                && source[inst].flags.contains(ir::Flags::GUARD)
-        })
+        source
+            .blocks()
+            .flat_map(|block| source.insts(block))
+            .any(|inst| {
+                source[inst].opcode == ir::Opcode::Alloca
+                    && source[inst].flags.contains(ir::Flags::GUARD)
+            })
     };
     let protect = (source.attrs.set.contains(ir::AttrSet::STACK_PROTECT) || guarded()) && !naked;
     let guard = protect.then_some(machine.conv.guard.as_ref()).flatten();
@@ -1166,7 +1277,10 @@ pub fn compile_recording(
     // A tail call is a call on a machine with no instruction to jump away with, and the frame is
     // worked out as though it stays one.
     stack.kept |= machine.insts.away.is_none() && !stack.tails.is_empty();
-    let base = Layout { moves: machine.insts.classes, ..Layout::new(machine.conv, machine.file) };
+    let base = Layout {
+        moves: machine.insts.classes,
+        ..Layout::new(machine.conv, machine.file)
+    };
     let base = stack.layout(base);
     let guarded = machine.guarded();
     // A protected function calls the one that does not come back, on the arm where the check
@@ -1256,7 +1370,14 @@ pub fn compile_recording(
     // In front of the splitting below, because what it does is take the values off the edges out of
     // a computed `goto` and the splitting has no answer for one of those: the block they leave ends
     // in a jump already, so neither end of the edge is somewhere a move can go.
-    split::indirect(&mut func, machine.branch, machine.insts, machine.short, machine.flags, names);
+    split::indirect(
+        &mut func,
+        machine.branch,
+        machine.insts,
+        machine.short,
+        machine.flags,
+        names,
+    );
 
     // And after it, because what it puts a pad at is the block an address names and the pass above
     // is what settles which block that is. The pad the prologue opens with is written much later,
@@ -1294,7 +1415,12 @@ pub fn compile_recording(
         let count = stack.locals.len();
         // A template that names a local in its text touches it where it stands, the way a reader
         // the address was folded into does.
-        let touched: Vec<_> = stack.addresses.iter().chain(&stack.framed).copied().collect();
+        let touched: Vec<_> = stack
+            .addresses
+            .iter()
+            .chain(&stack.framed)
+            .copied()
+            .collect();
         slots::reach(&func, &touched, &stack.ends, count, machine.insts, names)
     });
 
@@ -1322,7 +1448,11 @@ pub fn compile_recording(
     // The single pass allocator in a function that can be come back into. A value live across the
     // call that comes back has to be read by the second arrival from memory the first arm did not
     // write, and the backtracking allocator is free to leave it in a register the first arm writes.
-    let allocator = if alone { Allocator::Single } else { flags.allocator };
+    let allocator = if alone {
+        Allocator::Single
+    } else {
+        flags.allocator
+    };
     let called = names.resolve(func.name).to_owned();
     // One more register in a function that will keep no frame pointer, which is asked of the parts
     // of the frame the allocator cannot change. Not in a naked function, which has no prologue to
@@ -1416,19 +1546,29 @@ pub fn compile_recording(
             func.remove_inst(inst);
         }
     }
-    let mut layout = Layout { share: Some(&share), ..layout };
+    let mut layout = Layout {
+        share: Some(&share),
+        ..layout
+    };
     let mut frame = Frame::of(&func, &allocation, &layout);
     // A frame bigger than a page is taken by calling the platform's routine for it, and on a
     // machine whose call leaves the return address in a register that call writes over it. So such
     // a function is not a leaf, whatever the program called, and has to save the register the way
     // any other caller does. AArch64 Windows is the one, and clang saves x29 and x30 there too.
-    let page = machine.insts.probe.as_ref().map_or(u32::MAX, |probe| probe.interval);
+    let page = machine
+        .insts
+        .probe
+        .as_ref()
+        .map_or(u32::MAX, |probe| probe.interval);
     if layout.leaf
         && machine.conv.chkstk.is_some()
         && machine.conv.link.is_some()
         && frame.size() > page
     {
-        layout = Layout { leaf: false, ..layout };
+        layout = Layout {
+            leaf: false,
+            ..layout
+        };
         frame = Frame::of(&func, &allocation, &layout);
     }
     // The register was handed out on the promise that it would not be one, and a frame pointer set
@@ -1442,13 +1582,17 @@ pub fn compile_recording(
     // may want that only a prologue provides. A local, a spilled value and the arguments of a call
     // are the three ways to want them, and the answer to all three is the same sentence.
     if naked && frame.size() > 0 {
-        return Err(Unsupported::Naked { bytes: frame.size() });
+        return Err(Unsupported::Naked {
+            bytes: frame.size(),
+        });
     }
     // Here because the frame is settled and nothing after this changes how big it is. The name is
     // the one the source spelled, since that is what gcc's report says and what a person reading
     // it looks for, and a renamed function is the one place it differs from the symbol.
     recording.stack.record(Usage {
-        name: names.resolve(source.spelled.unwrap_or(source.name)).to_owned(),
+        name: names
+            .resolve(source.spelled.unwrap_or(source.name))
+            .to_owned(),
         named: source.named,
         declared: source.declared,
         bytes: frame.usage(),
@@ -1472,7 +1616,12 @@ pub fn compile_recording(
         .iter()
         .filter(|&&(local, _)| share.shared(local).is_none())
         .filter_map(|&(local, decl)| Some((decl, frame.from_frame_base(local)?)))
-        .chain(stack.passed.iter().filter_map(|&(decl, up)| Some((decl, i32::try_from(up).ok()?))))
+        .chain(
+            stack
+                .passed
+                .iter()
+                .filter_map(|&(decl, up)| Some((decl, i32::try_from(up).ok()?))),
+        )
         .collect();
     let framed: Vec<(u32, i32, &[rucc_regalloc::live::Range])> = stack
         .declared
@@ -1489,7 +1638,11 @@ pub fn compile_recording(
     // and what goes into one in the body has to go into one of these.
     let int = machine.conv.int_class;
     let held = used.scratch(int);
-    let protect = guard.map(|guard| Protect { guard, branch: machine.branch, scratch: guarded });
+    let protect = guard.map(|guard| Protect {
+        guard,
+        branch: machine.branch,
+        scratch: guarded,
+    });
     // A target with no instruction that touches a page without changing it does nothing about the
     // flag, which is the same answer the protector gives on a target with nowhere to keep its word.
     // Every target this crate has a back end for has one.
@@ -1502,7 +1655,11 @@ pub fn compile_recording(
     let probe = (flags.stack_clash || machine.conv.chkstk.is_some())
         .then_some(machine.insts.probe.as_ref())
         .flatten()
-        .map(|probe| Probing { probe, branch: machine.branch, scratch: [scratch[0], scratch[1]] });
+        .map(|probe| Probing {
+            probe,
+            branch: machine.branch,
+            scratch: [scratch[0], scratch[1]],
+        });
     // The hook and the list are the function's own where `fentry_name` and `fentry_section` said,
     // and the command line's otherwise. A section the function named lists the call whether or not
     // `-mrecord-mcount` asked, which is what gcc does, while one only the command line named is
@@ -1518,9 +1675,17 @@ pub fn compile_recording(
             None => names.intern(hook),
         };
         let record = flags.mcount.record || source.fentry_section.is_some();
-        let mcount = Mcount { record, ..flags.mcount };
+        let mcount = Mcount {
+            record,
+            ..flags.mcount
+        };
         let section = source.fentry_section.or(flags.fentry_section);
-        Some(Tracing { name, early, mcount, section })
+        Some(Tracing {
+            name,
+            early,
+            mcount,
+            section,
+        })
     });
     // And once more for the room a patcher was promised, which is a run of the shortest
     // instruction that does nothing and so needs the target to have one. Nothing is written on a
@@ -1528,19 +1693,26 @@ pub fn compile_recording(
     // patcher writing over the room starts at its front and wants every byte in it to be a place
     // it could have started at.
     // What `patchable_function_entry` on the function said, in place of the command line.
-    let room = source.patchable.map_or(flags.patch, |(total, before)| Room {
-        after: total.saturating_sub(before),
-        before,
-    });
-    let pad = room.any().then_some(machine.insts.pad).flatten().map(|name| Padding {
-        name,
-        before: room.before,
-        after: room.after,
-    });
-    // The pad at the top of the function is left out of one whose type says `nocf_check`, and
-    // under `-mmanual-endbr` out of every one that does not say `cf_check`. The pads at its
-    // labels stay, since a computed `goto` is a different branch.
-    let asked = !flags.manual_endbr || source.attrs.set.contains(ir::AttrSet::CF_CHECK);
+    let room = source
+        .patchable
+        .map_or(flags.patch, |(total, before)| Room {
+            after: total.saturating_sub(before),
+            before,
+        });
+    let pad = room
+        .any()
+        .then_some(machine.insts.pad)
+        .flatten()
+        .map(|name| Padding {
+            name,
+            before: room.before,
+            after: room.after,
+        });
+    // The pad at the top of the function is left out of one whose type says `nocf_check`, under
+    // `-mmanual-endbr` out of every one that does not say `cf_check`, and out of one only a direct
+    // call reaches. The pads at its labels stay, since a computed `goto` is a different branch.
+    let asked = (!flags.manual_endbr || source.attrs.set.contains(ir::AttrSet::CF_CHECK))
+        && !elsewhere.only_called_directly(source.name);
     let entry = match targets {
         Some(targets) => Some(targets.call),
         None => landing.filter(|_| asked && !source.attrs.set.contains(ir::AttrSet::NOCF)),
@@ -1587,7 +1759,11 @@ pub fn compile_recording(
     );
     // After the cleanup, which is what takes out the reads, and before the reloads below fold one
     // into the instruction that wanted it, where it is no longer one of the allocator's moves.
-    let unread = if flags.reloads { copies::unread(&mut func, &moves) } else { Vec::new() };
+    let unread = if flags.reloads {
+        copies::unread(&mut func, &moves)
+    } else {
+        Vec::new()
+    };
 
     // After the cleanup, which takes out a reload whose register still has the word and would
     // otherwise find a register this had folded away. Before anything that orders or lays out
@@ -1677,8 +1853,19 @@ pub fn compile_recording(
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
     // The cleanup took the byte each of these writes as never written. See `layout::joined`.
     let still = layout::joined(&func, machine.branch, &fused, &fusable, names);
-    assert!(joined.is_subset(&still), "a comparison came apart from its branch after the cleanup");
-    layout::blocks(&mut func, machine.branch, &fused, names, &fusable, &loops, flags.reorder);
+    assert!(
+        joined.is_subset(&still),
+        "a comparison came apart from its branch after the cleanup"
+    );
+    layout::blocks(
+        &mut func,
+        machine.branch,
+        &fused,
+        names,
+        &fusable,
+        &loops,
+        flags.reorder,
+    );
 
     // After the layout for the reason the branches wait for it: a select that reads what a
     // comparison left is a pair with nothing allowed between, and nothing past here puts anything
@@ -1724,7 +1911,12 @@ pub fn compile_recording(
     // that the byte an instruction names is the one it ends up with. i386 only: see
     // [`crate::bytes`].
     if std::ptr::eq(machine.selector, &select::x86::SELECTOR) {
-        bytes::reach(&mut func, machine.insts.prefix, machine.conv.int_class, names);
+        bytes::reach(
+            &mut func,
+            machine.insts.prefix,
+            machine.conv.int_class,
+            names,
+        );
     }
 
     // Once the blocks will not move again, since a head is a block a jump runs backwards to and
@@ -1744,7 +1936,13 @@ pub fn compile_recording(
     // A frame laid out as anything but a leaf is fine with a call left in it, and a protected one
     // is one of those: its check comes between the call and the `ret`, so the call has to stay
     // where it is, and the frame already leaves the stack pointer where a call needs it.
-    let jumped = tail::jumps(&mut func, &stack.tails, machine.insts, machine.branch, names)?;
+    let jumped = tail::jumps(
+        &mut func,
+        &stack.tails,
+        machine.insts,
+        machine.branch,
+        names,
+    )?;
     assert!(
         stack.kept || !layout.leaf || jumped == stack.tails.len(),
         "a leaf whose tail calls did not all become jumps"
@@ -1762,14 +1960,30 @@ pub fn compile_recording(
     // What the function may have left in a register other than a general purpose one, which the
     // choices without `-gpr` clear too. A `long double` it gives back on the x87 stack is in a
     // register that is not cleared, the way one in `rax` is not.
-    let types: Vec<ir::Type> = source.signature().returns.iter().map(|ret| ret.ty).collect();
+    let types: Vec<ir::Type> = source
+        .signature()
+        .returns
+        .iter()
+        .map(|ret| ret.ty)
+        .collect();
     let files = zero::Files {
         vector: vectors,
         extension: flags.zero_extension,
         x87: flags.x87 && !saves_all,
-        x87_returned: if abi::back_on_x87(&types) { types.len() } else { 0 },
+        x87_returned: if abi::back_on_x87(&types) {
+            types.len()
+        } else {
+            0
+        },
     };
-    zero::apply(&mut func, zeroing, files, machine.shapes, &machine.file, names);
+    zero::apply(
+        &mut func,
+        zeroing,
+        files,
+        machine.shapes,
+        &machine.file,
+        names,
+    );
 
     // A call or a tail jump through a pointer a load has just read reads the pointer itself, after
     // the tail calls because a jump is only a jump once that has made it one. Not when a thunk is
@@ -1822,9 +2036,17 @@ fn zeroing(command: Option<Zeroing>, set: ir::AttrSet) -> Option<Zeroing> {
     if set.contains(ir::AttrSet::ZERO_SKIP) {
         None
     } else if set.contains(ir::AttrSet::ZERO_ALL) {
-        Some(Zeroing { all: true, arg, wide })
+        Some(Zeroing {
+            all: true,
+            arg,
+            wide,
+        })
     } else if set.contains(ir::AttrSet::ZERO_USED) {
-        Some(Zeroing { all: false, arg, wide })
+        Some(Zeroing {
+            all: false,
+            arg,
+            wide,
+        })
     } else {
         command
     }
@@ -1837,8 +2059,9 @@ fn commuting(func: &mut mir::Func, shapes: &MachineInsts, names: &Interner) {
     let mut known: Map<mir::Opcode, bool> = Map::default();
     for inst in insts {
         let opcode = func[inst].opcode;
-        let commutes =
-            *known.entry(opcode).or_insert_with(|| shapes.commutes(names.resolve(opcode.name())));
+        let commutes = *known
+            .entry(opcode)
+            .or_insert_with(|| shapes.commutes(names.resolve(opcode.name())));
         if commutes {
             func[inst].flags = func[inst].flags.with(mir::Flags::COMMUTES);
         }
@@ -1857,7 +2080,10 @@ mod tests {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"), Signature::new());
         let block = func.create_block();
-        let values = params.iter().map(|&ty| func.append_param(block, ty)).collect();
+        let values = params
+            .iter()
+            .map(|&ty| func.append_param(block, ty))
+            .collect();
         (names, func, block, values)
     }
 
@@ -1888,9 +2114,14 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::aarch64(&aarch64::AAPCS64);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
         mir::print_func(&out, &names, &aarch64::REGS)
     }
 
@@ -1905,9 +2136,14 @@ mod tests {
         let pointed = first("$x29 = a64.mov_rr_64 $sp").unwrap_or_else(|| panic!("{text}"));
         let call = first("a64.bl").unwrap_or_else(|| panic!("{text}"));
         let back = first("a64.pop_pair_64").unwrap_or_else(|| panic!("{text}"));
-        let ret =
-            lines.iter().position(|&line| line == "a64.ret").unwrap_or_else(|| panic!("{text}"));
-        assert!(record < pointed && pointed < call && call < back && back < ret, "{text}");
+        let ret = lines
+            .iter()
+            .position(|&line| line == "a64.ret")
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(
+            record < pointed && pointed < call && call < back && back < ret,
+            "{text}"
+        );
         // Every push moves the stack pointer by sixteen, so whatever the frame takes on top of them
         // is a multiple of sixteen too, and nothing is taken for the word x86 would have owed.
         for line in &lines {
@@ -1927,9 +2163,14 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::aarch64(&aarch64::AAPCS64);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
         let text = mir::print_func(&out, &names, &aarch64::REGS);
         assert!(!text.contains("push"), "{text}");
         assert!(text.contains("a64.add_rr_32"), "{text}");
@@ -1963,9 +2204,15 @@ mod tests {
                 .expect("every instruction has a rule");
                 let text = mir::print_func(&out, &names, &aarch64::REGS);
                 for inst in wanted {
-                    assert!(text.contains(&format!("{inst}_{width}")), "{inst}_{width}: {text}");
+                    assert!(
+                        text.contains(&format!("{inst}_{width}")),
+                        "{inst}_{width}: {text}"
+                    );
                 }
-                assert!(!text.contains("lsr") && !text.contains("mul"), "written out: {text}");
+                assert!(
+                    !text.contains("lsr") && !text.contains("mul"),
+                    "written out: {text}"
+                );
             }
         }
     }
@@ -1974,19 +2221,31 @@ mod tests {
     /// the base set.
     #[test]
     fn an_aarch64_fused_multiply_add_is_one_instruction() {
-        for (format, wanted) in
-            [(rucc_ir::Float::F32, "a64.fmadd_f32"), (rucc_ir::Float::F64, "a64.fmadd_f64")]
-        {
+        for (format, wanted) in [
+            (rucc_ir::Float::F32, "a64.fmadd_f32"),
+            (rucc_ir::Float::F64, "a64.fmadd_f64"),
+        ] {
             let ty = Type::float(format);
             let (mut names, mut source, block, args) = blank(&[ty, ty, ty]);
             let mut build = Builder::new(&mut source, block);
             let args = build.func().push_values(&args);
-            let fused = build.value(ir::InstData { args, ..ir::InstData::new(Opcode::Fma) }, ty);
+            let fused = build.value(
+                ir::InstData {
+                    args,
+                    ..ir::InstData::new(Opcode::Fma)
+                },
+                ty,
+            );
             build.ret(&[fused]);
             let machine = Machine::aarch64(&aarch64::AAPCS64);
-            let out =
-                compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                    .expect("a fused multiply add is an instruction");
+            let out = compile(
+                &mut source,
+                &mut names,
+                &machine,
+                &Elsewhere::default(),
+                Flags::default(),
+            )
+            .expect("a fused multiply add is an instruction");
             let text = mir::print_func(&out, &names, &aarch64::REGS);
             assert!(text.contains(wanted), "{wanted}: {text}");
             assert!(!text.contains("call"), "and no call: {text}");
@@ -2004,11 +2263,23 @@ mod tests {
             let ones = build.unary(Opcode::Ctpop, args[0], ty);
             build.ret(&[ones]);
             let machine = Machine::aarch64(&aarch64::AAPCS64);
-            let flags = Flags { vector: false, ..Flags::default() };
-            let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-                .expect("a count is arithmetic without the vector registers");
+            let flags = Flags {
+                vector: false,
+                ..Flags::default()
+            };
+            let out = compile(
+                &mut source,
+                &mut names,
+                &machine,
+                &Elsewhere::default(),
+                flags,
+            )
+            .expect("a count is arithmetic without the vector registers");
             let text = mir::print_func(&out, &names, &aarch64::REGS);
-            assert!(!text.contains("a64.cnt"), "a vector register was used: {text}");
+            assert!(
+                !text.contains("a64.cnt"),
+                "a vector register was used: {text}"
+            );
         }
     }
 
@@ -2021,9 +2292,14 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         // `int f(int a, int b) { return a + b; }` end to end. A leaf that spills nothing needs no
         // frame at all, so there is no prologue to see. The one move left is the one the machine's
@@ -2059,7 +2335,10 @@ mod tests {
         };
         let mem = build.func().add_mem(info);
         let slot = build.value(
-            ir::InstData { extra: ir::Extra::Mem(mem), ..ir::InstData::new(Opcode::Alloca) },
+            ir::InstData {
+                extra: ir::Extra::Mem(mem),
+                ..ir::InstData::new(Opcode::Alloca)
+            },
             Type::PTR,
         );
         build.func().declare_mem(mem, 5);
@@ -2068,9 +2347,14 @@ mod tests {
         build.ret(&[loaded]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         // `int f(int a) { int x = a; return x; }` with the address of `x` taken, so it is four
         // bytes in the frame. A leaf this small lives in the red zone, so the stack pointer never
@@ -2090,9 +2374,18 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags = Flags { debug: true, ..Flags::default() };
-        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-            .expect("every instruction has a rule");
+        let flags = Flags {
+            debug: true,
+            ..Flags::default()
+        };
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            flags,
+        )
+        .expect("every instruction has a rule");
 
         // `int f(int a) { int x = a + a; return x; }` with nothing taking the address of `x`, so
         // it never reaches the frame and the only answer about it is a register. The sum is
@@ -2100,8 +2393,16 @@ mod tests {
         // the stretch is one instruction long and it is the move rather than the addition.
         assert_eq!(out.kept.len(), 1, "one stretch: {:?}", out.kept);
         assert_eq!(out.kept[0].decl, 5);
-        assert!(matches!(out.kept[0].at, mir::Where::Reg { .. }), "a register: {:?}", out.kept[0]);
-        assert!(out.locals.is_empty(), "nothing in the frame: {:?}", out.locals);
+        assert!(
+            matches!(out.kept[0].at, mir::Where::Reg { .. }),
+            "a register: {:?}",
+            out.kept[0]
+        );
+        assert!(
+            out.locals.is_empty(),
+            "nothing in the frame: {:?}",
+            out.locals
+        );
     }
 
     /// What `-Zlowering` is built out of, and the reason it is worth a test here rather than only
@@ -2137,12 +2438,19 @@ mod tests {
         let listing = lowerings.listing();
         assert!(listing.contains("lowering f\n"), "{listing}");
         for step in lowering::Step::GROUP {
-            assert!(listing.contains(step.name()), "{} did not run: {listing}", step.name());
+            assert!(
+                listing.contains(step.name()),
+                "{} did not run: {listing}",
+                step.name()
+            );
         }
         // The bit count went through the group rather than reaching the selector, which has no
         // rule for one.
         assert!(listing.contains("counts"), "{listing}");
-        assert!(!listing.contains("left 1"), "something the group answers for survived: {listing}");
+        assert!(
+            !listing.contains("left 1"),
+            "something the group answers for survived: {listing}"
+        );
     }
 
     /// What `-Zrule-coverage` is built out of: the rules a compilation fired, recorded as it went.
@@ -2174,10 +2482,19 @@ mod tests {
         )
         .expect("every instruction has a rule");
         let one = fired.count();
-        assert!(one > 0, "an add and a return went through the table and nothing was recorded");
+        assert!(
+            one > 0,
+            "an add and a return went through the table and nothing was recorded"
+        );
 
         let listing = fired.listing(&select::x86_64::TABLE);
-        assert_eq!(listing.lines().filter(|line| line.starts_with("fired ")).count(), one);
+        assert_eq!(
+            listing
+                .lines()
+                .filter(|line| line.starts_with("fired "))
+                .count(),
+            one
+        );
         assert!(
             listing.contains(&format!("{one} of ")),
             "{}",
@@ -2220,9 +2537,14 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         // `int f(int a) { return g(a) + a; }`. Not a leaf, so the stack pointer moves and the
         // register the value that outlives the call went to is one the prologue saves.
@@ -2254,24 +2576,47 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags = Flags { debug: true, ..Flags::default() };
-        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-            .expect("every instruction has a rule");
+        let flags = Flags {
+            debug: true,
+            ..Flags::default()
+        };
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            flags,
+        )
+        .expect("every instruction has a rule");
         let text = mir::print_func(&out, &names, &REGS);
 
         assert_eq!(out.calls.len(), 3, "{text}");
-        assert!(out.calls.iter().all(|call| call.callee == Some(callee)), "{text}");
+        assert!(
+            out.calls.iter().all(|call| call.callee == Some(callee)),
+            "{text}"
+        );
         // The first call passes the parameter on in the register it arrived in.
-        let [arg] = out.calls[0].args.as_slice() else { panic!("{:?}\n{text}", out.calls[0]) };
-        let entry = mir::Was::Entry { reg: x86_64::RDI, class: SYSV.int_class };
+        let [arg] = out.calls[0].args.as_slice() else {
+            panic!("{:?}\n{text}", out.calls[0])
+        };
+        let entry = mir::Was::Entry {
+            reg: x86_64::RDI,
+            class: SYSV.int_class,
+        };
         assert_eq!(arg.was, entry, "{text}");
         // The second call copies the parameter back out of the register it was kept in.
-        let [arg] = out.calls[1].args.as_slice() else { panic!("{:?}\n{text}", out.calls[1]) };
+        let [arg] = out.calls[1].args.as_slice() else {
+            panic!("{:?}\n{text}", out.calls[1])
+        };
         assert_eq!(arg.reg, x86_64::RDI, "{text}");
-        let mir::Was::Reg { reg, .. } = arg.was else { panic!("{arg:?}\n{text}") };
+        let mir::Was::Reg { reg, .. } = arg.was else {
+            panic!("{arg:?}\n{text}")
+        };
         assert!(SYSV.preserves_int(reg), "{text}");
         // And the third is a constant.
-        let [arg] = out.calls[2].args.as_slice() else { panic!("{:?}\n{text}", out.calls[2]) };
+        let [arg] = out.calls[2].args.as_slice() else {
+            panic!("{:?}\n{text}", out.calls[2])
+        };
         assert_eq!(arg.was, mir::Was::Constant(5), "{text}");
     }
 
@@ -2284,7 +2629,10 @@ mod tests {
         let signature = Signature::new().with_params(&params).with_returns(&[i32]);
         let mut source = Func::new(names.intern("f"), signature.clone());
         let block = source.create_block();
-        let args: Vec<_> = params.iter().map(|&ty| source.append_param(block, ty)).collect();
+        let args: Vec<_> = params
+            .iter()
+            .map(|&ty| source.append_param(block, ty))
+            .collect();
         let sig = source.add_signature(signature);
         let callee = names.intern("g");
         let call = Builder::new(&mut source, block).call(callee, sig, &args);
@@ -2292,9 +2640,18 @@ mod tests {
         Builder::new(&mut source, block).ret(&[got]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags = Flags { sibling, ..Flags::default() };
-        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-            .expect("every instruction has a rule");
+        let flags = Flags {
+            sibling,
+            ..Flags::default()
+        };
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            flags,
+        )
+        .expect("every instruction has a rule");
         mir::print_func(&out, &names, &REGS)
     }
 
@@ -2318,10 +2675,18 @@ mod tests {
     fn a_call_through_a_pointer_in_tail_position_is_a_jump_through_a_register() {
         let i32 = Type::int(32);
         let (mut names, mut source, block, args) = blank(&[Type::PTR, i32]);
-        source.set_signature(Signature::new().with_params(&[Type::PTR, i32]).with_returns(&[i32]));
+        source.set_signature(
+            Signature::new()
+                .with_params(&[Type::PTR, i32])
+                .with_returns(&[i32]),
+        );
         let sig = source.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
         let varargs = source.push_abis(&[]);
-        let info = source.add_call(ir::CallInfo { callee: None, signature: sig, varargs });
+        let info = source.add_call(ir::CallInfo {
+            callee: None,
+            signature: sig,
+            varargs,
+        });
         let mut build = Builder::new(&mut source, block);
         let inst = ir::InstData {
             args: build.func().push_values(&[args[0], args[1]]),
@@ -2333,9 +2698,18 @@ mod tests {
         Builder::new(&mut source, block).ret(&[got]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags = Flags { sibling: true, ..Flags::default() };
-        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-            .expect("every instruction has a rule");
+        let flags = Flags {
+            sibling: true,
+            ..Flags::default()
+        };
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            flags,
+        )
+        .expect("every instruction has a rule");
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.jmp_reg $rax"), "{text}");
         assert!(!text.contains("x64.call"), "{text}");
@@ -2360,9 +2734,14 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&WIN64);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         // The arguments arrive in `rcx` and `rdx` here rather than in `rdi` and `rsi`, which is
         // the whole of what changed, and it changed because the convention was asked.
@@ -2386,9 +2765,14 @@ mod tests {
         Builder::new(&mut source, join).ret(&[got]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         // The else arm is a critical edge carrying a value, so a block that nothing lowered is in
         // there, which is the pass between lowering and allocation doing its job. Without it the
@@ -2450,9 +2834,14 @@ mod tests {
         Builder::new(&mut source, exit).ret(&[result]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         // `int gcd(int a, int b) { while (b) { int t = a % b; a = b; b = t; } return a; }`. Two
         // things in here were wrong and each of them returned three from a program that gcc
@@ -2519,9 +2908,14 @@ mod tests {
         Builder::new(&mut source, join).ret(&[got]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         let read = rucc_mir::parse(&text, &mut names, &REGS).expect("what the printer wrote");
@@ -2539,10 +2933,18 @@ mod tests {
         // rather than lowered, and it is the convention that refuses it rather than anything about
         // the instructions.
         let machine = Machine::x86_64(&SYSV);
-        let failed =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect_err("a long double cannot come back beside another value");
-        assert_eq!(failed.to_string(), "what this function gives back is on the x87 stack");
+        let failed = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect_err("a long double cannot come back beside another value");
+        assert_eq!(
+            failed.to_string(),
+            "what this function gives back is on the x87 stack"
+        );
     }
 
     /// A `long double` in and a `long double` out, which is the whole of what the convention says
@@ -2565,21 +2967,40 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         // The two parameters, sixteen bytes apart, read out of the caller's frame rather than out
         // of a register, and the answer left on the stack by the last instruction in the function.
         assert!(text.contains("x64.fld_t [$rsp + 32]"), "{text}");
         assert!(text.contains("x64.fld_t [$rsp + 48]"), "{text}");
-        assert!(!text.contains("x64.lea_64"), "an address every reader took is gone: {text}");
-        assert!(!text.contains("x64.ret_val"), "nothing comes back in a register: {text}");
+        assert!(
+            !text.contains("x64.lea_64"),
+            "an address every reader took is gone: {text}"
+        );
+        assert!(
+            !text.contains("x64.ret_val"),
+            "nothing comes back in a register: {text}"
+        );
         // What comes after the `fld` is the epilogue, which gives the frame back and touches
         // nothing in the unit, so the value is where the caller looks for it when the `ret` runs.
         let end: Vec<&str> = text.lines().rev().skip(1).take(3).map(str::trim).collect();
-        assert_eq!(end, ["x64.ret", "$rsp = x64.add_ri_64 $rsp, 24", "x64.fld_t [$rsp]"], "{text}");
+        assert_eq!(
+            end,
+            [
+                "x64.ret",
+                "$rsp = x64.add_ri_64 $rsp, 24",
+                "x64.fld_t [$rsp]"
+            ],
+            "{text}"
+        );
     }
 
     /// A `_Complex long double` goes back on the x87 stack as two values, the real half on top.
@@ -2595,17 +3016,32 @@ mod tests {
         Builder::new(&mut source, block).ret(&[args[1], args[0]]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("the pair is what the convention asks for");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("the pair is what the convention asks for");
         let text = mir::print_func(&out, &names, &REGS);
         // The second parameter is the real half here, so it is loaded last and ends up on top. There
         // is no frame, so the first parameter is right above the return address.
         let lines: Vec<&str> = text.lines().map(str::trim).collect();
-        let imaginary = lines.iter().position(|&line| line == "x64.fld_t [$rsp + 8]");
-        let real = lines.iter().position(|&line| line == "x64.fld_t [$rsp + 24]");
-        assert!(imaginary.is_some() && real == imaginary.map(|at| at + 1), "{text}");
-        assert!(!text.contains("x64.ret_val"), "nothing comes back in a register: {text}");
+        let imaginary = lines
+            .iter()
+            .position(|&line| line == "x64.fld_t [$rsp + 8]");
+        let real = lines
+            .iter()
+            .position(|&line| line == "x64.fld_t [$rsp + 24]");
+        assert!(
+            imaginary.is_some() && real == imaginary.map(|at| at + 1),
+            "{text}"
+        );
+        assert!(
+            !text.contains("x64.ret_val"),
+            "nothing comes back in a register: {text}"
+        );
 
         let (mut names, mut source, block, _) = blank(&[]);
         let sig = source.add_signature(Signature::new().with_returns(&[f80, f80]));
@@ -2613,9 +3049,14 @@ mod tests {
         let call = Builder::new(&mut source, block).call(callee, sig, &[]);
         let halves: Vec<ir::Value> = source[call].results().collect();
         Builder::new(&mut source, block).ret(&[halves[1], halves[0]]);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("a call can take the pair off");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("a call can take the pair off");
         let text = mir::print_func(&out, &names, &REGS);
         assert_eq!(text.matches("x64.fstp_t").count(), 2, "{text}");
         assert_eq!(text.matches("x64.fld_t").count(), 2, "{text}");
@@ -2633,9 +3074,14 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.addss_rr"), "{text}");
@@ -2656,9 +3102,18 @@ mod tests {
             let counted = build.unary(opcode, args[0], ty);
             build.ret(&[counted]);
             let machine = Machine::x86_64(&SYSV);
-            let flags = Flags { isa, ..Flags::default() };
-            let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-                .expect("a count is an instruction or arithmetic");
+            let flags = Flags {
+                isa,
+                ..Flags::default()
+            };
+            let out = compile(
+                &mut source,
+                &mut names,
+                &machine,
+                &Elsewhere::default(),
+                flags,
+            )
+            .expect("a count is an instruction or arithmetic");
             mir::print_func(&out, &names, &REGS)
         };
         for (opcode, feature, inst) in [
@@ -2670,13 +3125,22 @@ mod tests {
             for width in [32, 64] {
                 let wanted = format!("{inst}_{width}");
                 let text = built(opcode, width, has, None);
-                assert!(text.contains(&wanted), "{wanted} from the command line: {text}");
+                assert!(
+                    text.contains(&wanted),
+                    "{wanted} from the command line: {text}"
+                );
                 let text = built(opcode, width, Isa::NONE, Some(has));
-                assert!(text.contains(&wanted), "{wanted} from the attribute: {text}");
+                assert!(
+                    text.contains(&wanted),
+                    "{wanted} from the attribute: {text}"
+                );
                 let text = built(opcode, width, Isa::NONE, None);
                 assert!(!text.contains(inst), "no {inst} on a plain x86-64: {text}");
                 let text = built(opcode, width, has, Some(Isa::NONE));
-                assert!(!text.contains(inst), "nor in a function built for less: {text}");
+                assert!(
+                    !text.contains(inst),
+                    "nor in a function built for less: {text}"
+                );
             }
         }
     }
@@ -2692,12 +3156,27 @@ mod tests {
             source.target = target;
             let mut build = Builder::new(&mut source, block);
             let args = build.func().push_values(&args);
-            let fused = build.value(ir::InstData { args, ..ir::InstData::new(Opcode::Fma) }, ty);
+            let fused = build.value(
+                ir::InstData {
+                    args,
+                    ..ir::InstData::new(Opcode::Fma)
+                },
+                ty,
+            );
             build.ret(&[fused]);
             let machine = Machine::x86_64(&SYSV);
-            let flags = Flags { isa, ..Flags::default() };
-            let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-                .expect("a fused multiply add is an instruction or a call");
+            let flags = Flags {
+                isa,
+                ..Flags::default()
+            };
+            let out = compile(
+                &mut source,
+                &mut names,
+                &machine,
+                &Elsewhere::default(),
+                flags,
+            )
+            .expect("a fused multiply add is an instruction or a call");
             mir::print_func(&out, &names, &REGS)
         };
         let has = Isa::of(&["fma"]);
@@ -2706,22 +3185,33 @@ mod tests {
             (rucc_ir::Float::F64, "x64.vfmadd213sd_rr"),
         ] {
             let text = built(format, has, None);
-            assert!(text.contains(wanted), "{wanted} from the command line: {text}");
+            assert!(
+                text.contains(wanted),
+                "{wanted} from the command line: {text}"
+            );
             assert!(!text.contains("call"), "and no call: {text}");
             let text = built(format, Isa::NONE, Some(has));
             assert!(text.contains(wanted), "{wanted} from the attribute: {text}");
             let text = built(format, Isa::NONE, None);
-            assert!(!text.contains("vfmadd"), "no vfmadd on a plain x86-64: {text}");
+            assert!(
+                !text.contains("vfmadd"),
+                "no vfmadd on a plain x86-64: {text}"
+            );
             assert!(text.contains("fma"), "but the call: {text}");
             let text = built(format, has, Some(Isa::NONE));
-            assert!(!text.contains("vfmadd"), "nor in a function built for less: {text}");
+            assert!(
+                !text.contains("vfmadd"),
+                "nor in a function built for less: {text}"
+            );
         }
     }
 
     /// The same on i386, where the arithmetic is in the vector registers too.
     #[test]
     fn an_i386_fused_multiply_add_is_one_instruction_where_the_processor_has_it() {
-        let triple = "i686-unknown-linux-gnu".parse::<rucc_target::Triple>().expect("a triple");
+        let triple = "i686-unknown-linux-gnu"
+            .parse::<rucc_target::Triple>()
+            .expect("a triple");
         let info = TargetInfo::new(triple);
         let machine = Machine::for_target(&info).expect("i386 has a back end");
         let built = |format: rucc_ir::Float, isa: Isa, target: Option<Isa>| {
@@ -2730,11 +3220,26 @@ mod tests {
             source.target = target;
             let mut build = Builder::new(&mut source, block);
             let args = build.func().push_values(&args);
-            let fused = build.value(ir::InstData { args, ..ir::InstData::new(Opcode::Fma) }, ty);
+            let fused = build.value(
+                ir::InstData {
+                    args,
+                    ..ir::InstData::new(Opcode::Fma)
+                },
+                ty,
+            );
             build.ret(&[fused]);
-            let flags = Flags { isa, ..Flags::default() };
-            let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-                .expect("a fused multiply add is an instruction or a call");
+            let flags = Flags {
+                isa,
+                ..Flags::default()
+            };
+            let out = compile(
+                &mut source,
+                &mut names,
+                &machine,
+                &Elsewhere::default(),
+                flags,
+            )
+            .expect("a fused multiply add is an instruction or a call");
             mir::print_func(&out, &names, &x86::REGS)
         };
         let has = Isa::of(&["fma"]).union(Isa::baseline());
@@ -2743,12 +3248,18 @@ mod tests {
             (rucc_ir::Float::F64, "x64.vfmadd213sd_rr"),
         ] {
             let text = built(format, has, None);
-            assert!(text.contains(wanted), "{wanted} from the command line: {text}");
+            assert!(
+                text.contains(wanted),
+                "{wanted} from the command line: {text}"
+            );
             assert!(!text.contains("call"), "and no call: {text}");
             let text = built(format, Isa::baseline(), Some(has));
             assert!(text.contains(wanted), "{wanted} from the attribute: {text}");
             let text = built(format, Isa::baseline(), None);
-            assert!(!text.contains("vfmadd"), "no vfmadd on a plain i386: {text}");
+            assert!(
+                !text.contains("vfmadd"),
+                "no vfmadd on a plain i386: {text}"
+            );
             assert!(text.contains("fma"), "but the call: {text}");
         }
     }
@@ -2757,7 +3268,10 @@ mod tests {
     /// zero, which is what `palloc` asks for on every call, rather than the arithmetic.
     #[test]
     fn a_zero_count_on_a_plain_x86_64_is_a_search_and_a_conditional_move() {
-        for (opcode, inst) in [(Opcode::Ctlz, "x64.clz_scan"), (Opcode::Cttz, "x64.ctz_scan")] {
+        for (opcode, inst) in [
+            (Opcode::Ctlz, "x64.clz_scan"),
+            (Opcode::Cttz, "x64.ctz_scan"),
+        ] {
             for width in [32, 64] {
                 let ty = Type::int(width);
                 let (mut names, mut source, block, args) = blank(&[ty]);
@@ -2802,9 +3316,14 @@ mod tests {
         build.ret(&[sum]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.movsd_rm"), "{text}");
@@ -2849,9 +3368,14 @@ mod tests {
         build.ret(&[]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         for inst in [
@@ -2889,17 +3413,24 @@ mod tests {
         let x = build.load(i32x4, args[0], info, ir::Flags::default());
         let y = build.load(i32x4, args[1], info, ir::Flags::default());
         let product = build.binary(Opcode::Mul, x, y, ir::Flags::default());
-        let splat =
-            ir::InstData { extra: ir::Extra::Imm(prime), ..ir::InstData::new(Opcode::Splat) };
+        let splat = ir::InstData {
+            extra: ir::Extra::Imm(prime),
+            ..ir::InstData::new(Opcode::Splat)
+        };
         let splat = build.value(splat, i32x4);
         let scaled = build.binary(Opcode::Mul, product, splat, ir::Flags::default());
         build.store(scaled, args[0], info, ir::Flags::default());
         build.ret(&[]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("a multiply of four int is written by name");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("a multiply of four int is written by name");
 
         let text = mir::print_func(&out, &names, &REGS);
         let count = |name: &str| text.matches(name).count();
@@ -2943,9 +3474,14 @@ mod tests {
         build.ret(&[]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every lane has a lowering");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every lane has a lowering");
 
         let text = mir::print_func(&out, &names, &REGS);
         for inst in [
@@ -2963,7 +3499,10 @@ mod tests {
         // The merges write over their first source, and the allocator only keeps the two in one
         // register when it is told to.
         for line in text.lines() {
-            if ["movss_rr", "movsd_rr", "punpcklqdq_rr"].iter().any(|it| line.contains(*it)) {
+            if ["movss_rr", "movsd_rr", "punpcklqdq_rr"]
+                .iter()
+                .any(|it| line.contains(*it))
+            {
                 assert!(line.contains("(reuse 1)"), "{line} in {text}");
             }
         }
@@ -2989,15 +3528,19 @@ mod tests {
             owns: 0,
             restrict: Restrict::NONE,
         };
-        let splat =
-            ir::InstData { extra: ir::Extra::Imm(zero), ..ir::InstData::new(Opcode::Splat) };
+        let splat = ir::InstData {
+            extra: ir::Extra::Imm(zero),
+            ..ir::InstData::new(Opcode::Splat)
+        };
         let mut four = build.value(splat, i32x4);
         for lane in 0..4 {
             four = build.insert_lane(four, args[1], lane);
         }
         build.store(four, args[0], info, ir::Flags::default());
-        let splat =
-            ir::InstData { extra: ir::Extra::Imm(wide_zero), ..ir::InstData::new(Opcode::Splat) };
+        let splat = ir::InstData {
+            extra: ir::Extra::Imm(wide_zero),
+            ..ir::InstData::new(Opcode::Splat)
+        };
         let mut two = build.value(splat, i64x2);
         for lane in 0..2 {
             two = build.insert_lane(two, args[2], lane);
@@ -3006,16 +3549,26 @@ mod tests {
         build.ret(&[]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every lane has a lowering");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every lane has a lowering");
 
         let text = mir::print_func(&out, &names, &REGS);
         let count = |name: &str| text.matches(name).count();
         assert_eq!(count("x64.movd_to_xmm"), 1, "{text}");
         assert_eq!(count("x64.movq_to_xmm"), 1, "{text}");
         assert_eq!(count("x64.pshufd_ri"), 2, "{text}");
-        for inst in ["x64.movss_rr", "x64.movsd_rr", "x64.punpcklqdq_rr", "x64.mov_ri"] {
+        for inst in [
+            "x64.movss_rr",
+            "x64.movsd_rr",
+            "x64.punpcklqdq_rr",
+            "x64.mov_ri",
+        ] {
             assert!(!text.contains(inst), "{inst} in {text}");
         }
     }
@@ -3044,9 +3597,14 @@ mod tests {
         build.ret(&[read]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.movups_rm"), "{text}");
@@ -3086,19 +3644,36 @@ mod tests {
         build.ret(&[back]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         // The signed conversions in both directions, the constants that correct them, and the
         // multiply that takes a correction or leaves it. Nothing here reaches a wide register.
-        assert!(text.contains("x64.fild_ll"), "the integer goes in as a signed one: {text}");
-        assert!(text.contains("x64.fistp_ll"), "and comes back out as one: {text}");
-        assert!(text.contains("x64.fmul_p"), "the correction is taken or not: {text}");
+        assert!(
+            text.contains("x64.fild_ll"),
+            "the integer goes in as a signed one: {text}"
+        );
+        assert!(
+            text.contains("x64.fistp_ll"),
+            "and comes back out as one: {text}"
+        );
+        assert!(
+            text.contains("x64.fmul_p"),
+            "the correction is taken or not: {text}"
+        );
         assert!(text.contains("x64.fadd_p"), "and applied one way: {text}");
         assert!(text.contains("x64.fsubr_p"), "and the other: {text}");
-        assert!(!text.contains("xmm"), "no part of this is in a vector register: {text}");
+        assert!(
+            !text.contains("xmm"),
+            "no part of this is in a vector register: {text}"
+        );
     }
 
     /// A value carried from one register file to the other, which is what a conversion is. The
@@ -3115,9 +3690,14 @@ mod tests {
         build.ret(&[back]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         // The conversion that cuts towards zero rather than the one that rounds, which is what C
         // means by the cast, and the argument and the answer in the register the convention names.
@@ -3138,9 +3718,14 @@ mod tests {
         build.ret(&[bits]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.movq_from_xmm"), "{text}");
@@ -3153,14 +3738,24 @@ mod tests {
         let f64 = Type::float(rucc_ir::Float::F64);
         let (mut names, mut source, block, args) = blank(&[f64, f64]);
         let mut build = Builder::new(&mut source, block);
-        let less = build.fcmp(rucc_ir::FloatPred::Olt, args[0], args[1], ir::Flags::default());
+        let less = build.fcmp(
+            rucc_ir::FloatPred::Olt,
+            args[0],
+            args[1],
+            ir::Flags::default(),
+        );
         let wide = build.unary(Opcode::ZExt, less, Type::int(32));
         build.ret(&[wide]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         // Less than is greater than with the operands the other way round, and the machine has no
         // condition for the first, so the rule that fires is the one that swaps them.
@@ -3177,14 +3772,24 @@ mod tests {
         let f64 = Type::float(rucc_ir::Float::F64);
         let (mut names, mut source, block, args) = blank(&[f64, f64]);
         let mut build = Builder::new(&mut source, block);
-        let same = build.fcmp(rucc_ir::FloatPred::Oeq, args[0], args[1], ir::Flags::default());
+        let same = build.fcmp(
+            rucc_ir::FloatPred::Oeq,
+            args[0],
+            args[1],
+            ir::Flags::default(),
+        );
         let wide = build.unary(Opcode::ZExt, same, Type::int(32));
         build.ret(&[wide]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         let line = text
@@ -3214,9 +3819,14 @@ mod tests {
         build.ret(&[half]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.mov_ri_64"), "{text}");
@@ -3234,13 +3844,21 @@ mod tests {
         build.ret(&[less]);
 
         let machine = Machine::x86_64(&SYSV);
-        let out =
-            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
-                .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            Flags::default(),
+        )
+        .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.xor_rr_64"), "{text}");
-        assert!(!text.contains("sub"), "a negation is not a subtraction: {text}");
+        assert!(
+            !text.contains("sub"),
+            "a negation is not a subtraction: {text}"
+        );
     }
 
     #[test]
@@ -3250,10 +3868,23 @@ mod tests {
         Builder::new(&mut source, block).ret(&[args[0]]);
 
         let machine = Machine::x86_64(&SYSV);
-        let flags = Flags { frame_pointer: true, profile: Profile::No, ..Flags::default() };
-        let kept = Flags { spare_frame_pointer: false, ..flags };
-        let out = compile(&mut source.clone(), &mut names, &machine, &Elsewhere::default(), kept)
-            .expect("every instruction has a rule");
+        let flags = Flags {
+            frame_pointer: true,
+            profile: Profile::No,
+            ..Flags::default()
+        };
+        let kept = Flags {
+            spare_frame_pointer: false,
+            ..flags
+        };
+        let out = compile(
+            &mut source.clone(),
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            kept,
+        )
+        .expect("every instruction has a rule");
 
         // A function that keeps a frame pointer keeps it whether it needed one or not, which is
         // what `-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer` is for.
@@ -3262,8 +3893,14 @@ mod tests {
         assert!(text.contains("$rbp = x64.mov_rr_64 $rsp"), "{text}");
 
         // Without the second flag a leaf with nothing in its frame gives it back, as with gcc.
-        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
-            .expect("every instruction has a rule");
+        let out = compile(
+            &mut source,
+            &mut names,
+            &machine,
+            &Elsewhere::default(),
+            flags,
+        )
+        .expect("every instruction has a rule");
         let text = mir::print_func(&out, &names, &REGS);
         assert!(!text.contains("$rbp"), "{text}");
     }
@@ -3276,16 +3913,25 @@ mod tests {
         let triple = |text: &str| text.parse::<rucc_target::Triple>().expect("a triple");
         let info = TargetInfo::new(triple("x86_64-unknown-linux-gnu"));
         let machine = Machine::for_target(&info).expect("x86-64 is the target this crate covers");
-        let ms = machine.under(Convention::Ms).expect("Linux has the Windows convention");
+        let ms = machine
+            .under(Convention::Ms)
+            .expect("Linux has the Windows convention");
         assert!(std::ptr::eq(ms.conv, &x86_64::MS_ON_SYSV));
         assert!(machine.under(Convention::Sysv).is_none());
         // The Windows convention owes `xmm6` to `xmm15` back, so the vector scratch registers are
         // two it does not owe.
-        assert!(!ms.env.scratch(ms.conv.sse_class).iter().any(|&reg| ms.conv.preserves_sse(reg)));
+        assert!(
+            !ms.env
+                .scratch(ms.conv.sse_class)
+                .iter()
+                .any(|&reg| ms.conv.preserves_sse(reg))
+        );
 
         let info = TargetInfo::new(triple("x86_64-pc-windows-msvc"));
         let machine = Machine::for_target(&info).expect("x86-64 is the target this crate covers");
-        let sysv = machine.under(Convention::Sysv).expect("Windows has the System V convention");
+        let sysv = machine
+            .under(Convention::Sysv)
+            .expect("Windows has the System V convention");
         assert!(std::ptr::eq(sysv.conv, &x86_64::SYSV_ON_WIN64));
         assert!(machine.under(Convention::Ms).is_none());
 
