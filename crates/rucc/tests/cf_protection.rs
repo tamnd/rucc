@@ -102,8 +102,10 @@ fn insts<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
 /// number anywhere in the file, so that a note whose key and value were the wrong way round would
 /// not pass.
 fn recorded(text: &str) -> Option<u32> {
-    let mut lines =
-        text.lines().skip_while(|line| !line.contains(".note.gnu.property")).map(str::trim_start);
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.contains(".note.gnu.property"))
+        .map(str::trim_start);
     // The key, and then the length and the value, which is what a property is made of.
     lines.find(|line| line.starts_with(".long\t0xc0000002"))?;
     let value = lines.nth(1)?;
@@ -119,11 +121,19 @@ fn recorded(text: &str) -> Option<u32> {
 /// through a pointer any more.
 #[test]
 fn every_function_opens_with_a_landing_pad_when_the_forward_edge_is_asked_for() {
-    for flag in ["-fcf-protection=branch", "-fcf-protection=full", "-fcf-protection"] {
+    for flag in [
+        "-fcf-protection=branch",
+        "-fcf-protection=full",
+        "-fcf-protection",
+    ] {
         let text = asm("branch", &[flag], THREE);
         for name in ["leaf", "calls", "deep"] {
             let lines = insts(&text, name);
-            assert_eq!(lines.first(), Some(&"endbr64"), "{flag} on {name}: {lines:?}");
+            assert_eq!(
+                lines.first(),
+                Some(&"endbr64"),
+                "{flag} on {name}: {lines:?}"
+            );
             assert_eq!(
                 lines.iter().filter(|line| **line == "endbr64").count(),
                 1,
@@ -145,7 +155,11 @@ fn a_label_whose_address_is_taken_opens_with_a_landing_pad_too() {
     assert_eq!(lines.first(), Some(&"endbr64"), "{lines:?}");
     // One at the top of the function and one at each of the two labels, and the two at the labels
     // are what the jump through the register arrives at.
-    assert_eq!(lines.iter().filter(|line| **line == "endbr64").count(), 3, "{lines:?}");
+    assert_eq!(
+        lines.iter().filter(|line| **line == "endbr64").count(),
+        3,
+        "{lines:?}"
+    );
 }
 
 /// And nothing opens with one when it was not.
@@ -156,11 +170,18 @@ fn a_label_whose_address_is_taken_opens_with_a_landing_pad_too() {
 #[test]
 fn nothing_opens_with_a_landing_pad_when_the_forward_edge_was_not_asked_for() {
     let plain = asm("plain", &[], THREE);
-    for flags in [&[][..], &["-fcf-protection=none"], &["-fcf-protection=return"]] {
+    for flags in [
+        &[][..],
+        &["-fcf-protection=none"],
+        &["-fcf-protection=return"],
+    ] {
         let text = asm("none", flags, THREE);
         for name in ["leaf", "calls", "deep"] {
             let lines = insts(&text, name);
-            assert!(!lines.contains(&"endbr64"), "{flags:?} on {name}: {lines:?}");
+            assert!(
+                !lines.contains(&"endbr64"),
+                "{flags:?} on {name}: {lines:?}"
+            );
             assert_eq!(lines, insts(&plain, name), "{flags:?} changed {name}");
         }
     }
@@ -191,7 +212,11 @@ fn the_file_records_which_edges_it_was_built_to_have_checked() {
 /// note, which is what gcc does with it.
 #[test]
 fn a_file_built_to_have_nothing_checked_records_nothing() {
-    for flags in [&[][..], &["-fcf-protection=none"], &["-fcf-protection=check"]] {
+    for flags in [
+        &[][..],
+        &["-fcf-protection=none"],
+        &["-fcf-protection=check"],
+    ] {
         let text = asm("quiet", flags, THREE);
         assert!(!text.contains(".note.gnu.property"), "{flags:?}");
         assert!(!text.contains("endbr64"), "{flags:?}");
@@ -207,10 +232,17 @@ fn a_file_built_to_have_nothing_checked_records_nothing() {
 /// reaches.
 #[test]
 fn the_landing_pad_stays_in_front_of_a_prologue_that_walks_the_stack() {
-    let text = asm("deep", &["-fcf-protection=branch", "-fstack-clash-protection"], THREE);
+    let text = asm(
+        "deep",
+        &["-fcf-protection=branch", "-fstack-clash-protection"],
+        THREE,
+    );
     let lines = insts(&text, "deep");
     assert_eq!(lines[0], "endbr64", "{lines:?}");
-    assert!(lines.iter().any(|line| line.starts_with("orb")), "the walk is still there: {lines:?}");
+    assert!(
+        lines.iter().any(|line| line.starts_with("orb")),
+        "the walk is still there: {lines:?}"
+    );
 }
 
 /// The two hardening flags that write into a prologue do not get in each other's way.
@@ -219,10 +251,17 @@ fn the_landing_pad_stays_in_front_of_a_prologue_that_walks_the_stack() {
 /// gets the pad first and the canary last with the frame taken in between.
 #[test]
 fn a_landing_pad_and_a_stack_protector_are_written_one_after_the_other() {
-    let text = asm("both", &["-fcf-protection=branch", "-fstack-protector-all"], THREE);
+    let text = asm(
+        "both",
+        &["-fcf-protection=branch", "-fstack-protector-all"],
+        THREE,
+    );
     let lines = insts(&text, "calls");
     assert_eq!(lines[0], "endbr64", "{lines:?}");
-    assert!(lines.iter().any(|line| line.contains("%fs:40")), "the canary is read: {lines:?}");
+    assert!(
+        lines.iter().any(|line| line.contains("%fs:40")),
+        "the canary is read: {lines:?}"
+    );
 }
 
 /// A target with nowhere to record it is refused rather than built without the record.
@@ -233,9 +272,20 @@ fn a_landing_pad_and_a_stack_protector_are_written_one_after_the_other() {
 /// in the image the linker is told to set, which is not something a compiler writes into an object.
 #[test]
 fn a_target_with_nowhere_to_record_it_is_refused() {
-    let (ok, _, err) = run("windows", "x86_64-pc-windows-msvc", &["-fcf-protection=full"], THREE);
-    assert!(!ok, "a flag that cannot be honoured is news rather than nothing");
-    assert!(err.contains("-fcf-protection=full is not supported"), "{err}");
+    let (ok, _, err) = run(
+        "windows",
+        "x86_64-pc-windows-msvc",
+        &["-fcf-protection=full"],
+        THREE,
+    );
+    assert!(
+        !ok,
+        "a flag that cannot be honoured is news rather than nothing"
+    );
+    assert!(
+        err.contains("-fcf-protection=full is not supported"),
+        "{err}"
+    );
 }
 
 /// An assembly file that a person wrote, with `endbr64` at each entry and the note from `<cet.h>`.
@@ -265,7 +315,11 @@ fn assembled(what: &str, flags: &[&str]) -> Vec<u8> {
         .arg(&object)
         .output()
         .expect("the compiler is built before its own tests run");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let bytes = std::fs::read(&object).expect("the object was written");
     let _ = std::fs::remove_dir_all(&dir);
     bytes
@@ -289,8 +343,39 @@ fn an_assembly_file_gets_the_landing_pad_and_the_note_from_cet_h() {
     assert!(holds(&full, &endbr), "the pad is there");
     assert!(holds(&full, &property(3)), "the note says both halves");
     let ret = assembled("hand-return", &["-fcf-protection=return"]);
-    assert!(!holds(&ret, &endbr), "no pad when only the return half is asked for");
+    assert!(
+        !holds(&ret, &endbr),
+        "no pad when only the return half is asked for"
+    );
     assert!(holds(&ret, &property(2)), "the note says the return half");
     let none = assembled("hand-none", &[]);
-    assert!(!holds(&none, &endbr) && !holds(&none, b"GNU\0"), "nothing without the flag");
+    assert!(
+        !holds(&none, &endbr) && !holds(&none, b"GNU\0"),
+        "nothing without the flag"
+    );
+}
+
+/// A `static` function only a direct call reaches opens with no landing pad when optimizing, as
+/// gcc writes it, since no indirect branch can arrive there. One whose address is kept still
+/// does, and at `-O0` both do, since gcc only works out who calls what when it optimizes.
+#[test]
+fn a_function_only_called_directly_has_no_pad_when_optimizing() {
+    const STATICS: &str = "\
+__attribute__((noinline)) static int direct(int x) { return x + 9; }
+__attribute__((noinline)) static int kept(int x) { return x * 3; }
+int (*pointer)(int) = kept;
+int entry(int x) { return direct(x) + kept(x); }
+";
+    let text = asm("direct", &["-O2", "-fcf-protection=branch"], STATICS);
+    assert_ne!(insts(&text, "direct").first(), Some(&"endbr64"), "{text}");
+    assert_eq!(insts(&text, "kept").first(), Some(&"endbr64"), "{text}");
+    assert_eq!(insts(&text, "entry").first(), Some(&"endbr64"), "{text}");
+    let text = asm("direct0", &["-O0", "-fcf-protection=branch"], STATICS);
+    for name in ["direct", "kept", "entry"] {
+        assert_eq!(
+            insts(&text, name).first(),
+            Some(&"endbr64"),
+            "{name}, {text}"
+        );
+    }
 }
