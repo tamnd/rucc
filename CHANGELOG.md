@@ -23,6 +23,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `rucc_target::riscv64::read` reads one line of RISC-V assembly back into the operands the encoder takes, the first step toward `-c` on riscv64 (#3894).
 - `rucc --target=riscv64-linux-gnu -c` writes an ELF object with the integrated assembler, with the riscv64 relocations, `.eh_frame` and the double float ABI flag (#3895).
 - riscv64 takes the kernel's `-mabi=lp64`, `-march=`, `-mcmodel=medany`, `-mno-save-restore`, `-mno-relax` and `-mno-riscv-attribute`, keeps floats out of an lp64 unit and marks its objects soft float (#3897).
+- riscv64 lowers `asm` statements, kept as text with gcc's RISC-V letters `I`, `J`, `K` and `A`, `%z`, clobbers, local register variables and `asm goto` (#3898).
+- The riscv64 integrated assembler encodes the A extension (`lr`, `sc` and the `amo` instructions with `.aq` and `.rl`), the CSR instructions and their pseudos with CSRs read by name, `fence.i`, `fence.tso`, `pause`, `wfi`, `sret`, `mret`, `sfence.vma`, and the swapped and zero branch pseudos (#3899).
+- riscv64 keeps `tp` and `sp` as file-scope register variables, the way the kernel's `asm/current.h` declares `current` and `current_stack_pointer` (#3900).
+- The riscv64 integrated assembler works out an operand written as a constant expression or a `.set` name, takes `.option push`, `pop`, `rvc`, `norvc`, `relax`, `norelax` and `arch`, makes `.word` four bytes as gas does, and takes `.half` (#3901).
+- The riscv64 integrated assembler encodes Zicfilp's `lpad` and Zicfiss's `sspush`, `sspopchk`, `ssrdp` and `ssamoswap` (#3902).
 
 ### Fixed
 
