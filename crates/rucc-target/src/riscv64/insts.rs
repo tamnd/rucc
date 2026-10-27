@@ -417,6 +417,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fabs_f64", FUnary),
     ("fmv_f32", FMove),
     ("fmv_f64", FMove),
+    // A float register cleared in front of a `ret` under `-fzero-call-used-regs=`, which writes
+    // the register and reads nothing, so the second operand is the same register and not spelled.
+    ("fzero_f64", FMove),
     // Between the two floating point widths.
     ("fcvt_f32_f64", FConvert),
     ("fcvt_f64_f32", FConvert),

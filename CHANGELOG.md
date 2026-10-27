@@ -37,6 +37,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A riscv64 target assembles files of assembly for a 32 bit machine under `-march=rv32...` with `-mabi=ilp32` or `-mabi=ilp32d`, writing ELF32 objects, so the kernel's compat vDSO builds. C and links for a 32 bit machine are refused, since there is no back end for one (#3917).
 - The riscv64 assembler takes the vector crypto extensions the kernel's crypto code is written with (Zvkned, Zvknha, Zvknhb, Zvkg, Zvksed, Zvksh, Zvkb and Zvbb), along with the strided, segment and indexed loads and stores, slides, merges and widening moves that code uses, and a constant operand of a vector instruction can be an expression (#3919).
 - The riscv64 assembler takes `.reloc` with `R_RISCV_SET_ULEB128` and `R_RISCV_SUB_ULEB128` and writes them as they were asked for, so the kernel's `AS_HAS_ULEB128` probe passes and its module loader test for the pair is built (#3920).
+- `-fzero-call-used-regs=` is taken on riscv64 and clears the registers gcc clears, the integer ones with `li` and the float ones with `fmv.d.x`, so the kernel's `CC_HAS_ZERO_CALL_USED_REGS` probe passes there as it does on x86-64 and arm64 (#3921).
 
 ### Fixed
 
