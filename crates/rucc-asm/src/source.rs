@@ -123,6 +123,10 @@ pub struct Flags {
     /// pads after an instruction, with no one byte `nop` in front. The private
     /// `Reader::after_data` says why.
     pub before_2_42: bool,
+    /// gas on RISC-V run without `-fpic`, where `la` is the address worked out from here, the same
+    /// as `lla`, rather than read out of the global offset table. A file built with `-fno-PIE`
+    /// is read that way, and the kernel's `head.S` is one.
+    pub nopic: bool,
 }
 
 /// The same, with what the command line said to the assembler.
@@ -217,6 +221,7 @@ pub fn read_with_debug(
             fatal_warnings: flags.fatal_warnings,
             noexecstack: flags.noexecstack,
             before_2_42: flags.before_2_42,
+            nopic: flags.nopic,
             debug: debug.cloned(),
             generating: debug.is_some(),
             ..Reader::default()
@@ -339,6 +344,36 @@ fn at_signs_back(mut done: Assembled) -> Assembled {
 /// gas settles the kernel's alternatives in two or three and so does this. A file that has not
 /// settled after this many is one whose sizes chase each other, and gas gives up on those too.
 const MOST_PASSES: usize = 64;
+
+/// The riscv64 extensions `.option arch, +name` may add: the ones the encoder writes the
+/// instructions of, and the ones whose instructions the kernel writes as numbers. Of the vector
+/// extension only what [`riscv64::vector`] says is there.
+const RV_EXTENSIONS: &[&str] = &[
+    "i",
+    "m",
+    "a",
+    "f",
+    "d",
+    "c",
+    "g",
+    "v",
+    "zve32x",
+    "zicsr",
+    "zifencei",
+    "zba",
+    "zbb",
+    "zbs",
+    "zbc",
+    "zbkb",
+    "zacas",
+    "zabha",
+    "zicfilp",
+    "zicfiss",
+    "zihintpause",
+    "zicbom",
+    "zicboz",
+    "zawrs",
+];
 
 /// The most bytes a count worked out from guessed places may come to.
 ///
@@ -588,6 +623,8 @@ struct Reader {
     long: Set<usize>,
     /// How many branches with a two byte form have been read so far.
     branches: usize,
+    /// Whether `.end` has been read, after which gas reads nothing more of the file.
+    ended: bool,
     /// Every alignment in the file, in the order it was written.
     aligns: Vec<Aligned>,
     /// Where every name was when the pass before this one ended, which is the place a label
@@ -654,6 +691,8 @@ struct Reader {
     fatal_warnings: bool,
     /// [`Flags::before_2_42`].
     before_2_42: bool,
+    /// [`Flags::nopic`].
+    nopic: bool,
     /// Where each run of padding in code went under [`Flags::before_2_42`], as a piece, how far
     /// into it and how long, for the end of the file to write once the mode it ends in is known.
     old_padding: Vec<(usize, u64, usize)>,
@@ -713,6 +752,9 @@ impl Reader {
             }
             let line = self.strip(raw, &mut commenting)?;
             self.feed(&line)?;
+            if self.ended {
+                break;
+            }
         }
         if commenting {
             return Err(self.bad("a block comment was opened and never closed"));
@@ -1085,7 +1127,19 @@ impl Reader {
                 Some(open) => {
                     constant(&text[..open]).map(|number| format!("{number}{}", &text[open..]))
                 }
-                None => constant(text).map(|number| number.to_string()),
+                None => constant(text).map(|number| number.to_string()).or_else(|| {
+                    // A name with a sum after it, `init_thread_union + THREAD_SIZE`, keeps the
+                    // name and has the sum worked out, from zero so the signs come out right.
+                    let at = text.find(['+', '-']).filter(|&at| at > 0)?;
+                    let name = text[..at].trim();
+                    let named =
+                        name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._$".contains(&b));
+                    if !named || name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+                        return None;
+                    }
+                    let number = constant(&format!("0{}", &text[at..]))?;
+                    Some(format!("{name}{number:+}"))
+                }),
             };
             pieces.push(worked.unwrap_or_else(|| text.to_owned()));
         }
@@ -1586,6 +1640,12 @@ impl Reader {
     /// `auipc` pair does not name the symbol: it names a label on the `auipc`, which the linker
     /// finds the high half by, so the `auipc` is given one. gas makes the same kind of label.
     fn rv64(&mut self, text: &str) -> Result<(), Trouble> {
+        if let Some(word) = riscv64::vector(text) {
+            let word = word.map_err(|why| self.bad(&why.to_string()))?;
+            self.generated();
+            self.row()?;
+            return self.put(&word.to_le_bytes());
+        }
         let line = riscv64::read(text).map_err(|why| self.bad(&why.to_string()))?;
         if line.mnemonic.starts_with("c.") {
             let half = riscv64::compressed(&line.mnemonic, &line.values)
@@ -1594,8 +1654,9 @@ impl Reader {
             self.row()?;
             return self.put(&half.to_le_bytes());
         }
-        let mut encoded = riscv64::encode(&line.mnemonic, &line.values)
-            .map_err(|why| self.bad(&why.to_string()))?;
+        let mnemonic = if self.nopic && line.mnemonic == "la" { "lla" } else { &line.mnemonic };
+        let mut encoded =
+            riscv64::encode(mnemonic, &line.values).map_err(|why| self.bad(&why.to_string()))?;
         // A conditional branch to a label reaches 4 KiB either way. One that turns out further
         // is grown the way gas grows it, into the opposite branch over a `jal` to the label.
         let mut branch = None;
@@ -2312,7 +2373,9 @@ impl Reader {
             }
 
             // rucc writes no compressed instruction and no relaxation, so the options that turn
-            // those on and off, and the extensions `arch` adds, change nothing here.
+            // those on and off change nothing here. An extension `arch` adds is taken when the
+            // encoder has its instructions and refused otherwise, since the kernel asks for the
+            // vector crypto code with a probe that is only this line.
             "option" if self.riscv => {
                 let option = args.first().map_or("", |arg| arg.trim());
                 if !matches!(
@@ -2322,6 +2385,13 @@ impl Reader {
                     return Err(
                         self.bad(&format!(".option {option} is not one this assembler takes"))
                     );
+                }
+                for name in args.iter().skip(1).filter_map(|arg| arg.trim().strip_prefix('+')) {
+                    if !RV_EXTENSIONS.contains(&name.trim()) {
+                        let what =
+                            format!("the {} extension is not one this assembler has", name.trim());
+                        return Err(self.bad(&what));
+                    }
                 }
             }
             "ltorg" | "pool" if self.aarch64 => self.literal_pool()?,
@@ -2498,6 +2568,7 @@ impl Reader {
             // refusing would turn a note into a failure.
             "ident" if self.elf() => self.ident(&args)?,
             "ident" | "loc_mark_labels" | "version" | "arch" | "arch_extension" | "cpu" => {}
+            "end" => self.ended = true,
             "att_syntax" | "intel_syntax" => self.intel = !self.aarch64 && word == "intel_syntax",
             "code32" | "code64" if !self.aarch64 => {
                 self.code = Some(if word == "code32" { Mode::Bits32 } else { Mode::Bits64 });
@@ -5013,6 +5084,7 @@ impl Reader {
                         .to_owned(),
                 ));
             }
+            let mut taken = None;
             let (symbol, kind, addend, after) = match residue.left.as_slice() {
                 // A distance from the table or a slot of it is about a name, and a number on its
                 // own has neither.
@@ -5087,6 +5159,32 @@ impl Reader {
                         _ => Reference::Address { bytes: fixup.width },
                     };
                     (name.clone(), kind, residue.constant, 0)
+                }
+                // Two names on RISC-V where the one taken off is not in this section, which gas
+                // writes as two relocations on the same bytes, the first name added and the
+                // second taken off. The kernel's PE header says how long its text is that way,
+                // `.long __pecoff_data_virt_end - __pecoff_text_end`, both from the linker script.
+                [
+                    Left { coeff: 1, what: What::Symbol(name), .. },
+                    Left { coeff: -1, what: What::Symbol(minus), at },
+                ]
+                | [
+                    Left { coeff: -1, what: What::Symbol(minus), at },
+                    Left { coeff: 1, what: What::Symbol(name), .. },
+                ] if self.riscv
+                    && fixup.reach == Reach::Near
+                    && matches!(fixup.width, 1 | 2 | 4 | 8)
+                    && at.is_none_or(|(part, _)| part != fixup.part) =>
+                {
+                    let bytes = fixup.width;
+                    taken = Some(Reloc {
+                        at: fixup.at as usize,
+                        symbol: minus.clone(),
+                        kind: Reference::Sum { bytes, minus: true },
+                        addend: 0,
+                        after: 0,
+                    });
+                    (name.clone(), Reference::Sum { bytes, minus: false }, residue.constant, 0)
                 }
                 // The distance from these bytes to something, which is what a position independent
                 // table of offsets holds and what `.long foo - .` is asking for. The subtracted
@@ -5212,6 +5310,7 @@ impl Reader {
                 addend,
                 after,
             });
+            self.parts[fixup.part].relocs.extend(taken);
         }
         Ok(())
     }
@@ -6989,6 +7088,89 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn a_riscv_name_with_a_sum_after_it_keeps_the_name_and_end_stops_the_file() {
+        // `head.S` sets up the first stack with `la sp, init_thread_union + THREAD_SIZE`, and the
+        // purgatory's `entry.S` ends with `.end`.
+        let read = match read(
+            concat!(
+                "\tlla a0, base + ((1 << 12) << 2) - 4\n",
+                "\tlla a1, base - 1 + 2\n",
+                "\t.end\n",
+                "\tnot read at all\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let text = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        assert_eq!(
+            relocs,
+            [
+                (0, "base", Reference::Riscv(riscv64::Fixup::PcrelHi20), 16380),
+                (4, ".Lpcrel_hi0", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
+                (8, "base", Reference::Riscv(riscv64::Fixup::PcrelHi20), 1),
+                (12, ".Lpcrel_hi1", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_riscv_difference_of_two_names_from_elsewhere_is_one_added_and_one_taken_off() {
+        // The kernel's PE header, `.long __pecoff_data_virt_end - __pecoff_text_end`, which gas
+        // writes as `R_RISCV_ADD32` and `R_RISCV_SUB32` on the same four bytes.
+        let read = match read(
+            concat!(
+                "\t.section .head.text,\"ax\"\n",
+                "\t.long end - start\n",
+                "\t.quad end - start + 8\n",
+                "\t.short end - here\n",
+                "\t.byte 0\n",
+                "\t.section .other,\"a\"\n",
+                "here:\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let text = read.parts.iter().find(|part| part.name == ".head.text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        let sum = |bytes, minus| Reference::Sum { bytes, minus };
+        assert_eq!(
+            relocs,
+            [
+                (0, "end", sum(4, false), 0),
+                (0, "start", sum(4, true), 0),
+                (4, "end", sum(8, false), 8),
+                (4, "start", sum(8, true), 0),
+                (12, "end", sum(2, false), 0),
+                (12, "here", sum(2, true), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_riscv_la_without_pic_is_lla() {
+        // `head.S` is built with `-fno-PIE` and writes `la a0, _start`, which gas then reaches
+        // from here. With pic it goes through the table, which is also what the listing means.
+        let text = "\tla a0, _start + 8\n";
+        for (nopic, hi, word) in [
+            (true, riscv64::Fixup::PcrelHi20, 0x0005_0513),
+            (false, riscv64::Fixup::GotHi20, 0x0005_3503),
+        ] {
+            let flags = Flags { nopic, ..Flags::default() };
+            let read = read_with(text, Arch::Riscv64, ObjectFormat::Elf, flags).unwrap();
+            let part = read.parts.iter().find(|part| part.name == ".text").unwrap();
+            assert_eq!((part.relocs[0].kind, part.relocs[0].addend), (Reference::Riscv(hi), 8));
+            assert_eq!(part.bytes[4..8], u32::to_le_bytes(word));
+        }
+    }
+
+    #[test]
     fn a_riscv_branch_past_its_reach_goes_the_other_way_over_a_jal() {
         let read = match read(
             concat!(
@@ -7048,6 +7230,17 @@ _tls$tlv$init:
             ]
         );
         assert!(super::read(".option pic\n", Arch::Riscv64).is_err());
+        // The vector instructions the kernel writes go through, and an extension the encoder has
+        // nothing for is refused where it is asked for, which is what the kernel's probe for the
+        // vector crypto code reads.
+        let vector = concat!(
+            "\t.option arch, +zve32x\n",
+            "\tvsetvli t1, x0, e8, m8, ta, ma\n",
+            "\tvle8.v v0, (a1)\n",
+        );
+        let read = super::read(vector, Arch::Riscv64).expect("the vector lines are read");
+        assert_eq!(words(&read, ".text"), [0x0c30_7357, 0x0205_8007]);
+        assert!(super::read("\t.option arch, +v, +zvkb\n", Arch::Riscv64).is_err());
     }
 
     #[test]

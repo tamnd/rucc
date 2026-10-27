@@ -30,6 +30,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 integrated assembler encodes Zicfilp's `lpad` and Zicfiss's `sspush`, `sspopchk`, `ssrdp` and `ssamoswap` (#3902).
 - The riscv64 integrated assembler encodes Zba, Zbb, Zbs and Zacas's `amocas.w` and `amocas.d`, reads `move` as `mv`, and reads a register instruction written with a constant, `and t2, t2, 7`, as its form with an immediate (#3904).
 - The riscv64 integrated assembler encodes Zbc, Zbkb's `pack`, `packh`, `packw` and `brev8`, Zabha's byte and halfword atomics, `amocas.q`, the floating point CSR pseudo instructions, `c.li`, `c.nop` and `c.ebreak`, and loads and stores from a label, and reads `-(288)` as a number instead of an address (#3906).
+- The riscv64 assembler encodes the vector instructions the kernel writes by hand, `vsetvli`, `vsetivli`, `vsetvl`, the unit stride `vle` and `vse` loads and stores and `vmv.v.v`, `vmv.v.x` and `vmv.v.i`, and refuses `.option arch` for an extension it has no instructions for (#3909).
+- `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=tp` and `-mstack-protector-guard-offset=` on riscv64 put the canary in the running task the way a riscv kernel asks, and `-mstack-protector-guard=global` is taken there too (#3911).
 
 ### Fixed
 
@@ -69,6 +71,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A riscv64 object writes `.dword sym - .` as an `R_RISCV_ADD64` and `R_RISCV_SUB64` pair against a local label on the place, as gas does, where it was refused (#3903).
 - The riscv64 integrated assembler grows a conditional branch to a label more than 4 KiB away into the opposite branch over a `jal`, as gas does, instead of refusing the file (#3905).
 - `__builtin_prefetch` on riscv64 writes no instruction, as gcc does without Zicbop, instead of stopping on an opcode the target has no spelling for (#3907).
+- A riscv64 file of assembly built with `-mabi=lp64` is marked soft float like the C beside it, so ld links the two, and the riscv64 assembler reads `.end`, `fmv.s.x` and `fmv.x.s`, and a name with a sum after it such as `init_thread_union + THREAD_SIZE` (#3908).
+- The riscv64 assembler writes a difference of two names it cannot work out, `.long a - b` with `b` in no section of the file, as an `R_RISCV_ADD` and `R_RISCV_SUB` pair on the same bytes the way gas does, in one, two, four or eight bytes (#3910).
+- The riscv64 assembler reads `la` in a file built without position independence as `lla`, the address worked out from the instruction, the way gas does without `-fpic`, rather than a read of the global offset table (#3912).
+- A 32-bit comparison on riscv64 keeps the `sext.w` in front of it when the word was cut out of a wider register, so `(int)(x >> 32)` or an `int` field of a small struct passed in a register no longer compares as an unsigned number (#3913).
 
 ## 0.30.12
 

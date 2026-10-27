@@ -1115,7 +1115,9 @@ fn float(mnemonic: &str, values: &[Value], out: &mut Encoded) -> Option<Result<(
         ("fmv", Some(to)) if rounding.is_none() => match (first, to, values) {
             ("x", "w", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x70, *rd, *rs, 0),
             ("x", "d", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x71, *rd, *rs, 0),
-            ("w", "x", [Fpr(rd), Gpr(rs)]) => r(0x53, 0, 0x78, *rd, *rs, 0),
+            // `fmv.s.x` and `fmv.x.s` are the old names, which the kernel's `fpu.S` still writes.
+            ("x", "s", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x70, *rd, *rs, 0),
+            ("w" | "s", "x", [Fpr(rd), Gpr(rs)]) => r(0x53, 0, 0x78, *rd, *rs, 0),
             ("d", "x", [Fpr(rd), Gpr(rs)]) => r(0x53, 0, 0x79, *rd, *rs, 0),
             _ => return Some(Err(unwritten())),
         },
@@ -1191,6 +1193,8 @@ mod tests {
         assert_eq!(one("fcvt.s.w", &[Fpr(10), Gpr(10)]), 0xd005_7553);
         assert_eq!(one("fcvt.wu.d", &[Gpr(10), Fpr(10), Value::Round(Round::Rtz)]), 0xc215_1553);
         assert_eq!(one("fmv.x.d", &[Gpr(10), Fpr(10)]), 0xe205_0553);
+        assert_eq!(one("fmv.s.x", &[Fpr(10), Gpr(10)]), 0xf005_0553);
+        assert_eq!(one("fmv.x.s", &[Gpr(10), Fpr(10)]), 0xe005_0553);
         assert_eq!(one("feq.d", &[Gpr(10), Fpr(10), Fpr(11)]), 0xa2b5_2553);
         assert_eq!(one("fneg.d", &[Fpr(10), Fpr(11)]), 0x22b5_9553);
         assert_eq!(one("sgtz", &[Gpr(10), Gpr(11)]), 0x00b0_2533);

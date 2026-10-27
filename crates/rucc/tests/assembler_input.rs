@@ -328,6 +328,29 @@ fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line(
     assert!(!dir.join("hot.o").exists(), "a half-written object was left behind");
 }
 
+#[test]
+fn a_riscv_file_assembled_under_lp64_says_soft_float_like_the_c_beside_it() {
+    // The kernel builds with `-mabi=lp64`, and ld refuses to link its vDSO when the objects from
+    // assembly say double float and the ones from C say soft float.
+    let dir = dir("lp64");
+    write(&dir, "a.s", "\t.text\n\tret\n");
+    let flags = |abi: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=riscv64-linux-gnu", "-c", "a.s", "-o", "a.o"])
+            .args(abi)
+            .current_dir(&dir)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let bytes = std::fs::read(dir.join("a.o")).expect("the object can be read back");
+        u32::from_le_bytes(bytes[48..52].try_into().expect("four bytes"))
+    };
+    // EF_RISCV_FLOAT_ABI_SOFT is zero and EF_RISCV_FLOAT_ABI_DOUBLE is four.
+    assert_eq!(flags(&["-mabi=lp64"]), 0);
+    assert_eq!(flags(&[]), 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn a_link_takes_the_object_the_assembly_produced() {
