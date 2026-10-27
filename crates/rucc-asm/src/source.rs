@@ -340,6 +340,36 @@ fn at_signs_back(mut done: Assembled) -> Assembled {
 /// settled after this many is one whose sizes chase each other, and gas gives up on those too.
 const MOST_PASSES: usize = 64;
 
+/// The riscv64 extensions `.option arch, +name` may add: the ones the encoder writes the
+/// instructions of, and the ones whose instructions the kernel writes as numbers. Of the vector
+/// extension only what [`riscv64::vector`] says is there.
+const RV_EXTENSIONS: &[&str] = &[
+    "i",
+    "m",
+    "a",
+    "f",
+    "d",
+    "c",
+    "g",
+    "v",
+    "zve32x",
+    "zicsr",
+    "zifencei",
+    "zba",
+    "zbb",
+    "zbs",
+    "zbc",
+    "zbkb",
+    "zacas",
+    "zabha",
+    "zicfilp",
+    "zicfiss",
+    "zihintpause",
+    "zicbom",
+    "zicboz",
+    "zawrs",
+];
+
 /// The most bytes a count worked out from guessed places may come to.
 ///
 /// A count that feeds on itself, like `.fill (1f - 0b) * 2` between the two labels, doubles on
@@ -1603,6 +1633,12 @@ impl Reader {
     /// `auipc` pair does not name the symbol: it names a label on the `auipc`, which the linker
     /// finds the high half by, so the `auipc` is given one. gas makes the same kind of label.
     fn rv64(&mut self, text: &str) -> Result<(), Trouble> {
+        if let Some(word) = riscv64::vector(text) {
+            let word = word.map_err(|why| self.bad(&why.to_string()))?;
+            self.generated();
+            self.row()?;
+            return self.put(&word.to_le_bytes());
+        }
         let line = riscv64::read(text).map_err(|why| self.bad(&why.to_string()))?;
         if line.mnemonic.starts_with("c.") {
             let half = riscv64::compressed(&line.mnemonic, &line.values)
@@ -2329,7 +2365,9 @@ impl Reader {
             }
 
             // rucc writes no compressed instruction and no relaxation, so the options that turn
-            // those on and off, and the extensions `arch` adds, change nothing here.
+            // those on and off change nothing here. An extension `arch` adds is taken when the
+            // encoder has its instructions and refused otherwise, since the kernel asks for the
+            // vector crypto code with a probe that is only this line.
             "option" if self.riscv => {
                 let option = args.first().map_or("", |arg| arg.trim());
                 if !matches!(
@@ -2339,6 +2377,13 @@ impl Reader {
                     return Err(
                         self.bad(&format!(".option {option} is not one this assembler takes"))
                     );
+                }
+                for name in args.iter().skip(1).filter_map(|arg| arg.trim().strip_prefix('+')) {
+                    if !RV_EXTENSIONS.contains(&name.trim()) {
+                        let what =
+                            format!("the {} extension is not one this assembler has", name.trim());
+                        return Err(self.bad(&what));
+                    }
                 }
             }
             "ltorg" | "pool" if self.aarch64 => self.literal_pool()?,
@@ -7096,6 +7141,17 @@ _tls$tlv$init:
             ]
         );
         assert!(super::read(".option pic\n", Arch::Riscv64).is_err());
+        // The vector instructions the kernel writes go through, and an extension the encoder has
+        // nothing for is refused where it is asked for, which is what the kernel's probe for the
+        // vector crypto code reads.
+        let vector = concat!(
+            "\t.option arch, +zve32x\n",
+            "\tvsetvli t1, x0, e8, m8, ta, ma\n",
+            "\tvle8.v v0, (a1)\n",
+        );
+        let read = super::read(vector, Arch::Riscv64).expect("the vector lines are read");
+        assert_eq!(words(&read, ".text"), [0x0c30_7357, 0x0205_8007]);
+        assert!(super::read("\t.option arch, +v, +zvkb\n", Arch::Riscv64).is_err());
     }
 
     #[test]
