@@ -37,6 +37,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A riscv64 target assembles files of assembly for a 32 bit machine under `-march=rv32...` with `-mabi=ilp32` or `-mabi=ilp32d`, writing ELF32 objects, so the kernel's compat vDSO builds. C and links for a 32 bit machine are refused, since there is no back end for one (#3917).
 - The riscv64 assembler takes the vector crypto extensions the kernel's crypto code is written with (Zvkned, Zvknha, Zvknhb, Zvkg, Zvksed, Zvksh, Zvkb and Zvbb), along with the strided, segment and indexed loads and stores, slides, merges and widening moves that code uses, and a constant operand of a vector instruction can be an expression (#3919).
 - The riscv64 assembler takes `.reloc` with `R_RISCV_SET_ULEB128` and `R_RISCV_SUB_ULEB128` and writes them as they were asked for, so the kernel's `AS_HAS_ULEB128` probe passes and its module loader test for the pair is built (#3920).
+- `-fzero-call-used-regs=` is taken on riscv64 and clears the registers gcc clears, the integer ones with `li` and the float ones with `fmv.d.x`, so the kernel's `CC_HAS_ZERO_CALL_USED_REGS` probe passes there as it does on x86-64 and arm64 (#3921).
 
 ### Fixed
 
@@ -82,6 +83,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A 32-bit comparison on riscv64 keeps the `sext.w` in front of it when the word was cut out of a wider register, so `(int)(x >> 32)` or an `int` field of a small struct passed in a register no longer compares as an unsigned number (#3913).
 - An answer written before the instruction has read all of its sources, like the riscv64 select, no longer gets the same scratch register as a spilled source, which made the select pick the wrong value (#3914).
 - The riscv64 `.insn s` form takes an offset in brackets of its own, as in `((32) & 0xfe0)(a0)` from the kernel's prefetch macros (#3918).
+- `-fcf-protection=` with `branch`, `return` or `full` is refused off x86 in gcc 14's words, where before it was taken and did nothing, so the riscv kernel no longer turns on RISCV_USER_CFI and builds a CFI vDSO without landing pads (#3922).
 
 ## 0.30.12
 
