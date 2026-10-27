@@ -69,6 +69,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A riscv64 object writes `.dword sym - .` as an `R_RISCV_ADD64` and `R_RISCV_SUB64` pair against a local label on the place, as gas does, where it was refused (#3903).
 - The riscv64 integrated assembler grows a conditional branch to a label more than 4 KiB away into the opposite branch over a `jal`, as gas does, instead of refusing the file (#3905).
 - `__builtin_prefetch` on riscv64 writes no instruction, as gcc does without Zicbop, instead of stopping on an opcode the target has no spelling for (#3907).
+- A riscv64 file of assembly built with `-mabi=lp64` is marked soft float like the C beside it, so ld links the two, and the riscv64 assembler reads `.end`, `fmv.s.x` and `fmv.x.s`, and a name with a sum after it such as `init_thread_union + THREAD_SIZE` (#3908).
 
 ## 0.30.12
 
