@@ -1251,13 +1251,17 @@ fn settle(
             Kind::Hinted => {
                 how.copy_size(module, callee, passed(&module[id], call, &module[callee]), None)
             }
-            Kind::Auto => how.copy_size(
+            // gcc's limit on a function called once is on its estimate of the body, which weighs
+            // each instruction as this does and leaves out what is free. Counted one apiece, the
+            // unfolded body is three or four times that, and `change_pte_range` in mm/mprotect.c
+            // came to 11554 against a limit of 4000 where weighed it is 3149 and gcc copies it.
+            Kind::Auto | Kind::Once => how.copy_size(
                 module,
                 callee,
                 passed(&module[id], call, &module[callee]),
                 Some(how.names),
             ),
-            Kind::Always | Kind::Once | Kind::Small => (size(&module[callee]), false),
+            Kind::Always | Kind::Small => (size(&module[callee]), false),
         };
         // A call to a function that never comes back is one gcc predicts is never made, so it
         // is no more hot than one in a cold function. `machine_real_restart` in
