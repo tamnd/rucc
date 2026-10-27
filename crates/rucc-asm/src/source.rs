@@ -456,6 +456,9 @@ struct Fixup {
     /// Whether these bytes are a LEB128 number, and a signed one, which is written in all of them
     /// however few it needs. See [`Reader::leb`].
     leb: Option<bool>,
+    /// The relocation `.reloc` asked for by a name that fills no bytes here, written as the file
+    /// said it rather than worked out. See [`Reader::reloc`].
+    named: Option<Reference>,
     line: usize,
 }
 
@@ -1567,6 +1570,7 @@ impl Reader {
                 jump,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -1584,6 +1588,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -1636,6 +1641,7 @@ impl Reader {
             jump,
             field: Some(Field::A64(field)),
             leb: None,
+            named: None,
             line: self.line,
         });
         Ok(())
@@ -1820,6 +1826,7 @@ impl Reader {
                 jump: field.relative(),
                 field: Some(Field::Rv(field)),
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -3382,6 +3389,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -3394,12 +3402,49 @@ impl Reader {
     ///
     /// Only the relocations that fill bytes of data with an address or a distance are taken, and
     /// they are written as the same expression would be in `.long` or `.quad` at that place, so the
-    /// writer picks the same relocation the name asks for.
+    /// writer picks the same relocation the name asks for. The one exception is RISC-V's ULEB128
+    /// pair, which the linker writes a number of its own length for and so is passed on as it is.
     fn reloc(&mut self, args: &[String]) -> Result<(), Trouble> {
         let [place, name, rest @ ..] = args else {
             return Err(self.bad(".reloc wants a place, a relocation and an expression"));
         };
         let name = name.trim();
+        // The ULEB128 pair writes no bytes of its own here and the linker writes as many as the
+        // number takes, so it is written as it was asked for, at a place that may come later.
+        let leb = match name {
+            "R_RISCV_SET_ULEB128" if self.riscv => Some(false),
+            "R_RISCV_SUB_ULEB128" if self.riscv => Some(true),
+            _ => None,
+        };
+        if let Some(minus) = leb {
+            let at = self.origin(place)?;
+            let sum = match rest {
+                [] => Sum::default(),
+                [one] => self.expression(one)?,
+                _ => return Err(self.bad(".reloc wants one expression after the relocation")),
+            };
+            for term in &sum.terms {
+                if let What::Symbol(name) = &term.what {
+                    let name = name.clone();
+                    self.sym(&name);
+                }
+            }
+            self.fixups.push(Fixup {
+                part: self.here,
+                at,
+                width: 0,
+                sum,
+                reach: Reach::Near,
+                slot: Reference::Got,
+                branch: None,
+                jump: false,
+                field: None,
+                leb: None,
+                named: Some(Reference::Leb { minus }),
+                line: self.line,
+            });
+            return Ok(());
+        }
         let (width, relative) = match name {
             "R_AARCH64_ABS64" | "R_X86_64_64" | "BFD_RELOC_64" => (8, false),
             "R_AARCH64_ABS32" | "R_X86_64_32" | "R_386_32" | "BFD_RELOC_32" => (4, false),
@@ -3437,6 +3482,7 @@ impl Reader {
             jump: false,
             field: None,
             leb: None,
+            named: None,
             line: self.line,
         });
         Ok(())
@@ -3465,6 +3511,7 @@ impl Reader {
             jump: false,
             field: Some(Field::A64(aarch64::Fixup::TlsdescCall)),
             leb: None,
+            named: None,
             line: self.line,
         });
         Ok(())
@@ -3533,6 +3580,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: Some(signed),
+                named: None,
                 line: self.line,
             });
         }
@@ -4599,6 +4647,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: None,
+                named: None,
                 line: self.line,
             });
         }
@@ -5111,6 +5160,10 @@ impl Reader {
                 self.padded_leb(&fixup, signed)?;
                 continue;
             }
+            if let Some(kind) = fixup.named {
+                self.named_reloc(&fixup, kind)?;
+                continue;
+            }
             let line = fixup.line;
             let bad = |why: String| Trouble { line, why };
             // A name reached through the global offset table, or through the one entry of it a
@@ -5431,6 +5484,25 @@ impl Reader {
             return Err(Trouble { line, why });
         }
         Ok(Reference::GotFront)
+    }
+
+    /// A relocation `.reloc` named and this file does not work out, against the name in the
+    /// expression or, for a plain number, against no name at all, which is what gas writes.
+    fn named_reloc(&mut self, fixup: &Fixup, kind: Reference) -> Result<(), Trouble> {
+        let symbol = match fixup.sum.terms.as_slice() {
+            [] => String::new(),
+            [Term { coeff: 1, what: What::Symbol(name) }] => name.clone(),
+            _ => {
+                let why =
+                    "'.reloc' of a ULEB128 relocation wants a name, a number, or a name and a \
+                           number"
+                        .to_owned();
+                return Err(Trouble { line: fixup.line, why });
+            }
+        };
+        let (at, addend) = (fixup.at as usize, fixup.sum.constant);
+        self.parts[fixup.part].relocs.push(Reloc { at, symbol, kind, addend, after: 0 });
+        Ok(())
     }
 
     /// A LEB128 number that was waiting for a label further on, written into the bytes the pass
@@ -7299,6 +7371,50 @@ _tls$tlv$init:
         assert_eq!(text.len(), 6 + 1024 + 1);
         assert_eq!(text[..4], [0x00b5_1463, 0x0140_106f, 0x00d6_7463, 0x00c0_106f]);
         assert_eq!(text[1028..], [0x00b5_4463, 0xfedf_e06f, 0x0000_8067]);
+    }
+
+    #[test]
+    fn a_riscv_uleb128_reloc_is_passed_on_as_it_was_asked_for() {
+        // The kernel's arch/riscv/kernel/tests/module_test/test_uleb128.S and the AS_HAS_ULEB128
+        // probe, which GNU as writes as these relocations, the probe's against no name at all.
+        let out = match read(
+            concat!(
+                "\t.data\n",
+                "first:\n",
+                "\t.space 127\n",
+                "second:\n",
+                "\t.reloc second, R_RISCV_SET_ULEB128, second\n",
+                "\t.reloc second, R_RISCV_SUB_ULEB128, first\n",
+                "\t.dword 0\n",
+                "\t.reloc ., R_RISCV_SET_ULEB128, 127\n",
+                "\t.byte 0\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let part = out.parts.iter().find(|part| part.name == ".data").unwrap();
+        assert_eq!(part.bytes.len(), 127 + 8 + 1);
+        let relocs: Vec<_> = part
+            .relocs
+            .iter()
+            .map(|reloc| (reloc.at, reloc.symbol.as_str(), reloc.kind, reloc.addend))
+            .collect();
+        assert_eq!(
+            relocs,
+            [
+                (127, "second", Reference::Leb { minus: false }, 0),
+                (127, "first", Reference::Leb { minus: true }, 0),
+                (135, "", Reference::Leb { minus: false }, 127),
+            ]
+        );
+        for line in [
+            "\t.data\nfirst:\n\t.reloc ., R_RISCV_SET_ULEB128, first + first\n",
+            "\t.data\n\t.reloc ., R_RISCV_SET_ULEB128, 2 * first\n",
+        ] {
+            assert!(read(line, Arch::Riscv64).is_err(), "{line}");
+        }
     }
 
     #[test]

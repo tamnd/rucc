@@ -65,7 +65,8 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         | Reference::GotKept
         | Reference::Field(_)
         | Reference::Riscv(_)
-        | Reference::Sum { .. } => {
+        | Reference::Sum { .. }
+        | Reference::Leb { .. } => {
             return None;
         }
         Reference::Away | Reference::AwayWide | Reference::Short | Reference::Tiny => return None,
@@ -149,6 +150,7 @@ pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
         | Reference::SlotKept
         | Reference::Riscv(_)
         | Reference::Sum { .. }
+        | Reference::Leb { .. }
         | Reference::Tls(_) => {
             return None;
         }
@@ -193,7 +195,11 @@ pub(crate) fn i386(reference: Reference) -> Option<pe::RelocationType> {
         Reference::GotOffset | Reference::GotFront | Reference::Slot | Reference::SlotKept => {
             return None;
         }
-        Reference::Field(_) | Reference::Riscv(_) | Reference::Sum { .. } | Reference::Tls(_) => {
+        Reference::Field(_)
+        | Reference::Riscv(_)
+        | Reference::Sum { .. }
+        | Reference::Leb { .. }
+        | Reference::Tls(_) => {
             return None;
         }
     })
