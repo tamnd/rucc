@@ -1567,7 +1567,7 @@ fn a_constant_wider_than_thirty_two_bits_goes_in_a_register_under_e_and_z() {
     assert!(!text.contains("addq $1229782938247303458"), "{text}");
     assert!(text.contains("lock; addq %rax,"), "{text}");
     assert!(text.contains("lock; addq $-1,"), "{text}");
-    assert!(text.contains("movl $4294967295,"), "{text}");
+    assert!(text.contains("movl\t$4294967295,"), "{text}");
     assert!(!text.contains("movl $-1,"), "{text}");
 }
 
