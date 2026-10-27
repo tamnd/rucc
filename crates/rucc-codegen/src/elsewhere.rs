@@ -142,10 +142,7 @@ impl Elsewhere {
             .globals()
             .filter_map(|id| {
                 let global = &module[id];
-                Some((
-                    global.name,
-                    global.tls?.max(Self::fastest(global, pic, format)),
-                ))
+                Some((global.name, global.tls?.max(Self::fastest(global, pic, format))))
             })
             .collect();
         let twice = module
@@ -167,10 +164,7 @@ impl Elsewhere {
         let indexed = format == ObjectFormat::Coff;
         let (imported, referred) = Self::pointers(module, format);
         let aligned = if format == ObjectFormat::Elf {
-            module
-                .globals()
-                .map(|id| (module[id].name, module[id].align))
-                .collect()
+            module.globals().map(|id| (module[id].name, module[id].align)).collect()
         } else {
             Map::default()
         };
@@ -313,10 +307,7 @@ impl Elsewhere {
                 .map(|id| module[id].name),
         );
         if pic == Pic::Absolute && copies && format == ObjectFormat::Elf {
-            return Self {
-                names: indirect.collect(),
-                ..Self::default()
-            };
+            return Self { names: indirect.collect(), ..Self::default() };
         }
         // A declared function marked hidden or protected is promised to be in this image, so the
         // distance to it is one the linker has. The kernel's compressed loader is built `-fPIE`
@@ -356,12 +347,7 @@ impl Elsewhere {
             .aliases()
             .filter(|&id| pic.replaceable(module[id].linkage, module[id].visibility))
             .map(|id| module[id].name);
-        funcs
-            .map(|id| module[id].name)
-            .chain(globals)
-            .chain(aliases)
-            .chain(indirect)
-            .collect()
+        funcs.map(|id| module[id].name).chain(globals).chain(aliases).chain(indirect).collect()
     }
 
     /// Whether the file says it needs every name another object defines reached through the
@@ -378,12 +364,7 @@ impl Elsewhere {
             .funcs()
             .filter(|&id| module[id].attrs.set.contains(AttrSet::NODIRECT))
             .map(|id| module[id].name)
-            .chain(
-                module
-                    .globals()
-                    .filter(|&id| module[id].indirect)
-                    .map(|id| module[id].name),
-            )
+            .chain(module.globals().filter(|&id| module[id].indirect).map(|id| module[id].name))
             .collect();
         if said.is_empty() {
             return false;
@@ -400,19 +381,16 @@ impl Elsewhere {
             );
         let used = module.funcs().flat_map(|id| {
             let func = &module[id];
-            func.blocks()
-                .flat_map(|block| func.insts(block))
-                .filter_map(|inst| match func[inst].extra {
+            func.blocks().flat_map(|block| func.insts(block)).filter_map(|inst| {
+                match func[inst].extra {
                     Extra::Call(info) => func[info].callee,
                     Extra::Symbol(name) => Some(name),
                     _ => None,
-                })
+                }
+            })
         });
         let held = module.globals().flat_map(|id| {
-            let init = module[id]
-                .init
-                .map(|list| &module[list])
-                .unwrap_or_default();
+            let init = module[id].init.map(|list| &module[list]).unwrap_or_default();
             init.iter().filter_map(|datum| match *datum {
                 Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } => {
                     Some(module[reloc].symbol)
@@ -420,10 +398,7 @@ impl Elsewhere {
                 _ => None,
             })
         });
-        defined
-            .chain(used)
-            .chain(held)
-            .any(|name| said.contains(&name))
+        defined.chain(used).chain(held).any(|name| said.contains(&name))
     }
 
     /// How far the address of that variable is aligned, which is how many of its low bits are
@@ -581,9 +556,7 @@ impl Elsewhere {
                     && func.linkage == Linkage::Internal
                     && !func.attrs.set.contains(AttrSet::USED)
                     && !aliased.contains(&func.name)
-                    && graph
-                        .node(func.name)
-                        .is_some_and(|node| !graph.address_taken(node))
+                    && graph.node(func.name).is_some_and(|node| !graph.address_taken(node))
             })
             .map(|id| module[id].name)
             .collect();
@@ -729,10 +702,7 @@ impl Elsewhere {
 /// module for it to be outside of.
 impl FromIterator<Symbol> for Elsewhere {
     fn from_iter<T: IntoIterator<Item = Symbol>>(names: T) -> Self {
-        Self {
-            names: names.into_iter().collect(),
-            ..Self::default()
-        }
+        Self { names: names.into_iter().collect(), ..Self::default() }
     }
 }
 
@@ -740,10 +710,7 @@ impl Elsewhere {
     /// The same set with those names said to be thread-local, for a test that lowers one function.
     #[must_use]
     pub fn with_threads<T: IntoIterator<Item = Symbol>>(mut self, threads: T) -> Self {
-        self.threads = threads
-            .into_iter()
-            .map(|name| (name, TlsModel::InitialExec))
-            .collect();
+        self.threads = threads.into_iter().map(|name| (name, TlsModel::InitialExec)).collect();
         self
     }
 
@@ -830,10 +797,7 @@ mod tests {
         let module = module(&mut names);
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         for name in ["kept", "away", "quiet", "shy", "here"] {
-            assert!(
-                !elsewhere.thread(names.intern(name)),
-                "{name} was called thread-local"
-            );
+            assert!(!elsewhere.thread(names.intern(name)), "{name} was called thread-local");
         }
     }
 
@@ -856,36 +820,12 @@ mod tests {
             module.add_global(global);
         };
         let general = TlsModel::GlobalDynamic;
-        add(
-            "away",
-            Linkage::External,
-            Visibility::Default,
-            false,
-            general,
-        );
+        add("away", Linkage::External, Visibility::Default, false, general);
         add("own", Linkage::External, Visibility::Default, true, general);
-        add(
-            "quiet",
-            Linkage::Internal,
-            Visibility::Default,
-            true,
-            general,
-        );
+        add("quiet", Linkage::Internal, Visibility::Default, true, general);
         add("shy", Linkage::External, Visibility::Hidden, false, general);
-        add(
-            "kept",
-            Linkage::External,
-            Visibility::Protected,
-            true,
-            general,
-        );
-        add(
-            "fast",
-            Linkage::External,
-            Visibility::Default,
-            true,
-            TlsModel::InitialExec,
-        );
+        add("kept", Linkage::External, Visibility::Protected, true, general);
+        add("fast", Linkage::External, Visibility::Default, true, TlsModel::InitialExec);
         let library = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf, true);
         let program = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         let wanted = [
@@ -902,10 +842,7 @@ mod tests {
             assert_eq!(program.model(name), Some(TlsModel::InitialExec));
         }
         let apple = Elsewhere::of(&module, Pic::Library, ObjectFormat::MachO, true);
-        assert_eq!(
-            apple.model(names.intern("away")),
-            Some(TlsModel::InitialExec)
-        );
+        assert_eq!(apple.model(names.intern("away")), Some(TlsModel::InitialExec));
     }
 
     #[test]
@@ -959,10 +896,7 @@ mod tests {
         let module = module(&mut names);
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         for name in ["kept", "away", "quiet", "shy", "second"] {
-            assert!(
-                !elsewhere.holds(names.intern(name)),
-                "{name} was in the table"
-            );
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
     }
 
@@ -989,13 +923,8 @@ mod tests {
         maybe.linkage = Linkage::Weak;
         module.add_global(maybe);
         let elsewhere = Elsewhere::of(&module, Pic::Absolute, ObjectFormat::Elf, true);
-        for name in [
-            "here", "exit", "kept", "away", "quiet", "shy", "second", "maybe",
-        ] {
-            assert!(
-                !elsewhere.holds(names.intern(name)),
-                "{name} was in the table"
-            );
+        for name in ["here", "exit", "kept", "away", "quiet", "shy", "second", "maybe"] {
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
         // Thread-local storage is a different question and keeps its answer.
         assert!(elsewhere.thread(names.intern("own")));
@@ -1027,10 +956,7 @@ mod tests {
         assert!(elsewhere.holds(names.intern("maybe")));
         assert!(elsewhere.holds(names.intern("perhaps")));
         for name in ["here", "exit", "kept", "away", "quiet", "shy", "inside"] {
-            assert!(
-                !elsewhere.holds(names.intern(name)),
-                "{name} was in the table"
-            );
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
     }
 
@@ -1047,10 +973,7 @@ mod tests {
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::MachO, true);
         assert!(elsewhere.holds(names.intern("away")));
         for name in ["kept", "quiet", "shy", "near"] {
-            assert!(
-                !elsewhere.holds(names.intern(name)),
-                "{name} was in the table"
-            );
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
     }
 
@@ -1063,10 +986,7 @@ mod tests {
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, false);
         assert!(elsewhere.holds(names.intern("away")));
         for name in ["kept", "quiet", "shy"] {
-            assert!(
-                !elsewhere.holds(names.intern(name)),
-                "{name} was in the table"
-            );
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
         let copied = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
         assert!(!copied.holds(names.intern("away")));
@@ -1080,10 +1000,7 @@ mod tests {
         let module = module(&mut names);
         let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf, true);
         for name in ["here", "exit", "kept", "away", "second"] {
-            assert!(
-                elsewhere.holds(names.intern(name)),
-                "{name} was not in the table"
-            );
+            assert!(elsewhere.holds(names.intern(name)), "{name} was not in the table");
         }
     }
 
@@ -1098,10 +1015,7 @@ mod tests {
         let module = module(&mut names);
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff, true);
         for name in ["here", "exit", "kept", "away", "quiet", "shy", "second"] {
-            assert!(
-                !elsewhere.holds(names.intern(name)),
-                "{name} was in the table"
-            );
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
     }
 
@@ -1113,10 +1027,7 @@ mod tests {
         let module = module(&mut names);
         let elsewhere = Elsewhere::of(&module, Pic::Library, ObjectFormat::Coff, true);
         for name in ["here", "exit", "kept", "away", "second"] {
-            assert!(
-                !elsewhere.holds(names.intern(name)),
-                "{name} was in the table"
-            );
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
         }
     }
 
@@ -1160,10 +1071,8 @@ mod tests {
         let block = reader.create_block();
         for name in ["kept", "away", "quiet", "_fmode", "near"] {
             let symbol = names.intern(name);
-            let data = InstData {
-                extra: Extra::Symbol(symbol),
-                ..InstData::new(Opcode::GlobalAddr)
-            };
+            let data =
+                InstData { extra: Extra::Symbol(symbol), ..InstData::new(Opcode::GlobalAddr) };
             Builder::new(&mut reader, block).value(data, rucc_ir::Type::PTR);
         }
         module.add_func(reader);
@@ -1179,11 +1088,7 @@ mod tests {
         let module = windows(&mut names);
         let elsewhere = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Coff, true);
         for name in ["GetCurrentProcessId", "_fmode"] {
-            assert_eq!(
-                elsewhere.slot(names.intern(name)),
-                Some(Slot::Imported),
-                "{name}"
-            );
+            assert_eq!(elsewhere.slot(names.intern(name)), Some(Slot::Imported), "{name}");
         }
         assert_eq!(elsewhere.slot(names.intern("away")), Some(Slot::Referred));
         for name in ["exit", "here", "kept", "quiet", "shy", "own", "near"] {
