@@ -18,7 +18,9 @@ use std::sync::LazyLock;
 use crate::named;
 use crate::riscv64::encode::{Addr, Offset, Operator, Round, Value};
 
-use Arg::{Base, Disp, Fixed, Fp, Imm, ImmPlus, Label, Lit, Mem, Near, Reg, Sp, Symbol, Through};
+use Arg::{
+    At, Base, Disp, Fixed, Fp, Imm, ImmPlus, Label, Lit, Mem, Near, Reg, Sp, Symbol, Through,
+};
 
 /// A byte.
 const B: u8 = 8;
@@ -53,6 +55,9 @@ pub enum Arg {
     Mem,
     /// The base register of the instruction's addressing mode, as a register on its own.
     Base,
+    /// The integer register the operand at that index was given, as an address with nothing added,
+    /// which is the only address `lr`, `sc` and the `amo` operations take.
+    At(u8),
     /// The constant of the instruction's addressing mode, as a constant on its own.
     Disp,
     /// That many bytes above the stack pointer, which is where a push and a pop put things.
@@ -476,11 +481,88 @@ static TEXT: &[(&str, &[Written])] = &[
     // Reads and writes before it ordered with reads and writes after it, which is what a C
     // fence asks for.
     ("fence", &[spell("fence", &[Arg::Order(3), Arg::Order(3)])]),
+    // Reads before it ordered with everything after it, and everything before it with writes after
+    // it, which are an acquire and a release fence as the psABI maps them.
+    ("fence_acquire", &[spell("fence", &[Arg::Order(2), Arg::Order(3)])]),
+    ("fence_release", &[spell("fence", &[Arg::Order(3), Arg::Order(1)])]),
+    // The atomics, as gcc writes them at the strongest ordering. What was there, the address and
+    // the value, and a subtraction is the add of the negation, put in the register the answer
+    // comes back in first.
+    ("xchg_32", &[spell("amoswap.w.aqrl", AMO_W)]),
+    ("xchg_64", &[spell("amoswap.d.aqrl", AMO_X)]),
+    ("xadd_32", &[spell("amoadd.w.aqrl", AMO_W)]),
+    ("xadd_64", &[spell("amoadd.d.aqrl", AMO_X)]),
+    ("xsub_32", &[spell("neg", &[Reg(0, W), Reg(2, W)]), spell("amoadd.w.aqrl", AMO_NEG_W)]),
+    ("xsub_64", &[spell("neg", &[Reg(0, X), Reg(2, X)]), spell("amoadd.d.aqrl", AMO_NEG_X)]),
+    // What was there, whether the exchange happened, the address, the value expected and the
+    // value put there. The loop goes round again only when the store lost the reservation, and
+    // the yes or no is whether what was there is what was expected.
+    ("cmpxchg_32", &compare_swap("lr.w.aqrl", spell("sc.w.rl", &[Reg(1, X), Reg(4, W), At(2)]))),
+    ("cmpxchg_64", &compare_swap("lr.d.aqrl", spell("sc.d.rl", &[Reg(1, X), Reg(4, X), At(2)]))),
+    // A byte or a half, as the same loop on the word around it. The value expected and the value
+    // put there are moved to where the byte is in the word, the mask picks it out, and the rest of
+    // the word is put back as it was found. Afterwards the byte is moved back down, so what comes
+    // back has nothing above it.
+    ("cmpxchg_8", &compare_swap_masked(spell("li", &[Reg(2, X), Lit(0xff)]))),
+    ("cmpxchg_16", &compare_swap_masked(spell("li", &[Reg(2, X), Lit(0xffff)]))),
     // Nothing from the table. The text it carries is the program's and the writer puts it down.
     ("template", &[]),
 ];
 
 const RR_X0: &[Arg] = &[Reg(0, X), Reg(0, X)];
+const AMO_W: &[Arg] = &[Reg(0, W), Reg(2, W), At(1)];
+const AMO_X: &[Arg] = &[Reg(0, X), Reg(2, X), At(1)];
+const AMO_NEG_W: &[Arg] = &[Reg(0, W), Reg(0, W), At(1)];
+const AMO_NEG_X: &[Arg] = &[Reg(0, X), Reg(0, X), At(1)];
+
+/// The compare and exchange of a word or a doubleword, `lr` and `sc` at that width, the store
+/// given whole since it is the one that reads only as much of the value as it writes.
+///
+/// A word comes back from `lr.w` sign extended, which is how one is kept in a register, so the
+/// comparisons read the whole register and the value expected has to be sign extended too.
+const fn compare_swap(load: &'static str, store: Written) -> [Written; 6] {
+    [
+        spell(load, &[Reg(0, X), At(2)]),
+        spell("bne", &[Reg(0, X), Reg(3, X), Near(3)]),
+        store,
+        spell("bnez", &[Reg(1, X), Near(-3)]),
+        spell("xor", &[Reg(1, X), Reg(0, X), Reg(3, X)]),
+        spell("seqz", &[Reg(1, X), Reg(1, X)]),
+    ]
+}
+
+/// The compare and exchange of a byte or a half, with the instruction that puts its mask in
+/// operand two.
+///
+/// The operands are what was there, the yes or no, then the word's address, the shift and later
+/// the mask, and the value expected and the value put there where the byte is in the word, and
+/// last the address, the value expected and the value put there.
+const fn compare_swap_masked(mask: Written) -> [Written; 22] {
+    [
+        spell("andi", &[Reg(3, X), Reg(6, X), Lit(3)]),
+        spell("slli", &[Reg(3, X), Reg(3, X), Lit(3)]),
+        mask,
+        spell("and", &[Reg(4, X), Reg(7, X), Reg(2, X)]),
+        spell("sll", &[Reg(4, X), Reg(4, X), Reg(3, X)]),
+        spell("and", &[Reg(5, X), Reg(8, X), Reg(2, X)]),
+        spell("sll", &[Reg(5, X), Reg(5, X), Reg(3, X)]),
+        spell("sll", &[Reg(3, X), Reg(2, X), Reg(3, X)]),
+        spell("andi", &[Reg(2, X), Reg(6, X), Lit(-4)]),
+        spell("lr.w.aqrl", &[Reg(0, X), At(2)]),
+        spell("and", &[Reg(1, X), Reg(0, X), Reg(3, X)]),
+        spell("bne", &[Reg(1, X), Reg(4, X), Near(5)]),
+        spell("xor", &[Reg(1, X), Reg(0, X), Reg(1, X)]),
+        spell("or", &[Reg(1, X), Reg(1, X), Reg(5, X)]),
+        spell("sc.w.rl", &[Reg(1, X), Reg(1, X), At(2)]),
+        spell("bnez", &[Reg(1, X), Near(-6)]),
+        spell("and", &[Reg(0, X), Reg(0, X), Reg(3, X)]),
+        spell("xor", &[Reg(1, X), Reg(0, X), Reg(4, X)]),
+        spell("seqz", &[Reg(1, X), Reg(1, X)]),
+        spell("andi", &[Reg(3, X), Reg(6, X), Lit(3)]),
+        spell("slli", &[Reg(3, X), Reg(3, X), Lit(3)]),
+        spell("srl", &[Reg(0, X), Reg(0, X), Reg(3, X)]),
+    ]
+}
 const RRR_X_SWAPPED: &[Arg] = &[Reg(0, X), Reg(2, X), Reg(1, X)];
 
 /// The instructions the opcode of that name is written as.
@@ -560,6 +642,7 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         Lit(imm) => Value::Imm(imm),
         Mem => Value::Mem(mem()?),
         Base => Value::Gpr(mem()?.base),
+        At(at) => Value::Mem(Addr { base: reg(at)?, offset: Offset::Imm(0) }),
         Disp => match mem()?.offset {
             Offset::Imm(imm) => Value::Imm(imm),
             Offset::Symbol(operator) => Value::Symbol(operator),
@@ -600,7 +683,7 @@ mod tests {
             for inst in written(name).unwrap() {
                 for arg in inst.args {
                     let (at, class) = match *arg {
-                        Reg(at, _) => (at, GPR),
+                        Reg(at, _) | At(at) => (at, GPR),
                         Fp(at) => (at, FPR),
                         Mem | Base | Disp => {
                             assert!(form.takes_mem(), "{name} names an address it has not got");
@@ -624,7 +707,7 @@ mod tests {
     /// address with a small offset.
     fn sample(form: Form, regs: &mut Vec<u8>) -> Operands<'_> {
         regs.clear();
-        regs.extend(10..=14);
+        regs.extend(10..=18);
         let reads = form.operands().iter().take_while(|op| op.role != Role::Use).count();
         let mem = Addr { base: 8, offset: Offset::Imm(16) };
         Operands { regs, reads, imm: 1, mem: Some(mem) }

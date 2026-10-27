@@ -5768,6 +5768,10 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
             // whatever the version. And the `.riscv.attributes` section, which this assembler
             // never writes.
             "-misa-spec=2.2" | "-mno-arch-attr" if riscv => {}
+            // That no instruction is marked for the linker to relax, which this assembler never
+            // does. The kernel asks for it on modules, which are linked by the module loader and
+            // not by `ld`. `-mrelax` is the opposite and is refused.
+            "-mno-relax" if riscv => {}
             // A directory for `.include` and `.incbin`. The assembler reads no file but its input,
             // and refuses both directives, so a place to look for one changes nothing.
             "-I" => {
@@ -10716,6 +10720,7 @@ mod tests {
             "-mno-relax",
             "-Wa,-misa-spec=2.2",
             "-Wa,-mno-arch-attr",
+            "-Wa,-mno-relax",
             "-c",
             "a.c",
         ];

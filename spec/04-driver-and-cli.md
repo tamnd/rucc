@@ -290,6 +290,7 @@ The driver constructs the link line with the right startup files, the right defa
 - `-mtune=generic32`, `generic64`, `i386`, `i486`, `i586` or `i686`, on x86, is taken and changes nothing. gas picks its padding by it, and the padding we write is valid on all of them. The i386 kernel passes `generic32`.
 - `-mabi=lp64`, on AArch64, is the only data model we have.
 - `-misa-spec=2.2` and `-mno-arch-attr`, on RISC-V. The first is the spec version gas reads `-march=` by, and this assembler takes the CSR and `fence.i` instructions whatever the version. The second leaves out the `.riscv.attributes` section, which is never written. The kernel passes both.
+- `-mno-relax`, on RISC-V, which asks that no instruction be marked with `R_RISCV_RELAX`. This assembler never marks one, so it is what happens anyway. The kernel passes it for modules. `-mrelax` asks for the opposite and is refused.
 - `-I<dir>` and `-I <dir>` are taken and change nothing, because the assembler reads no file but its input and refuses `.include` and `.incbin`. When it reads them, this is where they will look.
 - `-march=<arch>`, on AArch64, for an `armv8` or `armv9` architecture name with any `+` modifiers after it. The kernel passes `armv8.4-a` or `armv8.5-a` so that the assembler takes instructions the compiler is not allowed to generate, and ours takes every instruction it can encode whatever architecture is named, which gives the same result for any file gas would accept. What it cannot do is narrow, so gas's x86 processor names are refused.
 
