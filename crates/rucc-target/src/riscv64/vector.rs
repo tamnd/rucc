@@ -2,8 +2,8 @@
 //!
 //! The kernel saves and restores the vector registers, clears them at boot and copies user
 //! memory with them, and all of that is setting the vector type, loading and storing whole
-//! groups of byte elements, and filling a group with a constant. Those are here and nothing
-//! else of the extension is. rucc writes no vector code of its own, so these only come from a
+//! groups of byte elements, filling a group with a constant, and the few integer operations
+//! `lib/xor.S` and its kind run over a group. Those are here and nothing else of the extension is. rucc writes no vector code of its own, so these only come from a
 //! file or an `asm` statement, and the operands are read from the text here rather than through
 //! [`crate::riscv64::read`], whose operands have no vector register or vector type in them.
 
@@ -26,10 +26,13 @@ pub fn vector(text: &str) -> Option<Result<u32, Error>> {
     let word = match mnemonic.as_str() {
         "vsetvli" | "vsetivli" | "vsetvl" => set(&mnemonic, &operands),
         "vmv.v.v" | "vmv.v.x" | "vmv.v.i" => splat(&mnemonic, &operands),
-        _ => {
-            let (op, width) = memory(&mnemonic)?;
-            access(op, width, &operands)
-        }
+        _ => match arith(&mnemonic) {
+            Some((funct6, f3, from)) => operate(funct6, f3, from, &operands),
+            None => {
+                let (op, width) = memory(&mnemonic)?;
+                access(op, width, &operands)
+            }
+        },
     };
     let operands = operands.len();
     Some(word.ok_or(Error::Unwritten { mnemonic, operands }))
@@ -105,6 +108,55 @@ fn splat(mnemonic: &str, operands: &[&str]) -> Option<u32> {
     Some(0x17 << 26 | 1 << 25 | from << 15 | f3 << 12 | vd << 7 | 0x57)
 }
 
+/// Where the second source of an operation on a group comes from.
+#[derive(Clone, Copy)]
+enum From {
+    Group,
+    Register,
+    Constant,
+}
+
+/// The function and the operand kind of `vadd`, `vsub`, `vand`, `vor` and `vxor` with `.vv`,
+/// `.vx` or `.vi` after it. `vsub` has no constant form.
+fn arith(mnemonic: &str) -> Option<(u32, u32, From)> {
+    let (op, kind) = mnemonic.split_once('.')?;
+    let funct6 = match op {
+        "vadd" => 0b00_0000,
+        "vsub" => 0b00_0010,
+        "vand" => 0b00_1001,
+        "vor" => 0b00_1010,
+        "vxor" => 0b00_1011,
+        _ => return None,
+    };
+    let (f3, from) = match kind {
+        "vv" => (0, From::Group),
+        "vx" => (4, From::Register),
+        "vi" if op != "vsub" => (3, From::Constant),
+        _ => return None,
+    };
+    Some((funct6, f3, from))
+}
+
+/// `vxor.vv vd, vs2, vs1`, with a register or a five bit constant for the last in the `.vx` and
+/// `.vi` forms, and `v0.t` after it when it is masked.
+fn operate(funct6: u32, f3: u32, from: From, operands: &[&str]) -> Option<u32> {
+    let (vd, vs2, last, unmasked) = match *operands {
+        [vd, vs2, last] => (vd, vs2, last, 1),
+        [vd, vs2, last, "v0.t"] => (vd, vs2, last, 0),
+        _ => return None,
+    };
+    let last = match from {
+        From::Group => vreg(last)?,
+        From::Register => gpr(last)?,
+        From::Constant => {
+            let imm = last.parse::<i32>().ok().filter(|imm| (-16..16).contains(imm))?;
+            u32::try_from(imm & 0x1f).ok()?
+        }
+    };
+    let (vd, vs2) = (vreg(vd)?, vreg(vs2)?);
+    Some(funct6 << 26 | unmasked << 25 | vs2 << 20 | last << 15 | f3 << 12 | vd << 7 | 0x57)
+}
+
 /// The opcode and the width field of a unit stride load or store, `vle8.v` up to `vse64.v`.
 fn memory(mnemonic: &str) -> Option<(u32, u32)> {
     let rest = mnemonic.strip_suffix(".v")?;
@@ -172,6 +224,12 @@ mod tests {
             ("vle16.v v1, 0(a2)", 0x0206_5087),
             ("vle32.v v2, (a3), v0.t", 0x0006_e107),
             ("vse64.v v3, (a4)", 0x0207_71a7),
+            ("vxor.vv v16, v0, v8", 0x2e04_0857),
+            ("vxor.vv v0, v0, v8", 0x2e04_0057),
+            ("vadd.vx v4, v8, a0", 0x0285_4257),
+            ("vand.vi v1, v2, -3", 0x262e_b0d7),
+            ("vor.vv v3, v4, v5, v0.t", 0x2842_81d7),
+            ("vsub.vx v6, v7, t0", 0x0a72_c357),
         ] {
             assert_eq!(vector(text), Some(Ok(word)), "{text}");
         }
@@ -180,5 +238,7 @@ mod tests {
         assert!(matches!(vector("vsetivli a0, 32, e8"), Some(Err(_))));
         assert!(matches!(vector("vmv.v.i v0, 16"), Some(Err(_))));
         assert!(matches!(vector("vle8.v v32, (a0)"), Some(Err(_))));
+        assert!(matches!(vector("vxor.vv v0, v1, a0"), Some(Err(_))));
+        assert_eq!(vector("vsub.vi v0, v1, 1"), None);
     }
 }
