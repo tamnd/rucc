@@ -1177,9 +1177,13 @@ impl Checker<'_> {
         // backend has no reason to expect.
         let record = is_record(&self.types, ty);
         let register = record && in_a_register(&self.types, self.cx.target, ty);
-        let aarch64 = matches!(self.cx.target.tuple.arch().as_str(), "aarch64" | "arm64ec");
-        let memory = memory_only(&text, aarch64) || (record && !register);
-        if record && !register && !memory_only(&text, aarch64) {
+        let single = match self.cx.target.tuple.arch().as_str() {
+            "aarch64" | "arm64ec" => Some('Q'),
+            "riscv64" => Some('A'),
+            _ => None,
+        };
+        let memory = memory_only(&text, single) || (record && !register);
+        if record && !register && !memory_only(&text, single) {
             self.statement_unsupported("a structure or a union in a register constraint", span);
         }
 
@@ -1527,16 +1531,17 @@ fn spelling(literal: &StringLiteral) -> String {
 /// Whether a constraint allows memory and allows nothing else.
 ///
 /// The letters that mean memory are the machine independent ones, `m`, `o` and `V`, and the two
-/// that mean an address the instruction modifies. On AArch64 `Q` is one more, memory addressed
-/// by a single register, which the exclusive loads and stores take. Everything else is a
+/// that mean an address the instruction modifies. `single` is one more on a machine that has it,
+/// memory addressed by a single register, which is `Q` on AArch64 and `A` on RISC-V and is what
+/// the exclusive loads and stores and the atomics take. Everything else is a
 /// register class, a constant, a matching operand or a letter the target invented, and each of
 /// those is a value. A constraint that allows either, `"rm"`, is a value here, which is the
 /// answer gcc reaches for as well and which is free to give: a value the target cannot hold in
 /// a register is a question the backend gets to ask about a machine it knows.
-fn memory_only(constraint: &str, aarch64: bool) -> bool {
+fn memory_only(constraint: &str, single: Option<char>) -> bool {
     let letters: Vec<char> =
         constraint.chars().filter(|ch| !"=+&%#*!?, \t".contains(*ch)).collect();
-    let memory = |ch: &char| "moV<>".contains(*ch) || (aarch64 && *ch == 'Q');
+    let memory = |ch: &char| "moV<>".contains(*ch) || single == Some(*ch);
     !letters.is_empty() && letters.iter().all(memory)
 }
 
@@ -1592,13 +1597,16 @@ mod tests {
     }
 
     /// `Q` is memory on AArch64 and a register on x86, so which one it is depends on the target.
+    /// `A` is memory on RISC-V and the `rdx` and `rax` pair on x86.
     #[test]
     fn q_is_memory_only_on_aarch64() {
-        assert!(memory_only("=m", false));
-        assert!(memory_only("+Q", true));
-        assert!(!memory_only("+Q", false));
-        assert!(!memory_only("rQ", true));
-        assert!(!memory_only("=r", true));
+        assert!(memory_only("=m", None));
+        assert!(memory_only("+Q", Some('Q')));
+        assert!(!memory_only("+Q", None));
+        assert!(!memory_only("rQ", Some('Q')));
+        assert!(!memory_only("=r", Some('Q')));
+        assert!(memory_only("+A", Some('A')));
+        assert!(!memory_only("+A", None));
     }
     use crate::check::Context;
     use crate::print::Printer;

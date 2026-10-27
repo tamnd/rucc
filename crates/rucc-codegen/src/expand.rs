@@ -44,6 +44,7 @@ use std::cmp::Ordering;
 use rucc_base::hash::Map;
 use rucc_base::{Idx, Interner};
 use rucc_cost::{Goal, heuristics};
+use rucc_diag::Span;
 use rucc_ir::{
     AsmInfo, AsmOperand, AsmOperands, AttrSet, BlockCall, CallInfo, Def, Extra, Flags, FloatPred,
     Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Signature, Type, Value,
@@ -93,11 +94,15 @@ use crate::capability;
 /// consistent store needs no fence behind it there either, because `stlr` already keeps it in
 /// order with a later `ldar`, which is the one pair a fence would be for.
 ///
+/// RISC-V is weakly ordered too and has no ordered load or store, so `fenced` says to write each
+/// as the plain access with the fences the RISC-V psABI puts around it, which is what gcc 14.2.0
+/// writes. See `fenced`.
+///
 /// This runs before every other pass here, so that what it produces is an ordinary load or store
 /// that the width legalisation and everything after it get to see. An ordered access at a width the
 /// machine has no register for would otherwise be a shape nothing later understands, since every
 /// pass after this one is written about `load` and `store` by name.
-pub fn orderings(func: &mut Func, word: u32, total_store_order: bool) {
+pub fn orderings(func: &mut Func, word: u32, total_store_order: bool, fenced: bool) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         let plain = match func[inst].opcode {
@@ -106,6 +111,9 @@ pub fn orderings(func: &mut Func, word: u32, total_store_order: bool) {
             _ => continue,
         };
         if !total_store_order && !unordered(func, inst) {
+            if fenced {
+                self::fenced(func, inst, plain, word);
+            }
             continue;
         }
         relaxed(func, inst, plain, word);
@@ -134,14 +142,7 @@ fn unordered(func: &Func, inst: Inst) -> bool {
 fn relaxed(func: &mut Func, inst: Inst, plain: Opcode, word: u32) {
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
-    let ty = match plain {
-        Opcode::Store => match func[func[inst].args].first() {
-            Some(&value) => func[value].ty,
-            None => return,
-        },
-        _ => produced(func, inst),
-    };
-    if !indivisible(ty, info, word) {
+    if !accessed(func, inst, plain).is_some_and(|ty| indivisible(ty, info, word)) {
         return;
     }
     let unordered = MemInfo { order: MemOrder::NotAtomic, ..info };
@@ -158,6 +159,62 @@ fn relaxed(func: &mut Func, inst: Inst, plain: Opcode, word: u32) {
         return;
     }
 
+    plainly(func, inst, plain, unordered);
+}
+
+/// One ordered access on a machine that orders with fences, as the plain access with a fence in
+/// front of it, behind it or both.
+///
+/// The fences are the ones in the RISC-V psABI's table, which gcc 14.2.0 writes. An acquiring
+/// load is the load and then `fence r, rw`, and a sequentially consistent one has `fence rw, rw`
+/// in front as well. A releasing store is `fence rw, w` and then the store, and a sequentially
+/// consistent one has `fence rw, rw` behind it too. gcc puts that last fence there so that code
+/// built this way stays right beside code built for the newer mapping, which leaves it off the
+/// store and puts it on the load, and this does the same.
+///
+/// A fence is an `Opcode::Fence` at the ordering it keeps, so `fence r, rw` is an acquire and
+/// `fence rw, w` a release, and [`crate::lower`] writes each as the instruction this machine has.
+fn fenced(func: &mut Func, inst: Inst, plain: Opcode, word: u32) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let info = func[mem];
+    if !accessed(func, inst, plain).is_some_and(|ty| indivisible(ty, info, word)) {
+        return;
+    }
+    let (before, after) = match (plain, info.order) {
+        (Opcode::Load, MemOrder::SeqCst) => (Some(MemOrder::SeqCst), Some(MemOrder::Acquire)),
+        (Opcode::Load, _) => (None, Some(MemOrder::Acquire)),
+        (_, MemOrder::SeqCst) => (Some(MemOrder::Release), Some(MemOrder::SeqCst)),
+        _ => (Some(MemOrder::Release), None),
+    };
+    plainly(func, inst, plain, MemInfo { order: MemOrder::NotAtomic, ..info });
+    let span = func.span(inst);
+    if let Some(order) = before {
+        let fence = fence(func, order, span);
+        func.insert_before(fence, inst);
+    }
+    if let Some(order) = after {
+        let fence = fence(func, order, span);
+        func.insert_after(fence, inst);
+    }
+}
+
+/// A fence at that ordering, in no block yet.
+fn fence(func: &mut Func, order: MemOrder, span: Span) -> Inst {
+    let args = func.push_values(&[]);
+    let data = InstData { args, extra: Extra::Order(order), ..InstData::new(Opcode::Fence) };
+    func.create_inst(data, &[], span)
+}
+
+/// The type an ordered access moves, which is the value a store writes or the one a load reads.
+fn accessed(func: &Func, inst: Inst, plain: Opcode) -> Option<Type> {
+    match plain {
+        Opcode::Store => func[func[inst].args].first().map(|&value| func[value].ty),
+        _ => Some(produced(func, inst)),
+    }
+}
+
+/// The ordered access as the plain one, with the ordering taken off it.
+fn plainly(func: &mut Func, inst: Inst, plain: Opcode, unordered: MemInfo) {
     let plainly = func.add_mem(unordered);
     let data = &mut func[inst];
     data.opcode = plain;
@@ -3782,7 +3839,7 @@ mod tests {
     fn an_ordered_access_becomes_the_plain_one_this_machine_already_orders() {
         for order in [MemOrder::Relaxed, MemOrder::Acquire, MemOrder::SeqCst] {
             let (mut names, mut func) = reading(Type::int(32), 4, order);
-            orderings(&mut func, 8, true);
+            orderings(&mut func, 8, true, false);
             let text = printed(&func, &mut names);
             assert!(text.contains("load.i32"), "{order:?}: {text}");
             assert!(!text.contains("atomic_load"), "{order:?}: {text}");
@@ -3791,7 +3848,7 @@ mod tests {
 
         for order in [MemOrder::Relaxed, MemOrder::Release] {
             let (mut names, mut func) = writing(Type::int(32), 4, order);
-            orderings(&mut func, 8, true);
+            orderings(&mut func, 8, true, false);
             let text = printed(&func, &mut names);
             assert!(text.contains("store %1 -> %0"), "{order:?}: {text}");
             assert!(!text.contains("atomic_store"), "{order:?}: {text}");
@@ -3807,7 +3864,7 @@ mod tests {
     #[test]
     fn the_strongest_store_keeps_a_barrier_behind_it() {
         let (mut names, mut func) = writing(Type::int(32), 4, MemOrder::SeqCst);
-        orderings(&mut func, 8, true);
+        orderings(&mut func, 8, true, false);
         let text = printed(&func, &mut names);
         let (before, after) = text.split_once("fence seq_cst").expect("a barrier");
         assert!(before.contains("store %1 -> %0"), "the store comes first: {text}");
@@ -3821,20 +3878,61 @@ mod tests {
     #[test]
     fn a_weakly_ordered_machine_keeps_every_ordering_above_relaxed() {
         let (mut names, mut func) = reading(Type::int(32), 4, MemOrder::Relaxed);
-        orderings(&mut func, 8, false);
+        orderings(&mut func, 8, false, false);
         assert!(!printed(&func, &mut names).contains("atomic_load"), "relaxed is a plain load");
 
         for order in [MemOrder::Acquire, MemOrder::SeqCst] {
             let (mut names, mut func) = reading(Type::int(32), 4, order);
             let before = printed(&func, &mut names);
-            orderings(&mut func, 8, false);
+            orderings(&mut func, 8, false, false);
             assert_eq!(printed(&func, &mut names), before, "{order:?}");
         }
         for order in [MemOrder::Release, MemOrder::SeqCst] {
             let (mut names, mut func) = writing(Type::int(32), 4, order);
             let before = printed(&func, &mut names);
-            orderings(&mut func, 8, false);
+            orderings(&mut func, 8, false, false);
             assert_eq!(printed(&func, &mut names), before, "{order:?}");
+        }
+    }
+
+    /// On a machine that orders with fences an ordered access is the plain one with the fences
+    /// the RISC-V psABI puts around it, and a relaxed one is the plain one with none.
+    #[test]
+    fn a_machine_that_orders_with_fences_puts_them_around_the_plain_access() {
+        let fences = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter_map(|line| line.trim().strip_prefix("fence ").map(str::to_owned))
+                .collect()
+        };
+        for (order, before, after) in [
+            (MemOrder::Relaxed, &[][..], &[][..]),
+            (MemOrder::Acquire, &[][..], &["acquire"][..]),
+            (MemOrder::SeqCst, &["seq_cst"][..], &["acquire"][..]),
+        ] {
+            let (mut names, mut func) = reading(Type::int(32), 4, order);
+            orderings(&mut func, 8, false, true);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("atomic_load"), "{order:?}: {text}");
+            let (head, tail) = text.split_once("load.i32").expect("a plain load");
+            assert_eq!(fences(head), before, "{order:?}: {text}");
+            assert_eq!(fences(tail), after, "{order:?}: {text}");
+            let module = Module::new(names.intern("a.c"), &target());
+            rucc_ir::verify_func(&module, &func, &names).unwrap_or_else(|e| panic!("{e:?}"));
+        }
+        for (order, before, after) in [
+            (MemOrder::Relaxed, &[][..], &[][..]),
+            (MemOrder::Release, &["release"][..], &[][..]),
+            (MemOrder::SeqCst, &["release"][..], &["seq_cst"][..]),
+        ] {
+            let (mut names, mut func) = writing(Type::int(32), 4, order);
+            orderings(&mut func, 8, false, true);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("atomic_store"), "{order:?}: {text}");
+            let (head, tail) = text.split_once("store %1 -> %0").expect("a plain store");
+            assert_eq!(fences(head), before, "{order:?}: {text}");
+            assert_eq!(fences(tail), after, "{order:?}: {text}");
+            let module = Module::new(names.intern("a.c"), &target());
+            rucc_ir::verify_func(&module, &func, &names).unwrap_or_else(|e| panic!("{e:?}"));
         }
     }
 
@@ -3848,7 +3946,7 @@ mod tests {
                 build.ret(&[]);
             });
             let before = printed(&func, &mut names);
-            orderings(&mut func, 8, true);
+            orderings(&mut func, 8, true, false);
             assert_eq!(printed(&func, &mut names), before, "{order:?}");
         }
     }
@@ -3862,7 +3960,7 @@ mod tests {
     fn an_access_this_machine_cannot_do_in_one_go_is_left_alone() {
         for (ty, align) in [(Type::int(128), 16), (Type::int(64), 4)] {
             let (mut names, mut func) = reading(ty, align, MemOrder::SeqCst);
-            orderings(&mut func, 8, true);
+            orderings(&mut func, 8, true, false);
             assert!(printed(&func, &mut names).contains("atomic_load"), "left as it was");
         }
     }
@@ -3878,7 +3976,7 @@ mod tests {
                 if !order.is_valid_for_load() && !order.is_valid_for_store() {
                     continue;
                 }
-                orderings(&mut func, 8, true);
+                orderings(&mut func, 8, true, false);
                 let module = Module::new(names.intern("a.c"), &target());
                 rucc_ir::verify_func(&module, &func, &names)
                     .unwrap_or_else(|e| panic!("{order:?}: {e:?}"));
@@ -3893,7 +3991,7 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        orderings(&mut func, 8, true);
+        orderings(&mut func, 8, true, false);
         assert_eq!(printed(&func, &mut names), before);
     }
 

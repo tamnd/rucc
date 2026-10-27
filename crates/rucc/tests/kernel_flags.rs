@@ -37,6 +37,7 @@ fn cc_option(target: &str, flag: &str) -> bool {
 
 const X86: &str = "x86_64-unknown-linux-gnu";
 const ARM64: &str = "aarch64-unknown-linux-gnu";
+const RISCV: &str = "riscv64-linux-gnu";
 
 #[test]
 fn a_flag_that_asks_for_what_happens_passes_the_probe() {
@@ -68,6 +69,7 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
     assert!(cc_option(ARM64, "-mno-outline-atomics"));
     assert!(cc_option(ARM64, "-fzero-call-used-regs=used-gpr"));
     assert!(cc_option(ARM64, "-fzero-call-used-regs=all"));
+    assert!(cc_option(RISCV, "-fzero-call-used-regs=used-gpr"));
     assert!(cc_option(ARM64, "-mbranch-protection=pac-ret+leaf+bti"));
     assert!(cc_option(ARM64, "-msign-return-address=all"));
 }

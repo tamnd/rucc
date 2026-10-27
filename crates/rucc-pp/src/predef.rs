@@ -584,6 +584,11 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // another processor, and there is nothing cheap that would catch it. The driver takes a three
     // field triple, so a target this cannot spell is one nobody can ask for yet rather than a
     // hole in what it answers.
+    // The riscv32 row, which a riscv64 target builds the compat vDSO's assembly for.
+    if target.tuple.arch() == rucc_tuple::Arch::Riscv32 {
+        riscv(d, opts, 32);
+        return;
+    }
     let Some(triple) = Triple::from_tuple(target.tuple) else {
         return;
     };
@@ -699,30 +704,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                 SignReturn::All => d.set("__ARM_FEATURE_PAC_DEFAULT", "5"),
             }
         }
-        Arch::Riscv64 => {
-            d.flag("__riscv");
-            d.set("__riscv_xlen", "64");
-            // The float registers, for as long as a unit may keep a `double` in one. A unit built
-            // for a machine without the D extension, or for the convention that passes a float in
-            // the integer registers, has none, which is how the kernel builds.
-            if opts.vector {
-                d.set("__riscv_flen", "64");
-            }
-            d.flag(if opts.soft_float {
-                "__riscv_float_abi_soft"
-            } else {
-                "__riscv_float_abi_double"
-            });
-            d.flag("__riscv_muldiv");
-            d.flag("__riscv_atomic");
-            d.flag("__riscv_compressed");
-            // The kernel's `setup_vm` reads the second, since it runs before the kernel is where it
-            // was linked.
-            match opts.code_model {
-                CodeModel::Medany => d.set("__riscv_cmodel_medany", "1"),
-                _ => d.set("__riscv_cmodel_medlow", "1"),
-            }
-        }
+        Arch::Riscv64 => riscv(d, opts, 64),
         Arch::X86 => {
             d.flag("__i386__");
             d.flag("__i386");
@@ -992,6 +974,28 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 ///
 /// These are defined for assembly too, as gcc does, because an assembly file that has `endbr64`
 /// at each entry and the property note only when `__CET__` says so is the usual way to write one.
+/// The RISC-V macros, for a machine whose registers are `xlen` bits wide.
+fn riscv(d: &mut Defs, opts: &Predef, xlen: u32) {
+    d.flag("__riscv");
+    d.set("__riscv_xlen", &xlen.to_string());
+    // The float registers, for as long as a unit may keep a `double` in one. A unit built for a
+    // machine without the D extension, or for the convention that passes a float in the integer
+    // registers, has none, which is how the kernel builds.
+    if opts.vector {
+        d.set("__riscv_flen", "64");
+    }
+    d.flag(if opts.soft_float { "__riscv_float_abi_soft" } else { "__riscv_float_abi_double" });
+    d.flag("__riscv_muldiv");
+    d.flag("__riscv_atomic");
+    d.flag("__riscv_compressed");
+    // The kernel's `setup_vm` reads the second, since it runs before the kernel is where it was
+    // linked.
+    match opts.code_model {
+        CodeModel::Medany => d.set("__riscv_cmodel_medany", "1"),
+        _ => d.set("__riscv_cmodel_medlow", "1"),
+    }
+}
+
 fn hardening(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     match opts.protector {
         Protector::None => {}

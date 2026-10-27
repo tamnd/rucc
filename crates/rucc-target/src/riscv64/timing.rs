@@ -87,6 +87,9 @@ fn plain(form: Form) -> Timing {
         JumpReg | Call | Ret => (2, Unit::Branch),
         RetVal | RetVal2 | RetValFp | RetVal2Fp | ArgVal | ArgValFp | BrCond => (0, Unit::Free),
         Barrier | Trap | Nop | Template => (1, Unit::Fixed),
+        // An atomic goes to memory and back whatever the cache holds, and the ones that are loops
+        // are priced as the one time round they take when nothing else wants the line.
+        Amo | AmoNegated | CompareSwap | CompareSwapMasked => (LOAD + 1, Unit::Fixed),
     };
     Timing { latency, unit }
 }
