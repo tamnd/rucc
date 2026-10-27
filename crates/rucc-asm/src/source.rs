@@ -1664,9 +1664,10 @@ impl Reader {
             self.row()?;
             return self.put(&value.to_le_bytes()[..length as usize]);
         }
-        // `simm12(rs1)` is two of the fields.
+        // `simm12(rs1)` is two of the fields. The offset can be in brackets of its own, as in the
+        // kernel's `((offset) & 0xfe0)(a0)` for a prefetch, so the register is in the last pair.
         if let Some(last) = fields.pop() {
-            match last.strip_suffix(')').and_then(|inner| inner.split_once('(')) {
+            match last.strip_suffix(')').and_then(|inner| inner.rsplit_once('(')) {
                 Some((offset, base)) if format != "r" => {
                     fields.push(base.trim());
                     fields.push(if offset.trim().is_empty() { "0" } else { offset.trim() });
@@ -7305,6 +7306,7 @@ _tls$tlv$init:
                 "\t.insn i 19, 6, x0, a0, -32\n",
                 "\t.insn i 3, 3, a0, 8(sp)\n",
                 "\t.insn s 35, 3, a1, -8(sp)\n",
+                "\t.insn s 19, 6, x3, ((32) & 0xfe0)(a0)\n",
                 "\t.insn 0x0001\n",
                 "\t.insn 2, 0x4505\n",
             ),
@@ -7323,6 +7325,7 @@ _tls$tlv$init:
             0xfe05_6013,
             0x0081_3503,
             0xfeb1_3c23,
+            0x0235_6013,
         ] {
             bytes.extend(word.to_le_bytes());
         }
