@@ -349,10 +349,10 @@ impl Step {
             Self::Switches => {
                 switched.extend(switch::lowered(func, goal, force, tables, conv.word * 8))
             }
-            Self::Retries => retry::loops(func, conv.word),
+            Self::Retries => retry::loops(func, conv.word, conv.rmw_bits),
             Self::Fills => fills::loops(func, names, conv.word, conv.unaligned, goal),
             Self::Orderings => {
-                expand::orderings(func, conv.word, conv.total_store_order);
+                expand::orderings(func, conv.word, conv.total_store_order, conv.fenced);
                 locked::ordered(func, names, conv);
             }
             Self::Overflows => expand::overflows(func, conv.word * 8),

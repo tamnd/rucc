@@ -322,6 +322,8 @@ pub static LP64D: CallRegs = CallRegs {
     word: 8,
     // RVWMO is weakly ordered, so an acquire and a release each need a fence or an AMO.
     total_store_order: false,
+    fenced: true,
+    rmw_bits: 32,
     // The base ISA lets an implementation trap a misaligned access, and Linux then emulates it a
     // thousand times slower, so a copy keeps to the alignment it was given.
     unaligned: false,

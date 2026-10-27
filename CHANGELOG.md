@@ -38,6 +38,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 assembler takes the vector crypto extensions the kernel's crypto code is written with (Zvkned, Zvknha, Zvknhb, Zvkg, Zvksed, Zvksh, Zvkb and Zvbb), along with the strided, segment and indexed loads and stores, slides, merges and widening moves that code uses, and a constant operand of a vector instruction can be an expression (#3919).
 - The riscv64 assembler takes `.reloc` with `R_RISCV_SET_ULEB128` and `R_RISCV_SUB_ULEB128` and writes them as they were asked for, so the kernel's `AS_HAS_ULEB128` probe passes and its module loader test for the pair is built (#3920).
 - `-fzero-call-used-regs=` is taken on riscv64 and clears the registers gcc clears, the integer ones with `li` and the float ones with `fmv.d.x`, so the kernel's `CC_HAS_ZERO_CALL_USED_REGS` probe passes there as it does on x86-64 and arm64 (#3921).
+- RISC-V atomics: fences at every ordering, acquiring loads and releasing stores with the psABI fences around them, `amoswap` and `amoadd` for an exchange or an add of a word or a doubleword, and `lr` and `sc` loops for a compare and exchange, with a masked loop on the word for a byte or a half. Before this an acquire fence wrote nothing and the rest was refused. `-Wa,-mno-relax` is now taken on RISC-V (#3923).
 
 ### Fixed
 
