@@ -588,6 +588,8 @@ struct Reader {
     long: Set<usize>,
     /// How many branches with a two byte form have been read so far.
     branches: usize,
+    /// Whether `.end` has been read, after which gas reads nothing more of the file.
+    ended: bool,
     /// Every alignment in the file, in the order it was written.
     aligns: Vec<Aligned>,
     /// Where every name was when the pass before this one ended, which is the place a label
@@ -713,6 +715,9 @@ impl Reader {
             }
             let line = self.strip(raw, &mut commenting)?;
             self.feed(&line)?;
+            if self.ended {
+                break;
+            }
         }
         if commenting {
             return Err(self.bad("a block comment was opened and never closed"));
@@ -1085,7 +1090,19 @@ impl Reader {
                 Some(open) => {
                     constant(&text[..open]).map(|number| format!("{number}{}", &text[open..]))
                 }
-                None => constant(text).map(|number| number.to_string()),
+                None => constant(text).map(|number| number.to_string()).or_else(|| {
+                    // A name with a sum after it, `init_thread_union + THREAD_SIZE`, keeps the
+                    // name and has the sum worked out, from zero so the signs come out right.
+                    let at = text.find(['+', '-']).filter(|&at| at > 0)?;
+                    let name = text[..at].trim();
+                    let named =
+                        name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._$".contains(&b));
+                    if !named || name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+                        return None;
+                    }
+                    let number = constant(&format!("0{}", &text[at..]))?;
+                    Some(format!("{name}{number:+}"))
+                }),
             };
             pieces.push(worked.unwrap_or_else(|| text.to_owned()));
         }
@@ -2498,6 +2515,7 @@ impl Reader {
             // refusing would turn a note into a failure.
             "ident" if self.elf() => self.ident(&args)?,
             "ident" | "loc_mark_labels" | "version" | "arch" | "arch_extension" | "cpu" => {}
+            "end" => self.ended = true,
             "att_syntax" | "intel_syntax" => self.intel = !self.aarch64 && word == "intel_syntax",
             "code32" | "code64" if !self.aarch64 => {
                 self.code = Some(if word == "code32" { Mode::Bits32 } else { Mode::Bits64 });
@@ -6984,6 +7002,36 @@ _tls$tlv$init:
                 (12, ".Lpcrel_hi0", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
                 (16, "size", Reference::Riscv(riscv64::Fixup::PcrelHi20), 0),
                 (20, ".Lpcrel_hi1", Reference::Riscv(riscv64::Fixup::PcrelLo12S), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_riscv_name_with_a_sum_after_it_keeps_the_name_and_end_stops_the_file() {
+        // `head.S` sets up the first stack with `la sp, init_thread_union + THREAD_SIZE`, and the
+        // purgatory's `entry.S` ends with `.end`.
+        let read = match read(
+            concat!(
+                "\tlla a0, base + ((1 << 12) << 2) - 4\n",
+                "\tlla a1, base - 1 + 2\n",
+                "\t.end\n",
+                "\tnot read at all\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let text = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        assert_eq!(
+            relocs,
+            [
+                (0, "base", Reference::Riscv(riscv64::Fixup::PcrelHi20), 16380),
+                (4, ".Lpcrel_hi0", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
+                (8, "base", Reference::Riscv(riscv64::Fixup::PcrelHi20), 1),
+                (12, ".Lpcrel_hi1", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
             ]
         );
     }

@@ -69,7 +69,11 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
             }
         };
     }
-    let target = rucc_target::TargetInfo::new(opts.target);
+    let mut target = rucc_target::TargetInfo::new(opts.target);
+    // `-mabi=lp64` is in the object's flags as it is for C, or ld refuses to link the two.
+    if opts.soft_float {
+        target.tuple = target.tuple.with_abi(rucc_tuple::Abi::SoftFloat);
+    }
     let flags = rucc_asm::Flags {
         fatal_warnings: opts.asm_fatal_warnings,
         noexecstack: opts.asm_noexecstack,
