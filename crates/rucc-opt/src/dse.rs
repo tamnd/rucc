@@ -38,11 +38,28 @@
 //! What counts as covering is only a store whose address has the same origin as this one and a
 //! known offset from it, which is the same address. The oracle's "may" is never enough to kill,
 //! only to keep, so a question the oracle cannot answer costs an optimization and not a program.
+//!
+//! # Stores of zero into zeros
+//!
+//! The other half of gcc's definition is the redundant store, one that writes the value memory
+//! already holds. The case that matters is zero. Under `-ftrivial-auto-var-init=zero` every local
+//! is filled with zeros first, and an initializer or a run of `vms->x = 0` after it writes the
+//! same zeros again: `do_vmi_align_munmap` in mm/vma.c wrote zero twice into most of the fields
+//! of its two structs. After the walks, one pass over the blocks in reverse postorder follows which
+//! bytes of which objects hold zero, and a store of zero, or a fill with zero, into bytes that all
+//! do on every path into it goes. A block entered from a block not yet seen, which is a loop
+//! coming round, starts knowing nothing. The type rule is gcc's: bytes a fill zeroed take a later
+//! store of any type, and bytes a store zeroed only take a later one with the same type node. A
+//! fill the walks found dead zeroes nothing, and one they narrowed zeroes only what is left of it,
+//! so the zeros followed are those of the function after the walks' edits. Without that the fill
+//! in `cp_new_stat` would go because the stores of zero after it cover it, and then those stores
+//! would go because the fill had zeroed their bytes.
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::DSE_WALK_LIMIT;
 use rucc_ir::{
-    Block, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Type, Value,
+    Block, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Meta, Opcode, Restrict,
+    Type, Value,
 };
 
 use crate::alias::{Access, Alias, Origin};
@@ -57,6 +74,13 @@ pub const NAME: &str = "dse";
 /// Recorded for a store removed because nothing can read what it wrote.
 const REMOVED: &str =
     "store removed, nothing reads it before it is overwritten or goes out of scope";
+
+/// Recorded for a store of zero into bytes that already hold zero.
+const SAME: &str = "store removed, the bytes it writes already hold zero";
+
+/// The most spans of zeros followed at once, which keeps a block's meeting of its predecessors
+/// small. A fill and the stores that cut it up after it are a handful.
+const ZEROS: usize = 32;
 
 /// Recorded for a fill or a copy narrowed to the bytes something may read.
 const TRIMMED: &str = "fill or copy narrowed to the bytes something may still read";
@@ -118,6 +142,13 @@ impl Pass for Dse {
                     }
                 }
             }
+            // The zeros are followed through the function as it is once the walks' edits are
+            // made, which is what makes taking a store out on top of those edits sound.
+            let decided: Map<Inst, Fate> = fates.iter().copied().collect();
+            let same = walk.zeroed(&decided);
+            let gone: Set<Inst> = same.iter().copied().collect();
+            fates.retain(|(inst, _)| !gone.contains(inst));
+            fates.extend(same.into_iter().map(|inst| (inst, Fate::Same)));
         }
         // The distance a narrowed fill moves its address by is an integer as wide as an address,
         // since a wider one is a value a 32-bit target has no instruction to add. Sixty four when
@@ -136,6 +167,10 @@ impl Pass for Dse {
                     func.remove_inst(inst);
                     stats.optimized(REMOVED);
                 }
+                Fate::Same => {
+                    func.remove_inst(inst);
+                    stats.optimized(SAME);
+                }
                 Fate::Trim { skip, size } => {
                     trim(func, inst, skip, size, bits);
                     stats.optimized(TRIMMED);
@@ -152,6 +187,8 @@ impl Pass for Dse {
 enum Fate {
     /// Nothing reads a byte of it.
     Dead,
+    /// It writes zero into bytes that already hold zero.
+    Same,
     /// Only these bytes may be read, this many past its start, and they are all at one end.
     Trim { skip: i64, size: u64 },
     /// Something may read it, or a path from it goes round a loop.
@@ -383,6 +420,195 @@ impl Walk<'_> {
     }
 }
 
+/// Bytes of one object known to hold zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Zeros {
+    origin: Origin,
+    lo: i128,
+    hi: i128,
+    /// `None` when a fill zeroed them, after which a store of zero of any type into them may go,
+    /// and the type node of the store that did otherwise, which a later store must have too.
+    tbaa: Option<Option<Meta>>,
+}
+
+impl Zeros {
+    /// The bytes as a question to the oracle, with no type, which can only make it answer may.
+    fn access(&self) -> Access {
+        Access {
+            origin: self.origin,
+            offset: i64::try_from(self.lo).ok(),
+            size: u64::try_from(self.hi - self.lo).ok(),
+            tbaa: None,
+            restrict: Restrict::NONE,
+            volatile: false,
+        }
+    }
+}
+
+impl Walk<'_> {
+    /// The stores of zero into bytes that hold zero on every path to them, in the function as it
+    /// is once the stores the walks decided on are removed or narrowed.
+    fn zeroed(&mut self, decided: &Map<Inst, Fate>) -> Vec<Inst> {
+        let mut same = Vec::new();
+        let mut out: Map<Block, Vec<Zeros>> = Map::default();
+        let order: Vec<Block> = self.cfg.reverse_postorder().collect();
+        for block in order {
+            let mut known = self.entered(block, &out);
+            for inst in self.func.insts(block) {
+                let opcode = self.func[inst].opcode;
+                if !opcode.writes_memory() || opcode.touches_only_planes() {
+                    continue;
+                }
+                let mut zeros = self.zeros(inst);
+                match decided.get(&inst) {
+                    Some(Fate::Dead) => continue,
+                    Some(&Fate::Trim { skip, size }) => {
+                        zeros = zeros.map(|zeros| {
+                            let lo = zeros.lo + i128::from(skip);
+                            Zeros { lo, hi: lo + i128::from(size), ..zeros }
+                        });
+                    }
+                    _ => {}
+                }
+                if zeros.is_some_and(|zeros| holds(&known, &zeros)) {
+                    same.push(inst);
+                    continue;
+                }
+                self.forget(inst, &mut known);
+                if let Some(zeros) = zeros.filter(|_| known.len() < ZEROS) {
+                    known.push(zeros);
+                }
+            }
+            out.insert(block, known);
+        }
+        same
+    }
+
+    /// The zeros every edge into this block brings, which is nothing if an edge comes from a block
+    /// not yet seen.
+    fn entered(&self, block: Block, out: &Map<Block, Vec<Zeros>>) -> Vec<Zeros> {
+        let mut preds = self.cfg.predecessors(block).iter().map(|pred| out.get(pred));
+        let Some(Some(first)) = preds.next() else { return Vec::new() };
+        let mut known = first.clone();
+        for pred in preds {
+            let Some(pred) = pred else { return Vec::new() };
+            known = meet(&known, pred);
+        }
+        known
+    }
+
+    /// The zeros this instruction writes, when it is a plain store of zero or a fill with zero of
+    /// bytes the compiler knows.
+    fn zeros(&self, inst: Inst) -> Option<Zeros> {
+        let data = &self.func[inst];
+        let value = match data.opcode {
+            Opcode::Store => self.func[data.args][0],
+            Opcode::Memset => self.func.bulk(inst)?.with,
+            _ => return None,
+        };
+        if data.flags.contains(Flags::VOLATILE) || data.results().next().is_some() {
+            return None;
+        }
+        if self.func.mem_in(inst).is_some() || !plain(self.func, inst) || !zero(self.func, value) {
+            return None;
+        }
+        let access = self.alias.writes(inst)?;
+        let (lo, hi) = access.range().filter(|(lo, hi)| lo < hi)?;
+        let tbaa = (data.opcode == Opcode::Store).then_some(access.tbaa);
+        Some(Zeros { origin: access.origin, lo, hi, tbaa })
+    }
+
+    /// Takes out of what is known the bytes this instruction may write.
+    fn forget(&mut self, inst: Inst, known: &mut Vec<Zeros>) {
+        if known.is_empty() {
+            return;
+        }
+        let opcode = self.func[inst].opcode;
+        // What another thread wrote may become visible here, to anything but a local nobody else
+        // has the address of.
+        if matches!(opcode, Opcode::Fence | Opcode::AtomicRmw | Opcode::Cmpxchg)
+            || !plain_order(self.func, inst)
+        {
+            known.retain(|zeros| match zeros.origin {
+                Origin::Local(local) => !self.alias.escapes().escaped(local),
+                _ => false,
+            });
+        }
+        let before = std::mem::take(known);
+        if matches!(opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall) {
+            for zeros in before {
+                if self.alias.clobbered_by(&zeros.access(), inst).is_no() {
+                    known.push(zeros);
+                }
+            }
+            return;
+        }
+        let Some(write) = self.alias.writes(inst) else { return };
+        for zeros in before {
+            if zeros.origin != write.origin {
+                if self.alias.query(&zeros.access(), &write).is_no() {
+                    known.push(zeros);
+                }
+                continue;
+            }
+            // The same object, where only the bytes the write covers go, and all of them when the
+            // write does not say which.
+            let Some((start, end)) = write.range() else { continue };
+            if end <= zeros.lo || zeros.hi <= start {
+                known.push(zeros);
+                continue;
+            }
+            if zeros.lo < start {
+                known.push(Zeros { hi: start, ..zeros });
+            }
+            if end < zeros.hi {
+                known.push(Zeros { lo: end, ..zeros });
+            }
+        }
+    }
+}
+
+/// The zeros known on both of two edges.
+fn meet(a: &[Zeros], b: &[Zeros]) -> Vec<Zeros> {
+    let mut both = Vec::new();
+    for x in a {
+        for y in b.iter().filter(|y| y.origin == x.origin) {
+            let tbaa = match (x.tbaa, y.tbaa) {
+                (None, tbaa) | (tbaa, None) => tbaa,
+                (Some(s), Some(t)) if s == t => Some(s),
+                _ => continue,
+            };
+            let (lo, hi) = (x.lo.max(y.lo), x.hi.min(y.hi));
+            if lo < hi && both.len() < ZEROS {
+                both.push(Zeros { origin: x.origin, lo, hi, tbaa });
+            }
+        }
+    }
+    both
+}
+
+/// Whether every byte this writes already holds zero, in spans whose type allows it.
+fn holds(known: &[Zeros], store: &Zeros) -> bool {
+    let mut left = Live::new(store.lo, store.hi);
+    for zeros in known.iter().filter(|zeros| zeros.origin == store.origin) {
+        if zeros.tbaa.is_none() || zeros.tbaa == store.tbaa {
+            left.remove(zeros.lo, zeros.hi);
+        }
+    }
+    left.is_empty()
+}
+
+/// Whether this value is the constant zero, or the null pointer made from it, which is how the
+/// front end writes a null pointer constant.
+fn zero(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    match (func[inst].opcode, func[inst].extra) {
+        (Opcode::IConst, Extra::Imm(at)) => func[at].bits() == 0,
+        (Opcode::IntToPtr, _) => zero(func, func[func[inst].args][0]),
+        _ => false,
+    }
+}
+
 /// Whether this access is an ordinary one: not atomic, and of a length the compiler knows.
 fn plain(func: &Func, inst: Inst) -> bool {
     plain_order(func, inst) && func.bulk(inst).is_none_or(|bulk| bulk.length.is_none())
@@ -502,6 +728,8 @@ fn emit(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rucc_base::Interner;
 
     use super::Dse;
@@ -518,12 +746,14 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        // What says how wide an address is, which a store of a pointer needs to have a size.
+        let outside = Arc::new(crate::Outside::of(&module));
         let ids: Vec<_> = module.funcs().collect();
         for id in ids {
             if module[id].is_declaration() {
                 continue;
             }
-            let mut an = crate::machine::fixtures::analyses();
+            let mut an = crate::machine::fixtures::analyses().about(Arc::clone(&outside));
             Dse.run(&mut module[id], &mut an, fuel);
         }
         if let Err(errors) = rucc_ir::verify(&module, &names) {
@@ -724,7 +954,7 @@ block0(%0: ptr):
         let mut names = Interner::new();
         let mut module = rucc_ir::parse(&format!("{head}{body}"), &mut names).expect("it parses");
         // What says how wide an address is, which a module the driver hands the pass always has.
-        let outside = std::sync::Arc::new(crate::Outside::of(&module));
+        let outside = Arc::new(crate::Outside::of(&module));
         let id = module.funcs().next().expect("one function");
         let mut an = crate::machine::fixtures::analyses().about(outside);
         Dse.run(&mut module[id], &mut an, &mut Fuel::unlimited());
@@ -903,6 +1133,120 @@ block2:
 "#,
         );
         assert_eq!(stores(&out), 2, "{out}");
+    }
+
+    /// A fill whose middle the call reads around, then a store of zero into that middle after the
+    /// two arms meet: the store goes when neither arm writes there, and stays when one arm writes
+    /// something else there that a call reads.
+    #[test]
+    fn a_store_of_zero_into_bytes_every_path_zeroed_goes() {
+        let zeroed = |left: &str| {
+            format!(
+                r#"
+func @use(ptr), linkage(external);
+
+func @f(ptr, i1), linkage(external) {{
+block0(%0: ptr, %1: i1):
+    %2 = iconst.i8 0
+    memset %0, %2, size 16, align 8
+    %3 = iconst.i64 4
+    %4 = ptr_add %0, %3
+    br_if %1, block1, block2
+block1:
+    {left}
+    jump block3
+block2:
+    jump block3
+block3:
+    %6 = iconst.i32 0
+    store %6 -> %4, align 4
+    call @use(%0) : (ptr)
+    return
+}}
+"#
+            )
+        };
+        let out = cleaned(&zeroed("%5 = iconst.i32 0"));
+        assert!(out.contains("memset"), "{out}");
+        assert_eq!(stores(&out), 0, "{out}");
+        let out = cleaned(&zeroed(
+            "%5 = iconst.i32 7\n    store %5 -> %4, align 4\n    call @use(%0) : (ptr)",
+        ));
+        assert_eq!(stores(&out), 2, "the arm stores seven there, {out}");
+    }
+
+    /// A null pointer is zero too, which the front end writes as an integer zero made a pointer.
+    #[test]
+    fn a_store_of_a_null_pointer_into_zeros_goes() {
+        let out = cleaned(
+            r#"
+func @use(ptr), linkage(external);
+
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i8 0
+    memset %0, %1, size 16, align 8
+    %2 = iconst.i64 0
+    %3 = inttoptr.ptr %2
+    %4 = iconst.i64 4
+    %5 = ptr_add %0, %4
+    store %3 -> %5, align 4
+    call @use(%0) : (ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("memset"), "{out}");
+        assert_eq!(stores(&out), 0, "{out}");
+    }
+
+    /// A fill the stores after it cover goes, and then the stores of zero among them are what
+    /// zeroes their bytes and stay, the way `cp_new_stat` zeroes `__pad0`.
+    #[test]
+    fn a_store_of_zero_into_a_fill_that_goes_stays() {
+        let out = cleaned(
+            r#"
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i8 0
+    memset %0, %1, size 8, align 8
+    %2 = iconst.i32 0
+    store %2 -> %0, align 4
+    %3 = iconst.i64 4
+    %4 = ptr_add %0, %3
+    %5 = iconst.i32 1
+    store %5 -> %4, align 4
+    return
+}
+"#,
+        );
+        assert!(!out.contains("memset"), "{out}");
+        assert_eq!(stores(&out), 2, "{out}");
+    }
+
+    /// Zero stored twice with the same type goes the second time, and with another type stays,
+    /// which is gcc's rule for a store that is not a fill.
+    #[test]
+    fn a_store_of_zero_after_a_store_of_zero_goes_only_with_the_same_type() {
+        let twice = |second: &str| {
+            format!(
+                r#"
+func @f(ptr) -> i32, linkage(external) {{
+block0(%0: ptr):
+    %1 = iconst.i32 0
+    store %1 -> %0, align 4, tbaa !1
+    %2 = load.i32 %0, align 4, tbaa !1
+    store %1 -> %0, align 4, tbaa {second}
+    return %2
+}}
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0
+!2 = tbaa "float", parent !0, offset 0
+"#
+            )
+        };
+        assert_eq!(stores(&cleaned(&twice("!1"))), 1);
+        assert_eq!(stores(&cleaned(&twice("!2"))), 2);
     }
 
     /// Fuel stops the removal and not the walk.
