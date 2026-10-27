@@ -291,19 +291,28 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         // from here on is the line that used the macro and the source map can no longer tell.
         // `-Wsystem-headers` is how somebody porting a header hears all of it, so it keeps
         // these as well.
-        // Consecutive tokens of an expansion are nearly always spelled in the same file, so the
-        // file the last one was in is tried before the search over every file.
+        // Consecutive tokens of an expansion are nearly always spelled in one of a few files, the
+        // header the macro is in and the file its arguments came from, so the files the last few
+        // were in are tried before the search over every file. With only the last one tried, the
+        // search was one percent of a build of net/ipv4/tcp_cubic.c.
         let quiet = !opts.system_header_warnings;
-        let mut last: Option<&SourceFile> = None;
+        let mut recent: [Option<&SourceFile>; 4] = [None; 4];
         tokens
             .iter()
             .map(|token| {
                 let mut out = token.to_pp();
                 if quiet && !token.expansion.is_dummy() {
                     let pos = sess.sources.real(token.span.lo);
-                    if !last.is_some_and(|file| file.contains(pos)) {
-                        last = sess.sources.lookup_file(pos).map(|id| sess.sources.file(id));
+                    let hit = recent.iter().position(|file| file.is_some_and(|f| f.contains(pos)));
+                    match hit {
+                        Some(at) => recent[..=at].rotate_right(1),
+                        None => {
+                            recent.rotate_right(1);
+                            recent[0] =
+                                sess.sources.lookup_file(pos).map(|id| sess.sources.file(id));
+                        }
                     }
+                    let last = recent[0];
                     if last.is_some_and(|file| file.system_from.is_some_and(|from| pos >= from)) {
                         out.flags = out.flags.with(TokenFlags::SYSTEM_MACRO);
                     }
