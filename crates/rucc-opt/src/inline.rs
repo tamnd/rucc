@@ -674,18 +674,109 @@ fn settle_operands(func: &mut Func) {
     }
 }
 
-/// The names the module reaches by exactly one direct call and in no other way.
+/// The names the module reaches by exactly one direct call that can run and in no other way.
 ///
 /// Any other way is a second call, a tail call, an instruction that takes the address, an image
-/// that holds it, or an alias that names it. Whether a name is a `static` function that may be
-/// inlined is for the caller to ask.
+/// that holds it, or an alias that names it. A call in a block the constants say never runs is
+/// not counted, because gcc has folded it away by the time it counts. In mm/memory.c the
+/// `do_pte_missing` in `pte_marker_handle_uffd_wp` is behind `userfaultfd_wp`, which is false
+/// without `CONFIG_USERFAULTFD`, and counted, it left `do_anonymous_page` and `do_fault` with two
+/// calls each and out of line. Whether a name is a `static` function that may be inlined is for
+/// the caller to ask.
 fn called_once(module: &Module) -> Set<Symbol> {
-    let (calls, elsewhere) = references(module);
+    let (_, elsewhere) = references(module);
+    let mut calls: Map<Symbol, usize> = Map::default();
+    for id in module.funcs() {
+        let func = &module[id];
+        if func.is_declaration() {
+            continue;
+        }
+        let running = running(func);
+        for &block in &running {
+            for inst in func.insts(block) {
+                let Extra::Call(info) = func[inst].extra else { continue };
+                if func[inst].opcode != Opcode::Call {
+                    continue;
+                }
+                if let Some(callee) = func[info].callee {
+                    *calls.entry(callee).or_default() += 1;
+                }
+            }
+        }
+    }
     calls
         .into_iter()
         .filter(|&(name, count)| count == 1 && !elsewhere.contains(&name))
         .map(|(name, _)| name)
         .collect()
+}
+
+/// The blocks of a function that can run, going by the branches whose condition is a constant.
+///
+/// A block reached by one edge has the values that edge passes, so the constant a call left once
+/// its body went in, which comes back through the block after the call, decides the branch on it
+/// there. A block reached by more than one edge knows nothing of its parameters, which is never
+/// wrong and is all the called once rule needs.
+fn running(func: &Func) -> Set<Block> {
+    let mut edges: Map<Block, usize> = Map::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            for to in func.successors(inst) {
+                *edges.entry(to.block).or_default() += 1;
+            }
+        }
+    }
+    let mut values: Map<Value, (Imm, Type)> = Map::default();
+    let mut live = Set::default();
+    let mut work: Vec<Block> = func.entry().into_iter().collect();
+    live.extend(work.iter().copied());
+    while let Some(block) = work.pop() {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            let args = &func[data.args];
+            let found = {
+                let operand = |arg: Value| {
+                    values.get(&arg).copied().or_else(|| crate::fold::constant(func, arg))
+                };
+                let known = data.opcode != Opcode::IsConstant
+                    && args.iter().all(|&arg| operand(arg).is_some());
+                match data.opcode {
+                    // What `unlikely` wraps a condition in, which is the condition.
+                    Opcode::Expect => args.first().and_then(|&arg| operand(arg)),
+                    _ => known.then(|| computed(func, inst, &operand)).flatten(),
+                }
+            };
+            if let (Some(found), Some(result)) = (found, data.results().next()) {
+                values.insert(result, found);
+            }
+            if !func.is_terminator(inst) {
+                continue;
+            }
+            let operand =
+                |arg: Value| values.get(&arg).copied().or_else(|| crate::fold::constant(func, arg));
+            let decided = args
+                .first()
+                .and_then(|&arg| operand(arg))
+                .and_then(|(value, _)| goes_to(func, data, value));
+            let taken: Vec<BlockCall> = match decided {
+                Some(to) => vec![to],
+                None => func.successors(inst).collect(),
+            };
+            let mut bound = Vec::new();
+            for to in taken {
+                if edges.get(&to.block) == Some(&1) {
+                    let params = func[to.block].params.iter().copied();
+                    let passed = params.zip(func[to.args].iter().copied());
+                    bound.extend(passed.filter_map(|(param, arg)| Some((param, operand(arg)?))));
+                }
+                if live.insert(to.block) {
+                    work.push(to.block);
+                }
+            }
+            values.extend(bound);
+        }
+    }
+    live
 }
 
 /// The `static` functions reached by more than one direct call and in no other way whose copies,
@@ -1078,6 +1169,12 @@ fn settle(
             })
             .collect()
     };
+    // A call to a function called once that is in a block the constants say never runs is not
+    // the one call [`called_once`] counted, and a copy there would only be thrown away.
+    if calls.iter().any(|&(.., kind)| kind == Kind::Once) {
+        let running = running(&module[id]);
+        calls.retain(|&(block, _, _, kind)| kind != Kind::Once || running.contains(&block));
+    }
     // The calls to a function called once that are too many loops deep, found before anything is
     // spliced in, since a splice splits the block the call was in. Counted as gcc counts, so a
     // block in one loop is one deep, which is one more than `Loops::depth` says.
@@ -1154,13 +1251,17 @@ fn settle(
             Kind::Hinted => {
                 how.copy_size(module, callee, passed(&module[id], call, &module[callee]), None)
             }
-            Kind::Auto => how.copy_size(
+            // gcc's limit on a function called once is on its estimate of the body, which weighs
+            // each instruction as this does and leaves out what is free. Counted one apiece, the
+            // unfolded body is three or four times that, and `change_pte_range` in mm/mprotect.c
+            // came to 11554 against a limit of 4000 where weighed it is 3149 and gcc copies it.
+            Kind::Auto | Kind::Once => how.copy_size(
                 module,
                 callee,
                 passed(&module[id], call, &module[callee]),
                 Some(how.names),
             ),
-            Kind::Always | Kind::Once | Kind::Small => (size(&module[callee]), false),
+            Kind::Always | Kind::Small => (size(&module[callee]), false),
         };
         // A call to a function that never comes back is one gcc predicts is never made, so it
         // is no more hot than one in a cold function. `machine_real_restart` in

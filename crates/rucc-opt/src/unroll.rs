@@ -319,8 +319,12 @@ fn consider(
         if block != header && cfg.predecessors(block).iter().any(|at| !inside.contains(at)) {
             return Err(ENTRIES);
         }
+        // A loop that goes round once is not copied at all, it only loses its back edge, so what
+        // a copy could not carry is no reason to leave it. The kernel's `mk_vma_flags` is one:
+        // a loop over a one element list with `__set_bit`'s inline assembly in it, which kept the
+        // bit number from ever being a constant the assembly could take as an immediate.
         for inst in func.insts(block) {
-            if !copy::copyable(func, inst) {
+            if times > 1 && !copy::copyable(func, inst) {
                 return Err(PAYLOAD);
             }
         }
@@ -515,7 +519,7 @@ mod tests {
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        ADDRESSED, ESCAPES, EXITS, NO_COUNT, NO_FUEL, TOO_BIG, TOO_MANY, UNROLLED, Unroll,
+        ADDRESSED, ESCAPES, EXITS, NO_COUNT, NO_FUEL, PAYLOAD, TOO_BIG, TOO_MANY, UNROLLED, Unroll,
     };
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
@@ -631,6 +635,56 @@ mod tests {
         assert_eq!(tally(&it.func, Opcode::BrIf), 0);
         assert_eq!(it.func.blocks().count(), 4, "no block is added and none goes away");
         sound(&it.func, &mut it.names);
+    }
+
+    /// A loop holding inline assembly, which a copy cannot carry, read from text.
+    fn with_assembly(limit: i128) -> (Interner, Module) {
+        let text = format!(
+            r#"; ModuleID = 't.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @f() -> i32, linkage(external) {{
+block0:
+    %0 = iconst.i32 0
+    jump block1(%0)
+
+block1(%1: i32):
+    inline_asm.volatile "nop", "", "memory"()
+    %2 = iconst.i32 1
+    %3 = add.nsw %1, %2
+    %4 = iconst.i32 {limit}
+    %5 = icmp slt %3, %4
+    br_if %5, block1(%3), block2(%3)
+
+block2(%6: i32):
+    return %6
+}}
+"#
+        );
+        let mut names = Interner::new();
+        let module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        (names, module)
+    }
+
+    /// Going round once makes no copy, so the assembly in the body is no reason to keep the loop,
+    /// and going round three times still is.
+    #[test]
+    fn a_loop_that_runs_once_loses_its_back_edge_with_assembly_in_it() {
+        let (mut names, mut module) = with_assembly(1);
+        let id = module.funcs().next().expect("the fixture has a function");
+        let stats = unroll(&mut module[id], &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, UNROLLED), 1);
+        assert_eq!(tally(&module[id], Opcode::BrIf), 0);
+        assert_eq!(tally(&module[id], Opcode::InlineAsm), 1, "the body is kept as it was");
+        sound(&module[id], &mut names);
+
+        let (_, mut module) = with_assembly(3);
+        let id = module.funcs().next().expect("the fixture has a function");
+        let stats = unroll(&mut module[id], &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Missed, PAYLOAD), 1);
+        assert_eq!(tally(&module[id], Opcode::BrIf), 1);
     }
 
     #[test]
