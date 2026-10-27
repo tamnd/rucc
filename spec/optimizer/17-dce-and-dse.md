@@ -94,16 +94,18 @@ that use is a later store to the same location which post-dominates it, the firs
 Single use guarantees no intervening aliasing load. Post-dominance guarantees the later store
 actually executes.
 
-Two extensions GCC has and rucc should have.
+Three extensions GCC has and rucc should have.
 
 *Trimming.* A partially dead store, where a later store covers half of it, can be narrowed rather
 than removed. This matters for the common pattern of zeroing a struct and then filling in fields.
+
+*Redundant stores of zero.* A store of zero into bytes that already hold zero on every path to it can go. This is gcc's `dse_optimize_redundant_stores`, and it matters under `-ftrivial-auto-var-init=zero`, where every local is zeroed first and the fields the program then sets to zero are zeroed twice. rucc follows the bytes known to hold zero through the blocks in reverse postorder, after the dead store walks have decided, so that a fill they removed zeroes nothing. Bytes a fill zeroed take a later store of any type, and bytes a store zeroed only take a later store with the same type node, which is gcc's rule.
 
 *Stores dead at function exit.* A store to a local whose address does not escape is dead if nothing
 reads it before the function returns. This removes a great deal of code that C programmers write
 for clarity, and it depends on the escape analysis in document 08.4.
 
-The second one has a trap with a name: `memset` of a buffer holding a key, before returning, is
+The third one has a trap with a name: `memset` of a buffer holding a key, before returning, is
 dead by this rule and is removed, which is why `explicit_bzero` and `memset_s` exist. rucc must
 honour whatever mechanism it provides for this, and the simplest correct one is that a call to
 `explicit_bzero` is never removable, which follows from the whitelist rule in 17.1 if the function

@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A store of zero into bytes that already hold zero on every path to it is now removed, as gcc's dead store pass does it. Under `-ftrivial-auto-var-init=zero` the kernel fills each local with zeros and then sets many fields to zero again. In Linux 7.2.8 this takes 708 bytes out of `lib/maple_tree.o`, 192 out of `kernel/signal.o`, 176 out of `fs/read_write.o` and 176 out of `mm/vma.o` (#3938).
+
 ## 0.30.13
 
 This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow checks, the stack, global and alloca redzones, and the atomic checks. It also adds four UBSAN checks, `-finline-stringops`, more object size answers that agree with gcc, and faster NEON helpers on arm64.
