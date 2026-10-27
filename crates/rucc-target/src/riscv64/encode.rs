@@ -331,6 +331,31 @@ fn alu(mnemonic: &str) -> Option<(u32, u32, u32)> {
         "divuw" => (0x3b, 5, 1),
         "remw" => (0x3b, 6, 1),
         "remuw" => (0x3b, 7, 1),
+        // Zbb.
+        "andn" => (0x33, 7, 0x20),
+        "orn" => (0x33, 6, 0x20),
+        "xnor" => (0x33, 4, 0x20),
+        "min" => (0x33, 4, 0x05),
+        "minu" => (0x33, 5, 0x05),
+        "max" => (0x33, 6, 0x05),
+        "maxu" => (0x33, 7, 0x05),
+        "rol" => (0x33, 1, 0x30),
+        "ror" => (0x33, 5, 0x30),
+        "rolw" => (0x3b, 1, 0x30),
+        "rorw" => (0x3b, 5, 0x30),
+        // Zba.
+        "sh1add" => (0x33, 2, 0x10),
+        "sh2add" => (0x33, 4, 0x10),
+        "sh3add" => (0x33, 6, 0x10),
+        "add.uw" => (0x3b, 0, 0x04),
+        "sh1add.uw" => (0x3b, 2, 0x10),
+        "sh2add.uw" => (0x3b, 4, 0x10),
+        "sh3add.uw" => (0x3b, 6, 0x10),
+        // Zbs.
+        "bclr" => (0x33, 1, 0x24),
+        "bext" => (0x33, 5, 0x24),
+        "binv" => (0x33, 1, 0x34),
+        "bset" => (0x33, 1, 0x14),
         _ => return None,
     })
 }
@@ -359,6 +384,53 @@ fn shift_imm(mnemonic: &str) -> Option<(u32, u32, u32, u32)> {
         "slliw" => (0x1b, 1, 0, 5),
         "srliw" => (0x1b, 5, 0, 5),
         "sraiw" => (0x1b, 5, 0x20 << 5, 5),
+        "rori" => (0x13, 5, 0x18 << 6, 6),
+        "roriw" => (0x1b, 5, 0x30 << 5, 5),
+        "slli.uw" => (0x1b, 1, 0x02 << 6, 6),
+        "bclri" => (0x13, 1, 0x12 << 6, 6),
+        "bexti" => (0x13, 5, 0x12 << 6, 6),
+        "binvi" => (0x13, 1, 0x1a << 6, 6),
+        "bseti" => (0x13, 1, 0x0a << 6, 6),
+        _ => return None,
+    })
+}
+
+/// The opcode, the `funct3` and the twelve bits that pick the operation, of the bit manipulation
+/// instructions with one source register.
+fn unary(mnemonic: &str) -> Option<(u32, u32, i64)> {
+    Some(match mnemonic {
+        "clz" => (0x13, 1, 0x600),
+        "ctz" => (0x13, 1, 0x601),
+        "cpop" => (0x13, 1, 0x602),
+        "sext.b" => (0x13, 1, 0x604),
+        "sext.h" => (0x13, 1, 0x605),
+        "clzw" => (0x1b, 1, 0x600),
+        "ctzw" => (0x1b, 1, 0x601),
+        "cpopw" => (0x1b, 1, 0x602),
+        "zext.h" => (0x3b, 4, 0x080),
+        "rev8" => (0x13, 5, 0x6b8),
+        "orc.b" => (0x13, 5, 0x287),
+        _ => return None,
+    })
+}
+
+/// The form with a constant of a register instruction written with one, `and t2, t2, 7`, which
+/// llvm-mc reads as `andi` and the kernel's `strcmp.S` writes.
+fn with_constant(mnemonic: &str) -> Option<&'static str> {
+    Some(match mnemonic {
+        "add" => "addi",
+        "addw" => "addiw",
+        "and" => "andi",
+        "or" => "ori",
+        "xor" => "xori",
+        "slt" => "slti",
+        "sltu" => "sltiu",
+        "sll" => "slli",
+        "srl" => "srli",
+        "sra" => "srai",
+        "sllw" => "slliw",
+        "srlw" => "srliw",
+        "sraw" => "sraiw",
         _ => return None,
     })
 }
@@ -421,6 +493,8 @@ fn atomic(mnemonic: &str) -> Option<(u32, u32, u32)> {
         "amomax" => 0x14,
         "amominu" => 0x18,
         "amomaxu" => 0x1c,
+        // Zacas, compare and swap.
+        "amocas" => 0x05,
         // Zicfiss, the swap on the shadow stack.
         "ssamoswap" => 0x09,
         _ => return None,
@@ -580,6 +654,14 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
     let twelve = |imm: i64| if fits(imm, 12) { Ok(imm) } else { Err(immediate(imm)) };
     use Value::{Fpr, Gpr, Imm, Mem, Symbol};
 
+    if let (Some(constant), [Gpr(_), Gpr(_), Imm(_)]) = (with_constant(mnemonic), values) {
+        return encode(constant, values);
+    }
+    if let Some((op, f3, imm)) = unary(mnemonic) {
+        let [Gpr(rd), Gpr(rs)] = *values else { return Err(unwritten()) };
+        out.words.push(i(op, f3, rd, rs, imm));
+        return Ok(out);
+    }
     if let Some((op, f3, f7)) = alu(mnemonic) {
         let [Gpr(rd), Gpr(rs1), Gpr(rs2)] = *values else { return Err(unwritten()) };
         out.words.push(r(op, f3, f7, rd, rs1, rs2));
@@ -761,7 +843,7 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         // The pseudo instructions, as the base instructions GNU as writes for them.
         ("nop", []) => out.words.push(i(0x13, 0, ZERO, ZERO, 0)),
         ("li", [Gpr(rd), Imm(imm)]) => li(*rd, *imm, &mut out.words),
-        ("mv", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 0, *rd, *rs, 0)),
+        ("mv" | "move", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 0, *rd, *rs, 0)),
         ("not", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 4, *rd, *rs, -1)),
         ("neg", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x33, 0, 0x20, *rd, ZERO, *rs)),
         ("negw", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x3b, 0, 0x20, *rd, ZERO, *rs)),
@@ -1084,6 +1166,71 @@ mod tests {
         assert!(encode("csrsi", &[Imm(0x100), Imm(32)]).is_err());
         assert!(encode("sspush", &[Gpr(10)]).is_err());
         assert!(encode("lpad", &[Imm(1 << 20)]).is_err());
+    }
+
+    /// Zba, Zbb, Zbs and Zacas, `move`, and a register instruction written with a constant, with
+    /// the words llvm-mc 23 writes, since binutils 2.42 knows neither Zacas nor the last.
+    #[test]
+    fn the_bit_manipulation_instructions_are_the_words_llvm_mc_writes() {
+        let words: &[(&str, &[Value], u32)] = &[
+            ("andn", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_f533),
+            ("orn", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_e533),
+            ("xnor", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_c533),
+            ("max", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_e533),
+            ("maxu", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_f533),
+            ("min", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_c533),
+            ("minu", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_d533),
+            ("rol", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_9533),
+            ("ror", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_d533),
+            ("rolw", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_953b),
+            ("rorw", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_d53b),
+            ("rori", &[Gpr(10), Gpr(11), Imm(13)], 0x60d5_d513),
+            ("roriw", &[Gpr(10), Gpr(11), Imm(13)], 0x60d5_d51b),
+            ("clz", &[Gpr(10), Gpr(11)], 0x6005_9513),
+            ("ctz", &[Gpr(10), Gpr(11)], 0x6015_9513),
+            ("cpop", &[Gpr(10), Gpr(11)], 0x6025_9513),
+            ("clzw", &[Gpr(10), Gpr(11)], 0x6005_951b),
+            ("ctzw", &[Gpr(10), Gpr(11)], 0x6015_951b),
+            ("cpopw", &[Gpr(10), Gpr(11)], 0x6025_951b),
+            ("sext.b", &[Gpr(10), Gpr(11)], 0x6045_9513),
+            ("sext.h", &[Gpr(10), Gpr(11)], 0x6055_9513),
+            ("zext.h", &[Gpr(10), Gpr(11)], 0x0805_c53b),
+            ("rev8", &[Gpr(10), Gpr(11)], 0x6b85_d513),
+            ("orc.b", &[Gpr(10), Gpr(11)], 0x2875_d513),
+            ("sh1add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_a533),
+            ("sh2add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_c533),
+            ("sh3add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_e533),
+            ("add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_853b),
+            ("sh1add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_a53b),
+            ("sh2add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_c53b),
+            ("sh3add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_e53b),
+            ("slli.uw", &[Gpr(10), Gpr(11), Imm(13)], 0x08d5_951b),
+            ("bclr", &[Gpr(10), Gpr(11), Gpr(12)], 0x48c5_9533),
+            ("bclri", &[Gpr(10), Gpr(11), Imm(13)], 0x48d5_9513),
+            ("bext", &[Gpr(10), Gpr(11), Gpr(12)], 0x48c5_d533),
+            ("bexti", &[Gpr(10), Gpr(11), Imm(13)], 0x48d5_d513),
+            ("binv", &[Gpr(10), Gpr(11), Gpr(12)], 0x68c5_9533),
+            ("binvi", &[Gpr(10), Gpr(11), Imm(13)], 0x68d5_9513),
+            ("bset", &[Gpr(10), Gpr(11), Gpr(12)], 0x28c5_9533),
+            ("bseti", &[Gpr(10), Gpr(11), Imm(13)], 0x28d5_9513),
+            ("amocas.w", &[Gpr(10), Gpr(11), at(12, 0)], 0x28b6_252f),
+            ("amocas.d.aqrl", &[Gpr(10), Gpr(11), at(12, 0)], 0x2eb6_352f),
+            ("move", &[Gpr(5), Gpr(10)], 0x0005_0293),
+            ("and", &[Gpr(7), Gpr(7), Imm(7)], 0x0073_f393),
+            ("or", &[Gpr(10), Gpr(10), Imm(-2)], 0xffe5_6513),
+            ("xor", &[Gpr(10), Gpr(11), Imm(1)], 0x0015_c513),
+            ("add", &[Gpr(10), Gpr(10), Imm(16)], 0x0105_0513),
+            ("addw", &[Gpr(10), Gpr(10), Imm(-1)], 0xfff5_051b),
+            ("sll", &[Gpr(10), Gpr(11), Imm(3)], 0x0035_9513),
+            ("srl", &[Gpr(10), Gpr(11), Imm(63)], 0x03f5_d513),
+            ("sra", &[Gpr(10), Gpr(11), Imm(1)], 0x4015_d513),
+            ("sllw", &[Gpr(10), Gpr(11), Imm(31)], 0x01f5_951b),
+        ];
+        for &(mnemonic, values, word) in words {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
+        }
+        assert!(encode("rori", &[Gpr(10), Gpr(11), Imm(64)]).is_err());
+        assert!(encode("and", &[Gpr(10), Gpr(11), Imm(4096)]).is_err());
     }
 
     #[test]

@@ -28,6 +28,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - riscv64 keeps `tp` and `sp` as file-scope register variables, the way the kernel's `asm/current.h` declares `current` and `current_stack_pointer` (#3900).
 - The riscv64 integrated assembler works out an operand written as a constant expression or a `.set` name, takes `.option push`, `pop`, `rvc`, `norvc`, `relax`, `norelax` and `arch`, makes `.word` four bytes as gas does, and takes `.half` (#3901).
 - The riscv64 integrated assembler encodes Zicfilp's `lpad` and Zicfiss's `sspush`, `sspopchk`, `ssrdp` and `ssamoswap` (#3902).
+- The riscv64 integrated assembler encodes Zba, Zbb, Zbs and Zacas's `amocas.w` and `amocas.d`, reads `move` as `mv`, and reads a register instruction written with a constant, `and t2, t2, 7`, as its form with an immediate (#3904).
 
 ### Fixed
 
