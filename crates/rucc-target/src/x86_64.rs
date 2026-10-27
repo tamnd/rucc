@@ -45,8 +45,8 @@ pub use crate::x86_64::encode::{
 };
 pub use crate::x86_64::insts::{
     ADDRESSES, ALIGN, Address, Form, INSTS, LITERAL, LITERALS, TEMPLATE, TEMPLATE_MEM, address,
-    form, packed, template_arm, template_arms, template_filled, template_jumps, template_mem_at,
-    template_name, template_reg, unpacked,
+    form, packed, template_arm, template_arms, template_filled, template_frame, template_jumps,
+    template_locals, template_mem_at, template_name, template_reg, unpacked,
 };
 pub use crate::x86_64::read::{
     At, Disp, Line, Piece, Step, known, read, read_in, refused, unlabelled,
@@ -1582,6 +1582,8 @@ const SYSV_REGISTERS: CallRegs = CallRegs {
     return_address: 8,
     word: 8,
     total_store_order: true,
+    fenced: false,
+    rmw_bits: 8,
     unaligned: true,
     byte_swaps: &[16, 32, 64],
     push: 8,
@@ -1725,6 +1727,8 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         return_address: 8,
         word: 8,
         total_store_order: true,
+        fenced: false,
+        rmw_bits: 8,
         unaligned: true,
         byte_swaps: &[16, 32, 64],
         push: 8,

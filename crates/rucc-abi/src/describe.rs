@@ -277,6 +277,14 @@ pub enum Variadic {
     /// `double` in x0, and a call through a prototype without the `...` puts it in d0. The value
     /// that comes back is not an argument and comes back where it always does.
     IntegersOnly,
+    /// An argument past the `...` travels the way [`Variadic::IntegersOnly`] sends every one,
+    /// and a named argument travels the way it would in any other call.
+    ///
+    /// RISC-V LP64D. A `double` past the `...` is its bits in the next a register, a structure of
+    /// two `float`s is one a register rather than two fa registers, and `void f(double, ...)`
+    /// still takes its `double` in fa0. The callee homes a0 to a7 directly below the arguments the
+    /// caller left in memory, as Windows on AArch64 does, so a `void *` walks every unnamed one.
+    UnnamedIntegers,
 }
 
 /// What the bits above an integer narrower than an `int` are when it travels in a register.
@@ -305,8 +313,8 @@ pub enum Narrow {
 /// What the bits above a `_BitInt` narrower than its register are when it travels in one.
 ///
 /// A separate question from [`Narrow`], because the documents answer it separately. RISC-V
-/// leaves the bits above a `char` alone and extends a `_BitInt(N)` to the whole register, and
-/// AAPCS64 has a `_BitInt` section of its own that is not the one for `char`.
+/// extends a `char` to 32 bits and a `_BitInt(N)` to the whole register, and AAPCS64 has a
+/// `_BitInt` section of its own that is not the one for `char`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitInts {
     /// Anything, both ways. The side that receives the value reads only its own bits, and the

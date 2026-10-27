@@ -63,6 +63,7 @@ pub static SELECTOR: super::Selector = super::Selector {
         cell: "movsxd_rm_32_64",
         add: "add_rr_64",
         two_address: true,
+        scale: None,
     },
 };
 

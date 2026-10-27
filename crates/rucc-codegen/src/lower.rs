@@ -93,7 +93,7 @@ use rucc_target::{
     Address, CallRegs, Cleanup, Constraint, Convention, OperandDesc, PhysReg, RegClass, Role,
     VaList, Variadic,
 };
-use rucc_target::{aarch64, x86_64};
+use rucc_target::{aarch64, riscv64, x86_64};
 
 use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
@@ -660,6 +660,46 @@ fn shared_letters(constraint: &str) -> bool {
     })
 }
 
+/// Whether a RISC-V constraint has only letters gcc gives the same meaning there as the reader of
+/// constraints does, or one read as such a letter first. `I`, `J` and `K` are immediate ranges as
+/// on x86, with RISC-V's ranges. See [`riscv64::takes`]. `A` is memory addressed by one register,
+/// which is how every operand in memory is spelled here, so the caller reads it as `m`. A register
+/// the front end named in braces is read against RISC-V's own names.
+fn riscv_letters(constraint: &str) -> bool {
+    let mut inside = false;
+    constraint.chars().all(|c| match c {
+        '{' => {
+            inside = true;
+            true
+        }
+        '}' => {
+            inside = false;
+            true
+        }
+        _ if inside => true,
+        _ => matches!(
+            c,
+            '=' | '+'
+                | '&'
+                | '%'
+                | 'r'
+                | 'A'
+                | 'm'
+                | 'o'
+                | 'V'
+                | 'g'
+                | 'X'
+                | 'i'
+                | 'n'
+                | 'p'
+                | 'I'
+                | 'J'
+                | 'K'
+                | '0'..='9'
+        ),
+    })
+}
+
 /// A constraint list with every letter outside braces put through `swap`, and what is inside them,
 /// which is a register's name rather than letters, left alone.
 fn letters_outside(constraints: &str, swap: impl Fn(char) -> char) -> String {
@@ -877,6 +917,13 @@ struct Called<'a> {
     carried: &'a [(usize, RegClass)],
     /// The argument registers a line above the call wrote by name.
     passed: &'a [PhysReg],
+}
+
+/// Whether a RISC-V template calls out to a function, which is a `call`, a `jal` or a `jalr`.
+fn calls_out_rv(template: &str) -> bool {
+    template
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|word| matches!(word, "call" | "jal" | "jalr"))
 }
 
 /// Whether a template calls out to a function, which is a `call` anywhere in it as a word of its
@@ -1347,6 +1394,13 @@ pub struct Stack {
     /// after allocation, so the instruction is written here with nothing in its displacement and
     /// [`crate::finish`] writes the number in once [`crate::frame::Frame`] knows it.
     pub addresses: Vec<(mir::Inst, usize)>,
+    /// Which kept template names which of those locals in its text, for every local one names
+    /// other than the one that is its memory operand.
+    ///
+    /// The text holds a hole for each, which [`crate::finish`] fills with where the local is once
+    /// the frame is laid out, so the template reads it from the stack pointer and needs no register
+    /// for its address. See [`rucc_target::template::template_frame`].
+    pub framed: Vec<(mir::Inst, usize)>,
     /// Where the lifetime of which of those locals ends, one entry for every `lifetime_end` the
     /// front end wrote.
     ///
@@ -2525,9 +2579,9 @@ impl<'a> Lowering<'a> {
                 // rather than as an instruction nothing computes.
                 Opcode::InlineAsm => {
                     // The template is read as x86 assembly, and that reader is the only one there
-                    // is. AArch64 keeps every template as text, and any other machine's `asm` is
-                    // refused here rather than read as the wrong language.
-                    if self.on_aarch64() {
+                    // is. AArch64 and RISC-V keep every template as text, and any other machine's
+                    // `asm` is refused here rather than read as the wrong language.
+                    if self.on_aarch64() || self.on_riscv64() {
                         self.spelled(inst)?;
                         continue;
                     }
@@ -4482,8 +4536,34 @@ impl<'a> Lowering<'a> {
         let mem = self.counted_from_table(mir::Mem::table(table));
         self.out.build(block, near).at(span).def(base, gpr).mem(mem).finish();
         let offset = self.out.new_vreg(gpr);
-        let cell =
-            mir::Mem::at(mir::Operand::read(base, gpr)).indexed(mir::Operand::read(reg, gpr), 4);
+        let cell = match jumps.scale {
+            None => {
+                mir::Mem::at(mir::Operand::read(base, gpr)).indexed(mir::Operand::read(reg, gpr), 4)
+            }
+            // The index times four and the table's address added, where no address scales.
+            Some(shift) => {
+                let scaled = self.out.new_vreg(gpr);
+                let shift = self.named(shift);
+                let read = mir::Operand::read(reg, gpr);
+                self.out
+                    .build(block, shift)
+                    .at(span)
+                    .def(scaled, gpr)
+                    .operand(read)
+                    .imm(2)
+                    .finish();
+                let at = self.out.new_vreg(gpr);
+                let add = self.named(jumps.add);
+                self.out
+                    .build(block, add)
+                    .at(span)
+                    .def(at, gpr)
+                    .operand(mir::Operand::read(scaled, gpr))
+                    .operand(mir::Operand::read(base, gpr))
+                    .finish();
+                mir::Mem::at(mir::Operand::read(at, gpr))
+            }
+        };
         let load = self.named(jumps.cell);
         self.out.build(block, load).at(span).def(offset, gpr).mem(cell).finish();
         // Two address on x86-64, for the reason `thread_pointer` gives.
@@ -4956,8 +5036,12 @@ impl<'a> Lowering<'a> {
         let bare = spelled.strip_prefix('%').unwrap_or(&spelled);
         // `sp` is not in AArch64's table of names, since no operand is ever given it, and it is the
         // one the kernel reads as `current_stack_pointer`.
-        let named = if self.on_aarch64() && bare == "sp" {
+        // RISC-V's `sp` is left out of its table for the same reason, and its `tp` is in it, which
+        // is how the kernel reads `current`.
+        let named = if (self.on_aarch64() || self.on_riscv64()) && bare == "sp" {
             Some((self.conv.stack_pointer, self.gpr))
+        } else if self.on_riscv64() {
+            riscv64::named(bare)
         } else if self.on_aarch64() {
             aarch64::named(bare)
         } else if self.class_of(ty) != self.gpr {
@@ -5049,11 +5133,13 @@ impl<'a> Lowering<'a> {
         };
         // AArch64 is not total store order, so every ordering above relaxed is an instruction
         // there. An acquire fence only has to keep later accesses after earlier loads, which is
-        // `dmb ishld`, and everything stronger is the full `dmb ish` gcc writes for it.
+        // `dmb ishld`, and everything stronger is the full `dmb ish` gcc writes for it. RISC-V is
+        // not either, and has a `fence` for each of the four, which is what the psABI maps them to.
         let name = match order {
             MemOrder::NotAtomic | MemOrder::Relaxed => return Ok(()),
-            MemOrder::Acquire if self.on_aarch64() => "fence_acquire",
-            _ if self.on_aarch64() => self.selector.fence,
+            MemOrder::Acquire if self.on_aarch64() || self.on_riscv64() => "fence_acquire",
+            MemOrder::Release if self.on_riscv64() => "fence_release",
+            _ if self.on_aarch64() || self.on_riscv64() => self.selector.fence,
             MemOrder::SeqCst => self.selector.fence,
             _ => return Ok(()),
         };
@@ -5109,6 +5195,11 @@ impl<'a> Lowering<'a> {
         };
         let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
         let [address] = args[..] else { return Err(self.unsupported(inst)) };
+        // RISC-V has a prefetch only in Zicbop, which nothing here asks for, and gcc writes no
+        // instruction at all for the hint without it.
+        if self.on_riscv64() {
+            return Ok(());
+        }
         // AArch64 has the write hint in the base instruction set, and gcc 16.2.0 writes it there.
         let write = hint.write && self.on_aarch64();
         let name = match (hint.locality, write) {
@@ -5900,6 +5991,9 @@ impl<'a> Lowering<'a> {
         if self.on_aarch64() {
             return self.exchange_a64(inst, [addr, expected, desired], [old, exchanged]);
         }
+        if self.on_riscv64() {
+            return self.exchange_rv(inst, [addr, expected, desired], [old, exchanged]);
+        }
 
         // A value the machine can compare in one instruction, which is an integer or an address at
         // one of the four widths it has a compare and exchange for. Anything else is a type this
@@ -5979,6 +6073,9 @@ impl<'a> Lowering<'a> {
         }
         if self.on_aarch64() {
             return self.modify_a64(inst, op, [addr, operand], old);
+        }
+        if self.on_riscv64() {
+            return self.modify_rv(inst, op, [addr, operand], old);
         }
         let name = match op {
             RmwOp::Xchg => format!("xchg_{}", ty.bits()),
@@ -6131,6 +6228,61 @@ impl<'a> Lowering<'a> {
             }
             _ => Err(self.unsupported(inst)),
         }
+    }
+
+    /// A compare and exchange on RISC-V, which is a loop of `lr` and `sc` made one instruction for
+    /// the reason the AArch64 one is.
+    ///
+    /// A byte and a half have no `lr` and `sc` of their own, so theirs is the loop on the aligned
+    /// word around them, and it wants four registers more to work in. They are definitions of the
+    /// same instruction, written early, so that none of them is given a register the loop still
+    /// reads.
+    fn exchange_rv(
+        &mut self,
+        inst: Inst,
+        [addr, expected, desired]: [Value; 3],
+        [old, exchanged]: [Value; 2],
+    ) -> Result<(), Unsupported> {
+        let bits = self.atomic_bits(inst, self.source[old].ty)?;
+        let base = self.reg_of(addr)?;
+        let want = self.reg_of(expected)?;
+        let put = self.reg_of(desired)?;
+        let got = self.new_reg(old);
+        let flag = self.new_reg(exchanged);
+        let name = format!("cmpxchg_{bits}");
+        if bits >= 32 {
+            return self.written_as(inst, &name, &[got, flag, base, want, put]);
+        }
+        let work: [mir::Reg; 4] = std::array::from_fn(|_| self.out.new_vreg(self.gpr));
+        let [word, mask, wanted, given] = work;
+        self.written_as(inst, &name, &[got, flag, word, mask, wanted, given, base, want, put])
+    }
+
+    /// A read modify write on RISC-V, for the three that are one `amo` instruction at a word or a
+    /// doubleword. `crate::retry` made every narrower one a loop around a compare and exchange
+    /// before this, since the byte and half `amo` operations are an extension the base machine
+    /// has not got.
+    fn modify_rv(
+        &mut self,
+        inst: Inst,
+        op: RmwOp,
+        [addr, operand]: [Value; 2],
+        old: Value,
+    ) -> Result<(), Unsupported> {
+        let bits = self.atomic_bits(inst, self.source[old].ty)?;
+        let name = match op {
+            RmwOp::Xchg => "xchg",
+            RmwOp::Add => "xadd",
+            RmwOp::Sub => "xsub",
+            _ => return Err(self.unsupported(inst)),
+        };
+        if bits < 32 {
+            return Err(self.unsupported(inst));
+        }
+        let base = self.reg_of(addr)?;
+        let put = self.reg_of(operand)?;
+        let got = self.new_reg(old);
+        self.written_as(inst, &format!("{name}_{bits}"), &[got, base, put])
     }
 
     /// One `asm` statement.
@@ -6564,7 +6716,13 @@ impl<'a> Lowering<'a> {
         // to any of them by this, so a register one template leaves a value in is still holding
         // it when the next template reads it.
         let a64 = self.on_aarch64();
-        let (mut named, spelled, calls) = if a64 {
+        // RISC-V keeps its templates as text the way AArch64 does, and the register names its text
+        // spells are not looked for, which is what gcc does too.
+        let rv = self.on_riscv64();
+        let text_only = a64 || rv;
+        let (mut named, spelled, calls) = if rv {
+            (Self::clobbered_rv(inst, &clobbers)?, Vec::new(), calls_out_rv(template))
+        } else if a64 {
             (
                 Self::clobbered_a64(inst, &clobbers)?,
                 spelled_registers_a64(template),
@@ -6659,7 +6817,7 @@ impl<'a> Lowering<'a> {
         // function's frame when there is one, since that is spelled from the stack pointer rather
         // than from a register the text might write. Every other one on x86 is read through the
         // register its address is in.
-        let hole = if a64 {
+        let hole = if text_only {
             None
         } else {
             let framed = |operand: &AsmOperand<'_>| {
@@ -6707,14 +6865,18 @@ impl<'a> Lowering<'a> {
             // in a register. A letter that takes a register or memory gives the constant a place.
             // Only AArch64 asks for now, so x86 keeps spelling what it is given.
             let entries: Vec<&str> = constraints.split(',').collect();
-            for (index, operand) in list.iter().enumerate().filter(|_| a64) {
+            for (index, operand) in list.iter().enumerate().filter(|_| text_only) {
                 let (Some(value), Some(letter)) = (operand.value, operand.range) else { continue };
                 let Some(number) = self.bare_number(value) else { continue };
                 let only_constants = entries.len() == list.len()
                     && entries[index]
                         .chars()
                         .all(|c| matches!(c, 'E'..='P' | 'e' | 'Z' | '=' | '+' | '&' | '%'));
-                let taken = letter == 'Z' || aarch64::takes(letter, number);
+                let taken = if rv {
+                    riscv64::takes(letter, number)
+                } else {
+                    letter == 'Z' || aarch64::takes(letter, number)
+                };
                 if only_constants && operand.tied.is_none() && !taken {
                     return Err(Unsupported::Assembly { inst, refused: Written::Impossible });
                 }
@@ -6725,6 +6887,9 @@ impl<'a> Lowering<'a> {
                     && operand.tied.is_none()
                     && operand.immediate
                     && match (self.bare_number(value), operand.range) {
+                        // RISC-V's letters are gcc's for that machine, as AArch64's are below.
+                        (Some(number), Some(letter)) if rv => riscv64::takes(letter, number),
+                        (Some(_), None) if rv => true,
                         // `Z` on AArch64 is the zero register, which only a zero can be.
                         (_, Some('Z')) if a64 => self.zero(value),
                         // An address on AArch64 is a register, which `%a` puts in brackets.
@@ -6740,7 +6905,7 @@ impl<'a> Lowering<'a> {
                     };
                 // An operand in memory is spelled on AArch64 as the register its address is in,
                 // which is `[x3]` and is an address every instruction that takes one reads.
-                if (operand.memory && !a64 && hole == Some(index)) || spelled {
+                if (operand.memory && !text_only && hole == Some(index)) || spelled {
                     continue;
                 }
                 // Another one in memory, whose address is read as a register the text puts in
@@ -6749,9 +6914,12 @@ impl<'a> Lowering<'a> {
                 // pointer. The kernel's `has_fpu` hands `fnstsw` and `fnstcw` two locals as `"+m"`.
                 // One in a named address space has no register that says all of where it is, so
                 // it is refused.
-                if operand.memory && !a64 {
+                if operand.memory && !text_only {
                     if self.segment(inst).is_some() {
                         return Err(refused());
+                    }
+                    if self.local_of(value).is_some() {
+                        continue;
                     }
                     let read = mir::Operand::read(self.reg_of(value)?, self.gpr);
                     use_of[index] = Some(uses.len());
@@ -6809,8 +6977,13 @@ impl<'a> Lowering<'a> {
             .collect();
         let wanted = defs.iter().chain(&uses).filter(|operand| operand.class == int).count()
             - fixed_to.len();
-        let held: &[PhysReg] =
-            if a64 { &crate::pipeline::AARCH64_SCRATCH } else { &crate::pipeline::SCRATCH };
+        let held: &[PhysReg] = if rv {
+            &crate::pipeline::RISCV64_SCRATCH
+        } else if a64 {
+            &crate::pipeline::AARCH64_SCRATCH
+        } else {
+            &crate::pipeline::SCRATCH
+        };
         let free = |clobbered: &[(PhysReg, RegClass)]| {
             self.conv
                 .int_order
@@ -6974,7 +7147,7 @@ impl<'a> Lowering<'a> {
         // reason.
         let gpr = self.gpr;
         let vector = |index: usize| files.get(index).is_some_and(|&file| file != gpr);
-        if !a64 && (0..list.len()).any(registered) {
+        if !text_only && (0..list.len()).any(registered) {
             for line in template.split(['\n', ';']) {
                 let line = x86_64::unlabelled(line);
                 if names_one(line, registered)
@@ -6988,6 +7161,7 @@ impl<'a> Lowering<'a> {
 
         let mut text = String::with_capacity(template.len());
         let mut memory: Option<usize> = None;
+        let mut framed: Vec<usize> = Vec::new();
         if basic {
             text.push_str(template);
         } else {
@@ -6998,7 +7172,7 @@ impl<'a> Lowering<'a> {
             let mut skipped = false;
             while let Some(c) = chars.next() {
                 match c {
-                    '{' if !a64 => {
+                    '{' if !text_only => {
                         dialect = true;
                         continue;
                     }
@@ -7055,6 +7229,18 @@ impl<'a> Lowering<'a> {
                     continue;
                 }
                 let operand = list.get(index).ok_or_else(refused)?;
+                // An operand in memory on RISC-V is the register its address is in with no
+                // distance, as gcc writes it, and GNU as takes `0(a0)` for an `lr.w` as well.
+                if operand.memory && rv {
+                    let at = use_of[index].map(|at| first_use + at).ok_or_else(refused)?;
+                    if modifier.is_some() {
+                        return Err(refused());
+                    }
+                    text.push_str("0(");
+                    text.push_str(&template_reg(at, 'x'));
+                    text.push(')');
+                    continue;
+                }
                 if operand.memory && a64 {
                     let at = use_of[index].map(|at| first_use + at).ok_or_else(refused)?;
                     if modifier.is_some() {
@@ -7063,6 +7249,20 @@ impl<'a> Lowering<'a> {
                     text.push('[');
                     text.push_str(&template_reg(at, 'x'));
                     text.push(']');
+                    continue;
+                }
+                // A local that is not the instruction's own memory operand is named from the stack
+                // pointer too, by a hole the frame fills in. smapi.o in the kernel hands one
+                // template nine locals as `"m"` and clobbers six registers, and nine addresses in
+                // registers on top of that is more than x86-64 has.
+                let local = operand.value.and_then(|value| self.local_of(value));
+                if let Some(local) = local.filter(|_| operand.memory && hole != Some(index)) {
+                    match modifier {
+                        None | Some('P') => text.push_str(&x86_64::template_frame(local, 0)),
+                        Some('H') => text.push_str(&x86_64::template_frame(local, 8)),
+                        Some(_) => return Err(refused()),
+                    }
+                    framed.push(local);
                     continue;
                 }
                 if operand.memory && hole != Some(index) {
@@ -7100,7 +7300,14 @@ impl<'a> Lowering<'a> {
                     // with no modifier is named at the width of its type, as gcc names it. A
                     // vector register with no modifier is `v`, which is what gcc writes for one
                     // whatever is in it, and the modifiers name the scalar views of it.
-                    let width = if a64 && files[index] != self.gpr {
+                    let width = if rv {
+                        // A register by its ABI name, which `%z` asks for too when the operand
+                        // is not a zero.
+                        match modifier {
+                            None | Some('z') => 'x',
+                            Some(_) => return Err(refused()),
+                        }
+                    } else if a64 && files[index] != self.gpr {
                         match modifier {
                             None => 'v',
                             Some(view @ ('b' | 'h' | 's' | 'd' | 'q')) => view,
@@ -7181,9 +7388,16 @@ impl<'a> Lowering<'a> {
                     text.push_str(if wide { "xzr" } else { "wzr" });
                     continue;
                 }
+                // A zero under `%z` on RISC-V is the zero register, which is how the kernel's
+                // atomics store a zero they were handed as `"rJ"`.
+                if rv && modifier == Some('z') && self.zero(value) {
+                    text.push_str("zero");
+                    continue;
+                }
                 let bare = match modifier {
                     None => false,
                     Some('w' | 'x') if a64 => false,
+                    Some('z') if rv => false,
                     Some('c' | 'P' | 'p' | 'a') => true,
                     // The constant negated and bare, for the other half of an `add` written
                     // as a `sub`. A name has no negative, so only a number is taken.
@@ -7200,12 +7414,12 @@ impl<'a> Lowering<'a> {
                     // A width names a register, and a constant has none, so gcc prints the
                     // constant as it would with no modifier. The kernel's `outb` is written
                     // `%w1` against `"Nd"`, which is a constant whenever the port is.
-                    Some('b' | 'w' | 'k' | 'q') if !a64 => false,
+                    Some('b' | 'w' | 'k' | 'q') if !text_only => false,
                     Some(_) => return Err(refused()),
                 };
                 // A constant is bare on AArch64 whatever the modifier, which is how gcc prints one
                 // there and a form GNU as takes wherever `#` would go.
-                if !bare && !a64 {
+                if !bare && !text_only {
                     text.push('$');
                 }
                 if let Some(number) = self.bare_number(value) {
@@ -7221,7 +7435,7 @@ impl<'a> Lowering<'a> {
                     // which is how gcc prints it whatever the code model. The kernel's
                     // `static_cpu_has` writes `testb %[bitnum], %a[cap_byte]`, and code that runs
                     // before the kernel is at its link address cannot use the absolute form.
-                    if modifier == Some('a') && !a64 && self.address_bits() == 64 {
+                    if modifier == Some('a') && !text_only && self.address_bits() == 64 {
                         text.push_str("(%rip)");
                     }
                 } else {
@@ -7235,7 +7449,7 @@ impl<'a> Lowering<'a> {
         // registers it does not declare, and tcc's tests do: one that writes `%ecx` behind the
         // compiler's back would otherwise take the address with it.
         let mut local = None;
-        let at = match memory.filter(|_| !a64) {
+        let at = match memory.filter(|_| !text_only) {
             Some(index) => {
                 let value = list[index].value.ok_or_else(refused)?;
                 local = self.local_of(value);
@@ -7272,7 +7486,13 @@ impl<'a> Lowering<'a> {
             None => None,
         };
         let symbol = self.names.intern(&text);
-        let opcode = self.named(if a64 { aarch64::TEMPLATE } else { x86_64::TEMPLATE });
+        let opcode = self.named(if rv {
+            riscv64::TEMPLATE
+        } else if a64 {
+            aarch64::TEMPLATE
+        } else {
+            x86_64::TEMPLATE
+        });
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let mut build = self.out.build(block, opcode).at(span).symbol(symbol);
@@ -7286,6 +7506,7 @@ impl<'a> Lowering<'a> {
         if let Some(local) = local {
             self.stack.addresses.push((made, local));
         }
+        self.stack.framed.extend(framed.into_iter().map(|local| (made, local)));
         Ok(())
     }
 
@@ -7951,6 +8172,29 @@ impl<'a> Lowering<'a> {
         std::ptr::eq(self.selector.shapes, &aarch64::MACHINE)
     }
 
+    /// Whether the machine being lowered for is RISC-V.
+    fn on_riscv64(&self) -> bool {
+        std::ptr::eq(self.selector.shapes, &riscv64::MACHINE)
+    }
+
+    /// The registers a RISC-V clobber list names, by either name. `memory` and `cc` say nothing
+    /// about a register, and neither do `zero` and `sp`, which nothing allocates.
+    fn clobbered_rv(inst: Inst, clobbers: &str) -> Result<Vec<(PhysReg, RegClass)>, Unsupported> {
+        let refused = || Unsupported::Assembly { inst, refused: Written::Clobber };
+        let mut named = Vec::new();
+        for entry in clobbers.split(',') {
+            let entry = entry.trim().trim_matches('"');
+            if entry.is_empty() || matches!(entry, "memory" | "cc" | "zero" | "x0" | "sp" | "x2") {
+                continue;
+            }
+            let reg = riscv64::named(entry).ok_or_else(refused)?;
+            if !named.contains(&reg) {
+                named.push(reg);
+            }
+        }
+        Ok(named)
+    }
+
     /// The register an operand is pinned to on the machine being lowered for.
     ///
     /// [`pinned`] on x86, where it is always a general purpose register. AArch64 has no constraint
@@ -7958,6 +8202,9 @@ impl<'a> Lowering<'a> {
     /// is read against [`aarch64::named`], which may put it in either file. The file comes back with
     /// the register because the two are numbered from nought alike, and `x8` is not `v8`.
     fn pinned_here(&self, operand: &AsmOperand<'_>) -> Option<(PhysReg, RegClass)> {
+        if self.on_riscv64() {
+            return riscv64::named(operand.named?);
+        }
         if !self.on_aarch64() {
             return pinned(operand).map(|reg| (reg, self.gpr));
         }
@@ -8193,9 +8440,9 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
-    /// An `asm` statement on AArch64, which is kept as text whatever is in it.
+    /// An `asm` statement on AArch64 or RISC-V, which is kept as text whatever is in it.
     ///
-    /// Nothing reads AArch64 assembly back into instructions yet, so every template goes the way
+    /// Nothing reads either machine's assembly back into instructions yet, so every template goes the way
     /// one the x86 reader could not take apart goes, which is [`Self::kept`]: the text is carried
     /// to the listing with a hole for each operand, and the operands are the instruction's own. A
     /// constraint with a letter whose meaning differs between the two machines is refused first.
@@ -8206,12 +8453,15 @@ impl<'a> Lowering<'a> {
         let info = self.source[asm];
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         let constraints = self.names.resolve(info.constraints).to_string();
-        if !constraints.split(',').all(shared_letters) {
+        let (letters, single): (fn(&str) -> bool, char) =
+            if self.on_riscv64() { (riscv_letters, 'A') } else { (shared_letters, 'Q') };
+        if !constraints.split(',').all(letters) {
             return Err(refused());
         }
-        // `Q` is memory addressed by one register and nothing else, which is how every operand in
-        // memory is spelled here already, so it is read as `m`. See [`shared_letters`].
-        let constraints = letters_outside(&constraints, |c| if c == 'Q' { 'm' } else { c });
+        // `Q` on AArch64 and `A` on RISC-V are memory addressed by one register and nothing else,
+        // which is how every operand in memory is spelled here already, so they are read as `m`.
+        // See [`shared_letters`].
+        let constraints = letters_outside(&constraints, |c| if c == single { 'm' } else { c });
         let results: Vec<Value> = data.results().collect();
         let operands = AsmOperands::read(&constraints, &results, &self.source[data.args])
             .ok_or_else(refused)?;
@@ -8991,7 +9241,7 @@ impl<'a> Lowering<'a> {
         // here all the same would be refused rather than read the wrong list.
         let variadic = variadic && !foreign;
         if let (true, Some(area)) = (variadic && !in_memory, area) {
-            self.save_area(out, &arrived, area, conv.shared_positions);
+            self.save_area(out, &arrived, area, conv.shared_positions || conv.shadow > 0);
         } else if variadic {
             let incoming = arrived.beyond.next_multiple_of(self.conv.word);
             self.varargs = Some(Varargs::Pointer { incoming });
@@ -10305,6 +10555,60 @@ mod tests {
             let refused = lower_a64(&mut names, &source).expect_err(constraints);
             assert!(refused.contains("has an operand this cannot place"), "{refused}");
         }
+    }
+
+    fn lower_rv(names: &mut Interner, func: &Func) -> Result<String, String> {
+        let conv = &riscv64::LP64D;
+        let selector = &crate::select::riscv64::SELECTOR;
+        let out = super::func(func, names, selector, conv, &Elsewhere::default())
+            .map_err(|why| why.to_string())?;
+        Ok(mir::print_func(&out.func, names, &riscv64::REGS))
+    }
+
+    /// RISC-V without Zicbop has no prefetch, so the hint is no instruction, as in gcc.
+    #[test]
+    fn a_prefetch_on_riscv64_is_dropped() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR]);
+        let hint = PrefetchHint { write: false, locality: PrefetchHint::MOST };
+        Builder::new(&mut source, block).prefetch(args[0], hint);
+        Builder::new(&mut source, block).ret(&[]);
+        let text = lower_rv(&mut names, &source).expect("lowered");
+        assert!(!text.contains("prefetch"), "{text}");
+    }
+
+    /// A template on RISC-V is kept as text the way one on AArch64 is. `A` is the address in a
+    /// register written `0(a0)`, a zero under `%z` is `zero`, a clobber is the register it names,
+    /// and a constant `I` takes is spelled as itself.
+    #[test]
+    fn a_template_on_riscv64_is_kept_as_text_with_its_operands_in_registers() {
+        let (i32, i64, ptr) = (Type::int(32), Type::int(64), Type::PTR);
+        let (mut names, mut source, block, args) = blank(&[ptr]);
+        let zero = Builder::new(&mut source, block).iconst(i32, 0);
+        let five = Builder::new(&mut source, block).iconst(i64, 5);
+        let out = clobbering(
+            &mut source,
+            block,
+            &mut names,
+            "amoswap.w %0, %z2, %1\n\taddi %0, %0, %3",
+            "=r,A,rJ,I",
+            "t0",
+            &[args[0], zero, five],
+            &[i32],
+        );
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+        let text = lower_rv(&mut names, &source).expect("kept as text");
+        assert!(text.contains("@amoswap.w \u{1}r0x\u{2}, zero, 0(\u{1}r"), "{text}");
+        assert!(text.contains("addi \u{1}r0x\u{2}, \u{1}r0x\u{2}, 5"), "{text}");
+        assert!(text.contains("t0"), "{text}");
+        // A letter that means something else on x86 is refused rather than read as x86.
+        let (mut names, mut source, block, args) = blank(&[i64]);
+        let out =
+            clobbering(&mut source, block, &mut names, "mv %0, %1", "=a,r", "", &args, &[i64]);
+        let produced = source[out].results().next().expect("one result");
+        Builder::new(&mut source, block).ret(&[produced]);
+        let refused = lower_rv(&mut names, &source).expect_err("an x86 letter");
+        assert!(refused.contains("has an operand this cannot place"), "{refused}");
     }
 
     /// `Q` on AArch64 is memory addressed by one register, which is `[x3]` and is how an operand in

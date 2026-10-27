@@ -101,6 +101,9 @@ impl Flavour {
         match (self, machine) {
             (Flavour::Elf, Architecture::I386) => elf::r_type_i386(reference).map(flags),
             (Flavour::Elf, Architecture::Aarch64) => elf::r_type_aarch64(reference).map(flags),
+            (Flavour::Elf, Architecture::Riscv64 | Architecture::Riscv32) => {
+                elf::r_type_riscv64(reference).map(flags)
+            }
             (Flavour::Elf, _) => elf::r_type(reference).map(flags),
             (Flavour::Coff, Architecture::Aarch64) => {
                 coff::arm64(reference).map(|typ| RelocationFlags::Coff { typ })
@@ -123,6 +126,8 @@ impl Flavour {
             (Flavour::Elf | Flavour::Coff, Arch::X86_64) => Some(Architecture::X86_64),
             (Flavour::Elf | Flavour::Coff, Arch::Aarch64) => Some(Architecture::Aarch64),
             (Flavour::Elf | Flavour::Coff, Arch::X86) => Some(Architecture::I386),
+            (Flavour::Elf, Arch::Riscv64) => Some(Architecture::Riscv64),
+            (Flavour::Elf, Arch::Riscv32) => Some(Architecture::Riscv32),
             _ => None,
         }
     }
@@ -1469,12 +1474,14 @@ pub(crate) fn relocate(
 /// The format and the machine a target's object is written in by [`write()`], and nothing for a
 /// target it does not write.
 ///
-/// x86-64 on both formats and i386 on ELF. AArch64 reaches an object through a listing only, which
-/// [`crate::assembled`] writes.
+/// x86-64 on both formats and i386 on ELF. AArch64 and RISC-V reach an object through a listing
+/// only, which [`crate::assembled`] writes.
 fn written(target: &TargetInfo) -> Option<(Flavour, Architecture)> {
     let flavour = Flavour::of(target)?;
     let machine = flavour.machine(target.tuple.arch())?;
-    (machine != Architecture::Aarch64).then_some((flavour, machine))
+    let listed =
+        matches!(machine, Architecture::Aarch64 | Architecture::Riscv64 | Architecture::Riscv32);
+    (!listed).then_some((flavour, machine))
 }
 
 /// How far a name reaches, which is the one thing about a symbol ELF calls its binding.

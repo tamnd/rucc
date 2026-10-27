@@ -1195,16 +1195,13 @@ mod tests {
         );
     }
 
-    /// The three ABIs that are not Darwin arm64 answer the two questions the same way, and a
-    /// change to the classifier that made them differ would be a change to every `printf` on
-    /// three targets. Windows and RISC-V are here beside SysV because the flag they carry,
-    /// `Variadic::BothBanks` for one and `SameAsFixed` for the others, is a fact for the backend
-    /// rather than for the form the value travels in.
+    /// SysV and Windows x64 answer the two questions the same way, and a change to the classifier
+    /// that made them differ would be a change to every `printf` on both. Windows is here beside
+    /// SysV because the flag it carries, `Variadic::BothBanks`, is a fact for the backend rather
+    /// than for the form the value travels in.
     #[test]
     fn everywhere_else_the_two_questions_have_the_same_answer() {
-        for triple in
-            ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "riscv64-unknown-linux-gnu"]
-        {
+        for triple in ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"] {
             let mut types = Types::new();
             let target = target(triple);
             let float = types.float(FloatKind::Float);
@@ -1220,6 +1217,24 @@ mod tests {
             assert_eq!(fixed.args[1].pass, variadic.args[1].pass, "{triple}");
             assert_eq!(fixed.args[1].types, variadic.args[1].types, "{triple}");
         }
+    }
+
+    /// RISC-V passes two `float`s in two fa registers when they are named and in one a register
+    /// when they are past the `...`, which is `Variadic::UnnamedIntegers`.
+    #[test]
+    fn riscv_passes_a_float_pair_past_the_dots_in_an_integer_register() {
+        let mut types = Types::new();
+        let target = target("riscv64-unknown-linux-gnu");
+        let float = types.float(FloatKind::Float);
+        let int = types.int(IntKind::Int);
+        let pair = record(&mut types, &target, &[float, float]);
+        let fixed =
+            plan(&types, &target, Convention::Target, int, &[int, pair], &[int, pair], false)
+                .expect("a plan for a fixed argument");
+        let variadic = plan(&types, &target, Convention::Target, int, &[int], &[int, pair], true)
+            .expect("a plan for a variadic one");
+        assert!(fixed.args[1].types.iter().all(|ty| ty.is_float()), "{:?}", fixed.args[1]);
+        assert!(!variadic.args[1].types.iter().any(|ty| ty.is_float()), "{:?}", variadic.args[1]);
     }
 
     /// `long double twice(long double);` on mingw, where both the argument and the return value

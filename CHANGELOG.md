@@ -21,6 +21,28 @@ This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow
 - The RISC-V 64 register file and the LP64D calling convention, so `--print-config` for a riscv64 target now lists its registers. This is the first part of the riscv64 back end, and code generation for riscv64 is still refused. (#3881)
 - An RV64G instruction encoder in rucc-target, which takes what GNU as takes, pseudo instructions included, for the riscv64 back end (#3882).
 - The riscv64 opcode table, its assembly text, a printer for it, a U74 timing model, and the frame, branch, flag and bit tables the passes read (#3883).
+- A verified riscv64 rule set with 262 rules covering integer and float arithmetic, comparisons, widenings, loads, stores and conversions. Nothing uses it yet (#3885).
+- The riscv64 selector, LP64D argument and return lowering, and the riscv64 machine, so a riscv64 function is now lowered, selected and allocated, and `--emit=mir-final` works for it. `-S` and `-c` are still refused for riscv64. A jump table on a machine with no index register in its addresses shifts and adds the index first (#3891).
+- `-S` writes RISC-V assembly for riscv64. The output assembles with binutils, and a test program built from it runs under qemu and matches gcc on everything but variadic calls (#3892).
+- `rucc_target::riscv64::read` reads one line of RISC-V assembly back into the operands the encoder takes, the first step toward `-c` on riscv64 (#3894).
+- `rucc --target=riscv64-linux-gnu -c` writes an ELF object with the integrated assembler, with the riscv64 relocations, `.eh_frame` and the double float ABI flag (#3895).
+- riscv64 takes the kernel's `-mabi=lp64`, `-march=`, `-mcmodel=medany`, `-mno-save-restore`, `-mno-relax` and `-mno-riscv-attribute`, keeps floats out of an lp64 unit and marks its objects soft float (#3897).
+- riscv64 lowers `asm` statements, kept as text with gcc's RISC-V letters `I`, `J`, `K` and `A`, `%z`, clobbers, local register variables and `asm goto` (#3898).
+- The riscv64 integrated assembler encodes the A extension (`lr`, `sc` and the `amo` instructions with `.aq` and `.rl`), the CSR instructions and their pseudos with CSRs read by name, `fence.i`, `fence.tso`, `pause`, `wfi`, `sret`, `mret`, `sfence.vma`, and the swapped and zero branch pseudos (#3899).
+- riscv64 keeps `tp` and `sp` as file-scope register variables, the way the kernel's `asm/current.h` declares `current` and `current_stack_pointer` (#3900).
+- The riscv64 integrated assembler works out an operand written as a constant expression or a `.set` name, takes `.option push`, `pop`, `rvc`, `norvc`, `relax`, `norelax` and `arch`, makes `.word` four bytes as gas does, and takes `.half` (#3901).
+- The riscv64 integrated assembler encodes Zicfilp's `lpad` and Zicfiss's `sspush`, `sspopchk`, `ssrdp` and `ssamoswap` (#3902).
+- The riscv64 integrated assembler encodes Zba, Zbb, Zbs and Zacas's `amocas.w` and `amocas.d`, reads `move` as `mv`, and reads a register instruction written with a constant, `and t2, t2, 7`, as its form with an immediate (#3904).
+- The riscv64 integrated assembler encodes Zbc, Zbkb's `pack`, `packh`, `packw` and `brev8`, Zabha's byte and halfword atomics, `amocas.q`, the floating point CSR pseudo instructions, `c.li`, `c.nop` and `c.ebreak`, and loads and stores from a label, and reads `-(288)` as a number instead of an address (#3906).
+- The riscv64 assembler encodes the vector instructions the kernel writes by hand, `vsetvli`, `vsetivli`, `vsetvl`, the unit stride `vle` and `vse` loads and stores and `vmv.v.v`, `vmv.v.x` and `vmv.v.i`, and refuses `.option arch` for an extension it has no instructions for (#3909).
+- `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=tp` and `-mstack-protector-guard-offset=` on riscv64 put the canary in the running task the way a riscv kernel asks, and `-mstack-protector-guard=global` is taken there too (#3911).
+- The riscv64 assembler writes `vadd`, `vsub`, `vand`, `vor` and `vxor` with `.vv`, `.vx` and `.vi`, which `arch/riscv/lib/xor.S` on 6.12 needs (#3915).
+- The riscv64 assembler takes `.insn` as a number and in the `r`, `i` and `s` formats, so the kernel's `AS_HAS_INSN` probe passes the way it does with gas (#3916).
+- A riscv64 target assembles files of assembly for a 32 bit machine under `-march=rv32...` with `-mabi=ilp32` or `-mabi=ilp32d`, writing ELF32 objects, so the kernel's compat vDSO builds. C and links for a 32 bit machine are refused, since there is no back end for one (#3917).
+- The riscv64 assembler takes the vector crypto extensions the kernel's crypto code is written with (Zvkned, Zvknha, Zvknhb, Zvkg, Zvksed, Zvksh, Zvkb and Zvbb), along with the strided, segment and indexed loads and stores, slides, merges and widening moves that code uses, and a constant operand of a vector instruction can be an expression (#3919).
+- The riscv64 assembler takes `.reloc` with `R_RISCV_SET_ULEB128` and `R_RISCV_SUB_ULEB128` and writes them as they were asked for, so the kernel's `AS_HAS_ULEB128` probe passes and its module loader test for the pair is built (#3920).
+- `-fzero-call-used-regs=` is taken on riscv64 and clears the registers gcc clears, the integer ones with `li` and the float ones with `fmv.d.x`, so the kernel's `CC_HAS_ZERO_CALL_USED_REGS` probe passes there as it does on x86-64 and arm64 (#3921).
+- RISC-V atomics: fences at every ordering, acquiring loads and releasing stores with the psABI fences around them, `amoswap` and `amoadd` for an exchange or an add of a word or a doubleword, and `lr` and `sc` loops for a compare and exchange, with a masked loop on the word for a byte or a half. Before this an acquire fence wrote nothing and the rest was refused. `-Wa,-mno-relax` is now taken on RISC-V (#3923).
 
 ### Fixed
 
@@ -54,6 +76,19 @@ This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow
 - Addresses made of sixteen bit registers, `(%bx)` or `-2(%bp,%si)`, are written after `.code16` with the sixteen bit addressing byte, the same bytes gas writes. The vm86 code in the x86 selftest `entry_from_vm86` uses them. (#3877)
 - `<unwind.h>` is shipped, declaring libgcc's unwinder the way gcc's header does, so a program can walk its own stack with `_Unwind_Backtrace`. The x86 selftest `unwind_vdso` builds with it and passes. (#3878)
 - The long `nop`, `nopw`, `nopl` and `nopq` with a register or an address, is encoded as `0f 1f /0`. The protection keys selftest lays down 512 of them by hand. (#3879)
+- The assembler reads `.intel_syntax noprefix` blocks inside inline asm, which bcachefs uses for its key comparison, and takes the Intel names of the widening instructions such as `cdq`, which the Xen entry code in head_64.S uses (#3886).
+- An x86 inline asm template that names several locals in memory reads each one from the stack pointer, instead of putting every address but one in a register. `smapi.o` in the kernel names nine locals and clobbers six registers, and the allocator panicked on it (#3888).
+- A variadic call on riscv64 passes the unnamed arguments in the integer registers, as LP64D says, and a variadic function homes a0 to a7 below the caller's stack arguments so `va_arg` walks them with a `void *` (#3893).
+- A riscv64 object writes `.dword sym - .` as an `R_RISCV_ADD64` and `R_RISCV_SUB64` pair against a local label on the place, as gas does, where it was refused (#3903).
+- The riscv64 integrated assembler grows a conditional branch to a label more than 4 KiB away into the opposite branch over a `jal`, as gas does, instead of refusing the file (#3905).
+- `__builtin_prefetch` on riscv64 writes no instruction, as gcc does without Zicbop, instead of stopping on an opcode the target has no spelling for (#3907).
+- A riscv64 file of assembly built with `-mabi=lp64` is marked soft float like the C beside it, so ld links the two, and the riscv64 assembler reads `.end`, `fmv.s.x` and `fmv.x.s`, and a name with a sum after it such as `init_thread_union + THREAD_SIZE` (#3908).
+- The riscv64 assembler writes a difference of two names it cannot work out, `.long a - b` with `b` in no section of the file, as an `R_RISCV_ADD` and `R_RISCV_SUB` pair on the same bytes the way gas does, in one, two, four or eight bytes (#3910).
+- The riscv64 assembler reads `la` in a file built without position independence as `lla`, the address worked out from the instruction, the way gas does without `-fpic`, rather than a read of the global offset table (#3912).
+- A 32-bit comparison on riscv64 keeps the `sext.w` in front of it when the word was cut out of a wider register, so `(int)(x >> 32)` or an `int` field of a small struct passed in a register no longer compares as an unsigned number (#3913).
+- An answer written before the instruction has read all of its sources, like the riscv64 select, no longer gets the same scratch register as a spilled source, which made the select pick the wrong value (#3914).
+- The riscv64 `.insn s` form takes an offset in brackets of its own, as in `((32) & 0xfe0)(a0)` from the kernel's prefetch macros (#3918).
+- `-fcf-protection=` with `branch`, `return` or `full` is refused off x86 in gcc 14's words, where before it was taken and did nothing, so the riscv kernel no longer turns on RISCV_USER_CFI and builds a CFI vDSO without landing pads (#3922).
 
 ## 0.30.12
 

@@ -1,0 +1,1283 @@
+;; Lowering RV64GC.
+;;
+;; The same claim `x86-64.rules` makes, rule by rule: an IR term and a machine term compute the same
+;; thing, and `rucc-verify` proves it against `riscv64.model` before the rule may be used. The IR
+;; half of every rule is the one the other files match, since the IR is not about a target.
+;;
+;; Every integer register is sixty four bits and every instruction reads all of it, so what the
+;; bits above a narrow value hold is a promise the rules keep between them rather than something
+;; the machine keeps. There are two. A thirty two bit value is sign extended to the whole register,
+;; which is what the `w` instructions write and what the calling convention and gcc assume, so a
+;; comparison of the whole register is a comparison of the word. A one bit value is a zero or a one
+;; in the whole register, so a branch on it is `bnez`. Above a byte or a half nothing is promised,
+;; and an operation whose answer depends on those bits widens first, as on AArch64.
+;;
+;; The verifier holds each rule to the bits the IR term has, and a promise about the bits above
+;; them is not something it is asked about. The places that keep the word promise are the `w`
+;; instructions, the loads, `sext.w` when a doubleword is narrowed, and the comparisons, which
+;; write a zero or a one. The bitwise operations keep it on their own: the high bits of an `and`
+;; of two sign extended words are the `and` of the two sign bits.
+;;
+;; A machine term inside another one is an instruction of its own, built first into a register of
+;; its own, which is how a narrow division widens its operands.
+
+;; Constants. `li` builds any constant, in as many instructions as it takes, and the encoder is the
+;; one that works out how many. A thirty two bit constant is held sign extended in the IR, which is
+;; the promise kept above.
+
+(rule (lower (iconst.i1 k))
+      (rv.li_32 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i8 k))
+      (rv.li_32 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i16 k))
+      (rv.li_32 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i32 k))
+      (rv.li_32 k)
+      (spec (= k (result))))
+
+(rule (lower (iconst.i64 k))
+      (rv.li_64 k)
+      (spec (= k (result))))
+
+;; Arithmetic on two registers. Below sixty four bits it is the `w` instruction, whose low bits do
+;; not depend on the high ones, and the bitwise operations are the same instruction at every width.
+
+(rule (lower (add.i8 (value.i8 x) (value.i8 y)))
+      (rv.add_rr_32 x y)
+      (spec (= (bvadd x y) (result))))
+
+(rule (lower (add.i16 (value.i16 x) (value.i16 y)))
+      (rv.add_rr_32 x y)
+      (spec (= (bvadd x y) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (value.i32 y)))
+      (rv.add_rr_32 x y)
+      (spec (= (bvadd x y) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (value.i64 y)))
+      (rv.add_rr_64 x y)
+      (spec (= (bvadd x y) (result))))
+
+(rule (lower (sub.i8 (value.i8 x) (value.i8 y)))
+      (rv.sub_rr_32 x y)
+      (spec (= (bvsub x y) (result))))
+
+(rule (lower (sub.i16 (value.i16 x) (value.i16 y)))
+      (rv.sub_rr_32 x y)
+      (spec (= (bvsub x y) (result))))
+
+(rule (lower (sub.i32 (value.i32 x) (value.i32 y)))
+      (rv.sub_rr_32 x y)
+      (spec (= (bvsub x y) (result))))
+
+(rule (lower (sub.i64 (value.i64 x) (value.i64 y)))
+      (rv.sub_rr_64 x y)
+      (spec (= (bvsub x y) (result))))
+
+(rule (lower (and.i8 (value.i8 x) (value.i8 y)))
+      (rv.and_rr_32 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (and.i16 (value.i16 x) (value.i16 y)))
+      (rv.and_rr_32 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (and.i32 (value.i32 x) (value.i32 y)))
+      (rv.and_rr_32 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (and.i64 (value.i64 x) (value.i64 y)))
+      (rv.and_rr_64 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (or.i8 (value.i8 x) (value.i8 y)))
+      (rv.or_rr_32 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (or.i16 (value.i16 x) (value.i16 y)))
+      (rv.or_rr_32 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (or.i32 (value.i32 x) (value.i32 y)))
+      (rv.or_rr_32 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (or.i64 (value.i64 x) (value.i64 y)))
+      (rv.or_rr_64 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (xor.i8 (value.i8 x) (value.i8 y)))
+      (rv.xor_rr_32 x y)
+      (spec (= (bvxor x y) (result))))
+
+(rule (lower (xor.i16 (value.i16 x) (value.i16 y)))
+      (rv.xor_rr_32 x y)
+      (spec (= (bvxor x y) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (value.i32 y)))
+      (rv.xor_rr_32 x y)
+      (spec (= (bvxor x y) (result))))
+
+(rule (lower (xor.i64 (value.i64 x) (value.i64 y)))
+      (rv.xor_rr_64 x y)
+      (spec (= (bvxor x y) (result))))
+
+(rule (lower (mul.i8 (value.i8 x) (value.i8 y)))
+      (rv.mul_rr_32 x y)
+      (spec (= (bvmul x y) (result))))
+
+(rule (lower (mul.i16 (value.i16 x) (value.i16 y)))
+      (rv.mul_rr_32 x y)
+      (spec (= (bvmul x y) (result))))
+
+(rule (lower (mul.i32 (value.i32 x) (value.i32 y)))
+      (rv.mul_rr_32 x y)
+      (spec (= (bvmul x y) (result))))
+
+(rule (lower (mul.i64 (value.i64 x) (value.i64 y)))
+      (rv.mul_rr_64 x y)
+      (spec (= (bvmul x y) (result))))
+
+;; The three bitwise operations at one bit, which take zeros and ones to zeros and ones.
+
+(rule (lower (and.i1 (value.i1 x) (value.i1 y)))
+      (rv.and_rr_32 x y)
+      (spec (= (bvand x y) (result))))
+
+(rule (lower (or.i1 (value.i1 x) (value.i1 y)))
+      (rv.or_rr_32 x y)
+      (spec (= (bvor x y) (result))))
+
+(rule (lower (xor.i1 (value.i1 x) (value.i1 y)))
+      (rv.xor_rr_32 x y)
+      (spec (= (bvxor x y) (result))))
+
+;; With a constant in place of the second register, which is twelve bits signed on every
+;; instruction that takes one. There is no subtract of a constant, so taking one away is adding
+;; its negation, which is twelve bits when the constant is no lower than -2047.
+
+(rule (lower (add.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.add_ri_32 x k)
+      (spec (= (bvadd x k) (result))))
+
+(rule (lower (add.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.add_ri_32 x k)
+      (spec (= (bvadd x k) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.add_ri_32 x k)
+      (spec (= (bvadd x k) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (iconst.i64 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.add_ri_64 x k)
+      (spec (= (bvadd x k) (result))))
+
+(rule (lower (and.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.and_ri_32 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (and.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.and_ri_32 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (and.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.and_ri_32 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (and.i64 (value.i64 x) (iconst.i64 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.and_ri_64 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (or.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.or_ri_32 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (or.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.or_ri_32 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (or.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.or_ri_32 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (or.i64 (value.i64 x) (iconst.i64 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.or_ri_64 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (xor.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.xor_ri_32 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (xor.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.xor_ri_32 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.xor_ri_32 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (xor.i64 (value.i64 x) (iconst.i64 k)))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.xor_ri_64 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (sub.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (> k -2048) (<= k 2048)))
+      (rv.add_ri_32 x (- 0 k))
+      (spec (= (bvsub x k) (result))))
+
+(rule (lower (sub.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (> k -2048) (<= k 2048)))
+      (rv.add_ri_32 x (- 0 k))
+      (spec (= (bvsub x k) (result))))
+
+(rule (lower (sub.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (> k -2048) (<= k 2048)))
+      (rv.add_ri_32 x (- 0 k))
+      (spec (= (bvsub x k) (result))))
+
+(rule (lower (sub.i64 (value.i64 x) (iconst.i64 k)))
+      (if (and (> k -2048) (<= k 2048)))
+      (rv.add_ri_64 x (- 0 k))
+      (spec (= (bvsub x k) (result))))
+
+;; Negation and the complement, which are `sub` from zero and `xori` with minus one.
+
+(rule (lower (sub.i8 (iconst.i8 0) (value.i8 x)))
+      (rv.neg_r_32 x)
+      (spec (= (bvsub 0 x) (result))))
+
+(rule (lower (sub.i16 (iconst.i16 0) (value.i16 x)))
+      (rv.neg_r_32 x)
+      (spec (= (bvsub 0 x) (result))))
+
+(rule (lower (sub.i32 (iconst.i32 0) (value.i32 x)))
+      (rv.neg_r_32 x)
+      (spec (= (bvsub 0 x) (result))))
+
+(rule (lower (sub.i64 (iconst.i64 0) (value.i64 x)))
+      (rv.neg_r_64 x)
+      (spec (= (bvsub 0 x) (result))))
+
+(rule (lower (xor.i8 (value.i8 x) (iconst.i8 -1)))
+      (rv.not_r_32 x)
+      (spec (= (bvnot x) (result))))
+
+(rule (lower (xor.i16 (value.i16 x) (iconst.i16 -1)))
+      (rv.not_r_32 x)
+      (spec (= (bvnot x) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (iconst.i32 -1)))
+      (rv.not_r_32 x)
+      (spec (= (bvnot x) (result))))
+
+(rule (lower (xor.i64 (value.i64 x) (iconst.i64 -1)))
+      (rv.not_r_64 x)
+      (spec (= (bvnot x) (result))))
+
+;; The high half of a product, which is what a division by a constant multiplies for.
+
+(rule (lower (umulh.i64 (value.i64 x) (value.i64 y)))
+      (rv.mulhu_rr_64 x y)
+      (spec (= (extract 127 64 (bvmul (zero_extend 64 128 x) (zero_extend 64 128 y))) (result))))
+
+(rule (lower (smulh.i64 (value.i64 x) (value.i64 y)))
+      (rv.mulh_rr_64 x y)
+      (spec (= (extract 127 64 (bvmul (sign_extend 64 128 x) (sign_extend 64 128 y))) (result))))
+
+;; Division and remainder, which the machine has at both sizes, so a remainder is one instruction
+;; here where AArch64 multiplies the quotient back.
+
+(rule (lower (sdiv.i32 (value.i32 x) (value.i32 y)))
+      (rv.div_rr_32 x y)
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (sdiv.i64 (value.i64 x) (value.i64 y)))
+      (rv.div_rr_64 x y)
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (udiv.i32 (value.i32 x) (value.i32 y)))
+      (rv.divu_rr_32 x y)
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (udiv.i64 (value.i64 x) (value.i64 y)))
+      (rv.divu_rr_64 x y)
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (srem.i32 (value.i32 x) (value.i32 y)))
+      (rv.rem_rr_32 x y)
+      (spec (= (bvsrem x y) (result))))
+
+(rule (lower (srem.i64 (value.i64 x) (value.i64 y)))
+      (rv.rem_rr_64 x y)
+      (spec (= (bvsrem x y) (result))))
+
+(rule (lower (urem.i32 (value.i32 x) (value.i32 y)))
+      (rv.remu_rr_32 x y)
+      (spec (= (bvurem x y) (result))))
+
+(rule (lower (urem.i64 (value.i64 x) (value.i64 y)))
+      (rv.remu_rr_64 x y)
+      (spec (= (bvurem x y) (result))))
+
+;; A division of bytes or halves, which the width narrowing pass writes when both operands were
+;; widened from the same narrow type. Each operand is widened the way the division reads it,
+;; divided at thirty two bits, and the low end of the answer is the answer, for the reasons
+;; `aarch64.rules` gives.
+
+(rule (lower (sdiv.i8 (value.i8 x) (value.i8 y)))
+      (rv.low_8 (rv.div_rr_32 (rv.sextb_32 x) (rv.sextb_32 y)))
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (udiv.i8 (value.i8 x) (value.i8 y)))
+      (rv.low_8 (rv.divu_rr_32 (rv.zextb_32 x) (rv.zextb_32 y)))
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (srem.i8 (value.i8 x) (value.i8 y)))
+      (rv.low_8 (rv.rem_rr_32 (rv.sextb_32 x) (rv.sextb_32 y)))
+      (spec (= (bvsrem x y) (result))))
+
+(rule (lower (urem.i8 (value.i8 x) (value.i8 y)))
+      (rv.low_8 (rv.remu_rr_32 (rv.zextb_32 x) (rv.zextb_32 y)))
+      (spec (= (bvurem x y) (result))))
+
+(rule (lower (sdiv.i16 (value.i16 x) (value.i16 y)))
+      (rv.low_16 (rv.div_rr_32 (rv.sexth_32 x) (rv.sexth_32 y)))
+      (spec (= (bvsdiv x y) (result))))
+
+(rule (lower (udiv.i16 (value.i16 x) (value.i16 y)))
+      (rv.low_16 (rv.divu_rr_32 (rv.zexth_32 x) (rv.zexth_32 y)))
+      (spec (= (bvudiv x y) (result))))
+
+(rule (lower (srem.i16 (value.i16 x) (value.i16 y)))
+      (rv.low_16 (rv.rem_rr_32 (rv.sexth_32 x) (rv.sexth_32 y)))
+      (spec (= (bvsrem x y) (result)))
+      (bounded "a remainder of two unknowns is a division and a multiply back, and no solver settles that at sixteen bits, while the same rule over bytes is settled at its own width"))
+
+(rule (lower (urem.i16 (value.i16 x) (value.i16 y)))
+      (rv.low_16 (rv.remu_rr_32 (rv.zexth_32 x) (rv.zexth_32 y)))
+      (spec (= (bvurem x y) (result)))
+      (bounded "a remainder of two unknowns is a division and a multiply back, and no solver settles that at sixteen bits, while the same rule over bytes is settled at its own width"))
+
+;; Shifts by a constant. A left shift keeps its low bits whatever is above them, so it is the one
+;; that reaches the narrow widths as it is. A right shift of a byte or a half moves the bits above
+;; it down, so the instruction moves the value to the top of the register first.
+
+(rule (lower (shl.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k 0) (< k 8)))
+      (rv.sll_ri_32 x k)
+      (spec (= (bvshl x k) (result))))
+
+(rule (lower (shl.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k 0) (< k 16)))
+      (rv.sll_ri_32 x k)
+      (spec (= (bvshl x k) (result))))
+
+(rule (lower (shl.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k 0) (< k 32)))
+      (rv.sll_ri_32 x k)
+      (spec (= (bvshl x k) (result))))
+
+(rule (lower (shl.i64 (value.i64 x) (iconst.i64 k)))
+      (if (and (>= k 0) (< k 64)))
+      (rv.sll_ri_64 x k)
+      (spec (= (bvshl x k) (result))))
+
+(rule (lower (lshr.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k 0) (< k 8)))
+      (rv.srl_ri_8 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (lshr.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k 0) (< k 16)))
+      (rv.srl_ri_16 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (lshr.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k 0) (< k 32)))
+      (rv.srl_ri_32 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (lshr.i64 (value.i64 x) (iconst.i64 k)))
+      (if (and (>= k 0) (< k 64)))
+      (rv.srl_ri_64 x k)
+      (spec (= (bvlshr x k) (result))))
+
+(rule (lower (ashr.i8 (value.i8 x) (iconst.i8 k)))
+      (if (and (>= k 0) (< k 8)))
+      (rv.sra_ri_8 x k)
+      (spec (= (bvashr x k) (result))))
+
+(rule (lower (ashr.i16 (value.i16 x) (iconst.i16 k)))
+      (if (and (>= k 0) (< k 16)))
+      (rv.sra_ri_16 x k)
+      (spec (= (bvashr x k) (result))))
+
+(rule (lower (ashr.i32 (value.i32 x) (iconst.i32 k)))
+      (if (and (>= k 0) (< k 32)))
+      (rv.sra_ri_32 x k)
+      (spec (= (bvashr x k) (result))))
+
+(rule (lower (ashr.i64 (value.i64 x) (iconst.i64 k)))
+      (if (and (>= k 0) (< k 64)))
+      (rv.sra_ri_64 x k)
+      (spec (= (bvashr x k) (result))))
+
+;; Shifts by a register. The machine takes the count modulo the width, which is what the IR does,
+;; so there is nothing to mask. A left shift of eight or sixteen bits takes the `w` instruction and
+;; masks the count to its own width first, because the machine would take it modulo thirty two.
+
+(rule (lower (shl.i8 (value.i8 x) (value.i8 y)))
+      (rv.sll_rr_32 x (rv.and_ri_32 y 7))
+      (spec (= (bvshl x (bvand y 7)) (result))))
+
+(rule (lower (shl.i16 (value.i16 x) (value.i16 y)))
+      (rv.sll_rr_32 x (rv.and_ri_32 y 15))
+      (spec (= (bvshl x (bvand y 15)) (result))))
+
+(rule (lower (shl.i32 (value.i32 x) (value.i32 y)))
+      (rv.sll_rr_32 x y)
+      (spec (= (bvshl x (bvand y 31)) (result))))
+
+(rule (lower (shl.i64 (value.i64 x) (value.i64 y)))
+      (rv.sll_rr_64 x y)
+      (spec (= (bvshl x (bvand y 63)) (result))))
+
+(rule (lower (lshr.i32 (value.i32 x) (value.i32 y)))
+      (rv.srl_rr_32 x y)
+      (spec (= (bvlshr x (bvand y 31)) (result))))
+
+(rule (lower (lshr.i64 (value.i64 x) (value.i64 y)))
+      (rv.srl_rr_64 x y)
+      (spec (= (bvlshr x (bvand y 63)) (result))))
+
+(rule (lower (ashr.i32 (value.i32 x) (value.i32 y)))
+      (rv.sra_rr_32 x y)
+      (spec (= (bvashr x (bvand y 31)) (result))))
+
+(rule (lower (ashr.i64 (value.i64 x) (value.i64 y)))
+      (rv.sra_rr_64 x y)
+      (spec (= (bvashr x (bvand y 63)) (result))))
+
+;; A count the program masked to the width itself, as in `x << (n & 31)`. The machine takes the
+;; count modulo the width already, so the `and` is one instruction for nothing.
+
+(rule (lower (shl.i32 (value.i32 x) (and.i32 (value.i32 y) (iconst.i32 m))))
+      (if (= m 31))
+      (rv.sll_rr_32 x y)
+      (spec (= (bvshl x (bvand (bvand y m) 31)) (result))))
+
+(rule (lower (shl.i64 (value.i64 x) (and.i64 (value.i64 y) (iconst.i64 m))))
+      (if (= m 63))
+      (rv.sll_rr_64 x y)
+      (spec (= (bvshl x (bvand (bvand y m) 63)) (result))))
+
+(rule (lower (lshr.i32 (value.i32 x) (and.i32 (value.i32 y) (iconst.i32 m))))
+      (if (= m 31))
+      (rv.srl_rr_32 x y)
+      (spec (= (bvlshr x (bvand (bvand y m) 31)) (result))))
+
+(rule (lower (lshr.i64 (value.i64 x) (and.i64 (value.i64 y) (iconst.i64 m))))
+      (if (= m 63))
+      (rv.srl_rr_64 x y)
+      (spec (= (bvlshr x (bvand (bvand y m) 63)) (result))))
+
+(rule (lower (ashr.i32 (value.i32 x) (and.i32 (value.i32 y) (iconst.i32 m))))
+      (if (= m 31))
+      (rv.sra_rr_32 x y)
+      (spec (= (bvashr x (bvand (bvand y m) 31)) (result))))
+
+(rule (lower (ashr.i64 (value.i64 x) (and.i64 (value.i64 y) (iconst.i64 m))))
+      (if (= m 63))
+      (rv.sra_rr_64 x y)
+      (spec (= (bvashr x (bvand (bvand y m) 63)) (result))))
+
+;; Comparisons, each one term that leaves a zero or a one in the whole register. Equality is the
+;; difference and `seqz` or `snez`, and the rest are `slt` and `sltu`, the other way round for the
+;; greater ones and with the answer turned over for the ones that include equality. A word compares
+;; as the whole register, which is the promise at the top of the file.
+
+(rule (lower (icmp_eq.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_eq_32 x y)
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_ne_32 x y)
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_lt_32 x y)
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_le_32 x y)
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_gt_32 x y)
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_ge_32 x y)
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_lo_32 x y)
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_ls_32 x y)
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_hi_32 x y)
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i32 x) (value.i32 y)))
+      (rv.cmp_set_hs_32 x y)
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_eq_64 x y)
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_ne_64 x y)
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_lt_64 x y)
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_le_64 x y)
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_gt_64 x y)
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_ge_64 x y)
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_lo_64 x y)
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_ls_64 x y)
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_hi_64 x y)
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i64 x) (value.i64 y)))
+      (rv.cmp_set_hs_64 x y)
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+;; A byte or a half is compared as the word it widens to, sign extended for the signed predicates
+;; and zero extended for the rest, since the bits above it in the register are whatever the
+;; instruction that wrote it left there.
+
+(rule (lower (icmp_eq.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_eq_32 (rv.zextb_32 x) (rv.zextb_32 y))
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_ne_32 (rv.zextb_32 x) (rv.zextb_32 y))
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_lt_32 (rv.sextb_32 x) (rv.sextb_32 y))
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_le_32 (rv.sextb_32 x) (rv.sextb_32 y))
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_gt_32 (rv.sextb_32 x) (rv.sextb_32 y))
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_ge_32 (rv.sextb_32 x) (rv.sextb_32 y))
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_lo_32 (rv.zextb_32 x) (rv.zextb_32 y))
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_ls_32 (rv.zextb_32 x) (rv.zextb_32 y))
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_hi_32 (rv.zextb_32 x) (rv.zextb_32 y))
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i8 x) (value.i8 y)))
+      (rv.cmp_set_hs_32 (rv.zextb_32 x) (rv.zextb_32 y))
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_eq_32 (rv.zexth_32 x) (rv.zexth_32 y))
+      (spec (= (ite (= x y) 1 0) (result))))
+
+(rule (lower (icmp_ne.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_ne_32 (rv.zexth_32 x) (rv.zexth_32 y))
+      (spec (= (ite (not (= x y)) 1 0) (result))))
+
+(rule (lower (icmp_slt.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_lt_32 (rv.sexth_32 x) (rv.sexth_32 y))
+      (spec (= (ite (bvslt x y) 1 0) (result))))
+
+(rule (lower (icmp_sle.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_le_32 (rv.sexth_32 x) (rv.sexth_32 y))
+      (spec (= (ite (bvsle x y) 1 0) (result))))
+
+(rule (lower (icmp_sgt.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_gt_32 (rv.sexth_32 x) (rv.sexth_32 y))
+      (spec (= (ite (bvsgt x y) 1 0) (result))))
+
+(rule (lower (icmp_sge.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_ge_32 (rv.sexth_32 x) (rv.sexth_32 y))
+      (spec (= (ite (bvsge x y) 1 0) (result))))
+
+(rule (lower (icmp_ult.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_lo_32 (rv.zexth_32 x) (rv.zexth_32 y))
+      (spec (= (ite (bvult x y) 1 0) (result))))
+
+(rule (lower (icmp_ule.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_ls_32 (rv.zexth_32 x) (rv.zexth_32 y))
+      (spec (= (ite (bvule x y) 1 0) (result))))
+
+(rule (lower (icmp_ugt.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_hi_32 (rv.zexth_32 x) (rv.zexth_32 y))
+      (spec (= (ite (bvugt x y) 1 0) (result))))
+
+(rule (lower (icmp_uge.i1 (value.i16 x) (value.i16 y)))
+      (rv.cmp_set_hs_32 (rv.zexth_32 x) (rv.zexth_32 y))
+      (spec (= (ite (bvuge x y) 1 0) (result))))
+
+;; A choice between two values on a truth value, which is a copy, a branch over the next copy and
+;; that copy, since RV64GC has no conditional move. The operands are in the order the other files
+;; put them, the false arm first.
+
+(rule (lower (select.i8 (value.i1 c) (value.i8 t) (value.i8 f)))
+      (rv.sel_32 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (select.i16 (value.i1 c) (value.i16 t) (value.i16 f)))
+      (rv.sel_32 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (select.i32 (value.i1 c) (value.i32 t) (value.i32 f)))
+      (rv.sel_32 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+(rule (lower (select.i64 (value.i1 c) (value.i64 t) (value.i64 f)))
+      (rv.sel_64 f t c)
+      (spec (= (ite (not (= c 0)) t f) (result))))
+
+;; Conversions between widths. RV64GC widens a word with `sext.w` and nothing else in one
+;; instruction, so a byte or a half is moved to the top of the register and back down, and a zero
+;; extension of a byte is an `andi`.
+
+(rule (lower (sext.i8.i16 (value.i8 x)))
+      (rv.sextb_16 x)
+      (spec (= (sign_extend 8 16 x) (result))))
+
+(rule (lower (sext.i8.i32 (value.i8 x)))
+      (rv.sextb_32 x)
+      (spec (= (sign_extend 8 32 x) (result))))
+
+(rule (lower (sext.i8.i64 (value.i8 x)))
+      (rv.sextb_64 x)
+      (spec (= (sign_extend 8 64 x) (result))))
+
+(rule (lower (sext.i16.i32 (value.i16 x)))
+      (rv.sexth_32 x)
+      (spec (= (sign_extend 16 32 x) (result))))
+
+(rule (lower (sext.i16.i64 (value.i16 x)))
+      (rv.sexth_64 x)
+      (spec (= (sign_extend 16 64 x) (result))))
+
+(rule (lower (sext.i32.i64 (value.i32 x)))
+      (rv.sextw_64 x)
+      (spec (= (sign_extend 32 64 x) (result))))
+
+(rule (lower (zext.i8.i16 (value.i8 x)))
+      (rv.zextb_16 x)
+      (spec (= (zero_extend 8 16 x) (result))))
+
+(rule (lower (zext.i8.i32 (value.i8 x)))
+      (rv.zextb_32 x)
+      (spec (= (zero_extend 8 32 x) (result))))
+
+(rule (lower (zext.i8.i64 (value.i8 x)))
+      (rv.zextb_64 x)
+      (spec (= (zero_extend 8 64 x) (result))))
+
+(rule (lower (zext.i16.i32 (value.i16 x)))
+      (rv.zexth_32 x)
+      (spec (= (zero_extend 16 32 x) (result))))
+
+(rule (lower (zext.i16.i64 (value.i16 x)))
+      (rv.zexth_64 x)
+      (spec (= (zero_extend 16 64 x) (result))))
+
+(rule (lower (zext.i32.i64 (value.i32 x)))
+      (rv.zextw_64 x)
+      (spec (= (zero_extend 32 64 x) (result))))
+
+;; A one bit value is widened with an `andi`, so nothing is taken on trust about the bits above it.
+
+(rule (lower (zext.i1.i8 (value.i1 x)))
+      (rv.bit_to_8 x)
+      (spec (= (zero_extend 1 8 x) (result))))
+
+(rule (lower (zext.i1.i16 (value.i1 x)))
+      (rv.bit_to_16 x)
+      (spec (= (zero_extend 1 16 x) (result))))
+
+(rule (lower (zext.i1.i32 (value.i1 x)))
+      (rv.bit_to_32 x)
+      (spec (= (zero_extend 1 32 x) (result))))
+
+(rule (lower (zext.i1.i64 (value.i1 x)))
+      (rv.bit_to_64 x)
+      (spec (= (zero_extend 1 64 x) (result))))
+
+;; Narrowing. A byte or a half is the low end of the wider register, and a copy puts it in one of
+;; its own. A word is `sext.w`, which keeps the promise about words. Narrowing to one bit keeps that
+;; bit and clears the rest.
+
+(rule (lower (trunc.i16.i8 (value.i16 x)))
+      (rv.low_8 x)
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (lower (trunc.i32.i8 (value.i32 x)))
+      (rv.low_8 x)
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (lower (trunc.i64.i8 (value.i64 x)))
+      (rv.low_8 x)
+      (spec (= (extract 7 0 x) (result))))
+
+(rule (lower (trunc.i32.i16 (value.i32 x)))
+      (rv.low_16 x)
+      (spec (= (extract 15 0 x) (result))))
+
+(rule (lower (trunc.i64.i16 (value.i64 x)))
+      (rv.low_16 x)
+      (spec (= (extract 15 0 x) (result))))
+
+(rule (lower (trunc.i64.i32 (value.i64 x)))
+      (rv.low_32 x)
+      (spec (= (extract 31 0 x) (result))))
+
+(rule (lower (trunc.i8.i1 (value.i8 x)))
+      (rv.bit_of_32 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i16.i1 (value.i16 x)))
+      (rv.bit_of_32 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i32.i1 (value.i32 x)))
+      (rv.bit_of_32 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+(rule (lower (trunc.i64.i1 (value.i64 x)))
+      (rv.bit_of_64 x 1)
+      (spec (= (extract 0 0 x) (result))))
+
+
+;; Reading and writing memory. Two addressing modes, a register and a register plus a constant of
+;; twelve bits signed, which every load and store takes. A `_Bool` object is one byte holding a zero
+;; or a one, which is the truth value in a register, so it is the byte load and the byte store. A
+;; word load is `lw`, which sign extends and so keeps the promise about words.
+
+(rule (lower (load.i1 (value.i64 a)))
+      (rv.ld_bit (amode_base a))
+      (spec (= (extract 0 0 (select (mem) a)) (result))))
+
+(rule (lower (load.i1 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.ld_bit (amode_base_offset a k))
+      (spec (= (extract 0 0 (select (mem) (bvadd a k))) (result))))
+
+(rule (lower (store.i1 (value.i1 v) (value.i64 a)))
+      (rv.st_bit (amode_base a) v)
+      (spec (= (store (mem) a (zero_extend 1 8 v)) (result))))
+
+(rule (lower (store.i1 (value.i1 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.st_bit (amode_base_offset a k) v)
+      (spec (= (store (mem) (bvadd a k) (zero_extend 1 8 v)) (result))))
+
+(rule (lower (load.i8 (value.i64 a)))
+      (rv.ld_8 (amode_base a))
+      (spec (= (select (mem) a) (result))))
+
+(rule (lower (load.i8 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.ld_8 (amode_base_offset a k))
+      (spec (= (select (mem) (bvadd a k)) (result))))
+
+(rule (lower (store.i8 (value.i8 v) (value.i64 a)))
+      (rv.st_8 (amode_base a) v)
+      (spec (= (store (mem) a v) (result))))
+
+(rule (lower (store.i8 (value.i8 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.st_8 (amode_base_offset a k) v)
+      (spec (= (store (mem) (bvadd a k) v) (result))))
+
+(rule (lower (load.i16 (value.i64 a)))
+      (rv.ld_16 (amode_base a))
+      (spec (= (concat (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
+
+(rule (lower (load.i16 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.ld_16 (amode_base_offset a k))
+      (spec (= (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))) (result))))
+
+(rule (lower (store.i16 (value.i16 v) (value.i64 a)))
+      (rv.st_16 (amode_base a) v)
+      (spec (= (store (store (mem)
+                       a (extract 7 0 v))
+                       (bvadd a 1) (extract 15 8 v)) (result))))
+
+(rule (lower (store.i16 (value.i16 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.st_16 (amode_base_offset a k) v)
+      (spec (= (store (store (mem)
+                       (bvadd a k) (extract 7 0 v))
+                       (bvadd (bvadd a k) 1) (extract 15 8 v)) (result))))
+
+(rule (lower (load.i32 (value.i64 a)))
+      (rv.ld_32 (amode_base a))
+      (spec (= (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                       (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
+
+(rule (lower (load.i32 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.ld_32 (amode_base_offset a k))
+      (spec (= (concat (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                       (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))) (result))))
+
+(rule (lower (store.i32 (value.i32 v) (value.i64 a)))
+      (rv.st_32 (amode_base a) v)
+      (spec (= (store (store (store (store (mem)
+                       a (extract 7 0 v))
+                       (bvadd a 1) (extract 15 8 v))
+                       (bvadd a 2) (extract 23 16 v))
+                       (bvadd a 3) (extract 31 24 v)) (result))))
+
+(rule (lower (store.i32 (value.i32 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.st_32 (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (mem)
+                       (bvadd a k) (extract 7 0 v))
+                       (bvadd (bvadd a k) 1) (extract 15 8 v))
+                       (bvadd (bvadd a k) 2) (extract 23 16 v))
+                       (bvadd (bvadd a k) 3) (extract 31 24 v)) (result))))
+
+(rule (lower (load.i64 (value.i64 a)))
+      (rv.ld_64 (amode_base a))
+      (spec (= (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                       (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                       (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                       (select (mem) (bvadd a 1)) (select (mem) a)) (result))))
+
+(rule (lower (load.i64 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.ld_64 (amode_base_offset a k))
+      (spec (= (concat (select (mem) (bvadd (bvadd a k) 7)) (select (mem) (bvadd (bvadd a k) 6))
+                       (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
+                       (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                       (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k))) (result))))
+
+(rule (lower (store.i64 (value.i64 v) (value.i64 a)))
+      (rv.st_64 (amode_base a) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                       a (extract 7 0 v))
+                       (bvadd a 1) (extract 15 8 v))
+                       (bvadd a 2) (extract 23 16 v))
+                       (bvadd a 3) (extract 31 24 v))
+                       (bvadd a 4) (extract 39 32 v))
+                       (bvadd a 5) (extract 47 40 v))
+                       (bvadd a 6) (extract 55 48 v))
+                       (bvadd a 7) (extract 63 56 v)) (result))))
+
+(rule (lower (store.i64 (value.i64 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.st_64 (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                       (bvadd a k) (extract 7 0 v))
+                       (bvadd (bvadd a k) 1) (extract 15 8 v))
+                       (bvadd (bvadd a k) 2) (extract 23 16 v))
+                       (bvadd (bvadd a k) 3) (extract 31 24 v))
+                       (bvadd (bvadd a k) 4) (extract 39 32 v))
+                       (bvadd (bvadd a k) 5) (extract 47 40 v))
+                       (bvadd (bvadd a k) 6) (extract 55 48 v))
+                       (bvadd (bvadd a k) 7) (extract 63 56 v)) (result))))
+
+(rule (lower (load.f32 (value.i64 a)))
+      (rv.ld_f32 (amode_base a))
+      (spec (= (float_from_bits 32 (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                       (select (mem) (bvadd a 1)) (select (mem) a))) (result))))
+
+(rule (lower (load.f32 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.ld_f32 (amode_base_offset a k))
+      (spec (= (float_from_bits 32 (concat (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                       (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))) (result))))
+
+(rule (lower (store.f32 (value.f32 v) (value.i64 a)))
+      (rv.st_f32 (amode_base a) v)
+      (spec (= (store (store (store (store (mem)
+                       a (extract 7 0 (bits_from_float 32 v)))
+                       (bvadd a 1) (extract 15 8 (bits_from_float 32 v)))
+                       (bvadd a 2) (extract 23 16 (bits_from_float 32 v)))
+                       (bvadd a 3) (extract 31 24 (bits_from_float 32 v))) (result))))
+
+(rule (lower (store.f32 (value.f32 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.st_f32 (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (mem)
+                       (bvadd a k) (extract 7 0 (bits_from_float 32 v)))
+                       (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 32 v)))
+                       (bvadd (bvadd a k) 2) (extract 23 16 (bits_from_float 32 v)))
+                       (bvadd (bvadd a k) 3) (extract 31 24 (bits_from_float 32 v))) (result))))
+
+(rule (lower (load.f64 (value.i64 a)))
+      (rv.ld_f64 (amode_base a))
+      (spec (= (float_from_bits 64 (concat (select (mem) (bvadd a 7)) (select (mem) (bvadd a 6))
+                       (select (mem) (bvadd a 5)) (select (mem) (bvadd a 4))
+                       (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
+                       (select (mem) (bvadd a 1)) (select (mem) a))) (result))))
+
+(rule (lower (load.f64 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.ld_f64 (amode_base_offset a k))
+      (spec (= (float_from_bits 64 (concat (select (mem) (bvadd (bvadd a k) 7)) (select (mem) (bvadd (bvadd a k) 6))
+                       (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
+                       (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
+                       (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))) (result))))
+
+(rule (lower (store.f64 (value.f64 v) (value.i64 a)))
+      (rv.st_f64 (amode_base a) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                       a (extract 7 0 (bits_from_float 64 v)))
+                       (bvadd a 1) (extract 15 8 (bits_from_float 64 v)))
+                       (bvadd a 2) (extract 23 16 (bits_from_float 64 v)))
+                       (bvadd a 3) (extract 31 24 (bits_from_float 64 v)))
+                       (bvadd a 4) (extract 39 32 (bits_from_float 64 v)))
+                       (bvadd a 5) (extract 47 40 (bits_from_float 64 v)))
+                       (bvadd a 6) (extract 55 48 (bits_from_float 64 v)))
+                       (bvadd a 7) (extract 63 56 (bits_from_float 64 v))) (result))))
+
+(rule (lower (store.f64 (value.f64 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.st_f64 (amode_base_offset a k) v)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                       (bvadd a k) (extract 7 0 (bits_from_float 64 v)))
+                       (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 64 v)))
+                       (bvadd (bvadd a k) 2) (extract 23 16 (bits_from_float 64 v)))
+                       (bvadd (bvadd a k) 3) (extract 31 24 (bits_from_float 64 v)))
+                       (bvadd (bvadd a k) 4) (extract 39 32 (bits_from_float 64 v)))
+                       (bvadd (bvadd a k) 5) (extract 47 40 (bits_from_float 64 v)))
+                       (bvadd (bvadd a k) 6) (extract 55 48 (bits_from_float 64 v)))
+                       (bvadd (bvadd a k) 7) (extract 63 56 (bits_from_float 64 v))) (result))))
+
+;; Giving a value back. What is narrower than a word comes back in `a0` as the word it is, and the
+;; extension the convention asks of the callee is the business of the call lowering.
+
+(rule (lower (ret.i1 (value.i1 v)))
+      (rv.ret_val_32 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i8 (value.i8 v)))
+      (rv.ret_val_32 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i16 (value.i16 v)))
+      (rv.ret_val_32 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i32 (value.i32 v)))
+      (rv.ret_val_32 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.i64 (value.i64 v)))
+      (rv.ret_val_64 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.f32 (value.f32 v)))
+      (rv.ret_val_f32 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.f64 (value.f64 v)))
+      (rv.ret_val_f64 v)
+      (spec (= v (result))))
+
+
+;; Branching on a truth value, which the layout turns into a `bnez` or a `beqz`.
+
+(rule (lower (brif.i1 (value.i1 c)))
+      (rv.br_cond_32 c)
+      (spec (= c (result))))
+
+
+;; Floats, at the two formats the D extension has registers for. A `long double` is a quad here,
+;; which the convention passes in a pair of integer registers, and there is no rule for one yet.
+
+(rule (lower (fadd.f32 (value.f32 x) (value.f32 y)))
+      (rv.fadd_f32 x y)
+      (spec (= (fp.add x y) (result))))
+
+(rule (lower (fadd.f64 (value.f64 x) (value.f64 y)))
+      (rv.fadd_f64 x y)
+      (spec (= (fp.add x y) (result))))
+
+(rule (lower (fsub.f32 (value.f32 x) (value.f32 y)))
+      (rv.fsub_f32 x y)
+      (spec (= (fp.sub x y) (result))))
+
+(rule (lower (fsub.f64 (value.f64 x) (value.f64 y)))
+      (rv.fsub_f64 x y)
+      (spec (= (fp.sub x y) (result))))
+
+(rule (lower (fmul.f32 (value.f32 x) (value.f32 y)))
+      (rv.fmul_f32 x y)
+      (spec (= (fp.mul x y) (result))))
+
+(rule (lower (fmul.f64 (value.f64 x) (value.f64 y)))
+      (rv.fmul_f64 x y)
+      (spec (= (fp.mul x y) (result))))
+
+(rule (lower (fdiv.f32 (value.f32 x) (value.f32 y)))
+      (rv.fdiv_f32 x y)
+      (spec (= (fp.div x y) (result))))
+
+(rule (lower (fdiv.f64 (value.f64 x) (value.f64 y)))
+      (rv.fdiv_f64 x y)
+      (spec (= (fp.div x y) (result))))
+
+;; The fused multiply add, which the F and D extensions have, in the order of the arguments to
+;; `fma`.
+
+(rule (lower (fma.f32 (value.f32 x) (value.f32 y) (value.f32 z)))
+      (rv.fmadd_f32 x y z)
+      (spec (= (fp.fma x y z) (result))))
+
+(rule (lower (fma.f64 (value.f64 x) (value.f64 y) (value.f64 z)))
+      (rv.fmadd_f64 x y z)
+      (spec (= (fp.fma x y z) (result))))
+
+;; Comparing two floats. The machine has `feq`, `flt` and `fle`, and each of the IR's predicates
+;; but four is one of those, maybe the other way round and maybe with the answer turned over. The
+;; four are built out of two: ordered is each operand equal to itself, which a NaN is not, and
+;; ordered and unequal is one of the two less thans. The other two are those turned over.
+
+(rule (lower (fcmp_ogt.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_gt_f32 x y)
+      (spec (= (ite (fp.gt x y) 1 0) (result))))
+
+(rule (lower (fcmp_oge.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_ge_f32 x y)
+      (spec (= (ite (fp.geq x y) 1 0) (result))))
+
+(rule (lower (fcmp_olt.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_lt_f32 x y)
+      (spec (= (ite (fp.lt x y) 1 0) (result))))
+
+(rule (lower (fcmp_ole.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_le_f32 x y)
+      (spec (= (ite (fp.leq x y) 1 0) (result))))
+
+(rule (lower (fcmp_oeq.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_eq_f32 x y)
+      (spec (= (ite (fp.eq x y) 1 0) (result))))
+
+(rule (lower (fcmp_une.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_ne_f32 x y)
+      (spec (= (ite (not (fp.eq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ult.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_ult_f32 x y)
+      (spec (= (ite (not (fp.geq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ule.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_ule_f32 x y)
+      (spec (= (ite (not (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ugt.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_ugt_f32 x y)
+      (spec (= (ite (not (fp.leq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_uge.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.fcmp_set_uge_f32 x y)
+      (spec (= (ite (not (fp.lt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ord.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.and_rr_64 (rv.fcmp_set_eq_f32 x x) (rv.fcmp_set_eq_f32 y y))
+      (spec (= (ite (and (not (fp.isNaN x)) (not (fp.isNaN y))) 1 0) (result))))
+
+(rule (lower (fcmp_uno.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.xor_ri_64 (rv.and_rr_64 (rv.fcmp_set_eq_f32 x x) (rv.fcmp_set_eq_f32 y y)) 1)
+      (spec (= (ite (or (fp.isNaN x) (fp.isNaN y)) 1 0) (result))))
+
+(rule (lower (fcmp_one.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.or_rr_64 (rv.fcmp_set_lt_f32 x y) (rv.fcmp_set_lt_f32 y x))
+      (spec (= (ite (or (fp.lt x y) (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ueq.f32.i1 (value.f32 x) (value.f32 y)))
+      (rv.xor_ri_64 (rv.or_rr_64 (rv.fcmp_set_lt_f32 x y) (rv.fcmp_set_lt_f32 y x)) 1)
+      (spec (= (ite (not (or (fp.lt x y) (fp.gt x y))) 1 0) (result))))
+
+(rule (lower (fcmp_ogt.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_gt_f64 x y)
+      (spec (= (ite (fp.gt x y) 1 0) (result))))
+
+(rule (lower (fcmp_oge.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_ge_f64 x y)
+      (spec (= (ite (fp.geq x y) 1 0) (result))))
+
+(rule (lower (fcmp_olt.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_lt_f64 x y)
+      (spec (= (ite (fp.lt x y) 1 0) (result))))
+
+(rule (lower (fcmp_ole.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_le_f64 x y)
+      (spec (= (ite (fp.leq x y) 1 0) (result))))
+
+(rule (lower (fcmp_oeq.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_eq_f64 x y)
+      (spec (= (ite (fp.eq x y) 1 0) (result))))
+
+(rule (lower (fcmp_une.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_ne_f64 x y)
+      (spec (= (ite (not (fp.eq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ult.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_ult_f64 x y)
+      (spec (= (ite (not (fp.geq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ule.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_ule_f64 x y)
+      (spec (= (ite (not (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ugt.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_ugt_f64 x y)
+      (spec (= (ite (not (fp.leq x y)) 1 0) (result))))
+
+(rule (lower (fcmp_uge.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.fcmp_set_uge_f64 x y)
+      (spec (= (ite (not (fp.lt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ord.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.and_rr_64 (rv.fcmp_set_eq_f64 x x) (rv.fcmp_set_eq_f64 y y))
+      (spec (= (ite (and (not (fp.isNaN x)) (not (fp.isNaN y))) 1 0) (result))))
+
+(rule (lower (fcmp_uno.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.xor_ri_64 (rv.and_rr_64 (rv.fcmp_set_eq_f64 x x) (rv.fcmp_set_eq_f64 y y)) 1)
+      (spec (= (ite (or (fp.isNaN x) (fp.isNaN y)) 1 0) (result))))
+
+(rule (lower (fcmp_one.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.or_rr_64 (rv.fcmp_set_lt_f64 x y) (rv.fcmp_set_lt_f64 y x))
+      (spec (= (ite (or (fp.lt x y) (fp.gt x y)) 1 0) (result))))
+
+(rule (lower (fcmp_ueq.f64.i1 (value.f64 x) (value.f64 y)))
+      (rv.xor_ri_64 (rv.or_rr_64 (rv.fcmp_set_lt_f64 x y) (rv.fcmp_set_lt_f64 y x)) 1)
+      (spec (= (ite (not (or (fp.lt x y) (fp.gt x y))) 1 0) (result))))
+
+;; Conversions with a float on one side. The names are the AArch64 ones: `fcvt` puts the source
+;; format first, `fcvtzs` rounds toward zero into a signed integer and `scvtf` goes back. A word
+;; out of `fcvt.w` is sign extended, which keeps the promise about words.
+
+(rule (lower (fpext.f32.f64 (value.f32 x)))
+      (rv.fcvt_f32_f64 x)
+      (spec (= (float_from_float 32 64 x) (result))))
+
+(rule (lower (fptrunc.f64.f32 (value.f64 x)))
+      (rv.fcvt_f64_f32 x)
+      (spec (= (float_from_float 64 32 x) (result))))
+
+(rule (lower (fptosi.f32.i32 (value.f32 x)))
+      (rv.fcvtzs_f32_32 x)
+      (spec (= (signed_from_float 32 32 x) (result))))
+
+(rule (lower (fptosi.f32.i64 (value.f32 x)))
+      (rv.fcvtzs_f32_64 x)
+      (spec (= (signed_from_float 32 64 x) (result))))
+
+(rule (lower (fptosi.f64.i32 (value.f64 x)))
+      (rv.fcvtzs_f64_32 x)
+      (spec (= (signed_from_float 64 32 x) (result))))
+
+(rule (lower (fptosi.f64.i64 (value.f64 x)))
+      (rv.fcvtzs_f64_64 x)
+      (spec (= (signed_from_float 64 64 x) (result))))
+
+(rule (lower (sitofp.i32.f32 (value.i32 x)))
+      (rv.scvtf_32_f32 x)
+      (spec (= (float_from_signed 32 32 x) (result))))
+
+(rule (lower (sitofp.i32.f64 (value.i32 x)))
+      (rv.scvtf_32_f64 x)
+      (spec (= (float_from_signed 32 64 x) (result))))
+
+(rule (lower (sitofp.i64.f32 (value.i64 x)))
+      (rv.scvtf_64_f32 x)
+      (spec (= (float_from_signed 64 32 x) (result))))
+
+(rule (lower (sitofp.i64.f64 (value.i64 x)))
+      (rv.scvtf_64_f64 x)
+      (spec (= (float_from_signed 64 64 x) (result))))
+
+
+;; Moving a register from one file to the other, which is what a bitcast is. `fmv.x.w` sign
+;; extends the word it moves.
+
+(rule (lower (bitcast.f32.i32 (value.f32 x)))
+      (rv.fmov_from_f32 x)
+      (spec (= (bits_from_float 32 x) (result))))
+
+(rule (lower (bitcast.i32.f32 (value.i32 x)))
+      (rv.fmov_to_f32 x)
+      (spec (= (float_from_bits 32 x) (result))))
+
+(rule (lower (bitcast.f64.i64 (value.f64 x)))
+      (rv.fmov_from_f64 x)
+      (spec (= (bits_from_float 64 x) (result))))
+
+(rule (lower (bitcast.i64.f64 (value.i64 x)))
+      (rv.fmov_to_f64 x)
+      (spec (= (float_from_bits 64 x) (result))))

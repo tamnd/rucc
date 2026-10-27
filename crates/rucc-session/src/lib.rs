@@ -2337,6 +2337,18 @@ pub struct Options {
     /// `-mgeneral-regs-only` on either machine turn off. A kernel turns them off so that entering
     /// it does not mean saving them, and a function with a `float` in it is then refused.
     pub vector: bool,
+    /// Whether a float argument travels in the integer registers, which is RISC-V's `-mabi=lp64`
+    /// and the convention the riscv kernel builds with. This compiler passes floats only the LP64D
+    /// way, so a unit built for this one holds no float at all and [`Self::vector`] is off. What it
+    /// changes is the float ABI the target names, and so the flag in the object, which ld checks
+    /// is the same in every object it links.
+    pub soft_float: bool,
+    /// Whether this is a 32 bit RISC-V machine on a riscv64 target, which `-march=rv32...` with
+    /// `-mabi=ilp32` or `-mabi=ilp32d` asks for. The riscv kernel builds its compat vDSO that way,
+    /// four files of assembly linked with `-melf32lriscv`. There is no 32 bit back end, so the
+    /// driver takes it for preprocessing and assembling and nothing else, and the target is the
+    /// `riscv32` row of the table, which gives the macros and the ELF class of the object.
+    pub rv32: bool,
     /// Whether a value may be kept on the x87 stack, which `-mno-80387` and `-msoft-float` turn
     /// off. That is the eighty bit `long double`.
     pub x87: bool,
@@ -3071,6 +3083,8 @@ impl Options {
             tls_descriptors: false,
             stack_boundary: None,
             vector: true,
+            soft_float: false,
+            rv32: false,
             x87: true,
             x87_return: true,
             guard: None,
@@ -3251,6 +3265,21 @@ pub struct Session {
     warning_count: u32,
 }
 
+/// The `riscv32` row of the table, on the operating system and the environment of `target`, which
+/// is what [`Options::rv32`] builds for.
+///
+/// # Panics
+///
+/// Never for a riscv64 target, whose operating system and environment riscv32 has as well.
+#[must_use]
+pub fn rv32(target: Triple) -> rucc_tuple::TargetTuple {
+    let tuple = target.tuple();
+    rucc_tuple::TargetTuple::builder(rucc_tuple::Arch::Riscv32, tuple.os())
+        .env(tuple.env())
+        .build()
+        .expect("riscv32 runs where riscv64 does")
+}
+
 impl Session {
     /// A session for `opts`.
     ///
@@ -3260,7 +3289,11 @@ impl Session {
     /// target, and two answers to one question is how a front end ends up disagreeing with its own
     /// back end.
     pub fn new(opts: Options) -> Self {
-        let mut target = TargetInfo::new(opts.target);
+        let mut target = if opts.rv32 {
+            TargetInfo::for_tuple(rv32(opts.target))
+        } else {
+            TargetInfo::new(opts.target)
+        };
         if opts.reg_struct_return {
             target = target.with_reg_struct_return(true);
         }
@@ -3270,6 +3303,9 @@ impl Session {
         }
         if let Some(version) = opts.os_version {
             target.tuple = target.tuple.with_os_version(version);
+        }
+        if opts.soft_float {
+            target.tuple = target.tuple.with_abi(rucc_tuple::Abi::SoftFloat);
         }
         target = target.with_simd128(opts.wasm.has(wasm::Feature::Simd128));
         if let Some(signed) = opts.char_signed {

@@ -18,7 +18,9 @@ use std::sync::LazyLock;
 use crate::named;
 use crate::riscv64::encode::{Addr, Offset, Operator, Round, Value};
 
-use Arg::{Base, Disp, Fixed, Fp, Imm, ImmPlus, Label, Lit, Mem, Near, Reg, Sp, Symbol, Through};
+use Arg::{
+    At, Base, Disp, Fixed, Fp, Imm, ImmPlus, Label, Lit, Mem, Near, Reg, Sp, Symbol, Through,
+};
 
 /// A byte.
 const B: u8 = 8;
@@ -53,6 +55,9 @@ pub enum Arg {
     Mem,
     /// The base register of the instruction's addressing mode, as a register on its own.
     Base,
+    /// The integer register the operand at that index was given, as an address with nothing added,
+    /// which is the only address `lr`, `sc` and the `amo` operations take.
+    At(u8),
     /// The constant of the instruction's addressing mode, as a constant on its own.
     Disp,
     /// That many bytes above the stack pointer, which is where a push and a pop put things.
@@ -91,6 +96,11 @@ const RRR_X: &[Arg] = &[Reg(0, X), Reg(1, X), Reg(2, X)];
 const RRI_W: &[Arg] = &[Reg(0, W), Reg(1, W), Imm];
 const RRI_X: &[Arg] = &[Reg(0, X), Reg(1, X), Imm];
 const RR_W: &[Arg] = &[Reg(0, W), Reg(1, W)];
+// A word that comes out of an instruction of the whole register, `and` or `mv` or `not`, is only
+// sign extended if what went in was, so those read every bit of their sources.
+const RRR_WX: &[Arg] = &[Reg(0, W), Reg(1, X), Reg(2, X)];
+const RRI_WX: &[Arg] = &[Reg(0, W), Reg(1, X), Imm];
+const RR_WX: &[Arg] = &[Reg(0, W), Reg(1, X)];
 const RR_X: &[Arg] = &[Reg(0, X), Reg(1, X)];
 const FFF: &[Arg] = &[Fp(0), Fp(1), Fp(2)];
 const FF: &[Arg] = &[Fp(0), Fp(1)];
@@ -105,18 +115,18 @@ static TEXT: &[(&str, &[Written])] = &[
     ("li_32", &[spell("li", &[Reg(0, W), Imm])]),
     ("li_64", &[spell("li", &[Reg(0, X), Imm])]),
     // Copies.
-    ("mv_rr_32", &[spell("mv", RR_W)]),
+    ("mv_rr_32", &[spell("mv", RR_WX)]),
     ("mv_rr_64", &[spell("mv", RR_X)]),
     // Arithmetic on two registers.
     ("add_rr_32", &[spell("addw", RRR_W)]),
     ("add_rr_64", &[spell("add", RRR_X)]),
     ("sub_rr_32", &[spell("subw", RRR_W)]),
     ("sub_rr_64", &[spell("sub", RRR_X)]),
-    ("and_rr_32", &[spell("and", RRR_W)]),
+    ("and_rr_32", &[spell("and", RRR_WX)]),
     ("and_rr_64", &[spell("and", RRR_X)]),
-    ("or_rr_32", &[spell("or", RRR_W)]),
+    ("or_rr_32", &[spell("or", RRR_WX)]),
     ("or_rr_64", &[spell("or", RRR_X)]),
-    ("xor_rr_32", &[spell("xor", RRR_W)]),
+    ("xor_rr_32", &[spell("xor", RRR_WX)]),
     ("xor_rr_64", &[spell("xor", RRR_X)]),
     ("mul_rr_32", &[spell("mulw", RRR_W)]),
     ("mul_rr_64", &[spell("mul", RRR_X)]),
@@ -139,11 +149,11 @@ static TEXT: &[(&str, &[Written])] = &[
     // Arithmetic on a register and a constant.
     ("add_ri_32", &[spell("addiw", RRI_W)]),
     ("add_ri_64", &[spell("addi", RRI_X)]),
-    ("and_ri_32", &[spell("andi", RRI_W)]),
+    ("and_ri_32", &[spell("andi", RRI_WX)]),
     ("and_ri_64", &[spell("andi", RRI_X)]),
-    ("or_ri_32", &[spell("ori", RRI_W)]),
+    ("or_ri_32", &[spell("ori", RRI_WX)]),
     ("or_ri_64", &[spell("ori", RRI_X)]),
-    ("xor_ri_32", &[spell("xori", RRI_W)]),
+    ("xor_ri_32", &[spell("xori", RRI_WX)]),
     ("xor_ri_64", &[spell("xori", RRI_X)]),
     ("sll_ri_32", &[spell("slliw", RRI_W)]),
     ("sll_ri_64", &[spell("slli", RRI_X)]),
@@ -182,7 +192,7 @@ static TEXT: &[(&str, &[Written])] = &[
     // One register to one register.
     ("neg_r_32", &[spell("negw", RR_W)]),
     ("neg_r_64", &[spell("neg", RR_X)]),
-    ("not_r_32", &[spell("not", RR_W)]),
+    ("not_r_32", &[spell("not", RR_WX)]),
     ("not_r_64", &[spell("not", RR_X)]),
     // Widening. RV64GC has no instruction for a byte or a half, so those move the bits to the
     // top of the register and back down.
@@ -250,9 +260,11 @@ static TEXT: &[(&str, &[Written])] = &[
     ("bit_to_16", &[spell("andi", &[Reg(0, H), Reg(1, B), Lit(1)])]),
     ("bit_to_32", &[spell("andi", &[Reg(0, W), Reg(1, B), Lit(1)])]),
     ("bit_to_64", &[spell("andi", &[Reg(0, X), Reg(1, B), Lit(1)])]),
+    // Narrowing. Above a byte or a half nothing is promised, so those are a copy. A word is kept
+    // sign extended, which is what every reader of one on this machine counts on.
     ("low_8", &[spell("mv", &[Reg(0, B), Reg(1, B)])]),
     ("low_16", &[spell("mv", &[Reg(0, H), Reg(1, H)])]),
-    ("low_32", &[spell("mv", &[Reg(0, W), Reg(1, W)])]),
+    ("low_32", &[spell("sext.w", &[Reg(0, W), Reg(1, W)])]),
     ("bit_of_32", &[spell("andi", &[Reg(0, W), Reg(1, W), Imm])]),
     ("bit_of_64", &[spell("andi", &[Reg(0, W), Reg(1, X), Imm])]),
     // Comparisons that keep their answer. Equality is whether the difference is zero, which for
@@ -282,13 +294,24 @@ static TEXT: &[(&str, &[Written])] = &[
     ("cmp_set_ls_64", &[spell("sltu", RRR_X_SWAPPED), FLIP]),
     ("cmp_set_hi_64", &[spell("sltu", RRR_X_SWAPPED)]),
     ("cmp_set_hs_64", &[spell("sltu", RRR_X), FLIP]),
+    // A thirty two bit value is kept sign extended in its register, so the comparisons of the
+    // whole register give the answer for the low half, signed and unsigned. They read the whole
+    // register, so a `sext.w` in front of one has to stay even when nothing reads above the word.
+    ("cmp_set_lt_32", &[spell("slt", RRR_X)]),
+    ("cmp_set_le_32", &[spell("slt", RRR_X_SWAPPED), FLIP]),
+    ("cmp_set_gt_32", &[spell("slt", RRR_X_SWAPPED)]),
+    ("cmp_set_ge_32", &[spell("slt", RRR_X), FLIP]),
+    ("cmp_set_lo_32", &[spell("sltu", RRR_X)]),
+    ("cmp_set_ls_32", &[spell("sltu", RRR_X_SWAPPED), FLIP]),
+    ("cmp_set_hi_32", &[spell("sltu", RRR_X_SWAPPED)]),
+    ("cmp_set_hs_32", &[spell("sltu", RRR_X), FLIP]),
     // The second source when the byte is not zero, and the first when it is.
     (
         "sel_32",
         &[
-            spell("mv", &[Reg(0, W), Reg(2, W)]),
+            spell("mv", &[Reg(0, W), Reg(2, X)]),
             spell("bnez", &[Reg(3, B), Near(2)]),
-            spell("mv", &[Reg(0, W), Reg(1, W)]),
+            spell("mv", &[Reg(0, W), Reg(1, X)]),
         ],
     ),
     (
@@ -307,10 +330,12 @@ static TEXT: &[(&str, &[Written])] = &[
     ("lea_far_64", &[spell("lea.far", &[Reg(0, X), Mem])]),
     ("addr_64", &[spell("lla", &[Reg(0, X), Symbol])]),
     ("got_64", &[spell("la", &[Reg(0, X), Symbol])]),
+    ("gottprel_64", &[spell("la.tls.ie", &[Reg(0, X), Symbol])]),
     ("thread_64", &[spell("mv", &[Reg(0, X), Fixed(TP)])]),
     // Loads. A load of thirty two bits sign extends, which is the right answer for an `int` and a
     // harmless one for anything that reads only the low half.
     ("ld_8", &[spell("lbu", &[Reg(0, X), Mem])]),
+    ("ld_bit", &[spell("lbu", &[Reg(0, B), Mem])]),
     ("ld_16", &[spell("lhu", &[Reg(0, X), Mem])]),
     ("ld_32", &[spell("lw", &[Reg(0, W), Mem])]),
     ("ld_64", &[spell("ld", &[Reg(0, X), Mem])]),
@@ -320,6 +345,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ldu_32", &[spell("lwu", &[Reg(0, X), Mem])]),
     // Stores.
     ("st_8", &[spell("sb", &[Reg(0, B), Mem])]),
+    ("st_bit", &[spell("sb", &[Reg(0, B), Mem])]),
     ("st_16", &[spell("sh", &[Reg(0, H), Mem])]),
     ("st_32", &[spell("sw", &[Reg(0, W), Mem])]),
     ("st_64", &[spell("sd", &[Reg(0, X), Mem])]),
@@ -350,8 +376,9 @@ static TEXT: &[(&str, &[Written])] = &[
     ("fabs_f64", &[spell("fabs.d", FF)]),
     ("fmv_f32", &[spell("fmv.s", FF)]),
     ("fmv_f64", &[spell("fmv.d", FF)]),
-    ("fcvt_f64_f32", &[spell("fcvt.d.s", FF)]),
-    ("fcvt_f32_f64", &[spell("fcvt.s.d", FF)]),
+    ("fzero_f64", &[spell("fmv.d.x", &[Fp(0), Fixed(0)])]),
+    ("fcvt_f32_f64", &[spell("fcvt.d.s", FF)]),
+    ("fcvt_f64_f32", &[spell("fcvt.s.d", FF)]),
     ("scvtf_32_f32", &[spell("fcvt.s.w", &[Fp(0), Reg(1, W)])]),
     ("scvtf_32_f64", &[spell("fcvt.d.w", &[Fp(0), Reg(1, W)])]),
     ("scvtf_64_f32", &[spell("fcvt.s.l", &[Fp(0), Reg(1, X)])]),
@@ -454,11 +481,88 @@ static TEXT: &[(&str, &[Written])] = &[
     // Reads and writes before it ordered with reads and writes after it, which is what a C
     // fence asks for.
     ("fence", &[spell("fence", &[Arg::Order(3), Arg::Order(3)])]),
+    // Reads before it ordered with everything after it, and everything before it with writes after
+    // it, which are an acquire and a release fence as the psABI maps them.
+    ("fence_acquire", &[spell("fence", &[Arg::Order(2), Arg::Order(3)])]),
+    ("fence_release", &[spell("fence", &[Arg::Order(3), Arg::Order(1)])]),
+    // The atomics, as gcc writes them at the strongest ordering. What was there, the address and
+    // the value, and a subtraction is the add of the negation, put in the register the answer
+    // comes back in first.
+    ("xchg_32", &[spell("amoswap.w.aqrl", AMO_W)]),
+    ("xchg_64", &[spell("amoswap.d.aqrl", AMO_X)]),
+    ("xadd_32", &[spell("amoadd.w.aqrl", AMO_W)]),
+    ("xadd_64", &[spell("amoadd.d.aqrl", AMO_X)]),
+    ("xsub_32", &[spell("neg", &[Reg(0, W), Reg(2, W)]), spell("amoadd.w.aqrl", AMO_NEG_W)]),
+    ("xsub_64", &[spell("neg", &[Reg(0, X), Reg(2, X)]), spell("amoadd.d.aqrl", AMO_NEG_X)]),
+    // What was there, whether the exchange happened, the address, the value expected and the
+    // value put there. The loop goes round again only when the store lost the reservation, and
+    // the yes or no is whether what was there is what was expected.
+    ("cmpxchg_32", &compare_swap("lr.w.aqrl", spell("sc.w.rl", &[Reg(1, X), Reg(4, W), At(2)]))),
+    ("cmpxchg_64", &compare_swap("lr.d.aqrl", spell("sc.d.rl", &[Reg(1, X), Reg(4, X), At(2)]))),
+    // A byte or a half, as the same loop on the word around it. The value expected and the value
+    // put there are moved to where the byte is in the word, the mask picks it out, and the rest of
+    // the word is put back as it was found. Afterwards the byte is moved back down, so what comes
+    // back has nothing above it.
+    ("cmpxchg_8", &compare_swap_masked(spell("li", &[Reg(2, X), Lit(0xff)]))),
+    ("cmpxchg_16", &compare_swap_masked(spell("li", &[Reg(2, X), Lit(0xffff)]))),
     // Nothing from the table. The text it carries is the program's and the writer puts it down.
     ("template", &[]),
 ];
 
 const RR_X0: &[Arg] = &[Reg(0, X), Reg(0, X)];
+const AMO_W: &[Arg] = &[Reg(0, W), Reg(2, W), At(1)];
+const AMO_X: &[Arg] = &[Reg(0, X), Reg(2, X), At(1)];
+const AMO_NEG_W: &[Arg] = &[Reg(0, W), Reg(0, W), At(1)];
+const AMO_NEG_X: &[Arg] = &[Reg(0, X), Reg(0, X), At(1)];
+
+/// The compare and exchange of a word or a doubleword, `lr` and `sc` at that width, the store
+/// given whole since it is the one that reads only as much of the value as it writes.
+///
+/// A word comes back from `lr.w` sign extended, which is how one is kept in a register, so the
+/// comparisons read the whole register and the value expected has to be sign extended too.
+const fn compare_swap(load: &'static str, store: Written) -> [Written; 6] {
+    [
+        spell(load, &[Reg(0, X), At(2)]),
+        spell("bne", &[Reg(0, X), Reg(3, X), Near(3)]),
+        store,
+        spell("bnez", &[Reg(1, X), Near(-3)]),
+        spell("xor", &[Reg(1, X), Reg(0, X), Reg(3, X)]),
+        spell("seqz", &[Reg(1, X), Reg(1, X)]),
+    ]
+}
+
+/// The compare and exchange of a byte or a half, with the instruction that puts its mask in
+/// operand two.
+///
+/// The operands are what was there, the yes or no, then the word's address, the shift and later
+/// the mask, and the value expected and the value put there where the byte is in the word, and
+/// last the address, the value expected and the value put there.
+const fn compare_swap_masked(mask: Written) -> [Written; 22] {
+    [
+        spell("andi", &[Reg(3, X), Reg(6, X), Lit(3)]),
+        spell("slli", &[Reg(3, X), Reg(3, X), Lit(3)]),
+        mask,
+        spell("and", &[Reg(4, X), Reg(7, X), Reg(2, X)]),
+        spell("sll", &[Reg(4, X), Reg(4, X), Reg(3, X)]),
+        spell("and", &[Reg(5, X), Reg(8, X), Reg(2, X)]),
+        spell("sll", &[Reg(5, X), Reg(5, X), Reg(3, X)]),
+        spell("sll", &[Reg(3, X), Reg(2, X), Reg(3, X)]),
+        spell("andi", &[Reg(2, X), Reg(6, X), Lit(-4)]),
+        spell("lr.w.aqrl", &[Reg(0, X), At(2)]),
+        spell("and", &[Reg(1, X), Reg(0, X), Reg(3, X)]),
+        spell("bne", &[Reg(1, X), Reg(4, X), Near(5)]),
+        spell("xor", &[Reg(1, X), Reg(0, X), Reg(1, X)]),
+        spell("or", &[Reg(1, X), Reg(1, X), Reg(5, X)]),
+        spell("sc.w.rl", &[Reg(1, X), Reg(1, X), At(2)]),
+        spell("bnez", &[Reg(1, X), Near(-6)]),
+        spell("and", &[Reg(0, X), Reg(0, X), Reg(3, X)]),
+        spell("xor", &[Reg(1, X), Reg(0, X), Reg(4, X)]),
+        spell("seqz", &[Reg(1, X), Reg(1, X)]),
+        spell("andi", &[Reg(3, X), Reg(6, X), Lit(3)]),
+        spell("slli", &[Reg(3, X), Reg(3, X), Lit(3)]),
+        spell("srl", &[Reg(0, X), Reg(0, X), Reg(3, X)]),
+    ]
+}
 const RRR_X_SWAPPED: &[Arg] = &[Reg(0, X), Reg(2, X), Reg(1, X)];
 
 /// The instructions the opcode of that name is written as.
@@ -538,6 +642,7 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         Lit(imm) => Value::Imm(imm),
         Mem => Value::Mem(mem()?),
         Base => Value::Gpr(mem()?.base),
+        At(at) => Value::Mem(Addr { base: reg(at)?, offset: Offset::Imm(0) }),
         Disp => match mem()?.offset {
             Offset::Imm(imm) => Value::Imm(imm),
             Offset::Symbol(operator) => Value::Symbol(operator),
@@ -578,7 +683,7 @@ mod tests {
             for inst in written(name).unwrap() {
                 for arg in inst.args {
                     let (at, class) = match *arg {
-                        Reg(at, _) => (at, GPR),
+                        Reg(at, _) | At(at) => (at, GPR),
                         Fp(at) => (at, FPR),
                         Mem | Base | Disp => {
                             assert!(form.takes_mem(), "{name} names an address it has not got");
@@ -602,7 +707,7 @@ mod tests {
     /// address with a small offset.
     fn sample(form: Form, regs: &mut Vec<u8>) -> Operands<'_> {
         regs.clear();
-        regs.extend(10..=14);
+        regs.extend(10..=18);
         let reads = form.operands().iter().take_while(|op| op.role != Role::Use).count();
         let mem = Addr { base: 8, offset: Offset::Imm(16) };
         Operands { regs, reads, imm: 1, mem: Some(mem) }
@@ -666,6 +771,7 @@ mod tests {
         assert_eq!(listing("sra_ri_8", &shift), ["slli a0, a1, 56", "srai a0, a0, 59"]);
         assert_eq!(listing("addr_64", &with), ["lla a0, s"]);
         assert_eq!(listing("got_64", &with), ["la a0, s"]);
+        assert_eq!(listing("gottprel_64", &with), ["la.tls.ie a0, s"]);
         assert_eq!(listing("thread_64", &with), ["mv a0, tp"]);
         assert_eq!(listing("call", &with), ["call s"]);
         assert_eq!(listing("call_reg", &with), ["jalr a1"]);
@@ -709,6 +815,8 @@ mod tests {
         assert_eq!(operand_width("sextb_64", 0), Some(64));
         assert_eq!(operand_width("sextw_64", 1), Some(32));
         assert_eq!(operand_width("add_rr_32", 2), Some(32));
+        assert_eq!(operand_width("cmp_set_lt_32", 1), Some(64));
+        assert_eq!(operand_width("and_rr_32", 2), Some(64));
         assert_eq!(operand_width("fadd_f64", 0), None);
         assert_eq!(operand_width("nothing", 0), None);
     }

@@ -290,6 +290,9 @@ pub static WIN64: AbiDescription = AbiDescription {
 /// purpose and the aggregate holding it is an integer pair like anything else. That single fact
 /// is the whole difference between this description and one for LoongArch LP64D, which is why
 /// section 6.1 calls that one close to this one.
+///
+/// An argument past the `...` is classified with the floating point registers left out, which is
+/// [`Variadic::UnnamedIntegers`].
 pub static RISCV_LP64D: AbiDescription = AbiDescription {
     name: "RISC-V LP64D",
     banks: Banks { integer: 8, float: 8, shared: false, integer_width: 8, float_width: 8 },
@@ -320,9 +323,11 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
         Rule::new(Test::Anything, Travel::ByReference),
     ],
     return_pointer: ReturnPointer::FirstArgument,
-    variadic: Variadic::SameAsFixed,
+    variadic: Variadic::UnnamedIntegers,
     stack_args: StackArgs::RegisterSized,
-    narrow: Narrow::Unspecified,
+    // The psABI extends anything narrower than a word to 32 bits by its own sign and then to the
+    // whole register, for an argument by the caller and for a return value by the callee.
+    narrow: Narrow::ToInt,
     bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
 };

@@ -39,10 +39,11 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::riscv64::{FPR, GPR, f, x};
 
 use Form::{
-    Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, CmpSet, Convert, FAlu, FCmpSet,
-    FConvert, FMove, FMulAdd, FUnary, FpToInt, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero,
-    Lea, Load, LoadFp, LoadImm, Move, Nop, Pop, PopPair, Probe, Push, PushPair, Ret, RetVal,
-    RetVal2, RetVal2Fp, RetValFp, Select, Store, StoreFp, Template, Test, Trap, Unary,
+    Address, Alu, AluI, Amo, AmoNegated, ArgVal, ArgValFp, Barrier, BrCond, Call, CmpSet,
+    CompareSwap, CompareSwapMasked, Convert, FAlu, FCmpSet, FConvert, FMove, FMulAdd, FUnary,
+    FpToInt, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp, LoadImm, Move,
+    Nop, Pop, PopPair, Probe, Push, PushPair, Ret, RetVal, RetVal2, RetVal2Fp, RetValFp, Select,
+    Store, StoreFp, Template, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -142,6 +143,28 @@ pub enum Form {
     Trap,
     /// A fence between the memory accesses before it and the ones after it.
     Barrier,
+    /// An `amo` instruction. What was there, the register holding the address and the value the
+    /// operation is done with.
+    Amo,
+    /// An `amoadd` of the negated value, which is a subtraction. The same operands as
+    /// [`Form::Amo`], and what was there is written early, since the negation is put in it before
+    /// the address is read.
+    AmoNegated,
+    /// A compare and exchange as a loop of `lr` and `sc`. What was there, whether the exchange
+    /// happened, the address, the value expected and the value put there.
+    ///
+    /// The two it writes are written early, because the loop writes both before it reads the
+    /// address and the two values for the last time. The yes or no is the status `sc` left until
+    /// the loop ends, and the answer after it.
+    CompareSwap,
+    /// The same for a byte or a half, which `lr` and `sc` do not come in, as the loop on the word
+    /// around it with the rest of the word kept. What was there, whether the exchange happened,
+    /// four more the loop works in, the address, the value expected and the value put there.
+    ///
+    /// The four are the word's address, the mask that picks the byte out of it, and the value
+    /// expected and the value put there moved to where the byte is in the word. All six are
+    /// written early for the reason the two of [`Form::CompareSwap`] are.
+    CompareSwapMasked,
     /// An `asm` template kept as the text the program wrote. See
     /// `crate::aarch64::Form::Template`.
     Template,
@@ -179,6 +202,28 @@ static RET_VAL: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixe
 static RET_VAL_2: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(x(11)))];
 static RET_VAL_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(f(10)))];
 static RET_VAL_2_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(f(11)))];
+static AMO: [OperandDesc; 3] =
+    [OperandDesc::write(GPR), OperandDesc::read(GPR), OperandDesc::read(GPR)];
+static AMO_NEGATED: [OperandDesc; 3] =
+    [OperandDesc::write_early(GPR), OperandDesc::read(GPR), OperandDesc::read(GPR)];
+static COMPARE_SWAP: [OperandDesc; 5] = [
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+];
+static COMPARE_SWAP_MASKED: [OperandDesc; 9] = [
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::write_early(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+];
 static NONE: [OperandDesc; 0] = [];
 
 impl Form {
@@ -208,6 +253,10 @@ impl Form {
             RetVal2 => &RET_VAL_2,
             RetValFp => &RET_VAL_FP,
             RetVal2Fp => &RET_VAL_2_FP,
+            Amo => &AMO,
+            AmoNegated => &AMO_NEGATED,
+            CompareSwap => &COMPARE_SWAP,
+            CompareSwapMasked => &COMPARE_SWAP_MASKED,
             Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier | Probe | Template => &NONE,
         }
     }
@@ -243,6 +292,10 @@ impl Form {
                 | Call
                 | Ret
                 | Barrier
+                | Amo
+                | AmoNegated
+                | CompareSwap
+                | CompareSwapMasked
                 | Template
         )
     }
@@ -351,20 +404,31 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_set_ls_64", CmpSet),
     ("cmp_set_hi_64", CmpSet),
     ("cmp_set_hs_64", CmpSet),
+    ("cmp_set_lt_32", CmpSet),
+    ("cmp_set_le_32", CmpSet),
+    ("cmp_set_gt_32", CmpSet),
+    ("cmp_set_ge_32", CmpSet),
+    ("cmp_set_lo_32", CmpSet),
+    ("cmp_set_ls_32", CmpSet),
+    ("cmp_set_hi_32", CmpSet),
+    ("cmp_set_hs_32", CmpSet),
     // A choice between two registers on a byte, which is a copy and a branch around a second one.
     ("sel_32", Select),
     ("sel_64", Select),
     // The test the layout writes in front of a branch on a byte, which it folds into the branch.
     ("test", Test),
     // Addresses: a base and a constant, a symbol near enough to reach from the code, a symbol
-    // through the global offset table, and the thread pointer.
+    // through the global offset table, a thread-local variable's offset from the thread pointer
+    // through the table, and the thread pointer.
     ("lea_64", Lea),
     ("lea_far_64", Lea),
     ("addr_64", Address),
     ("got_64", Address),
+    ("gottprel_64", Address),
     ("thread_64", Address),
     // Loads, unsigned and signed.
     ("ld_8", Load),
+    ("ld_bit", Load),
     ("ld_16", Load),
     ("ld_32", Load),
     ("ld_64", Load),
@@ -374,6 +438,7 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ldu_32", Load),
     // Stores.
     ("st_8", Store),
+    ("st_bit", Store),
     ("st_16", Store),
     ("st_32", Store),
     ("st_64", Store),
@@ -405,9 +470,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fabs_f64", FUnary),
     ("fmv_f32", FMove),
     ("fmv_f64", FMove),
+    // A float register cleared in front of a `ret` under `-fzero-call-used-regs=`, which writes
+    // the register and reads nothing, so the second operand is the same register and not spelled.
+    ("fzero_f64", FMove),
     // Between the two floating point widths.
-    ("fcvt_f64_f32", FConvert),
     ("fcvt_f32_f64", FConvert),
+    ("fcvt_f64_f32", FConvert),
     // From an integer to a float, and back, rounding toward zero the way C does. The names are the
     // AArch64 ones, the source and then the destination.
     ("scvtf_32_f32", IntToFp),
@@ -496,6 +564,23 @@ pub static INSTS: &[(&str, Form)] = &[
     ("nop", Nop),
     ("trap", Trap),
     ("fence", Barrier),
+    ("fence_acquire", Barrier),
+    ("fence_release", Barrier),
+    // The atomics. A read modify write at a word or a doubleword is one `amo` instruction, and a
+    // compare and exchange is a loop of `lr` and `sc`, each at the strongest ordering, which is
+    // what gcc writes there and is never wrong at a weaker one. A byte or a half has neither, so
+    // its compare and exchange is the masked loop on the word, and every other read modify write
+    // of one is a loop around that.
+    ("xchg_32", Amo),
+    ("xchg_64", Amo),
+    ("xadd_32", Amo),
+    ("xadd_64", Amo),
+    ("xsub_32", AmoNegated),
+    ("xsub_64", AmoNegated),
+    ("cmpxchg_8", CompareSwapMasked),
+    ("cmpxchg_16", CompareSwapMasked),
+    ("cmpxchg_32", CompareSwap),
+    ("cmpxchg_64", CompareSwap),
     // An `asm` statement's text, which is spelled into the listing rather than chosen by anything.
     ("template", Template),
 ];

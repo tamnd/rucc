@@ -530,6 +530,23 @@ fn windows_arm64_is_aapcs64_until_there_is_a_dots() {
 }
 
 #[test]
+fn riscv_passes_what_is_past_a_dots_in_the_integer_registers() {
+    let two = pieces(&[float(Format::Single, 4); 2]);
+    let pair = Arg::Aggregate(record(&two));
+    let double = Arg::Scalar(float(Format::Double, 8));
+    // A named `double` is fa0 whether there is a `...` or not, which is what gcc does for
+    // `void f(double, ...)`.
+    let mut call = RISCV_LP64D.call().variadic();
+    assert_eq!(call.argument(&double), Pass::Direct);
+    assert_eq!((call.integer_left(), call.float_left()), (8, 7));
+    // Past the `...` a `double` is its bits in the next a register, and two `float`s are the
+    // eight bytes of one rather than fa1 and fa2.
+    assert_eq!(call.variadic_argument(&double), Pass::Pieces(vec![gpr(0, 8)]));
+    assert_eq!(call.variadic_argument(&pair), Pass::Pieces(vec![gpr(0, 8)]));
+    assert_eq!((call.integer_left(), call.float_left()), (6, 7));
+}
+
+#[test]
 fn windows_arm64_passes_a_large_homogeneous_aggregate_by_reference_past_a_dots() {
     let four = pieces(&[float(Format::Double, 8); 4]);
     let hfa = Arg::Aggregate(record(&four));

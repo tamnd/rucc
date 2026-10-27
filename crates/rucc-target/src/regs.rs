@@ -528,7 +528,7 @@ pub struct CallRegs {
     /// How many bytes a variadic callee takes at the very top of its own frame, directly below the
     /// arguments the caller left in memory, to home its argument registers in.
     ///
-    /// Sixty four on Windows on AArch64 and nothing anywhere else. It is [`CallRegs::shadow`] with
+    /// Sixty four on Windows on AArch64 and on RISC-V, and nothing anywhere else. It is [`CallRegs::shadow`] with
     /// the other party paying for it: the caller reserves nothing, and the callee's prologue takes
     /// the bytes before it pushes anything, so that the x registers it writes there and the
     /// arguments above them are one run of words a `char *` walks. Microsoft's compiler and clang
@@ -568,6 +568,19 @@ pub struct CallRegs {
     /// accesses around them and an acquire or a release has an instruction of its own. Here beside
     /// the word because the same pass asks both questions about the same access.
     pub total_store_order: bool,
+    /// Whether an ordered access is the plain one with fences around it, which is how a machine
+    /// with no ordered load or store of its own keeps the ordering.
+    ///
+    /// True on RISC-V, where gcc writes `fence r, rw` behind an acquiring load and `fence rw, w` in
+    /// front of a releasing store. False on x86, which [`CallRegs::total_store_order`] already
+    /// orders, and on AArch64, which has `ldar` and `stlr`.
+    pub fenced: bool,
+    /// The narrowest integer in bits a read modify write is one instruction at.
+    ///
+    /// Eight on x86 and AArch64. Thirty two on RISC-V, whose `amo`, `lr` and `sc` come in words
+    /// and doublewords only, so an exchange or an add of a byte or a half there is a loop around a
+    /// compare and exchange, and that is a masked loop on the word the byte is in.
+    pub rmw_bits: u32,
     /// Whether a plain load or store of a word may be at any address, as fast and as correct as
     /// an aligned one, so a copy of bytes may move them a word at a time whatever the alignment.
     ///
@@ -741,17 +754,23 @@ impl CallRegs {
     }
 
     /// The registers as a variadic function that homes its argument registers sees them, which is
-    /// the same set on every convention but Windows on AArch64.
+    /// the same set on every convention but Windows on AArch64 and RISC-V.
     ///
     /// There every argument of such a function, named or not, arrived in an x register or in the
     /// caller's memory, and the function homes the x registers in the [`CallRegs::home`] bytes it
     /// takes directly below that memory. Seen from inside, that is Windows x64 with the callee paying
     /// for the shadow space: one run of positions, no vector file, and the arguments the caller left
     /// in memory starting that many bytes up from the bottom of the homed words.
+    ///
+    /// RISC-V homes a0 to a7 the same way, but a named `double` still arrived in an fa register,
+    /// so the two files keep their own positions and only the shadow space is new.
     #[must_use]
     pub fn homed(&self) -> CallRegs {
         if self.home == 0 {
             return *self;
+        }
+        if self.abi.variadic == rucc_abi::Variadic::UnnamedIntegers {
+            return CallRegs { shadow: self.home, ..*self };
         }
         CallRegs { shadow: self.home, shared_positions: true, sse_args: &[], ..*self }
     }
@@ -1249,6 +1268,8 @@ mod tests {
             return_address: 8,
             word: 8,
             total_store_order: true,
+            fenced: false,
+            rmw_bits: 8,
             unaligned: true,
             byte_swaps: &[16, 32, 64],
             push: 8,

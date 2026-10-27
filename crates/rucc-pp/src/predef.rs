@@ -165,6 +165,9 @@ pub struct Predef {
     /// On AArch64 it decides `__ARM_FP`, `__ARM_NEON` and the fused multiply add macros, which gcc
     /// leaves out under that flag. On x86-64 the extensions say the same thing, through `__SSE__`.
     pub vector: bool,
+    /// Whether a float argument travels in the integer registers, which is RISC-V's `-mabi=lp64`
+    /// and decides `__riscv_float_abi_soft`.
+    pub soft_float: bool,
     /// Whether `-mstrict-align` was given, which takes `__ARM_FEATURE_UNALIGNED` away on AArch64
     /// as it does in gcc.
     pub strict_align: bool,
@@ -213,6 +216,7 @@ impl Predef {
             isa: Isa::baseline(),
             wasm: wasm::Cpu::default().features(),
             vector: true,
+            soft_float: false,
             strict_align: false,
             branch_protection: BranchProtection::default(),
             protector: Protector::None,
@@ -253,6 +257,7 @@ impl Predef {
             isa: opts.isa,
             wasm: opts.wasm,
             vector: opts.vector,
+            soft_float: opts.soft_float,
             strict_align: opts.strict_align,
             branch_protection: opts.branch_protection,
             protector: opts.protector,
@@ -579,6 +584,11 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // another processor, and there is nothing cheap that would catch it. The driver takes a three
     // field triple, so a target this cannot spell is one nobody can ask for yet rather than a
     // hole in what it answers.
+    // The riscv32 row, which a riscv64 target builds the compat vDSO's assembly for.
+    if target.tuple.arch() == rucc_tuple::Arch::Riscv32 {
+        riscv(d, opts, 32);
+        return;
+    }
     let Some(triple) = Triple::from_tuple(target.tuple) else {
         return;
     };
@@ -612,7 +622,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // Which code model, which is the small one unless `-mcmodel=kernel` said otherwise.
             // A kernel header reads the second to know its addresses are in the top 2 GiB.
             d.flag(match opts.code_model {
-                CodeModel::Small | CodeModel::Tiny => "__code_model_small__",
+                CodeModel::Small | CodeModel::Tiny | CodeModel::Medany => "__code_model_small__",
                 CodeModel::Kernel => "__code_model_kernel__",
             });
             // The MMX registers are not used on x86-64: the sixty four bit operations go
@@ -694,16 +704,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                 SignReturn::All => d.set("__ARM_FEATURE_PAC_DEFAULT", "5"),
             }
         }
-        Arch::Riscv64 => {
-            d.flag("__riscv");
-            d.set("__riscv_xlen", "64");
-            d.set("__riscv_flen", "64");
-            d.flag("__riscv_float_abi_double");
-            d.flag("__riscv_muldiv");
-            d.flag("__riscv_atomic");
-            d.flag("__riscv_compressed");
-            d.set("__riscv_cmodel_medlow", "1");
-        }
+        Arch::Riscv64 => riscv(d, opts, 64),
         Arch::X86 => {
             d.flag("__i386__");
             d.flag("__i386");
@@ -973,6 +974,28 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 ///
 /// These are defined for assembly too, as gcc does, because an assembly file that has `endbr64`
 /// at each entry and the property note only when `__CET__` says so is the usual way to write one.
+/// The RISC-V macros, for a machine whose registers are `xlen` bits wide.
+fn riscv(d: &mut Defs, opts: &Predef, xlen: u32) {
+    d.flag("__riscv");
+    d.set("__riscv_xlen", &xlen.to_string());
+    // The float registers, for as long as a unit may keep a `double` in one. A unit built for a
+    // machine without the D extension, or for the convention that passes a float in the integer
+    // registers, has none, which is how the kernel builds.
+    if opts.vector {
+        d.set("__riscv_flen", "64");
+    }
+    d.flag(if opts.soft_float { "__riscv_float_abi_soft" } else { "__riscv_float_abi_double" });
+    d.flag("__riscv_muldiv");
+    d.flag("__riscv_atomic");
+    d.flag("__riscv_compressed");
+    // The kernel's `setup_vm` reads the second, since it runs before the kernel is where it was
+    // linked.
+    match opts.code_model {
+        CodeModel::Medany => d.set("__riscv_cmodel_medany", "1"),
+        _ => d.set("__riscv_cmodel_medlow", "1"),
+    }
+}
+
 fn hardening(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     match opts.protector {
         Protector::None => {}
@@ -1836,6 +1859,30 @@ mod tests {
         for n in 0..3 {
             assert!(field(VERSION, n).parse::<u32>().is_ok(), "{}", field(VERSION, n));
         }
+    }
+
+    #[test]
+    fn the_riscv_kernel_has_no_float_registers_and_the_medany_model() {
+        let triple: Triple = "riscv64-linux-gnu".parse().expect("riscv64");
+        let target = TargetInfo::new(triple);
+        let hosted = built_in(&target, &Predef::new());
+        for line in [
+            "#define __riscv_flen 64",
+            "#define __riscv_float_abi_double 1",
+            "#define __riscv_cmodel_medlow 1",
+        ] {
+            assert!(has(&hosted, line), "{line}");
+        }
+        let kernel = Predef {
+            vector: false,
+            soft_float: true,
+            code_model: CodeModel::Medany,
+            ..Predef::new()
+        };
+        let kernel = built_in(&target, &kernel);
+        assert!(has(&kernel, "#define __riscv_float_abi_soft 1"), "{kernel}");
+        assert!(has(&kernel, "#define __riscv_cmodel_medany 1"), "{kernel}");
+        assert!(!kernel.contains("__riscv_flen") && !kernel.contains("__riscv_cmodel_medlow"));
     }
 
     #[test]

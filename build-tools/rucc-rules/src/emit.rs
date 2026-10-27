@@ -517,6 +517,11 @@ fn value(
                     let left = value(source, &args[0], bound, wanted, used)?;
                     let right = value(source, &args[1], bound, wanted, used)?;
                     let name = if head == "+" { "saturating_add" } else { "saturating_sub" };
+                    // A number on the left has no type of its own to call the method on, as in
+                    // the `(- 0 k)` a subtraction of a constant becomes on RISC-V.
+                    if matches!(args[0].kind, TermKind::Int(_)) {
+                        return Ok(format!("({left}_i128).{name}({right})"));
+                    }
                     Ok(format!("({left}).{name}({right})"))
                 }
                 // A shift left, which is where a mask that starts at the bottom ends up once a
@@ -890,6 +895,12 @@ mod tests {
         assert!(out.contains("Some((v1).saturating_sub(1))"), "{out}");
         // A subtraction needs no helper, so the only one here is the guard's.
         assert!(!out.contains("fn trailing_zeros"), "{out}");
+        let out = built(
+            "(rule (simplify (sub.i32 (value.i32 x) (iconst.i32 k)))\n\
+             (add.i32 (value.i32 x) (iconst.i32 (- 0 k)))\n\
+             (spec (= (bvsub x k) (result))))\n",
+        );
+        assert!(out.contains("Some((0_i128).saturating_sub(v1))"), "{out}");
     }
 
     /// A computation nothing can be made of is refused where it is written, the same as a guard
