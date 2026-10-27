@@ -1688,6 +1688,13 @@ fn generate(
     } else {
         elsewhere
     };
+    // gcc leaves the landing pad out of a function only a direct call reaches, and only when it
+    // optimizes, since that is when it works out who calls what.
+    let elsewhere = if opts.opt_level.runs_optimizer() {
+        elsewhere.called_directly(module, pic)
+    } else {
+        elsewhere
+    };
     // Asked of the module the code is made from, since a use the optimizer took away is one gcc
     // never asks about either.
     let indirect = Elsewhere::needs_indirect(module);
