@@ -239,13 +239,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         Ok(bytes) => bytes,
         Err(e) => return failure(format!("{name}: {e}")),
     };
-    let Ok(file) = sess
-        .sources
-        .add_shared(crate::phase::source_name(name), bytes, None)
-    else {
-        return failure(format!(
-            "{name}: the source map has no room left for this file"
-        ));
+    let Ok(file) = sess.sources.add_shared(crate::phase::source_name(name), bytes, None) else {
+        return failure(format!("{name}: the source map has no room left for this file"));
     };
     clock.lap("read");
 
@@ -270,13 +265,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     "{name}: the source map has no room for the built in macros"
                 ));
             }
-            if pp
-                .preinclude(&opts.preincludes, &mut tokens, &mut cx)
-                .is_err()
-            {
-                return failure(format!(
-                    "{name}: the source map has no room for the command line"
-                ));
+            if pp.preinclude(&opts.preincludes, &mut tokens, &mut cx).is_err() {
+                return failure(format!("{name}: the source map has no room for the command line"));
             }
             // Moved rather than appended when nothing came before it, which is almost always,
             // since appending copies the whole of the file's tokens a second time.
@@ -294,9 +284,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 pp.line_directives(),
                 &sess.sources,
                 &sess.interner,
-                rucc_pp::PrintOptions {
-                    line_markers: opts.line_markers,
-                },
+                rucc_pp::PrintOptions { line_markers: opts.line_markers },
             ));
         }
         // A token spelled in a system header's macro keeps the fact, since the span it carries
@@ -314,10 +302,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 if quiet && !token.expansion.is_dummy() {
                     let pos = sess.sources.real(token.span.lo);
                     if !last.is_some_and(|file| file.contains(pos)) {
-                        last = sess
-                            .sources
-                            .lookup_file(pos)
-                            .map(|id| sess.sources.file(id));
+                        last = sess.sources.lookup_file(pos).map(|id| sess.sources.file(id));
                     }
                     if last.is_some_and(|file| file.system_from.is_some_and(|from| pos >= from)) {
                         out.flags = out.flags.with(TokenFlags::SYSTEM_MACRO);
@@ -356,12 +341,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     clock.lap("convert");
 
     // Only the ones the file wrote, since a name nothing interned is one nothing can use.
-    let type_names: Vec<Symbol> = sess
-        .target
-        .type_names()
-        .iter()
-        .filter_map(|&(name, _)| sess.interner.find(name))
-        .collect();
+    let type_names: Vec<Symbol> =
+        sess.target.type_names().iter().filter_map(|&(name, _)| sess.interner.find(name)).collect();
     let parsed = rucc_parse::parse(
         &tokens,
         rucc_parse::Context {
@@ -598,9 +579,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         // one check that a bug in the walk cannot talk its way past, and a
                         // wrong instruction found here costs a message rather than an hour
                         // in front of a debugger over the assembly it turned into.
-                        if let Err(errors) = clock.time("verify", || {
-                            rucc_ir::verify(&lowered.module, &sess.interner)
-                        }) {
+                        if let Err(errors) = clock
+                            .time("verify", || rucc_ir::verify(&lowered.module, &sess.interner))
+                        {
                             for error in errors {
                                 diagnostics.push(internal(&format!("invalid IR, {error}")));
                             }
@@ -766,12 +747,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         if !named.permit(diag) {
             continue;
         }
-        if rucc_diag::dropped(
-            diag,
-            &sess.sources,
-            opts.warnings,
-            opts.system_header_warnings,
-        ) || named.silenced(diag)
+        if rucc_diag::dropped(diag, &sess.sources, opts.warnings, opts.system_header_warnings)
+            || named.silenced(diag)
         {
             continue;
         }
@@ -794,14 +771,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     };
     let note = match &opts.profile_data.counts {
         Some(counts) if opts.profile_data.notes && errors == 0 => {
-            let cwd = std::env::current_dir()
-                .unwrap_or_default()
-                .display()
-                .to_string();
+            let cwd = std::env::current_dir().unwrap_or_default().display().to_string();
             let mut place = |span: Span| {
-                let at = (!span.is_dummy())
-                    .then(|| sess.sources.presumed(span.lo))
-                    .flatten()?;
+                let at = (!span.is_dummy()).then(|| sess.sources.presumed(span.lo)).flatten()?;
                 Some((at.name.to_owned(), at.line, at.column))
             };
             rucc_opt::coverage::note(
@@ -919,20 +891,13 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
 /// those instead.
 pub(crate) fn joined(opts: &Options, units: &[rucc_lto::Unit<'_>]) -> Result<Vec<u8>, String> {
     let flat = |diags: Vec<Diagnostic>| {
-        diags
-            .iter()
-            .map(|diag| diag.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ")
+        diags.iter().map(|diag| diag.message.as_str()).collect::<Vec<_>>().join("; ")
     };
     let mut sess = Session::new(opts.clone());
     let mut module = rucc_lto::join(units, opts.isa, &mut sess.interner)?;
     if let Err(errors) = rucc_ir::verify(&module, &sess.interner) {
         let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
-        return Err(format!(
-            "the joined module is not valid IR, {}",
-            errors.join("; ")
-        ));
+        return Err(format!("the joined module is not valid IR, {}", errors.join("; ")));
     }
     let name = "ld-temp.o";
     optimize(
@@ -959,12 +924,7 @@ pub(crate) fn joined(opts: &Options, units: &[rucc_lto::Unit<'_>]) -> Result<Vec
             spent: &mut Spent::default(),
         },
         &mut None,
-        Origin {
-            map: &sess.sources,
-            name,
-            meaning: &meaning,
-            copies: &rucc_ir::Copies::default(),
-        },
+        Origin { map: &sess.sources, name, meaning: &meaning, copies: &rucc_ir::Copies::default() },
     )
     .map_err(flat)?;
     match made {
@@ -1009,11 +969,8 @@ fn linker_options(comments: &[rucc_parse::Comment], target: &TargetInfo) -> Vec<
         .map(|comment| match comment {
             rucc_parse::Comment::Lib(lib) => {
                 let lower = lib.to_ascii_lowercase();
-                let suffix = if lower.ends_with(".lib") || lower.ends_with(".a") {
-                    ""
-                } else {
-                    ".lib"
-                };
+                let suffix =
+                    if lower.ends_with(".lib") || lower.ends_with(".a") { "" } else { ".lib" };
                 if lib.contains(' ') {
                     format!("/DEFAULTLIB:\"{lib}{suffix}\"")
                 } else {
@@ -1069,10 +1026,7 @@ fn instrument(
     // are into the runtime and are neither. Detect and kernel only, as document 03's matrix has it:
     // enforce has no row for a leak, since there is nothing in the middle of a run to stop.
     if opts.leaks.sweeps()
-        && matches!(
-            opts.safety,
-            rucc_session::Safety::Detect | rucc_session::Safety::Kernel
-        )
+        && matches!(opts.safety, rucc_session::Safety::Detect | rucc_session::Safety::Kernel)
     {
         let section = match target.object_format {
             rucc_target::ObjectFormat::Elf => Some(".init_array"),
@@ -1081,11 +1035,7 @@ fn instrument(
         rucc_safety::leaks::watch(module, names, section);
     }
     match rucc_ir::verify(module, names) {
-        Ok(()) => Ok(Instrumented {
-            checks,
-            interposed,
-            crossings,
-        }),
+        Ok(()) => Ok(Instrumented { checks, interposed, crossings }),
         Err(errors) => Err(errors
             .iter()
             .map(|e| internal(&format!("invalid IR after check insertion, {e}")))
@@ -1104,22 +1054,15 @@ fn coverage(opts: &Options, target: &TargetInfo, counts: &str) -> rucc_opt::cove
     };
     // With `-freorder-functions` gcc puts the constructor in `.text.startup` and the destructor in
     // `.text.exit`, which the kernel's linker script keeps with its init and exit code.
-    let reorder = opts
-        .reorder_functions
-        .unwrap_or_else(|| opts.opt_level.schedules());
+    let reorder = opts.reorder_functions.unwrap_or_else(|| opts.opt_level.schedules());
     let text = (target.object_format == rucc_target::ObjectFormat::Elf && reorder).then(|| {
         if opts.function_sections {
-            (
-                ".text.startup._sub_I_00100_0".to_owned(),
-                ".text.exit._sub_D_00100_1".to_owned(),
-            )
+            (".text.startup._sub_I_00100_0".to_owned(), ".text.exit._sub_D_00100_1".to_owned())
         } else {
             (".text.startup".to_owned(), ".text.exit".to_owned())
         }
     });
-    let (major, minor, phase) = opts
-        .gcov
-        .unwrap_or((opts.gnuc.major, opts.gnuc.minor, b'*'));
+    let (major, minor, phase) = opts.gcov.unwrap_or((opts.gnuc.major, opts.gnuc.minor, b'*'));
     rucc_opt::coverage::Coverage {
         counts: counts.to_owned(),
         count: opts.profile_data.arcs,
@@ -1157,8 +1100,7 @@ struct Instrumented {
 /// checks accesses, which reasons about each local as an object of its own and should not find
 /// two at one address.
 fn shares_slots(opts: &Options) -> bool {
-    opts.stack_reuse
-        .unwrap_or_else(|| opts.opt_level.runs_optimizer())
+    opts.stack_reuse.unwrap_or_else(|| opts.opt_level.runs_optimizer())
         && !opts.safety.instruments()
 }
 
@@ -1253,10 +1195,8 @@ fn optimize(
     }
     // Last, where gcc puts it, so a block the optimizer merged away gets no call of its own. See
     // `rucc_opt::sancov`.
-    let how = rucc_opt::sancov::Sancov {
-        pc: opts.sanitize_coverage_pc,
-        cmp: opts.sanitize_coverage_cmp,
-    };
+    let how =
+        rucc_opt::sancov::Sancov { pc: opts.sanitize_coverage_pc, cmp: opts.sanitize_coverage_cmp };
     if rucc_opt::sancov::run(module, names, how) > 0 {
         if let Err(errors) = rucc_ir::verify(module, names) {
             return Err(errors
@@ -1376,9 +1316,7 @@ pub(crate) fn no_back_end(target: Triple) -> Option<String> {
         return None;
     }
     let info = TargetInfo::new(target);
-    Machine::for_target(&info)
-        .is_none()
-        .then(|| nothing_to_generate(&info.tuple))
+    Machine::for_target(&info).is_none().then(|| nothing_to_generate(&info.tuple))
 }
 
 /// The one message for a target with no back end, from the link and from the compile.
@@ -1426,9 +1364,7 @@ fn generate(
         // feature. Without it, wasm has no way to give the frame back before the call, so the
         // calls are left as they are, and one `musttail` asked for is an error. After `prepare`,
         // which only knows the plain calls.
-        let sibling = opts
-            .sibling_calls
-            .unwrap_or_else(|| opts.opt_level.sibling_calls());
+        let sibling = opts.sibling_calls.unwrap_or_else(|| opts.opt_level.sibling_calls());
         let able = opts.wasm.has(rucc_target::wasm::Feature::TailCall);
         let elsewhere = Elsewhere::of(module, IrPic::Absolute, target.object_format, false);
         let mut refusals = Vec::new();
@@ -1470,9 +1406,7 @@ fn generate(
             math_errno: opts.math.errno,
         };
         if matches!(opts.emit, EmitKind::WasmTree) {
-            return rucc_wasm::tree(module, names, wasm)
-                .map(Artifact::Text)
-                .map_err(refused);
+            return rucc_wasm::tree(module, names, wasm).map(Artifact::Text).map_err(refused);
         }
         // With `-g` the back end gives the code offset and the span of each run of code too, and the
         // DWARF from rucc-debug goes in the object before the text is printed from it, so `-S -g`
@@ -1488,18 +1422,13 @@ fn generate(
             rucc_wasm::translate(module, names, wasm).map_err(refused)?
         };
         if matches!(opts.emit, EmitKind::Asm) {
-            return rucc_wasm::assembly(&object)
-                .map(Artifact::Text)
-                .map_err(refused);
+            return rucc_wasm::assembly(&object).map(Artifact::Text).map_err(refused);
         }
         if opts.save_temps.wanted() {
             *assembly = Some(rucc_wasm::assembly(&object).map_err(refused)?);
         }
         let written = rucc_wasm::write(&object).map_err(refused)?;
-        return Ok(Artifact::Object {
-            bytes: written.bytes,
-            defines: written.defines,
-        });
+        return Ok(Artifact::Object { bytes: written.bytes, defines: written.defines });
     }
     let Some(machine) = Machine::for_target(target) else {
         return Err(vec![unsupported(&nothing_to_generate(&target.tuple))]);
@@ -1569,9 +1498,7 @@ fn generate(
         // gcc keeps it in a leaf on x86 and leaves it out of one on AArch64, where the frame record
         // also holds the return address and so, under `-mbranch-protection=pac-ret`, costs a
         // signature and a check on every call.
-        leaf_frame_pointer: opts
-            .leaf_frame_pointer
-            .unwrap_or(target.tuple.arch() != Arch::Aarch64),
+        leaf_frame_pointer: opts.leaf_frame_pointer.unwrap_or(target.tuple.arch() != Arch::Aarch64),
         // Only when optimizing, which is the one place gcc looks for a leaf to give it back in.
         spare_frame_pointer: opts.leaf_frame_pointer.is_none() && opts.opt_level.runs_optimizer(),
         red_zone: opts.red_zone,
@@ -1579,9 +1506,7 @@ fn generate(
         vector: opts.vector,
         x87: opts.x87,
         x87_return: opts.x87_return,
-        zero: opts
-            .zero_regs
-            .map(|(all, arg, wide)| rucc_codegen::zero::Zeroing { all, arg, wide }),
+        zero: opts.zero_regs.map(|(all, arg, wide)| rucc_codegen::zero::Zeroing { all, arg, wide }),
         zero_extension: zero_extension(opts.isa),
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
@@ -1601,28 +1526,17 @@ fn generate(
             Some(true) => pipeline::Profile::Early,
             Some(false) => pipeline::Profile::Late,
         },
-        mcount: pipeline::Mcount {
-            record: opts.record_mcount,
-            nop: opts.nop_mcount,
-        },
+        mcount: pipeline::Mcount { record: opts.record_mcount, nop: opts.nop_mcount },
         fentry_name: opts.fentry_name.as_deref().map(|name| names.intern(name)),
-        fentry_section: opts
-            .fentry_section
-            .as_deref()
-            .map(|section| names.intern(section)),
-        patch: pipeline::Room {
-            after: opts.patchable.after(),
-            before: opts.patchable.before,
-        },
+        fentry_section: opts.fentry_section.as_deref().map(|section| names.intern(section)),
+        patch: pipeline::Room { after: opts.patchable.after(), before: opts.patchable.before },
         // On at every level above `-O0`, which is where gcc turns `-freorder-blocks` on
         // (`gcc/opts.cc:604`) and what `spec/optimizer/38-scheduling-and-layout.md` section 38.3
         // reads off that: it is one of the earliest optimizations there is, it is nearly free,
         // and it helps every target. `-O0` keeps the order the shape of the graph gives, so that
         // the blocks come out in the order they were written and a person stepping through the
         // code walks down the screen.
-        reorder: opts
-            .reorder_blocks
-            .unwrap_or_else(|| opts.opt_level.runs_optimizer()),
+        reorder: opts.reorder_blocks.unwrap_or_else(|| opts.opt_level.runs_optimizer()),
         // On at `-O2` and `-O3`, which is where gcc splits a function for x86, and not when the
         // goal is size, which gcc's gate on the pass says. Only x86-64 and i386 ELF, the targets
         // whose listing writes the second part, and not under `-g`, whose line and range tables
@@ -1651,9 +1565,7 @@ fn generate(
         // `spec/optimizer/38-scheduling-and-layout.md` section 38.6 asks for. Not at `-O1`,
         // because a schedule is a whole dependence graph per block and `-O1` is the level whose
         // budget is roughly `-O0`'s. Not at `-O0` for the reason nothing else is.
-        schedule: opts
-            .schedule_insns
-            .unwrap_or_else(|| opts.opt_level.schedules()),
+        schedule: opts.schedule_insns.unwrap_or_else(|| opts.opt_level.schedules()),
         // Off unless asked for. gcc pads loops at `-O2` and `-O3`. gcc's padding here cost a third
         // of a percent of the corpus's text and more than a percent of SQLite's for no speed
         // anybody could measure, which is tamnd/rucc#1823. The padding this asks for now keeps a
@@ -1668,10 +1580,7 @@ fn generate(
         // The backtracking allocator whenever the optimizer runs, and the single pass one at `-O0`,
         // which is what section 39.7 keeps it for. `-Zregalloc=` picks either at any level. See
         // `rucc_regalloc::backtrack` for what the backtracking one does differently.
-        allocator: if opts
-            .backtracking
-            .unwrap_or_else(|| opts.opt_level.runs_optimizer())
-        {
+        allocator: if opts.backtracking.unwrap_or_else(|| opts.opt_level.runs_optimizer()) {
             pipeline::Allocator::Backtracking
         } else {
             pipeline::Allocator::Single
@@ -1682,14 +1591,9 @@ fn generate(
         // rather than matched against, so a level added later answers this without editing it.
         goal: Goal::for_size(opts.opt_level.is_size()),
         // Only when somebody is measuring, and checked when the arguments were parsed.
-        switch: opts
-            .switch_shape
-            .as_deref()
-            .and_then(rucc_codegen::switch::Force::named),
+        switch: opts.switch_shape.as_deref().and_then(rucc_codegen::switch::Force::named),
         // On from `-O2` and at `-Os`, which is where gcc turns `-foptimize-sibling-calls` on.
-        sibling: opts
-            .sibling_calls
-            .unwrap_or_else(|| opts.opt_level.sibling_calls()),
+        sibling: opts.sibling_calls.unwrap_or_else(|| opts.opt_level.sibling_calls()),
         debug: opts.debug_info,
         // x86-64 Windows, whose unwinder looks a frame up by the address its call returns to.
         trailing: target.tuple.arch() == Arch::X86_64
@@ -1800,27 +1704,16 @@ fn generate(
     // on ELF, whose section names are the ones gcc writes, and only for a function the program
     // did not put somewhere itself.
     let heat = target.tuple.os().object_format() == Some(ObjectFormat::Elf)
-        && opts
-            .reorder_functions
-            .unwrap_or_else(|| opts.opt_level.schedules());
-    let unlikely = if heat {
-        rucc_opt::unlikely::functions(module)
-    } else {
-        Default::default()
-    };
+        && opts.reorder_functions.unwrap_or_else(|| opts.opt_level.schedules());
+    let unlikely = if heat { rucc_opt::unlikely::functions(module) } else { Default::default() };
     // `main` and the constructors go in `.text.startup` and the destructors in `.text.exit`, on
     // the same terms. Cold wins, as it does in gcc's `default_function_section`.
-    let startup = if heat {
-        rucc_opt::startup::functions(module, names)
-    } else {
-        Default::default()
-    };
+    let startup =
+        if heat { rucc_opt::startup::functions(module, names) } else { Default::default() };
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
     // The order gcc writes them in, which objtool reads. See `rucc_opt::expand`.
-    let reorder = opts
-        .toplevel_reorder
-        .unwrap_or_else(|| opts.opt_level.runs_optimizer());
+    let reorder = opts.toplevel_reorder.unwrap_or_else(|| opts.opt_level.runs_optimizer());
     for id in rucc_opt::expand::order(module, reorder) {
         let func = &mut module[id];
         let base = if unlikely.contains(&id) {
@@ -1903,9 +1796,7 @@ fn generate(
             // And the routine i386 position independent code finds the global offset table with,
             // for the same reason. See `rucc_codegen::thunks::pc_thunk`.
             if elsewhere.based() {
-                globals
-                    .file_asm
-                    .extend(rucc_codegen::thunks::pc_thunk(&funcs, names));
+                globals.file_asm.extend(rucc_codegen::thunks::pc_thunk(&funcs, names));
             }
             // The pointer each variable this file reads and only declares is reached through on
             // COFF, which is a variable of this file's all the same. Asked for after the loop
@@ -1938,10 +1829,7 @@ fn generate(
                         .map(|name| names.resolve(name).to_owned()),
                 );
             }
-            (
-                globals,
-                rucc_asm::aliases(module, names, target.object_format).map_err(refused)?,
-            )
+            (globals, rucc_asm::aliases(module, names, target.object_format).map_err(refused)?)
         }
         _ => (rucc_asm::Globals::default(), Vec::new()),
     };
@@ -2021,11 +1909,7 @@ fn generate(
                 // A unit with a landing pad comes through this too. The listing names the
                 // personality routine and the call site table with `.cfi_personality` and
                 // `.cfi_lsda`, writes the table in `.gcc_except_table`, and the reader keeps both.
-                let print = if opts.debug_info {
-                    rucc_asm::print_marked
-                } else {
-                    rucc_asm::print
-                };
+                let print = if opts.debug_info { rucc_asm::print_marked } else { rucc_asm::print };
                 let listing = print(
                     &funcs,
                     &globals,
@@ -2043,11 +1927,7 @@ fn generate(
                     noexecstack: opts.asm_noexecstack,
                     keep_slots: opts.asm_keep_slots,
                     before_2_42: opts.gnu_as
-                        < rucc_session::GasVersion {
-                            major: 2,
-                            minor: 42,
-                            patch: 0,
-                        },
+                        < rucc_session::GasVersion { major: 2, minor: 42, patch: 0 },
                     // The listing writes `la` for a slot of the table and `lla` for the rest.
                     nopic: false,
                 };
@@ -2070,16 +1950,8 @@ fn generate(
                 let info = if opts.debug_info {
                     let assembled =
                         placed(&read, &funcs, names, target).map_err(|why| vec![internal(&why)])?;
-                    describe(
-                        &assembled,
-                        &globals.image(),
-                        &funcs,
-                        names,
-                        origin,
-                        opts,
-                        target,
-                    )
-                    .map_err(|why| vec![internal(&why)])?
+                    describe(&assembled, &globals.image(), &funcs, names, origin, opts, target)
+                        .map_err(|why| vec![internal(&why)])?
                 } else {
                     rucc_object::Info::default()
                 };
@@ -2173,11 +2045,8 @@ fn placed(
     names: &Interner,
     target: &TargetInfo,
 ) -> Result<rucc_asm::Assembled, String> {
-    let at: Map<&str, &rucc_object::Name> = read
-        .names
-        .iter()
-        .map(|name| (name.name.as_str(), name))
-        .collect();
+    let at: Map<&str, &rucc_object::Name> =
+        read.names.iter().map(|name| (name.name.as_str(), name)).collect();
     let offset = |name: &str| match at.get(name).map(|name| name.at) {
         Some(rucc_object::Held::In { part, offset }) => Some((part, offset)),
         _ => None,
@@ -2192,17 +2061,11 @@ fn placed(
         let name = names.resolve(func.name);
         let spelled = directives.spell(name);
         let Some((part, start)) = offset(&spelled) else {
-            return Err(format!(
-                "the listing has no label for the function '{name}'"
-            ));
+            return Err(format!("the listing has no label for the function '{name}'"));
         };
         let mut rows = Vec::with_capacity(func.inst_count() + 1);
         if !func.declared.is_dummy() {
-            rows.push(rucc_asm::Row {
-                at: 0,
-                span: func.declared,
-                inst: None,
-            });
+            rows.push(rucc_asm::Row { at: 0, span: func.declared, inst: None });
         }
         for block in func.blocks() {
             for inst in func.insts(block) {
@@ -2214,11 +2077,7 @@ fn placed(
                     return Err(format!("the label '{label}' is not inside '{name}'"));
                 }
                 let at = usize::try_from(here - start).map_err(|why| why.to_string())?;
-                rows.push(rucc_asm::Row {
-                    at,
-                    span: func.span(inst),
-                    inst: Some(inst),
-                });
+                rows.push(rucc_asm::Row { at, span: func.span(inst), inst: Some(inst) });
             }
         }
         // What `.size` said, or on a format without it, how far the label after the last
@@ -2241,11 +2100,7 @@ fn placed(
         });
         lines.push(rows);
     }
-    Ok(rucc_asm::Assembled {
-        text,
-        lines,
-        frames: None,
-    })
+    Ok(rucc_asm::Assembled { text, lines, frames: None })
 }
 
 /// The debug sections for what was just assembled, as bytes and relocations.
@@ -2275,11 +2130,7 @@ fn describe(
     opts: &Options,
     target: &TargetInfo,
 ) -> Result<rucc_object::Info, String> {
-    let rucc_asm::Assembled {
-        text,
-        lines,
-        frames,
-    } = assembled;
+    let rucc_asm::Assembled { text, lines, frames } = assembled;
     let rewrite = |path: &str| opts.prefix_map.debug.apply(path).into_owned();
     // The file table, built as the rows are walked rather than up front, because what belongs in it
     // is the files the code came from and not the files the preprocessor opened. A header that
@@ -2359,13 +2210,8 @@ fn describe(
         // one name in one scope is a debugger's problem rather than a reader's.
         let mut sig = known.and_then(|known| known.sig.clone());
         let mut placed: Vec<(u32, i32)> = built.locals.clone();
-        let mut spots = stretches(
-            extent,
-            rows,
-            built,
-            target,
-            opts.dwarf_version != 4 && opts.var_tracking,
-        );
+        let mut spots =
+            stretches(extent, rows, built, target, opts.dwarf_version != 4 && opts.var_tracking);
         // And a local in the frame that shares its bytes and has no stretch at all, which still
         // gets its entry so that a debugger says it is not available rather than that there is no
         // such name. That is a function whose instructions were scheduled, where no stretch can be
@@ -2380,10 +2226,7 @@ fn describe(
         let copied: Vec<(u32, rucc_debug::Spot)> = taken(&mut placed)
             .into_iter()
             .map(|(decl, at)| {
-                (
-                    decl,
-                    rucc_debug::Spot::Always(rucc_debug::Held::Frame(i64::from(at))),
-                )
+                (decl, rucc_debug::Spot::Always(rucc_debug::Held::Frame(i64::from(at))))
             })
             .chain(
                 taken(&mut spots)
@@ -2402,9 +2245,7 @@ fn describe(
                 // Or the stretches, for a parameter the front end kept in a value rather than in
                 // the frame, which is what a scalar parameter whose address is never taken is at
                 // every optimization level including this one.
-                let Some(which) = spots.iter().position(|(at, _)| *at == decl) else {
-                    continue;
-                };
+                let Some(which) = spots.iter().position(|(at, _)| *at == decl) else { continue };
                 param.spot = Some(spot(spots.remove(which).1, opts.var_tracking));
             }
         }
@@ -2417,9 +2258,7 @@ fn describe(
         // table is not known until every local has been looked up.
         let mut wants: Vec<Option<usize>> = Vec::with_capacity(locals.capacity());
         for (decl, at) in placed {
-            let Some(named) = origin.meaning.locals.get(&decl) else {
-                continue;
-            };
+            let Some(named) = origin.meaning.locals.get(&decl) else { continue };
             wants.push(named.scope);
             locals.push(rucc_debug::Local {
                 name: named.name.clone(),
@@ -2438,9 +2277,7 @@ fn describe(
         // comes out does not depend on the order the back end happened to hand registers out in.
         spots.sort_by_key(|(decl, _)| *decl);
         for (decl, spans) in spots {
-            let Some(named) = origin.meaning.locals.get(&decl) else {
-                continue;
-            };
+            let Some(named) = origin.meaning.locals.get(&decl) else { continue };
             wants.push(named.scope);
             locals.push(rucc_debug::Local {
                 name: named.name.clone(),
@@ -2459,35 +2296,12 @@ fn describe(
         // are over the whole unit, and what goes on an entry is a place in this function's table, so
         // the two are joined here.
         // And the bodies the inliner copied in, each inside the scope its call was written in.
-        let Found {
-            mut inlined,
-            called,
-            own,
-        } = copies(
-            extent.len as u64,
-            rows,
-            &origin,
-            &mut copying,
-            &mut files,
-            &rewrite,
-        );
-        adopt(
-            copied,
-            &own,
-            &mut inlined,
-            &origin,
-            &copying,
-            &mut files,
-            &rewrite,
-        );
+        let Found { mut inlined, called, own } =
+            copies(extent.len as u64, rows, &origin, &mut copying, &mut files, &rewrite);
+        adopt(copied, &own, &mut inlined, &origin, &copying, &mut files, &rewrite);
         wants.extend(&called);
-        let (scopes, at) = nests(
-            &wants,
-            &origin.meaning.scopes,
-            extent.len as u64,
-            rows,
-            origin.map,
-        );
+        let (scopes, at) =
+            nests(&wants, &origin.meaning.scopes, extent.len as u64, rows, origin.map);
         for (local, want) in locals.iter_mut().zip(&wants) {
             local.scope = want.and_then(|want| at.get(&want).copied());
         }
@@ -2523,9 +2337,7 @@ fn describe(
     // anybody can ask the value of by name.
     let mut globals = Vec::new();
     for object in &data.objects {
-        let Some(held) = origin.meaning.objects.get(&object.name) else {
-            continue;
-        };
+        let Some(held) = origin.meaning.objects.get(&object.name) else { continue };
         globals.push(rucc_debug::Global {
             name: object.name.clone(),
             ty: held.ty,
@@ -2545,20 +2357,9 @@ fn describe(
     // those types the same way, so they are left off. A global register variable is in its
     // register rather than dropped, and gcc keeps the types used before it, which is how the
     // kernel's `enum node_states` gets into an arm64 unit that only names `node_states`.
-    let laid: Set<&str> = data
-        .objects
-        .iter()
-        .map(|object| object.name.as_str())
-        .collect();
-    for name in origin
-        .meaning
-        .statics
-        .iter()
-        .filter(|name| !laid.contains(name.as_str()))
-    {
-        let Some(held) = origin.meaning.objects.get(name) else {
-            continue;
-        };
+    let laid: Set<&str> = data.objects.iter().map(|object| object.name.as_str()).collect();
+    for name in origin.meaning.statics.iter().filter(|name| !laid.contains(name.as_str())) {
+        let Some(held) = origin.meaning.objects.get(name) else { continue };
         let register = held.register.as_deref().and_then(|name| {
             let (class, reg) = target.regs.reg_named(name)?;
             target.call_regs?.dwarf(class, reg)
@@ -2572,11 +2373,7 @@ fn describe(
             }),
             external: held.external,
             tags: held.tags.clone(),
-            uses: if held.register.is_some() {
-                held.uses.clone()
-            } else {
-                Vec::new()
-            },
+            uses: if held.register.is_some() { held.uses.clone() } else { Vec::new() },
             dropped: register.is_none(),
             register,
         });
@@ -2587,11 +2384,7 @@ fn describe(
     // `__stack_chk_fail`, has none. A name the unit went on to define is described as a definition
     // above, or was not emitted and has no business being declared either.
     let meaning = &origin.meaning;
-    let emitted: Set<&str> = text
-        .funcs
-        .iter()
-        .map(|extent| extent.name.as_str())
-        .collect();
+    let emitted: Set<&str> = text.funcs.iter().map(|extent| extent.name.as_str()).collect();
     let defined: Set<&str> = text
         .funcs
         .iter()
@@ -2603,11 +2396,7 @@ fn describe(
     // And the functions of this unit the same references reach that have no code of their own
     // here, each as the function a copy would be a copy of, for the same reason.
     for name in &meaning.reached {
-        if let Some(known) = meaning
-            .funcs
-            .get(name)
-            .filter(|_| !emitted.contains(name.as_str()))
-        {
+        if let Some(known) = meaning.funcs.get(name).filter(|_| !emitted.contains(name.as_str())) {
             copying.origin(known.body, meaning, &mut files, &rewrite);
         }
     }
@@ -2706,10 +2495,8 @@ fn describe_wasm(
     // wasi-libc calls, as clang does, and the program and the declarations know it as `main`. A
     // `main` with one parameter or with three keeps its name, and the `__main_argc_argv` next to it
     // is a caller that the back end made, which is not `main`.
-    let renamed = !object
-        .functions
-        .iter()
-        .any(|f| object.symbols[f.symbol as usize].name == "main");
+    let renamed =
+        !object.functions.iter().any(|f| object.symbols[f.symbol as usize].name == "main");
     for (function, lines) in object.functions.iter().zip(lines) {
         let symbol = &object.symbols[function.symbol as usize].name;
         let name = match symbol.as_str() {
@@ -2721,9 +2508,7 @@ fn describe_wasm(
             if span.is_dummy() {
                 continue;
             }
-            let Some(at_line) = origin.map.presumed(span.lo) else {
-                continue;
-            };
+            let Some(at_line) = origin.map.presumed(span.lo) else { continue };
             let file = interned(&mut files, rewrite(at_line.name));
             let row = rucc_debug::Row {
                 at: u64::from(at),
@@ -2752,12 +2537,7 @@ fn describe_wasm(
         match decl {
             Some(decl) if rows.first().is_some_and(|first| first.at > 0) => {
                 prologue_end = rows.first().map(|first| first.at);
-                let row = rucc_debug::Row {
-                    at: 0,
-                    file: decl.file,
-                    line: decl.line,
-                    column: 0,
-                };
+                let row = rucc_debug::Row { at: 0, file: decl.file, line: decl.line, column: 0 };
                 rows.insert(0, row);
             }
             _ => {
@@ -2815,9 +2595,7 @@ fn describe_wasm(
         let mut locals = Vec::with_capacity(spots.len());
         let mut wants: Vec<Option<usize>> = Vec::with_capacity(spots.len());
         for (decl, spot) in spots {
-            let Some(named) = origin.meaning.locals.get(&decl) else {
-                continue;
-            };
+            let Some(named) = origin.meaning.locals.get(&decl) else { continue };
             wants.push(named.scope);
             locals.push(rucc_debug::Local {
                 name: named.name.clone(),
@@ -2831,35 +2609,12 @@ fn describe_wasm(
                 tags: named.tags.clone(),
             });
         }
-        let Found {
-            mut inlined,
-            called,
-            own,
-        } = copies(
-            u64::from(lines.len),
-            &lines.rows,
-            &origin,
-            &mut copying,
-            &mut files,
-            &rewrite,
-        );
-        adopt(
-            copied,
-            &own,
-            &mut inlined,
-            &origin,
-            &copying,
-            &mut files,
-            &rewrite,
-        );
+        let Found { mut inlined, called, own } =
+            copies(u64::from(lines.len), &lines.rows, &origin, &mut copying, &mut files, &rewrite);
+        adopt(copied, &own, &mut inlined, &origin, &copying, &mut files, &rewrite);
         wants.extend(&called);
-        let (scopes, at) = nests(
-            &wants,
-            &origin.meaning.scopes,
-            u64::from(lines.len),
-            &lines.rows,
-            origin.map,
-        );
+        let (scopes, at) =
+            nests(&wants, &origin.meaning.scopes, u64::from(lines.len), &lines.rows, origin.map);
         for (local, want) in locals.iter_mut().zip(&wants) {
             local.scope = want.and_then(|want| at.get(&want).copied());
         }
@@ -2886,15 +2641,10 @@ fn describe_wasm(
     }
     let mut globals = Vec::new();
     for symbol in &object.symbols {
-        if !matches!(
-            symbol.kind,
-            rucc_object::wasm::SymbolKind::Data { place: Some(_) }
-        ) {
+        if !matches!(symbol.kind, rucc_object::wasm::SymbolKind::Data { place: Some(_) }) {
             continue;
         }
-        let Some(held) = origin.meaning.objects.get(&symbol.name) else {
-            continue;
-        };
+        let Some(held) = origin.meaning.objects.get(&symbol.name) else { continue };
         globals.push(rucc_debug::Global {
             name: symbol.name.clone(),
             ty: held.ty,
@@ -2943,11 +2693,7 @@ fn describe_wasm(
 fn spot(spans: Vec<rucc_debug::Span>, tracking: bool) -> rucc_debug::Spot {
     // The first of the longest, so that two stretches of one length give the same answer every
     // time rather than whichever the back end listed last.
-    let home = spans
-        .iter()
-        .rev()
-        .max_by_key(|span| span.len)
-        .map(|span| span.held);
+    let home = spans.iter().rev().max_by_key(|span| span.len).map(|span| span.held);
     match home {
         Some(held) if !tracking => rucc_debug::Spot::Always(held),
         _ => rucc_debug::Spot::Over(spans),
@@ -2977,10 +2723,8 @@ fn stretches(
 ) -> Vec<(u32, Vec<rucc_debug::Span>)> {
     // A target nobody has written a calling convention down for has no DWARF numbering either, so
     // there is no way to name the register a local is in and nothing to say.
-    let (false, Some(regs)) = (
-        built.kept.is_empty() && built.arrived.is_empty(),
-        target.call_regs,
-    ) else {
+    let (false, Some(regs)) = (built.kept.is_empty() && built.arrived.is_empty(), target.call_regs)
+    else {
         return Vec::new();
     };
     let ends = ends(extent.len as u64, rows);
@@ -3007,11 +2751,7 @@ fn stretches(
             },
             rucc_mir::Where::Frame(at) => rucc_debug::Held::Frame(i64::from(at)),
         };
-        let span = rucc_debug::Span {
-            from,
-            len: to - from,
-            held,
-        };
+        let span = rucc_debug::Span { from, len: to - from, held };
         match spots.iter_mut().find(|(decl, _)| *decl == kept.decl) {
             Some((_, spans)) => spans.push(span),
             None => spots.push((kept.decl, vec![span])),
@@ -3021,12 +2761,8 @@ fn stretches(
     // the back end gave it. The prologue and the moves out of the argument registers run before
     // that, and a debugger stopped on the first byte of the function asks about those bytes.
     for &(decl, at) in &built.arrived {
-        let rucc_mir::Where::Reg { reg, class } = at else {
-            continue;
-        };
-        let Some(number) = regs.dwarf(class, reg) else {
-            continue;
-        };
+        let rucc_mir::Where::Reg { reg, class } = at else { continue };
+        let Some(number) = regs.dwarf(class, reg) else { continue };
         let first = spots.iter().find(|(at, _)| *at == decl);
         let first = first.and_then(|(_, spans)| spans.iter().map(|span| span.from).min());
         let end =
@@ -3034,11 +2770,7 @@ fn stretches(
         if end == 0 {
             continue;
         }
-        let span = rucc_debug::Span {
-            from: 0,
-            len: end,
-            held: rucc_debug::Held::Reg(number),
-        };
+        let span = rucc_debug::Span { from: 0, len: end, held: rucc_debug::Held::Reg(number) };
         match spots.iter_mut().find(|(at, _)| *at == decl) {
             Some((_, spans)) => spans.push(span),
             None => spots.push((decl, vec![span])),
@@ -3050,21 +2782,12 @@ fn stretches(
     if entries {
         for &(decl, at) in &built.arrived {
             // One register for the whole parameter, since the value of one of two is half of it.
-            let rucc_mir::Where::Reg { reg, class } = at else {
-                continue;
-            };
-            let alone = built
-                .arrived
-                .iter()
-                .filter(|(other, _)| *other == decl)
-                .count()
-                == 1;
+            let rucc_mir::Where::Reg { reg, class } = at else { continue };
+            let alone = built.arrived.iter().filter(|(other, _)| *other == decl).count() == 1;
             if !alone || !built.unassigned.contains(&decl) {
                 continue;
             }
-            let Some(number) = regs.dwarf(class, reg) else {
-                continue;
-            };
+            let Some(number) = regs.dwarf(class, reg) else { continue };
             let which = match spots.iter().position(|(at, _)| *at == decl) {
                 Some(which) => which,
                 None => {
@@ -3078,20 +2801,12 @@ fn stretches(
             let mut from = 0;
             for span in spans.iter() {
                 if span.from > from {
-                    gaps.push(rucc_debug::Span {
-                        from,
-                        len: span.from - from,
-                        held,
-                    });
+                    gaps.push(rucc_debug::Span { from, len: span.from - from, held });
                 }
                 from = from.max(span.from + span.len);
             }
             if extent.len as u64 > from {
-                gaps.push(rucc_debug::Span {
-                    from,
-                    len: extent.len as u64 - from,
-                    held,
-                });
+                gaps.push(rucc_debug::Span { from, len: extent.len as u64 - from, held });
             }
             spans.extend(gaps);
             spans.sort_by_key(|span| span.from);
@@ -3131,9 +2846,7 @@ fn sites(
         };
         let mut args = Vec::with_capacity(call.args.len());
         for arg in &call.args {
-            let Some(number) = regs.dwarf(arg.class, arg.reg) else {
-                continue;
-            };
+            let Some(number) = regs.dwarf(arg.class, arg.reg) else { continue };
             let held = match arg.was {
                 rucc_mir::Was::Reg { reg, class } => match regs.dwarf(class, reg) {
                     Some(from) => rucc_debug::Held::Reg(from),
@@ -3148,11 +2861,7 @@ fn sites(
             args.push((number, held));
         }
         if !args.is_empty() {
-            out.push(rucc_debug::Call {
-                returns,
-                callee: names.resolve(callee).to_owned(),
-                args,
-            });
+            out.push(rucc_debug::Call { returns, callee: names.resolve(callee).to_owned(), args });
         }
     }
     out.sort_by_key(|call| call.returns);
@@ -3280,11 +2989,8 @@ fn nests<R: Located>(
     // In the order the unit wrote them, which puts a scope after the one it is inside, because that
     // is the order the writer wants and is what lets a parent be named by an entry already made.
     needed.sort_unstable();
-    let at: Map<usize, usize> = needed
-        .iter()
-        .enumerate()
-        .map(|(which, &scope)| (scope, which))
-        .collect();
+    let at: Map<usize, usize> =
+        needed.iter().enumerate().map(|(which, &scope)| (scope, which)).collect();
     let ends = ends(len, rows);
     let out = needed
         .iter()
@@ -3331,12 +3037,7 @@ impl<'a> Copying<'a> {
             .map(|(which, scope)| (scope.span.lo, which))
             .collect();
         starts.sort_unstable();
-        Copying {
-            bodies,
-            starts,
-            abstracts: Vec::new(),
-            made: Map::default(),
-        }
+        Copying { bodies, starts, abstracts: Vec::new(), made: Map::default() }
     }
 
     /// Which of [`Copying::abstracts`] the body at `of` is, made the first time it is asked for, and
@@ -3376,10 +3077,7 @@ impl<'a> Copying<'a> {
     /// Scopes nest and never cross, so the last one to start at or before `pos` is either the one
     /// or inside it, and walking out from there finds it.
     fn scope(&self, scopes: &[crate::shapes::Scope], pos: rucc_diag::BytePos) -> Option<usize> {
-        let at = self
-            .starts
-            .partition_point(|&(lo, _)| lo <= pos)
-            .checked_sub(1)?;
+        let at = self.starts.partition_point(|&(lo, _)| lo <= pos).checked_sub(1)?;
         let mut up = Some(self.starts[at].1);
         while let Some(which) = up {
             let span = scopes[which].span;
@@ -3413,11 +3111,7 @@ fn copies<R: Located>(
     let mut scopes: Vec<Option<usize>> = Vec::new();
     let mut own: Map<rucc_diag::BytePos, usize> = Map::default();
     if origin.map.copies().is_empty() {
-        return Found {
-            inlined: out,
-            called: scopes,
-            own,
-        };
+        return Found { inlined: out, called: scopes, own };
     }
     let ends = ends(len, rows);
     let mut seen: Map<rucc_diag::BytePos, Option<usize>> = Map::default();
@@ -3477,18 +3171,11 @@ fn copies<R: Located>(
                 Some(last) if last.from + last.len >= from => {
                     last.len = to.saturating_sub(last.from).max(last.len);
                 }
-                _ => over.push(rucc_debug::Reach {
-                    from,
-                    len: to - from,
-                }),
+                _ => over.push(rucc_debug::Reach { from, len: to - from }),
             }
         }
     }
-    Found {
-        inlined: out,
-        called: scopes,
-        own,
-    }
+    Found { inlined: out, called: scopes, own }
 }
 
 /// What [`copies`] finds in one function.
@@ -3504,9 +3191,8 @@ struct Found {
 
 /// Takes the declarations of the copies out of `from`, and keeps the order of the rest.
 fn taken<T>(from: &mut Vec<(u32, T)>) -> Vec<(u32, T)> {
-    let (copied, own) = std::mem::take(from)
-        .into_iter()
-        .partition(|(decl, _)| *decl >= rucc_ir::COPIED);
+    let (copied, own) =
+        std::mem::take(from).into_iter().partition(|(decl, _)| *decl >= rucc_ir::COPIED);
     *from = own;
     copied
 }
@@ -3529,21 +3215,11 @@ fn adopt(
     // copy come out in the order the program declared them.
     copied.sort_by_key(|(decl, _)| origin.copies.named(*decl));
     for (decl, spot) in copied {
-        let Some((site, decl)) = origin.copies.named(decl) else {
-            continue;
-        };
-        let Some(site) = origin.copies.sites().get(site) else {
-            continue;
-        };
-        let Some(&entry) = own.get(&site.at) else {
-            continue;
-        };
-        let Some(&name) = copying.bodies.get(&site.of.lo) else {
-            continue;
-        };
-        let Some(known) = origin.meaning.funcs.get(name) else {
-            continue;
-        };
+        let Some((site, decl)) = origin.copies.named(decl) else { continue };
+        let Some(site) = origin.copies.sites().get(site) else { continue };
+        let Some(&entry) = own.get(&site.at) else { continue };
+        let Some(&name) = copying.bodies.get(&site.of.lo) else { continue };
+        let Some(known) = origin.meaning.funcs.get(name) else { continue };
         let copy = &mut inlined[entry];
         if let Some(which) = known.params.iter().position(|&param| param == Some(decl)) {
             if copy.params.len() <= which {
@@ -3552,9 +3228,7 @@ fn adopt(
             copy.params[which].get_or_insert(spot);
             continue;
         }
-        let Some(named) = origin.meaning.locals.get(&decl) else {
-            continue;
-        };
+        let Some(named) = origin.meaning.locals.get(&decl) else { continue };
         copy.locals.push(rucc_debug::Local {
             name: named.name.clone(),
             ty: named.ty,
@@ -3599,10 +3273,7 @@ fn spread<R: Located>(
             Some(last) if last.from + last.len >= from => {
                 last.len = to.saturating_sub(last.from).max(last.len);
             }
-            _ => out.push(rucc_debug::Reach {
-                from,
-                len: to - from,
-            }),
+            _ => out.push(rucc_debug::Reach { from, len: to - from }),
         }
     }
     out
@@ -3627,11 +3298,8 @@ fn spread<R: Located>(
 fn settle(mut spans: Vec<rucc_debug::Span>) -> Vec<rucc_debug::Span> {
     spans.sort_by_key(|span| (span.from, span.len));
     for which in 0..spans.len() {
-        let (from, end, held) = (
-            spans[which].from,
-            spans[which].from + spans[which].len,
-            spans[which].held,
-        );
+        let (from, end, held) =
+            (spans[which].from, spans[which].from + spans[which].len, spans[which].held);
         let later = spans[which + 1..]
             .iter()
             .take_while(|later| later.from < end)
@@ -3642,10 +3310,8 @@ fn settle(mut spans: Vec<rucc_debug::Span>) -> Vec<rucc_debug::Span> {
     }
     // Every address a stretch begins or ends at, which cuts the function into pieces no stretch is
     // partly over: a piece is inside a stretch or outside it and never half of each.
-    let mut edges: Vec<u64> = spans
-        .iter()
-        .flat_map(|span| [span.from, span.from + span.len])
-        .collect();
+    let mut edges: Vec<u64> =
+        spans.iter().flat_map(|span| [span.from, span.from + span.len]).collect();
     edges.sort_unstable();
     edges.dedup();
     let mut out: Vec<rucc_debug::Span> = Vec::new();
@@ -3655,10 +3321,7 @@ fn settle(mut spans: Vec<rucc_debug::Span>) -> Vec<rucc_debug::Span> {
         // Nothing before this can cover this piece or any piece after it, since the pieces only
         // ever move forward. The list is in the order the stretches start in, so the walk below
         // stops at the first one that starts too late as well.
-        while spans
-            .get(first)
-            .is_some_and(|span| span.from + span.len <= from)
-        {
+        while spans.get(first).is_some_and(|span| span.from + span.len <= from) {
             first += 1;
         }
         let mut held = None;
@@ -3675,18 +3338,12 @@ fn settle(mut spans: Vec<rucc_debug::Span>) -> Vec<rucc_debug::Span> {
                 Some(seen) => agreed &= seen == span.held,
             }
         }
-        let (Some(held), true) = (held, agreed) else {
-            continue;
-        };
+        let (Some(held), true) = (held, agreed) else { continue };
         match out.last_mut() {
             Some(last) if last.from + last.len == from && last.held == held => {
                 last.len += to - from
             }
-            _ => out.push(rucc_debug::Span {
-                from,
-                len: to - from,
-                held,
-            }),
+            _ => out.push(rucc_debug::Span { from, len: to - from, held }),
         }
     }
     out
@@ -3719,11 +3376,7 @@ fn interned(files: &mut Vec<String>, name: String) -> usize {
 /// writes at the top of every file it compiles that way. The assembler then gives each instruction
 /// the prefixes that make it do in real mode what it would have done in protected mode.
 fn sixteen(opts: &Options, listing: String) -> String {
-    if opts.sixteen {
-        format!("\t.code16gcc\n{listing}")
-    } else {
-        listing
-    }
+    if opts.sixteen { format!("\t.code16gcc\n{listing}") } else { listing }
 }
 
 /// The feature word is empty on a machine whose bits these are not. It is the x86 one, and AArch64
@@ -3743,11 +3396,7 @@ fn output(opts: &Options, target: &TargetInfo, indirect: bool) -> rucc_object::O
         }
     }
     let x86 = matches!(target.tuple.arch(), Arch::X86_64 | Arch::X86);
-    let needed = if x86 && indirect {
-        rucc_object::Property::INDIRECT_EXTERN_ACCESS
-    } else {
-        0
-    };
+    let needed = if x86 && indirect { rucc_object::Property::INDIRECT_EXTERN_ACCESS } else { 0 };
     let mut arm = 0;
     if target.tuple.arch() == Arch::Aarch64 {
         if opts.branch_protection.bti {
@@ -3762,11 +3411,7 @@ fn output(opts: &Options, target: &TargetInfo, indirect: bool) -> rucc_object::O
             functions: opts.function_sections,
             data: opts.data_sections,
         },
-        property: rucc_object::Property {
-            features,
-            needed,
-            arm,
-        },
+        property: rucc_object::Property { features, needed, arm },
         isa: opts.isa,
         ident: opts.ident.then_some(IDENT),
     }
@@ -3831,10 +3476,7 @@ fn no_wasm_tree(target: Triple) -> Diagnostic {
         ),
         Span::DUMMY,
     )
-    .note(
-        "use --target=wasm32-wasip1, or --emit=mir-final for a native target",
-        Span::DUMMY,
-    )
+    .note("use --target=wasm32-wasip1, or --emit=mir-final for a native target", Span::DUMMY)
 }
 
 /// A diagnostic about a program this compiler is not finished enough to compile.
@@ -3854,10 +3496,7 @@ fn unsupported(message: &str) -> Diagnostic {
 fn unsupported_at(message: &str, span: Span) -> Diagnostic {
     Diagnostic::error(message.to_owned(), span)
         .with_code("E0653")
-        .note(
-            "this construct is not lowered yet, see https://github.com/tamnd/rucc/issues",
-            span,
-        )
+        .note("this construct is not lowered yet, see https://github.com/tamnd/rucc/issues", span)
 }
 
 /// A diagnostic about IR that was handed to us rather than built by us.
@@ -3869,10 +3508,7 @@ fn invalid(message: &str) -> Diagnostic {
 fn internal(message: &str) -> Diagnostic {
     Diagnostic::error(format!("internal error: {message}"), Span::DUMMY)
         .with_code("E0652")
-        .note(
-            "this is a bug in rucc rather than in the program, please report it",
-            Span::DUMMY,
-        )
+        .note("this is a bug in rucc rather than in the program, please report it", Span::DUMMY)
 }
 
 /// Every function's line, in the order they were compiled.
@@ -3885,9 +3521,7 @@ fn su_file(stack: &StackUsage, sources: &SourceMap, file: &str) -> String {
     let mut out = String::new();
     for row in stack.rows() {
         let span = row.span();
-        let at = (!span.is_dummy())
-            .then(|| sources.presumed(span.lo))
-            .flatten();
+        let at = (!span.is_dummy()).then(|| sources.presumed(span.lo)).flatten();
         let (name, line, column) = at.map_or((file, 0, 0), |at| (at.name, at.line, at.column));
         out.push_str(&row.line(name, line, column));
     }
@@ -3960,22 +3594,14 @@ mod tests {
     /// The typed tree of a freestanding `source`, insisting that it compiled cleanly.
     fn shipped(source: &str) -> String {
         let result = run(&freestanding(), source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
     /// The typed tree of `source`, insisting that it compiled cleanly.
     fn tast(source: &str) -> String {
         let result = run(&options(), source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -4011,12 +3637,7 @@ mod tests {
             opts.gnu_extensions = gnu;
             let result = run(&opts, source);
             assert_eq!(result.messages, Vec::<String>::new());
-            assert_eq!(
-                result.text().contains("copied"),
-                there,
-                "gnu {gnu}: {}",
-                result.text()
-            );
+            assert_eq!(result.text().contains("copied"), there, "gnu {gnu}: {}", result.text());
         }
     }
 
@@ -4188,10 +3809,7 @@ mod tests {
             "_mm_setcsr",
         ] {
             let defined = text.contains(&format!("{absent}("));
-            assert!(
-                !defined,
-                "{absent} is defined and the header says it is not"
-            );
+            assert!(!defined, "{absent} is defined and the header says it is not");
             assert!(text.contains(absent), "{absent} is absent and unexplained");
         }
     }
@@ -4238,14 +3856,8 @@ mod tests {
             "__m128 single(__m128 a, __m128 b) { return _mm_add_ps(a, b); }\n",
         ));
         assert!(text.contains("matching"), "{text}");
-        assert!(
-            text.contains("narrow"),
-            "the MMX header is not reached: {text}"
-        );
-        assert!(
-            text.contains("single"),
-            "the SSE header is not reached: {text}"
-        );
+        assert!(text.contains("narrow"), "the MMX header is not reached: {text}");
+        assert!(text.contains("single"), "the SSE header is not reached: {text}");
     }
 
     /// The wider umbrella reaches everything the narrower one does, and the fence family with it.
@@ -4265,10 +3877,7 @@ mod tests {
             "__m128i wide(__m128i a, __m128i b) { return _mm_add_epi32(a, b); }\n",
         ));
         assert!(text.contains("barriers"), "{text}");
-        assert!(
-            text.contains("wide"),
-            "the SSE2 header is not reached: {text}"
-        );
+        assert!(text.contains("wide"), "the SSE2 header is not reached: {text}");
     }
 
     /// Including it twice is the same as including it once, and so is including it beside the
@@ -4306,11 +3915,7 @@ mod tests {
             "uint32_t total(uint32x4_t a) { return vaddvq_u32(a); }\n",
         );
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         assert!(result.text().contains("pair"), "{}", result.text());
         assert!(result.text().contains("total"), "{}", result.text());
     }
@@ -4343,11 +3948,7 @@ mod tests {
             "}\n",
         );
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         assert!(result.text().contains("func @step("), "{}", result.text());
     }
 
@@ -4367,10 +3968,7 @@ mod tests {
         let text = rucc_session::runtime::header("emmintrin.h").expect("emmintrin.h is shipped");
         for absent in ["_mm_sqrt_pd", "_mm_sqrt_sd"] {
             let defined = text.contains(&format!("{absent}("));
-            assert!(
-                !defined,
-                "{absent} is defined and the header says it is not"
-            );
+            assert!(!defined, "{absent} is defined and the header says it is not");
             assert!(text.contains(absent), "{absent} is absent and unexplained");
         }
     }
@@ -4463,10 +4061,7 @@ mod tests {
             ] {
                 assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
             }
-            assert!(
-                !text.contains("call"),
-                "a step was not inlined at {level:?}:\n{text}"
-            );
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
         }
         let result = run(
             &freestanding(),
@@ -4521,10 +4116,7 @@ mod tests {
             ] {
                 assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
             }
-            assert!(
-                !text.contains("call"),
-                "a step was not inlined at {level:?}:\n{text}"
-            );
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
         }
         let result = run(
             &freestanding(),
@@ -4590,10 +4182,7 @@ mod tests {
             ] {
                 assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
             }
-            assert!(
-                !text.contains("call"),
-                "a step was not inlined at {level:?}:\n{text}"
-            );
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
         }
         let result = run(
             &freestanding(),
@@ -4639,10 +4228,7 @@ mod tests {
             ] {
                 assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
             }
-            assert!(
-                !text.contains("call"),
-                "a step was not inlined at {level:?}:\n{text}"
-            );
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
         }
         let result = run(
             &freestanding(),
@@ -4687,19 +4273,12 @@ mod tests {
             let result = run(&opts, source);
             assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
             let text = result.text();
-            for step in [
-                "vfmadd213ps",
-                "vfnmsub213sd",
-                "vfmaddsub213ps",
-                "vcvtph2ps",
-                "vcvtps2ph $4",
-            ] {
+            for step in
+                ["vfmadd213ps", "vfnmsub213sd", "vfmaddsub213ps", "vcvtph2ps", "vcvtps2ph $4"]
+            {
                 assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
             }
-            assert!(
-                !text.contains("call"),
-                "a step was not inlined at {level:?}:\n{text}"
-            );
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
         }
         let result = run(
             &freestanding(),
@@ -4731,14 +4310,11 @@ mod tests {
         // the tail position is a jump to the function, and a jump to a local label is not a call.
         let called = |text: &str| -> Vec<String> {
             let calls = text.lines().filter_map(|line| {
-                let callee = line
-                    .strip_prefix("\tcall\t")
-                    .or_else(|| line.strip_prefix("\tjmp\t"))?;
+                let callee =
+                    line.strip_prefix("\tcall\t").or_else(|| line.strip_prefix("\tjmp\t"))?;
                 (!callee.starts_with('.')).then_some(callee)
             });
-            calls
-                .map(|callee| callee.split('@').next().unwrap_or(callee).to_owned())
-                .collect()
+            calls.map(|callee| callee.split('@').next().unwrap_or(callee).to_owned()).collect()
         };
         for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
             let mut opts = options();
@@ -4748,11 +4324,7 @@ mod tests {
             assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
             let text = result.text();
             assert_eq!(called(text), ["fma", "fmaf"], "at {level:?}:\n{text}");
-            assert_eq!(
-                text.matches("vfmadd213sd").count(),
-                1,
-                "at {level:?}:\n{text}"
-            );
+            assert_eq!(text.matches("vfmadd213sd").count(), 1, "at {level:?}:\n{text}");
 
             let mut choices = rucc_target::Choices::new();
             choices.read("fma").expect("gcc knows fma");
@@ -4761,16 +4333,8 @@ mod tests {
             assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
             let text = result.text();
             assert!(called(text).is_empty(), "at {level:?}:\n{text}");
-            assert_eq!(
-                text.matches("vfmadd213sd").count(),
-                2,
-                "at {level:?}:\n{text}"
-            );
-            assert_eq!(
-                text.matches("vfmadd213ss").count(),
-                1,
-                "at {level:?}:\n{text}"
-            );
+            assert_eq!(text.matches("vfmadd213sd").count(), 2, "at {level:?}:\n{text}");
+            assert_eq!(text.matches("vfmadd213ss").count(), 1, "at {level:?}:\n{text}");
         }
         let mut opts = options();
         opts.emit = EmitKind::Asm;
@@ -4800,15 +4364,12 @@ mod tests {
         // As on x86-64, and without the call that reads the address of the GOT.
         let called = |text: &str| -> Vec<String> {
             let calls = text.lines().filter_map(|line| {
-                let callee = line
-                    .strip_prefix("\tcall\t")
-                    .or_else(|| line.strip_prefix("\tjmp\t"))?;
+                let callee =
+                    line.strip_prefix("\tcall\t").or_else(|| line.strip_prefix("\tjmp\t"))?;
                 (!callee.starts_with('.') && !callee.starts_with("__x86.get_pc_thunk"))
                     .then_some(callee)
             });
-            calls
-                .map(|callee| callee.split('@').next().unwrap_or(callee).to_owned())
-                .collect()
+            calls.map(|callee| callee.split('@').next().unwrap_or(callee).to_owned()).collect()
         };
         for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
             let mut opts = options();
@@ -4820,11 +4381,7 @@ mod tests {
             assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
             let text = result.text();
             assert_eq!(called(text), ["fma", "fmaf"], "at {level:?}:\n{text}");
-            assert_eq!(
-                text.matches("vfmadd213sd").count(),
-                1,
-                "at {level:?}:\n{text}"
-            );
+            assert_eq!(text.matches("vfmadd213sd").count(), 1, "at {level:?}:\n{text}");
 
             let mut choices = rucc_target::Choices::new();
             choices.read("fma").expect("gcc knows fma");
@@ -4833,16 +4390,8 @@ mod tests {
             assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
             let text = result.text();
             assert!(called(text).is_empty(), "at {level:?}:\n{text}");
-            assert_eq!(
-                text.matches("vfmadd213sd").count(),
-                2,
-                "at {level:?}:\n{text}"
-            );
-            assert_eq!(
-                text.matches("vfmadd213ss").count(),
-                1,
-                "at {level:?}:\n{text}"
-            );
+            assert_eq!(text.matches("vfmadd213sd").count(), 2, "at {level:?}:\n{text}");
+            assert_eq!(text.matches("vfmadd213ss").count(), 1, "at {level:?}:\n{text}");
         }
     }
 
@@ -4867,9 +4416,7 @@ mod tests {
             let fused = text.lines().filter(|line| line.starts_with("\tfmadd "));
             let widths: Vec<bool> = fused.map(|line| line.contains(" d0,")).collect();
             assert_eq!(widths, [true, false], "at {level:?}:\n{text}");
-            let calls = text
-                .lines()
-                .any(|line| line.starts_with("\tb") && line.contains("fma"));
+            let calls = text.lines().any(|line| line.starts_with("\tb") && line.contains("fma"));
             assert!(!calls, "at {level:?}:\n{text}");
         }
     }
@@ -4894,10 +4441,7 @@ mod tests {
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new());
         let text = result.text();
-        assert!(
-            text.contains("crc32l") && text.contains("popcntl"),
-            "{text}"
-        );
+        assert!(text.contains("crc32l") && text.contains("popcntl"), "{text}");
         let l = &text[text.find("\nl:").expect("l is defined")..];
         let l = &l[..l.find("ret").expect("l returns")];
         assert!(l.contains("crc32l") && !l.contains("call"), "{l}");
@@ -4950,16 +4494,8 @@ mod tests {
             "}\n",
         );
         let checks: [(&str, &str, &[&str]); 2] = [
-            (
-                popcount,
-                "popcount_test",
-                &["kmovq", "vmovdqu8", "vpopcntq", "vpaddq", "vshufi64x2"],
-            ),
-            (
-                pclmul,
-                "avx512_pclmul_test",
-                &["vpxorq", "vpclmulqdq", "vpternlogq", "crc32q"],
-            ),
+            (popcount, "popcount_test", &["kmovq", "vmovdqu8", "vpopcntq", "vpaddq", "vshufi64x2"]),
+            (pclmul, "avx512_pclmul_test", &["vpxorq", "vpclmulqdq", "vpternlogq", "crc32q"]),
         ];
         for (source, name, wanted) in checks {
             for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
@@ -4969,9 +4505,7 @@ mod tests {
                 let result = run(&opts, source);
                 assert_eq!(result.messages, Vec::<String>::new(), "{name} at {level:?}");
                 let text = result.text();
-                let start = text
-                    .find(&format!("\n{name}:"))
-                    .expect("the probe is written out");
+                let start = text.find(&format!("\n{name}:")).expect("the probe is written out");
                 let body = &text[start..];
                 let body = &body[..body.find(".size").unwrap_or(body.len())];
                 for instruction in wanted {
@@ -4980,10 +4514,7 @@ mod tests {
                         "no {instruction} at {level:?} in:\n{body}"
                     );
                 }
-                assert!(
-                    !body.contains("call"),
-                    "a call left behind at {level:?} in:\n{body}"
-                );
+                assert!(!body.contains("call"), "a call left behind at {level:?} in:\n{body}");
             }
         }
     }
@@ -5075,20 +4606,15 @@ mod tests {
         let mut choices = rucc_target::Choices::new();
         choices.read("ssse3").expect("gcc knows ssse3");
         opts.isa = choices.over(opts.isa);
-        let result = run(
-            &opts,
-            &format!("{source}__m128 g(__m128 x) {{ return _mm_movehdup_ps(x); }}\n"),
-        );
+        let result =
+            run(&opts, &format!("{source}__m128 g(__m128 x) {{ return _mm_movehdup_ps(x); }}\n"));
         assert_eq!(result.messages, Vec::<String>::new());
         let result = run(
             &opts,
             "#include <immintrin.h>\n__m128i h(__m128i x) { return _mm_abs_epi8(_mm_cvtepi8_epi32(x)); }\n",
         );
         let said = result.messages.join("\n");
-        assert!(
-            said.contains("'_mm_cvtepi8_epi32': target specific option mismatch"),
-            "{said}"
-        );
+        assert!(said.contains("'_mm_cvtepi8_epi32': target specific option mismatch"), "{said}");
     }
 
     /// A string gcc does not know is refused in gcc's words, and AArch64's own strings are
@@ -5141,10 +4667,7 @@ mod tests {
                 assert!(text.contains(step), "{march}: no {step} in:\n{text}");
             }
             // tamnd/rucc#2304. The assembler that reads this is told the extension is on.
-            assert!(
-                text.starts_with("\t.arch_extension\tcrc\n"),
-                "{march}:\n{text}"
-            );
+            assert!(text.starts_with("\t.arch_extension\tcrc\n"), "{march}:\n{text}");
         }
         let source = concat!(
             "#include <arm_acle.h>\n",
@@ -5170,9 +4693,7 @@ mod tests {
     #[test]
     fn the_shipped_arm_acle_refuses_a_caller_not_built_for_crc() {
         for march in ["armv8-a", "armv8-a+simd", "armv8.1-a+nocrc"] {
-            let said = run(&aarch64_asm(march), POSTGRES_ARMV8_PROBE)
-                .messages
-                .join("\n");
+            let said = run(&aarch64_asm(march), POSTGRES_ARMV8_PROBE).messages.join("\n");
             let refusal = "inlining failed in call to 'always_inline' '__crc32cb': target \
                            specific option mismatch";
             assert!(said.contains(refusal), "{march}: {said}");
@@ -5209,11 +4730,7 @@ mod tests {
         assert!(on < text.find("\ncd:").expect("cd"), "{text}");
         let switched = text.matches("\t.arch_extension\tcrc\n").count();
         assert!(switched >= 2, "{text}");
-        assert_eq!(
-            text.matches("\t.arch_extension\tnocrc\n").count(),
-            switched,
-            "{text}"
-        );
+        assert_eq!(text.matches("\t.arch_extension\tnocrc\n").count(), switched, "{text}");
     }
 
     /// The header is AArch64's alone, as gcc's is.
@@ -5295,10 +4812,7 @@ mod tests {
             .map(|name| format!("#include <{name}>\n"))
             .collect();
         let twice = once.repeat(2);
-        assert_eq!(
-            shipped(&format!("{once}int x;\n")),
-            shipped(&format!("{twice}int x;\n"))
-        );
+        assert_eq!(shipped(&format!("{once}int x;\n")), shipped(&format!("{twice}int x;\n")));
 
         let mut opts = freestanding();
         opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
@@ -5312,10 +4826,7 @@ mod tests {
             result.text().to_owned()
         };
         let neon = "#include <arm_neon.h>\n#include <arm_acle.h>\n";
-        assert_eq!(
-            tree(&format!("{neon}int x;\n")),
-            tree(&format!("{neon}{neon}int x;\n"))
-        );
+        assert_eq!(tree(&format!("{neon}int x;\n")), tree(&format!("{neon}{neon}int x;\n")));
 
         let mut opts = freestanding();
         opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
@@ -5329,10 +4840,7 @@ mod tests {
             result.text().to_owned()
         };
         let simd = "#include <wasm_simd128.h>\n";
-        assert_eq!(
-            tree(&format!("{simd}int x;\n")),
-            tree(&format!("{simd}{simd}int x;\n"))
-        );
+        assert_eq!(tree(&format!("{simd}int x;\n")), tree(&format!("{simd}{simd}int x;\n")));
     }
 
     #[test]
@@ -5340,11 +4848,7 @@ mod tests {
         let fs = MemoryFileSystem::new();
         let result = compile(&options(), "/nope.c", &fs);
         assert!(result.failed());
-        assert!(
-            result.messages[0].contains("/nope.c"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("/nope.c"), "{:?}", result.messages);
         assert!(result.text().is_empty());
     }
 
@@ -5366,10 +4870,7 @@ decl #0 x : int object external static defined
         // converted from a preprocessing number to a constant of a type, parsed as an
         // expression, and folded to the number the array type carries.
         let text = tast("#define N 2\nint a[N];\n");
-        assert!(
-            text.starts_with("decl #0 a : int[2] object external static tentative"),
-            "{text}"
-        );
+        assert!(text.starts_with("decl #0 a : int[2] object external static tentative"), "{text}");
     }
 
     /// A pragma survives the preprocessor on purpose, since what one means is not its
@@ -5535,21 +5036,10 @@ decl #0 x : int object external static defined
         assert_eq!(result.messages.len(), 2, "{:?}", result.messages);
         assert!(!result.failed(), "{:?}", result.messages);
         for message in &result.messages {
-            assert!(
-                message.contains("'transparent_union' attribute ignored"),
-                "{message}"
-            );
+            assert!(message.contains("'transparent_union' attribute ignored"), "{message}");
         }
-        assert!(
-            result.messages[0].contains("first member"),
-            "{:?}",
-            result.messages
-        );
-        assert!(
-            result.messages[1].contains("only a union"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("first member"), "{:?}", result.messages);
+        assert!(result.messages[1].contains("only a union"), "{:?}", result.messages);
     }
 
     /// What an access to a packed member is allowed to assume about where it starts.
@@ -5653,24 +5143,17 @@ decl #0 x : int object external static defined
             "typedef long long v2di __attribute__((__vector_size__(16)));\n",
             "typedef long long v2di_u __attribute__((__vector_size__(16), __aligned__(1)));\n",
         );
-        let loaded = body(&format!(
-            "{prefix}v2di f(const void *p) {{ return *(const v2di_u *)p; }}"
-        ));
+        let loaded =
+            body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di_u *)p; }}"));
         assert_eq!(loaded.matches("align 1\n").count(), 1, "{loaded}");
         assert!(!loaded.contains("align 16"), "{loaded}");
         // The store side, which travels as a copy into whatever the pointer names and so carries
         // one number for both ends of it.
-        let stored = body(&format!(
-            "{prefix}void f(void *p, v2di b) {{ *(v2di_u *)p = b; }}"
-        ));
-        assert!(
-            stored.contains("memcpy %0, %2, size 16, align 1"),
-            "{stored}"
-        );
+        let stored = body(&format!("{prefix}void f(void *p, v2di b) {{ *(v2di_u *)p = b; }}"));
+        assert!(stored.contains("memcpy %0, %2, size 16, align 1"), "{stored}");
         // And the aligned spelling of the same two, which is where sixteen is the right answer.
-        let aligned = body(&format!(
-            "{prefix}v2di f(const void *p) {{ return *(const v2di *)p; }}"
-        ));
+        let aligned =
+            body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di *)p; }}"));
         assert!(aligned.contains("align 16"), "{aligned}");
     }
 
@@ -5745,18 +5228,9 @@ decl #0 x : int object external static defined
             "void g(void) {}\n",
             "void plain(void) {}\n",
         ));
-        assert!(
-            text.contains("\t.p2align\t6\n\t.type\tv, @object\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\t.p2align\t4, 0x90\n\t.globl\tplain\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.p2align\t6\n\t.type\tv, @object\n"), "{text}");
+        assert!(text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"), "{text}");
+        assert!(text.contains("\t.p2align\t4, 0x90\n\t.globl\tplain\n"), "{text}");
     }
 
     /// The same question asked by the command line instead of by a declaration, which is
@@ -5778,39 +5252,20 @@ decl #0 x : int object external static defined
             opts.emit = EmitKind::Asm;
             opts.align_functions = align;
             let result = run(&opts, source);
-            assert_eq!(
-                result.messages,
-                Vec::<String>::new(),
-                "expected this to compile"
-            );
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
             result.text().to_owned()
         };
 
         let text = listing(Some(32));
-        assert!(
-            text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"),
-            "the larger one wins: {text}"
-        );
-        assert!(
-            text.contains("\t.p2align\t5, 0x90\n\t.globl\tsmall\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\t.p2align\t5, 0x90\n\t.globl\tplain\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"), "the larger one wins: {text}");
+        assert!(text.contains("\t.p2align\t5, 0x90\n\t.globl\tsmall\n"), "{text}");
+        assert!(text.contains("\t.p2align\t5, 0x90\n\t.globl\tplain\n"), "{text}");
 
         // And the negative form, which asks for the smallest boundary the target has and is the
         // one spelling that takes a function below the sixteen bytes it would get anyway.
         let text = listing(Some(8));
-        assert!(
-            text.contains("\t.p2align\t3, 0x90\n\t.globl\tplain\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.p2align\t3, 0x90\n\t.globl\tplain\n"), "{text}");
+        assert!(text.contains("\t.p2align\t8, 0x90\n\t.globl\tg\n"), "{text}");
     }
 
     /// And the one position where the attribute means something else. On a declaration it raises
@@ -5856,14 +5311,8 @@ decl #0 x : int object external static defined
             "L low;\n",
             "H high;\n",
         ));
-        assert!(
-            text.contains("\t.p2align\t1\n\t.type\tlow, @object\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\t.p2align\t4\n\t.type\thigh, @object\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.p2align\t1\n\t.type\tlow, @object\n"), "{text}");
+        assert!(text.contains("\t.p2align\t4\n\t.type\thigh, @object\n"), "{text}");
     }
 
     /// The attribute that builds a type rather than changing a layout. `vector_size(n)` says the
@@ -5891,12 +5340,7 @@ decl #0 x : int object external static defined
             "typedef int v4si __attribute__((vector_size(16)));\n",
             "v2di f(v2di x, v4si r, int c) { return c ? x : r; }\n",
         ));
-        assert!(
-            refused
-                .iter()
-                .any(|m| m.contains("type mismatch in conditional")),
-            "{refused:?}"
-        );
+        assert!(refused.iter().any(|m| m.contains("type mismatch in conditional")), "{refused:?}");
     }
 
     #[test]
@@ -5988,11 +5432,7 @@ decl #0 x : int object external static defined
             ),
         );
         assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
-        assert!(
-            result.messages[0].contains("assignment of read-only"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("assignment of read-only"), "{:?}", result.messages);
     }
 
     /// The third layout attribute, and the one that moves nothing. It says the scalars in the
@@ -6014,19 +5454,13 @@ decl #0 x : int object external static defined
 
         let armoured =
             "struct s { int i; } __attribute__((__scalar_storage_order__(\"big-endian\")));\n";
-        assert!(
-            body(&format!("{armoured}{read}")).contains("bswap"),
-            "{armoured}"
-        );
+        assert!(body(&format!("{armoured}{read}")).contains("bswap"), "{armoured}");
 
         let front = "struct __attribute__((scalar_storage_order(\"big-endian\"))) s { int i; };\n";
         assert!(body(&format!("{front}{read}")).contains("bswap"), "{front}");
 
         let standard = "struct s { int i; } [[gnu::scalar_storage_order(\"big-endian\")]];\n";
-        assert!(
-            body(&format!("{standard}{read}")).contains("bswap"),
-            "{standard}"
-        );
+        assert!(body(&format!("{standard}{read}")).contains("bswap"), "{standard}");
 
         let same =
             "struct s { int i; } __attribute__((scalar_storage_order(\"little-endian\")));\n";
@@ -6084,10 +5518,8 @@ decl #0 x : int object external static defined
         let taken = format!("{record}int *f(struct s *p) {{ return &p->i; }}\n");
         assert_eq!(
             run(&opts, &taken).messages,
-            [
-                "/main.c:3:30: error: cannot take address of scalar with reverse storage order \
-              [E0712]"
-            ]
+            ["/main.c:3:30: error: cannot take address of scalar with reverse storage order \
+              [E0712]"]
         );
         let element = format!("{record}int *f(struct s *p) {{ return &p->a[0]; }}\n");
         let messages = run(&opts, &element).messages;
@@ -6106,10 +5538,8 @@ decl #0 x : int object external static defined
         let wrong = "struct s { int i; } __attribute__((scalar_storage_order(\"middle\")));\n";
         assert_eq!(
             run(&opts, wrong).messages,
-            [
-                "/main.c:1:36: error: 'scalar_storage_order' argument must be one of \"big-endian\" \
-              or \"little-endian\" [E0688]"
-            ]
+            ["/main.c:1:36: error: 'scalar_storage_order' argument must be one of \"big-endian\" \
+              or \"little-endian\" [E0688]"]
         );
         let bare = "struct s { int i; } __attribute__((scalar_storage_order));\n";
         let messages = run(&opts, bare).messages;
@@ -6204,10 +5634,7 @@ decl #0 x : int object external static defined
         let bogus = "int h(const char *, ...) __attribute__((format(bogus, 1, 2)));\n";
         let messages = run(&opts, bogus).messages;
         assert_eq!(messages.len(), 1, "{messages:?}");
-        assert!(
-            messages[0].contains("'bogus' is an unrecognized format"),
-            "{messages:?}"
-        );
+        assert!(messages[0].contains("'bogus' is an unrecognized format"), "{messages:?}");
     }
 
     /// Where a bit-field goes, which packing decides and which is the part of all this that
@@ -6231,44 +5658,22 @@ decl #0 x : int object external static defined
             bit_field_byte("struct s { int x : 12; __attribute__((packed)) char y : 6; };"),
             1
         );
-        assert_eq!(
-            bit_field_byte("#pragma pack(4)\nstruct s { int x : 12; char y : 6; };"),
-            1
-        );
+        assert_eq!(bit_field_byte("#pragma pack(4)\nstruct s { int x : 12; char y : 6; };"), 1);
         // A thirty bit field after a byte, which is the case the rule was written for.
         assert_eq!(bit_field_byte("struct s { char x; int y : 30; };"), 4);
-        assert_eq!(
-            bit_field_byte("struct s { char x; int y : 30; } __attribute__((packed));"),
-            1
-        );
+        assert_eq!(bit_field_byte("struct s { char x; int y : 30; } __attribute__((packed));"), 1);
         // Four is what an `int` asked for anyway, so this caps nothing and still counts.
-        assert_eq!(
-            bit_field_byte("#pragma pack(4)\nstruct s { char x; int y : 30; };"),
-            1
-        );
-        assert_eq!(
-            bit_field_byte("#pragma pack(2)\nstruct s { char x; int y : 30; };"),
-            1
-        );
+        assert_eq!(bit_field_byte("#pragma pack(4)\nstruct s { char x; int y : 30; };"), 1);
+        assert_eq!(bit_field_byte("#pragma pack(2)\nstruct s { char x; int y : 30; };"), 1);
     }
 
     /// The byte a read of `s.y` loads from, which is where the bit-field was placed.
     fn bit_field_byte(record: &str) -> u64 {
         let source = format!("{record}\nint f(struct s *p) {{ return p->y; }}\n");
         let body = body(&source);
-        let Some((before, _)) = body.split_once("ptr_add") else {
-            return 0;
-        };
-        let (_, constant) = before
-            .rsplit_once("iconst.i64 ")
-            .expect("an offset constant");
-        constant
-            .lines()
-            .next()
-            .expect("a line")
-            .trim()
-            .parse()
-            .expect("a byte offset")
+        let Some((before, _)) = body.split_once("ptr_add") else { return 0 };
+        let (_, constant) = before.rsplit_once("iconst.i64 ").expect("an offset constant");
+        constant.lines().next().expect("a line").trim().parse().expect("a byte offset")
     }
 
     /// An attribute in the middle of a specifier list, which is where a member usually carries
@@ -6389,12 +5794,7 @@ decl #0 x : int object external static defined
             "unknown action `x` for `#pragma pack` - ignored",
             "`#pragma pack(pop, foo)` encountered without matching `#pragma pack(push, foo)`",
         ];
-        assert_eq!(
-            result.messages.len(),
-            expected.len(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages.len(), expected.len(), "{:?}", result.messages);
         for (message, want) in result.messages.iter().zip(expected) {
             assert!(message.contains(want), "expected {want:?} in {message:?}");
         }
@@ -6480,24 +5880,14 @@ decl #0 x : int object external static defined
         let source = "int f(void) { char c = 300; return c; }\n";
         let plain = run(&options(), source);
         assert_eq!(plain.errors, 0, "{:?}", plain.messages);
-        assert_eq!(
-            plain.messages.len(),
-            1,
-            "expected a warning about the narrowed constant"
-        );
-        assert!(
-            !plain.text().is_empty(),
-            "a warning is not a reason to write nothing"
-        );
+        assert_eq!(plain.messages.len(), 1, "expected a warning about the narrowed constant");
+        assert!(!plain.text().is_empty(), "a warning is not a reason to write nothing");
 
         let mut opts = options();
         opts.warnings_are_errors = true;
         let strict = run(&opts, source);
         assert!(strict.failed());
-        assert!(
-            strict.text().is_empty(),
-            "and under -Werror it is a reason to write nothing"
-        );
+        assert!(strict.text().is_empty(), "and under -Werror it is a reason to write nothing");
         for message in &strict.messages {
             assert!(!message.contains("warning:"), "{message}");
         }
@@ -6518,10 +5908,7 @@ decl #0 x : int object external static defined
         opts.warnings_are_errors = true;
         let both = run(&opts, source);
         assert_eq!(both.messages, Vec::<String>::new());
-        assert!(
-            !both.failed(),
-            "-w -Werror is not an error about a warning nobody saw"
-        );
+        assert!(!both.failed(), "-w -Werror is not an error about a warning nobody saw");
     }
 
     #[test]
@@ -6532,11 +5919,7 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.std = Std::C23;
         opts.gnu_extensions = false;
-        assert!(
-            !run(&opts, source).failed(),
-            "{:?}",
-            run(&opts, source).messages
-        );
+        assert!(!run(&opts, source).failed(), "{:?}", run(&opts, source).messages);
 
         opts.std = Std::C17;
         assert!(run(&opts, source).failed());
@@ -6559,11 +5942,7 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -6626,14 +6005,8 @@ decl #0 x : int object external static defined
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        assert_eq!(
-            order(rucc_session::OptLevel::O0),
-            "set_reset_devices poking_init start later"
-        );
-        assert_eq!(
-            order(rucc_session::OptLevel::O2),
-            "set_reset_devices poking_init later start"
-        );
+        assert_eq!(order(rucc_session::OptLevel::O0), "set_reset_devices poking_init start later");
+        assert_eq!(order(rucc_session::OptLevel::O2), "set_reset_devices poking_init later start");
     }
 
     /// The target reaches the back end, so the same C is different instructions on Windows.
@@ -6672,11 +6045,7 @@ decl #0 x : int object external static defined
 
         let linux = run(&options(), source);
         assert_eq!(linux.messages.len(), 3, "{:?}", linux.messages);
-        assert!(
-            linux.messages[0].contains("does not declare anything"),
-            "{:?}",
-            linux.messages
-        );
+        assert!(linux.messages[0].contains("does not declare anything"), "{:?}", linux.messages);
 
         // And the flag answers for either of them, so a program built for Linux against a header
         // written for Windows can be read the way the header meant it.
@@ -6723,11 +6092,7 @@ decl #0 x : int object external static defined
             "riscv64-unknown-linux-gnu",
             "wasm32-wasip1",
         ] {
-            assert_eq!(
-                no_back_end(tuple.parse::<Triple>().unwrap()),
-                None,
-                "{tuple}"
-            );
+            assert_eq!(no_back_end(tuple.parse::<Triple>().unwrap()), None, "{tuple}");
         }
     }
 
@@ -6748,9 +6113,7 @@ decl #0 x : int object external static defined
         let lowered = run(&opts, source);
         assert!(!lowered.failed(), "{:?}", lowered.messages);
         assert!(
-            lowered
-                .text()
-                .contains("func @f(ptr sret(8, align 4), ptr, i64)"),
+            lowered.text().contains("func @f(ptr sret(8, align 4), ptr, i64)"),
             "{}",
             lowered.text()
         );
@@ -6766,16 +6129,8 @@ decl #0 x : int object external static defined
         opts.emit = EmitKind::Asm;
         let listing = run(&opts, source);
         assert!(!listing.failed(), "{:?}", listing.messages);
-        assert!(
-            listing
-                .text()
-                .contains("f:\n\t.functype\tf (i32, i32, i64) -> ()\n")
-        );
-        assert!(
-            listing.text().contains("\tend_function\n"),
-            "{}",
-            listing.text()
-        );
+        assert!(listing.text().contains("f:\n\t.functype\tf (i32, i32, i64) -> ()\n"));
+        assert!(listing.text().contains("\tend_function\n"), "{}", listing.text());
         // The tree form names each parameter by its value in the IR, the hidden one too.
         opts.emit = EmitKind::WasmTree;
         let tree = run(&opts, source);
@@ -6884,11 +6239,7 @@ decl #0 x : int object external static defined
         opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         let result = run(&opts, "int f(int a) { return a; }\n");
         assert!(result.failed());
-        assert!(
-            result.messages[0].contains("is not a wasm target"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("is not a wasm target"), "{:?}", result.messages);
         assert!(result.text().is_empty());
     }
 
@@ -6903,12 +6254,8 @@ decl #0 x : int object external static defined
         let result = run(&opts, source);
         assert!(!result.failed(), "{:?}", result.messages);
         let text = result.text();
-        for line in [
-            "stp x29, x30, [sp, #-16]!",
-            "mov x29, sp",
-            "bl g",
-            "ldp x29, x30, [sp], #16",
-        ] {
+        for line in ["stp x29, x30, [sp, #-16]!", "mov x29, sp", "bl g", "ldp x29, x30, [sp], #16"]
+        {
             assert!(text.contains(line), "{line} is not in\n{text}");
         }
         assert!(!text.contains('%'), "{text}");
@@ -6968,9 +6315,7 @@ decl #0 x : int object external static defined
         );
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
-        let Artifact::Object { bytes, .. } = result.artifact else {
-            panic!("an object")
-        };
+        let Artifact::Object { bytes, .. } = result.artifact else { panic!("an object") };
         let has = |name: &[u8]| bytes.windows(name.len()).any(|at| at == name);
         assert!(has(b".gcc_except_table\0"), "no call site table");
         assert!(has(b"zPLR\0"), "no header naming the personality routine");
@@ -7026,10 +6371,7 @@ decl #0 x : int object external static defined
         let result = run(&opts, source);
         assert!(!result.failed(), "{:?}", result.messages);
         let text = result.text();
-        let at = |what: &str| {
-            text.find(what)
-                .unwrap_or_else(|| panic!("{what} is not in\n{text}"))
-        };
+        let at = |what: &str| text.find(what).unwrap_or_else(|| panic!("{what} is not in\n{text}"));
         assert!(at("sdiv w") < at("msub w"), "{text}");
         assert!(at("udiv x") < at("msub x"), "{text}");
     }
@@ -7048,10 +6390,7 @@ decl #0 x : int object external static defined
         let result = run(&opts, source);
         assert!(!result.failed(), "{:?}", result.messages);
         let text = result.text();
-        let at = |what: &str| {
-            text.find(what)
-                .unwrap_or_else(|| panic!("{what} is not in\n{text}"))
-        };
+        let at = |what: &str| text.find(what).unwrap_or_else(|| panic!("{what} is not in\n{text}"));
         assert!(at("adr x") < at("ldrsw x"), "{text}");
         assert!(at("ldrsw x") < at("br x"), "{text}");
         assert!(text.contains("_j0:"), "{text}");
@@ -7120,14 +6459,8 @@ decl #0 x : int object external static defined
     fn a_darwin_thread_local_is_reached_through_its_descriptor() {
         let source = "__thread int n = 5;\nint *f(void) { return &n; }\n";
         for (triple, wanted) in [
-            (
-                "aarch64-apple-darwin",
-                &["_n@TLVPPAGE\n", "_n@TLVPPAGEOFF]\n", "\tblr x"][..],
-            ),
-            (
-                "x86_64-apple-darwin",
-                &["_n@TLVP(%rip), %rdi\n", "\tcall\t*%"][..],
-            ),
+            ("aarch64-apple-darwin", &["_n@TLVPPAGE\n", "_n@TLVPPAGEOFF]\n", "\tblr x"][..]),
+            ("x86_64-apple-darwin", &["_n@TLVP(%rip), %rdi\n", "\tcall\t*%"][..]),
         ] {
             let mut opts = options();
             opts.emit = EmitKind::Asm;
@@ -7139,10 +6472,7 @@ decl #0 x : int object external static defined
                 assert!(text.contains(want), "{triple} wanted {want:?}:\n{text}");
             }
             assert!(text.contains("\n_n:\n\t.quad\t__tlv_bootstrap\n"), "{text}");
-            assert!(
-                !text.contains("tpidr_el0") && !text.contains("%fs"),
-                "{text}"
-            );
+            assert!(!text.contains("tpidr_el0") && !text.contains("%fs"), "{text}");
         }
     }
 
@@ -7152,16 +6482,9 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
-        let result = run(
-            &opts,
-            "void *f(void) { return __builtin_thread_pointer(); }\n",
-        );
+        let result = run(&opts, "void *f(void) { return __builtin_thread_pointer(); }\n");
         assert!(result.failed());
-        assert!(
-            result.messages[0].contains("thread pointer"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("thread pointer"), "{:?}", result.messages);
     }
 
     /// Darwin's list is a plain pointer and its variadic arguments are all on the stack, so a
@@ -7217,10 +6540,7 @@ decl #0 x : int object external static defined
         assert!(text.contains(", _ext@GOTPAGE\n"), "{text}");
         assert!(text.contains(", _ext@GOTPAGEOFF]\n"), "{text}");
         assert!(!text.contains(":lo12:"), "{text}");
-        assert!(
-            text.contains("\t.globl\t_g\n\t.zerofill\t__DATA,__bss,_g,16,2\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.globl\t_g\n\t.zerofill\t__DATA,__bss,_g,16,2\n"), "{text}");
     }
 
     /// A computed goto table on Darwin, which Postgres's expression interpreter is built around.
@@ -7246,10 +6566,8 @@ decl #0 x : int object external static defined
             assert!(!result.failed(), "{:?}", result.messages);
             let text = result.text();
             // Every label the table holds is one the function defines, spelled the same way.
-            let held: Vec<&str> = text
-                .lines()
-                .filter_map(|line| line.strip_prefix("\t.quad\t_.Llbl."))
-                .collect();
+            let held: Vec<&str> =
+                text.lines().filter_map(|line| line.strip_prefix("\t.quad\t_.Llbl.")).collect();
             if level == rucc_session::OptLevel::O0 {
                 assert_eq!(held.len(), 2, "{text}");
             }
@@ -7260,18 +6578,10 @@ decl #0 x : int object external static defined
 
             opts.emit = EmitKind::Object;
             let result = run(&opts, source);
-            assert_eq!(
-                result.messages,
-                Vec::<String>::new(),
-                "{:?}",
-                result.messages
-            );
+            assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
             let bytes = result.artifact.bytes();
             let has = |what: &[u8]| bytes.windows(what.len()).any(|window| window == what);
-            assert!(
-                has(b"_f\0"),
-                "{level:?}: the function is in the symbol table"
-            );
+            assert!(has(b"_f\0"), "{level:?}: the function is in the symbol table");
             assert!(!has(b".Llbl"), "{level:?}: no symbol for a label");
         }
     }
@@ -7317,17 +6627,9 @@ decl #0 x : int object external static defined
         let result = run(&opts, source);
         assert!(result.failed());
         assert_eq!(result.messages.len(), 2, "{:?}", result.messages);
-        assert!(
-            result.messages[0].contains("cannot generate code for 'a'"),
-            "{:?}",
-            result
-        );
+        assert!(result.messages[0].contains("cannot generate code for 'a'"), "{:?}", result);
         assert!(result.messages[0].contains("`naked`"), "{:?}", result);
-        assert!(
-            result.messages[1].contains("cannot generate code for 'b'"),
-            "{:?}",
-            result
-        );
+        assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
         assert!(result.text().is_empty());
     }
 
@@ -7337,10 +6639,7 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         let said = run(&opts, "int one(void) { return 1; }\n");
-        assert!(
-            said.text().contains(&format!("\t.ident\t\"{IDENT}\"\n")),
-            "{said:?}"
-        );
+        assert!(said.text().contains(&format!("\t.ident\t\"{IDENT}\"\n")), "{said:?}");
         opts.ident = false;
         let quiet = run(&opts, "int one(void) { return 1; }\n");
         assert!(!quiet.text().contains(".ident"), "{quiet:?}");
@@ -7356,14 +6655,8 @@ decl #0 x : int object external static defined
         let source = "const char *s(void) { return \"short\"; }\n\
                       const char *l(void) { return \"a literal that is long enough to align\"; }\n";
         let text = run(&opts, source).text().to_owned();
-        assert!(
-            text.contains("\t.section\t.rodata.str1.1,\"aMS\",@progbits,1\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\t.section\t.rodata.str1.8,\"aMS\",@progbits,1\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.rodata.str1.1,\"aMS\",@progbits,1\n"), "{text}");
+        assert!(text.contains("\t.section\t.rodata.str1.8,\"aMS\",@progbits,1\n"), "{text}");
         opts.opt_level = rucc_session::OptLevel::Os;
         let small = run(&opts, source).text().to_owned();
         assert!(!small.contains(".rodata.str1.8"), "{small}");
@@ -7380,14 +6673,8 @@ decl #0 x : int object external static defined
                       const void *w(void) { return U\"four\"; }\n\
                       const void *z(void) { return u\"a\\0b\"; }\n";
         let text = run(&opts, source).text().to_owned();
-        assert!(
-            text.contains("\t.section\t.rodata.str2.2,\"aMS\",@progbits,2\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\t.section\t.rodata.str4.4,\"aMS\",@progbits,4\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.rodata.str2.2,\"aMS\",@progbits,2\n"), "{text}");
+        assert!(text.contains("\t.section\t.rodata.str4.4,\"aMS\",@progbits,4\n"), "{text}");
         // A zero inside it would be the end of the string to the linker.
         assert_eq!(text.matches(".rodata.str2.2").count(), 1, "{text}");
     }
@@ -7406,44 +6693,23 @@ decl #0 x : int object external static defined
                       int f(int x) { int y = work(x); if (y < 0) { oops(y); return -1; } \
                       return work(y); }\n";
         let text = run(&opts, source).text().to_owned();
-        assert!(
-            text.contains("\t.section\t.text.unlikely,\"ax\",@progbits\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\t.type\tf.cold, @function\nf.cold:\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.text.unlikely,\"ax\",@progbits\n"), "{text}");
+        assert!(text.contains("\t.type\tf.cold, @function\nf.cold:\n"), "{text}");
         assert!(text.contains("\t.size\tf, .-f\n"), "{text}");
         assert!(text.contains("\t.size\tf.cold, .-f.cold\n"), "{text}");
         let cold = &text[text.find("f.cold:").expect("a cold part")..];
         assert!(cold.contains("call\toops"), "{text}");
         let start = text.find(".text.unlikely").expect("a cold section");
-        assert!(
-            text[start..].contains("\t.cfi_startproc\n\t.cfi_def_cfa_offset 16\n"),
-            "{text}"
-        );
+        assert!(text[start..].contains("\t.cfi_startproc\n\t.cfi_def_cfa_offset 16\n"), "{text}");
         opts.emit = EmitKind::Object;
         let object = run(&opts, source);
-        let has = |name: &[u8]| {
-            object
-                .artifact
-                .bytes()
-                .windows(name.len())
-                .any(|at| at == name)
-        };
+        let has = |name: &[u8]| object.artifact.bytes().windows(name.len()).any(|at| at == name);
         assert!(has(b".text.unlikely\0") && has(b"f.cold\0"));
         // The same on i386, as gcc does it for `-m32`.
         let mut i386 = opts.clone();
         i386.target = "i686-linux-gnu".parse::<Triple>().unwrap();
         let object = run(&i386, source);
-        let has = |name: &[u8]| {
-            object
-                .artifact
-                .bytes()
-                .windows(name.len())
-                .any(|at| at == name)
-        };
+        let has = |name: &[u8]| object.artifact.bytes().windows(name.len()).any(|at| at == name);
         assert!(has(b".text.unlikely\0") && has(b"f.cold\0"));
         i386.emit = EmitKind::Asm;
         let text = run(&i386, source).text().to_owned();
@@ -7473,26 +6739,17 @@ decl #0 x : int object external static defined
         let source = "__attribute__((cold)) int f(int x) { return x + 1; }\n\
                       int g(int x) { return f(x) * 2; }\n";
         let text = run(&opts, source).text().to_owned();
-        let unlikely = text
-            .find("\t.section\t.text.unlikely,\"ax\",@progbits\n")
-            .expect(&text);
+        let unlikely = text.find("\t.section\t.text.unlikely,\"ax\",@progbits\n").expect(&text);
         let f = text.find("\nf:").expect(&text);
         let g = text.find("\ng:").expect(&text);
-        assert!(
-            unlikely < f && f < g && text[f..g].contains("\n\t.text\n"),
-            "{text}"
-        );
+        assert!(unlikely < f && f < g && text[f..g].contains("\n\t.text\n"), "{text}");
         opts.function_sections = true;
         let text = run(&opts, source).text().to_owned();
-        assert!(
-            text.contains("\t.section\t.text.unlikely.f,\"ax\",@progbits\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.text.unlikely.f,\"ax\",@progbits\n"), "{text}");
         opts.function_sections = false;
-        for (level, asked) in [
-            (rucc_session::OptLevel::O1, None),
-            (rucc_session::OptLevel::O2, Some(false)),
-        ] {
+        for (level, asked) in
+            [(rucc_session::OptLevel::O1, None), (rucc_session::OptLevel::O2, Some(false))]
+        {
             opts.opt_level = level;
             opts.reorder_functions = asked;
             let text = run(&opts, source).text().to_owned();
@@ -7502,10 +6759,7 @@ decl #0 x : int object external static defined
         opts.reorder_functions = None;
         let placed = "__attribute__((cold, section(\".foo\"))) int f(int x) { return x; }\n";
         let text = run(&opts, placed).text().to_owned();
-        assert!(
-            text.contains(".foo") && !text.contains(".text.unlikely"),
-            "{text}"
-        );
+        assert!(text.contains(".foo") && !text.contains(".text.unlikely"), "{text}");
     }
 
     /// `main` and a constructor go in `.text.startup` and a destructor in `.text.exit` from `-O2`,
@@ -7529,11 +6783,7 @@ decl #0 x : int object external static defined
             if text_at.is_some_and(|t| t > section) {
                 return ".text".to_owned();
             }
-            text[section + 10..]
-                .split(',')
-                .next()
-                .unwrap_or_default()
-                .to_owned()
+            text[section + 10..].split(',').next().unwrap_or_default().to_owned()
         };
         let text = run(&opts, source).text().to_owned();
         assert_eq!(section_of(&text, "main"), ".text.startup", "{text}");
@@ -7546,26 +6796,19 @@ decl #0 x : int object external static defined
         assert_eq!(section_of(&text, "up"), ".text.startup.up", "{text}");
         assert_eq!(section_of(&text, "down"), ".text.exit.down", "{text}");
         opts.function_sections = false;
-        for (level, asked) in [
-            (rucc_session::OptLevel::O1, None),
-            (rucc_session::OptLevel::O2, Some(false)),
-        ] {
+        for (level, asked) in
+            [(rucc_session::OptLevel::O1, None), (rucc_session::OptLevel::O2, Some(false))]
+        {
             opts.opt_level = level;
             opts.reorder_functions = asked;
             let text = run(&opts, source).text().to_owned();
-            assert!(
-                !text.contains(".text.startup") && !text.contains(".text.exit"),
-                "{text}"
-            );
+            assert!(!text.contains(".text.startup") && !text.contains(".text.exit"), "{text}");
         }
         opts.opt_level = rucc_session::OptLevel::O2;
         opts.reorder_functions = None;
         let placed = "__attribute__((section(\".foo\"))) int main(void) { return 0; }\n";
         let text = run(&opts, placed).text().to_owned();
-        assert!(
-            text.contains(".foo") && !text.contains(".text.startup"),
-            "{text}"
-        );
+        assert!(text.contains(".foo") && !text.contains(".text.startup"), "{text}");
         let cold = "__attribute__((cold)) int main(void) { return 0; }\n";
         let text = run(&opts, cold).text().to_owned();
         assert_eq!(section_of(&text, "main"), ".text.unlikely", "{text}");
@@ -7587,15 +6830,9 @@ decl #0 x : int object external static defined
             result.messages[0].contains("a `f64` is kept in the vector registers"),
             "{result:?}"
         );
-        assert!(
-            !result.messages[0].contains("not lowered yet"),
-            "{result:?}"
-        );
+        assert!(!result.messages[0].contains("not lowered yet"), "{result:?}");
         let result = run(&opts, "long double same(long double x) { return x; }\n");
-        assert!(
-            result.messages[0].contains("a `f80` is kept in the x87 registers"),
-            "{result:?}"
-        );
+        assert!(result.messages[0].contains("a `f80` is kept in the x87 registers"), "{result:?}");
 
         let source = "#include <stdarg.h>\n\
                       struct big { long a[8]; };\n\
@@ -7631,10 +6868,7 @@ decl #0 x : int object external static defined
         opts.stack_boundary = Some(8);
         opts.opt_level = rucc_session::OptLevel::O2;
         let result = run(&opts, "long double same(long double x) { return x; }\n");
-        assert!(
-            result.messages[0].contains("a `f80` is kept in the x87 registers"),
-            "{result:?}"
-        );
+        assert!(result.messages[0].contains("a `f80` is kept in the x87 registers"), "{result:?}");
 
         let source = "typedef float v4 __attribute__((vector_size(16)));\n\
                       void g(void);\n\
@@ -7668,11 +6902,7 @@ decl #0 x : int object external static defined
         opts.stack_clash = true;
         let result = run(&opts, source);
         assert!(!result.failed(), "{:?}", result.messages);
-        assert!(
-            result.text().contains("cmp_rr_64 $rsp, $r10"),
-            "{}",
-            result.text()
-        );
+        assert!(result.text().contains("cmp_rr_64 $rsp, $r10"), "{}", result.text());
         assert!(result.text().contains("jcc_b"), "{}", result.text());
         assert!(result.text().contains("or_mi_8"), "{}", result.text());
     }
@@ -7702,11 +6932,7 @@ decl #0 x : int object external static defined
             Artifact::Object { bytes, .. } => bytes,
             other => panic!("expected an object, got {other:?}"),
         };
-        assert_eq!(
-            &bytes[..2],
-            b"\x64\x86",
-            "an object that says which machine it is for"
-        );
+        assert_eq!(&bytes[..2], b"\x64\x86", "an object that says which machine it is for");
 
         // And the same two functions for Linux, so that what the test is measuring is the target
         // rather than the program being one this compiler cannot reach yet.
@@ -7744,11 +6970,7 @@ decl #0 x : int object external static defined
             Artifact::Object { bytes, .. } => bytes,
             other => panic!("expected an object, got {other:?}"),
         };
-        assert_eq!(
-            &bytes[..2],
-            b"\x64\x86",
-            "an object that says which machine it is for"
-        );
+        assert_eq!(&bytes[..2], b"\x64\x86", "an object that says which machine it is for");
 
         // And the same source for Linux, which does have a table and still uses it, so what this
         // measures is the format rather than the program.
@@ -7777,41 +6999,26 @@ decl #0 x : int object external static defined
         opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
-        let Artifact::Object { bytes, .. } = result.artifact else {
-            panic!("expected an object")
-        };
-        assert!(
-            bytes
-                .windows(wanted.len())
-                .any(|at| at == wanted.as_bytes()),
-            "no options"
-        );
+        let Artifact::Object { bytes, .. } = result.artifact else { panic!("expected an object") };
+        assert!(bytes.windows(wanted.len()).any(|at| at == wanted.as_bytes()), "no options");
 
         opts.emit = EmitKind::Asm;
         let text = match run(&opts, source).artifact {
             Artifact::Text(text) => text,
             other => panic!("expected a listing, got {other:?}"),
         };
-        assert!(
-            text.contains("\t.ascii\t\" /DEFAULTLIB:\\\"my lib.lib\\\"\"\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.ascii\t\" /DEFAULTLIB:\\\"my lib.lib\\\"\"\n"), "{text}");
 
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
-        let Artifact::Text(text) = result.artifact else {
-            panic!("expected a listing")
-        };
+        let Artifact::Text(text) = result.artifact else { panic!("expected a listing") };
         assert!(!text.contains("DEFAULTLIB"), "{text}");
 
         // And a line that says too little is a warning rather than a silent nothing.
         let result = run(&opts, "#pragma comment(lib)\nint f(void) { return 0; }\n");
-        assert!(
-            result.messages.iter().any(|m| m.contains("wants a string")),
-            "{result:?}"
-        );
+        assert!(result.messages.iter().any(|m| m.contains("wants a string")), "{result:?}");
     }
 
     /// An opcode the rule language has no word for is named anyway, and pointed at.
@@ -7839,14 +7046,8 @@ decl #0 x : int object external static defined
             result.messages[0].contains("no rule lowers a `sext` producing a `i128`"),
             "{result:?}"
         );
-        assert!(
-            result.messages[0].contains(":2:"),
-            "the line the widening is on: {result:?}"
-        );
-        assert!(
-            !result.messages[0].contains("this instruction"),
-            "{result:?}"
-        );
+        assert!(result.messages[0].contains(":2:"), "the line the widening is on: {result:?}");
+        assert!(!result.messages[0].contains("this instruction"), "{result:?}");
     }
 
     /// A conversion between `long double` and a 128-bit integer calls libgcc's routine for it.
@@ -7859,19 +7060,10 @@ decl #0 x : int object external static defined
     fn a_long_double_converts_to_and_from_128_bits_through_libgcc() {
         for (source, routine) in [
             ("long double f(__int128 a) { return a; }\n", "__floattixf"),
-            (
-                "long double f(unsigned __int128 a) { return a; }\n",
-                "__floatuntixf",
-            ),
+            ("long double f(unsigned __int128 a) { return a; }\n", "__floatuntixf"),
             ("__int128 f(long double a) { return a; }\n", "__fixxfti"),
-            (
-                "unsigned __int128 f(long double a) { return a; }\n",
-                "__fixunsxfti",
-            ),
-            (
-                "long double f(unsigned _BitInt(100) a) { return a; }\n",
-                "__floatuntixf",
-            ),
+            ("unsigned __int128 f(long double a) { return a; }\n", "__fixunsxfti"),
+            ("long double f(unsigned _BitInt(100) a) { return a; }\n", "__floatuntixf"),
             ("_BitInt(77) f(long double a) { return a; }\n", "__fixxfti"),
         ] {
             let text = mir(source);
@@ -7890,15 +7082,8 @@ decl #0 x : int object external static defined
             "int f(int a) { __int128 wide = a; __asm__(\"\" : \"+r\"(wide)); return wide; }\n";
         let result = run(&opts, source);
         assert!(result.failed());
-        let note = result
-            .messages
-            .iter()
-            .find(|line| line.contains("note:"))
-            .expect("a note");
-        assert!(
-            note.contains("https://github.com/tamnd/rucc/issues"),
-            "{note}"
-        );
+        let note = result.messages.iter().find(|line| line.contains("note:")).expect("a note");
+        assert!(note.contains("https://github.com/tamnd/rucc/issues"), "{note}");
         assert!(!note.contains("spec/17-milestones.md"), "{note}");
     }
 
@@ -7906,10 +7091,7 @@ decl #0 x : int object external static defined
     #[test]
     fn the_frame_flags_on_the_command_line_reach_the_generated_frame() {
         let source = "int f(int a) { return a; }\n";
-        assert!(
-            !mir(source).contains("$rbp"),
-            "a leaf needs no frame pointer when told so"
-        );
+        assert!(!mir(source).contains("$rbp"), "a leaf needs no frame pointer when told so");
 
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
@@ -7928,11 +7110,7 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -7992,17 +7170,9 @@ decl #0 x : int object external static defined
     #[test]
     fn a_branch_on_a_comparison_jumps_on_the_opposite_of_what_it_compared() {
         let arms = "return 1; return 2;";
-        let signed = [
-            ("==", "jne"),
-            ("!=", "je"),
-            ("<", "jge"),
-            ("<=", "jg"),
-            (">", "jle"),
-        ];
+        let signed = [("==", "jne"), ("!=", "je"), ("<", "jge"), ("<=", "jg"), (">", "jle")];
         for (operator, jump) in signed.into_iter().chain([(">=", "jl")]) {
-            let text = asm(&format!(
-                "int f(int a, int b) {{ if (a {operator} b) {arms} }}\n"
-            ));
+            let text = asm(&format!("int f(int a, int b) {{ if (a {operator} b) {arms} }}\n"));
             assert!(
                 text.contains(&format!("\tcmpl\t%esi, %edi\n\t{jump}\t")),
                 "{operator}: {text}"
@@ -8044,11 +7214,7 @@ decl #0 x : int object external static defined
         opts.emit = EmitKind::Asm;
         opts.opt_level = rucc_session::OptLevel::O2;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -8094,13 +7260,9 @@ decl #0 x : int object external static defined
     /// `cmov` on that comparison and no branch, as clang writes it (tamnd/rucc#3262).
     #[test]
     fn a_switch_whose_arms_are_a_function_of_the_label_is_a_range_check_and_arithmetic() {
-        let arms: String = (0..16)
-            .map(|k| format!("case {k}: return {};", k + 1))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let text = optimized(&format!(
-            "int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"
-        ));
+        let arms: String =
+            (0..16).map(|k| format!("case {k}: return {};", k + 1)).collect::<Vec<_>>().join(" ");
+        let text = optimized(&format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
         assert!(text.contains("\tcmpl\t$15, "), "{text}");
         assert!(text.contains("\tcmovbel\t"), "{text}");
         assert!(!text.contains("\tja\t"), "{text}");
@@ -8137,9 +7299,7 @@ decl #0 x : int object external static defined
             .map(|k| format!("case {k}: return {};", if k == 9 { 100 } else { k + 1 }))
             .collect::<Vec<_>>()
             .join(" ");
-        let text = optimized(&format!(
-            "int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"
-        ));
+        let text = optimized(&format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
         assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
         assert!(!text.contains("\tjmp\t*"), "{text}");
         assert!(text.contains("leaq\tCSWTCH.0(%rip)"), "{text}");
@@ -8186,10 +7346,7 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Asm;
         opts.opt_level = rucc_session::OptLevel::Os;
-        let result = run(
-            &opts,
-            &format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"),
-        );
+        let result = run(&opts, &format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
         assert_eq!(result.messages, Vec::<String>::new());
         let text = result.text();
         let table = &text[text.find("CSWTCH.0:").expect("the table is in the output")..];
@@ -8397,10 +7554,7 @@ decl #0 x : int object external static defined
         // allocator taking no hints, and what matters here is what is not among them: nothing
         // narrows the value and nothing widens it again, which is what a cast that did something
         // would look like.
-        for line in text
-            .lines()
-            .filter(|line| line.starts_with('\t') && !line.contains('.'))
-        {
+        for line in text.lines().filter(|line| line.starts_with('\t') && !line.contains('.')) {
             let mnemonic = line.split_whitespace().next().unwrap_or("");
             assert!(matches!(mnemonic, "movq" | "ret"), "{line} in\n{text}");
         }
@@ -8412,9 +7566,7 @@ decl #0 x : int object external static defined
     #[test]
     fn an_argument_past_the_last_register_is_read_out_of_the_caller_s_stack() {
         let six = "long a, long b, long c, long d, long e, long f";
-        let text = asm(&format!(
-            "long f({six}, long g, long h) {{ return g + h; }}\n"
-        ));
+        let text = asm(&format!("long f({six}, long g, long h) {{ return g + h; }}\n"));
 
         // Nothing is pushed and no frame is taken, so the only thing between the stack pointer and
         // the caller's arguments is the return address the call pushed. Which is where gcc 16.2.0
@@ -8442,9 +7594,7 @@ decl #0 x : int object external static defined
     fn a_call_writes_the_arguments_with_no_register_left_at_the_stack_pointer() {
         let six = "1, 2, 3, 4, 5, 6";
         let decl = "long g(long, long, long, long, long, long, long, long);\n";
-        let text = asm(&format!(
-            "{decl}long f(void) {{ return g({six}, 7, 8); }}\n"
-        ));
+        let text = asm(&format!("{decl}long f(void) {{ return g({six}, 7, 8); }}\n"));
 
         assert!(text.contains("\tmovq\t%"), "{text}");
         assert!(text.contains(", (%rsp)\n"), "{text}");
@@ -8468,10 +7618,7 @@ decl #0 x : int object external static defined
         let decl = "int g(int, ...);\n";
         let text = asm(&format!("{decl}int f(void) {{ return g(0, {nine}); }}\n"));
 
-        assert!(
-            text.contains("\tmovl\t$8, "),
-            "eight registers, not nine: {text}"
-        );
+        assert!(text.contains("\tmovl\t$8, "), "eight registers, not nine: {text}");
         assert!(text.contains("\tmovsd\t%"), "{text}");
         assert!(text.contains(", (%rsp)\n"), "{text}");
     }
@@ -8489,10 +7636,7 @@ decl #0 x : int object external static defined
         // Five general purpose registers and eight vector ones, since the one parameter the
         // signature names took the first of the six.
         let stores = |mnemonic: &str| text.matches(&format!("\t{mnemonic}\t%")).count();
-        assert!(
-            text.contains(", 8(%r"),
-            "the second slot, not the first: {text}"
-        );
+        assert!(text.contains(", 8(%r"), "the second slot, not the first: {text}");
         assert!(!text.contains(", 0(%r"), "{text}");
         // All sixteen bytes of each vector register, which is what gcc writes and what a `va_arg`
         // of a `_Float128` reads back, so the mnemonic is the one that moves a whole register.
@@ -8523,29 +7667,13 @@ decl #0 x : int object external static defined
         assert!(text.contains(", 16(%r"), "{text}");
         let frame: u32 = text
             .lines()
-            .find_map(|line| {
-                line.trim()
-                    .strip_prefix("subq	$")?
-                    .split(',')
-                    .next()?
-                    .parse()
-                    .ok()
-            })
+            .find_map(|line| line.trim().strip_prefix("subq	$")?.split(',').next()?.parse().ok())
             .expect("a variadic function takes a frame for the save area");
         let above = |line: &str| {
-            let at: u32 = line
-                .trim()
-                .strip_prefix("leaq	")?
-                .split('(')
-                .next()?
-                .parse()
-                .ok()?;
+            let at: u32 = line.trim().strip_prefix("leaq	")?.split('(').next()?.parse().ok()?;
             Some(at > frame)
         };
-        assert!(
-            text.lines().filter_map(above).any(|it| it),
-            "{frame}: {text}"
-        );
+        assert!(text.lines().filter_map(above).any(|it| it), "{frame}: {text}");
     }
 
     /// A `va_arg` is a branch on whether the argument it wants is still in the save area, and which
@@ -8566,9 +7694,7 @@ decl #0 x : int object external static defined
         assert!(text.contains("	ja	"), "{text}");
 
         let arg = "__builtin_va_arg(ap, double)";
-        let text = asm(&format!(
-            "double f(int n, ...) {{ {read} return {arg}; }}\n"
-        ));
+        let text = asm(&format!("double f(int n, ...) {{ {read} return {arg}; }}\n"));
         assert!(text.contains("$160, "), "the last vector slot: {text}");
     }
 
@@ -8580,16 +7706,10 @@ decl #0 x : int object external static defined
         let body = "struct pair p = *q; return p.a + p.b;";
         let text = asm(&format!("{decl}long f(struct pair *q) {{ {body} }}\n"));
 
-        assert!(
-            !text.contains("memcpy"),
-            "nothing calls the library: {text}"
-        );
+        assert!(!text.contains("memcpy"), "nothing calls the library: {text}");
         assert!(!text.contains("\tcall"), "{text}");
         // Sixteen bytes aligned to eight is two words, and each is a load and a store.
-        assert!(
-            text.matches("\tmovq\t").count() >= 4,
-            "two words each way: {text}"
-        );
+        assert!(text.matches("\tmovq\t").count() >= 4, "two words each way: {text}");
     }
 
     /// x86-64 moves a word at any address, so a character array is copied eight bytes at a time
@@ -8598,17 +7718,11 @@ decl #0 x : int object external static defined
     fn a_copy_moves_words_whatever_the_alignment() {
         let decl = "struct bytes { char a[13]; };\n";
         let body = "*p = *q;";
-        let text = asm(&format!(
-            "{decl}void f(struct bytes *p, struct bytes *q) {{ {body} }}\n"
-        ));
+        let text = asm(&format!("{decl}void f(struct bytes *p, struct bytes *q) {{ {body} }}\n"));
 
         // Thirteen bytes are a word at 0 and a word at 5, each a load and a store.
         assert!(!text.contains("\tmovb\t"), "not a byte at a time: {text}");
-        assert_eq!(
-            text.matches("\tmovq\t").count(),
-            4,
-            "two words each way: {text}"
-        );
+        assert_eq!(text.matches("\tmovq\t").count(), 4, "two words each way: {text}");
         assert!(text.contains("5(%rsi)"), "the tail overlaps: {text}");
     }
 
@@ -8617,22 +7731,14 @@ decl #0 x : int object external static defined
     #[test]
     fn the_part_of_an_initialiser_that_names_nothing_is_stored_as_zero() {
         let decl = "struct wide { long a, b, c; };\n";
-        let text = asm(&format!(
-            "{decl}long f(void) {{ struct wide w = {{ 7 }}; return w.c; }}\n"
-        ));
+        let text = asm(&format!("{decl}long f(void) {{ struct wide w = {{ 7 }}; return w.c; }}\n"));
 
-        assert!(
-            !text.contains("memset"),
-            "nothing calls the library: {text}"
-        );
+        assert!(!text.contains("memset"), "nothing calls the library: {text}");
         // Either spelling of a zero in a register, the move of one or the exclusive or of the
         // register with itself that `rucc_codegen::shorten` writes instead where it is free. The
         // exclusive or is the thirty-two bit one whatever the width of the word, since the half of
         // the register it does not write is cleared rather than left alone.
-        assert!(
-            text.contains("\tmovq\t$0, ") || text.contains("\txorl\t"),
-            "the zero: {text}"
-        );
+        assert!(text.contains("\tmovq\t$0, ") || text.contains("\txorl\t"), "the zero: {text}");
     }
 
     /// A copy too large to be worth unrolling is a call to the runtime, which is the C library on
@@ -8661,9 +7767,7 @@ decl #0 x : int object external static defined
     #[test]
     fn a_structure_too_large_to_unroll_is_copied_into_the_argument_area_by_the_runtime() {
         let decl = "struct huge { char a[4096]; };\nint take(struct huge);\n";
-        let text = asm(&format!(
-            "{decl}int f(struct huge *p) {{ return take(*p); }}\n"
-        ));
+        let text = asm(&format!("{decl}int f(struct huge *p) {{ return take(*p); }}\n"));
 
         let copy = text.find("call\tmemcpy").expect("the copy");
         let call = text.find("call\ttake").expect("the call");
@@ -8709,11 +7813,7 @@ decl #0 x : int object external static defined
         let mut opts = options();
         opts.emit = EmitKind::Object;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         match result.artifact {
             Artifact::Object { bytes, .. } => bytes,
             other => panic!("expected an object, got {other:?}"),
@@ -8728,11 +7828,7 @@ decl #0 x : int object external static defined
     #[test]
     fn a_function_goes_from_c_to_an_object_a_linker_would_take() {
         let bytes = obj("int add(int a, int b) { return a + b; }\n");
-        assert_eq!(
-            &bytes[..4],
-            b"\x7fELF",
-            "an object file starts by saying it is one"
-        );
+        assert_eq!(&bytes[..4], b"\x7fELF", "an object file starts by saying it is one");
         let text = asm("int add(int a, int b) { return a + b; }\n");
         assert!(
             text.contains("\taddl\t"),
@@ -8766,14 +7862,8 @@ decl #0 x : int object external static defined
     #[test]
     fn a_bit_field_initializer_writes_every_byte_of_the_value_and_not_only_the_ones_that_are_set() {
         let text = asm("struct s { unsigned f : 20; } x = { 0x12300 };\n");
-        assert!(
-            text.contains("\t.data\n"),
-            "there is something to write: {text}"
-        );
-        assert!(
-            text.contains("\nx:\n\t.ascii\t\"\\000#\\001\"\n"),
-            "and it is the value: {text}"
-        );
+        assert!(text.contains("\t.data\n"), "there is something to write: {text}");
+        assert!(text.contains("\nx:\n\t.ascii\t\"\\000#\\001\"\n"), "and it is the value: {text}");
 
         // Two fields, the first of them zero, which is the same thing said with the zero byte
         // inside the run rather than at the front of it.
@@ -8783,17 +7873,11 @@ decl #0 x : int object external static defined
         // Wider than an `int`, which is the same code and is worth saying because the value no
         // longer fits in the thirty two bits a bit-field used to be read at.
         let text = asm("struct s { unsigned long long f : 40; } x = { 0x100000 };\n");
-        assert!(
-            text.contains("\nx:\n\t.ascii\t\"\\000\\000\\020\"\n\t.space\t5\n"),
-            "{text}"
-        );
+        assert!(text.contains("\nx:\n\t.ascii\t\"\\000\\000\\020\"\n\t.space\t5\n"), "{text}");
 
         // Nothing in it, which still costs no bytes in the file.
         let text = asm("struct s { unsigned f : 20; } x = { 0 };\n");
-        assert!(
-            text.contains("\t.bss\n"),
-            "an object of zeroes is zeroes: {text}"
-        );
+        assert!(text.contains("\t.bss\n"), "an object of zeroes is zeroes: {text}");
         assert!(text.contains("\nx:\n\t.space\t4\n"), "{text}");
     }
 
@@ -8802,18 +7886,12 @@ decl #0 x : int object external static defined
     fn a_string_literal_is_a_variable_with_a_name_no_program_could_write() {
         let text = asm("const char *f(void) { return \"hi\"; }\n");
         assert!(text.contains("\t.ascii\t\"hi\\000\"\n"), "{text}");
-        assert!(
-            text.contains("\t.section\t.rodata.str1.1,\"aMS\",@progbits,1\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.rodata.str1.1,\"aMS\",@progbits,1\n"), "{text}");
         let label = text
             .lines()
             .find(|line| line.starts_with(".Lstr"))
             .unwrap_or_else(|| panic!("a label for the literal in\n{text}"));
-        assert!(
-            !text.contains(&format!(".globl\t{}", label.trim_end_matches(':'))),
-            "{text}"
-        );
+        assert!(!text.contains(&format!(".globl\t{}", label.trim_end_matches(':'))), "{text}");
     }
 
     /// `__func__` is an object of its own, as gcc emits it: a local `__func__.N` in `.rodata` and
@@ -8821,14 +7899,8 @@ decl #0 x : int object external static defined
     #[test]
     fn func_is_a_local_object_in_rodata_and_not_a_literal() {
         let text = asm("const char *list_bdev_fs_names(void) { return __func__; }\n");
-        assert!(
-            text.contains("\t.section\t.rodata\n\t.p2align\t4\n"),
-            "{text}"
-        );
-        assert!(
-            text.contains("\n__func__.0:\n\t.ascii\t\"list_bdev_fs_names\\000\"\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.rodata\n\t.p2align\t4\n"), "{text}");
+        assert!(text.contains("\n__func__.0:\n\t.ascii\t\"list_bdev_fs_names\\000\"\n"), "{text}");
         assert!(!text.contains(".rodata.str1.1"), "{text}");
         assert!(!text.contains(".globl\t__func__"), "{text}");
     }
@@ -8848,10 +7920,7 @@ decl #0 x : int object external static defined
         ] {
             opts.opt_level = level;
             let text = run(&opts, source).text().to_owned();
-            let at = |label: &str| {
-                text.find(label)
-                    .unwrap_or_else(|| panic!("{label} in\n{text}"))
-            };
+            let at = |label: &str| text.find(label).unwrap_or_else(|| panic!("{label} in\n{text}"));
             assert!(at(first) < at(second), "{text}");
         }
     }
@@ -8885,10 +7954,7 @@ decl #0 x : int object external static defined
         // And in the object it is eight zero bytes and a relocation, which is what the two paths
         // being one description is for.
         let bytes = obj(source);
-        assert!(
-            bytes.windows(8).any(|w| w == b"counter\0"),
-            "the object has to name it"
-        );
+        assert!(bytes.windows(8).any(|w| w == b"counter\0"), "the object has to name it");
     }
 
     /// A const table of function pointers, which is the shape that made SQLite link with a warning.
@@ -8906,20 +7972,14 @@ decl #0 x : int object external static defined
         let text = asm("static void a(void) {}\nstatic void b(void) {}\n\
              struct m { void (*x)(void); void (*y)(void); };\n\
              const struct m t = { a, b };\n");
-        assert!(
-            text.contains("\t.section\t.data.rel.ro.local,\"aw\",@progbits\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.data.rel.ro.local,\"aw\",@progbits\n"), "{text}");
         assert!(text.contains("\nt:\n\t.quad\ta\n\t.quad\tb\n"), "{text}");
 
         // One name this file only declares is enough to lose the `.local` half, because a name the
         // link resolves from somewhere else is one another object may turn out to define.
         let text =
             asm("void a(void);\nstruct m { void (*x)(void); };\nconst struct m t = { a };\n");
-        assert!(
-            text.contains("\t.section\t.data.rel.ro,\"aw\",@progbits\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.data.rel.ro,\"aw\",@progbits\n"), "{text}");
 
         // And a constant with no address in it stays exactly where it was.
         let text = asm("const int fixed = 7;\n");
@@ -8937,10 +7997,7 @@ decl #0 x : int object external static defined
         let text = asm("_Thread_local int x = 1;\nint read(void) { return x; }\n");
         // The storage: the section the loader makes a copy of for every thread, and the symbol
         // type that makes a linker refuse an ordinary relocation aimed at it.
-        assert!(
-            text.contains("\t.section\t.tdata,\"awT\",@progbits\n"),
-            "{text}"
-        );
+        assert!(text.contains("\t.section\t.tdata,\"awT\",@progbits\n"), "{text}");
         assert!(text.contains("\t.type\tx, @tls_object\n"), "{text}");
         // The way to reach it: how far into a thread's block it sits, out of the table, plus where
         // this thread's block is, out of the segment register.
@@ -8978,11 +8035,7 @@ decl #0 x : int object external static defined
         assert!(text.contains("add x0, sp, #16"), "{text}");
         let result = run(&freestanding(), source);
         assert_eq!(result.errors, 1, "{:?}", result.messages);
-        assert!(
-            result.messages[0].contains("only available on AArch64"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("only available on AArch64"), "{:?}", result.messages);
     }
 
     /// The four hints and the one thing that decides between them, which is the locality.
@@ -8997,19 +8050,13 @@ decl #0 x : int object external static defined
     /// same instruction as a prefetch for a read, which is the fourth line here.
     #[test]
     fn a_prefetch_is_one_of_four_instructions_and_the_locality_is_what_picks() {
-        for (locality, wanted) in [
-            (0, "prefetchnta"),
-            (1, "prefetcht2"),
-            (2, "prefetcht1"),
-            (3, "prefetcht0"),
-        ] {
+        for (locality, wanted) in
+            [(0, "prefetchnta"), (1, "prefetcht2"), (2, "prefetcht1"), (3, "prefetcht0")]
+        {
             let source =
                 format!("void warm(void *p) {{ __builtin_prefetch(p, 0, {locality}); }}\n");
             let text = asm(&source);
-            assert!(
-                text.contains(&format!("\t{wanted}\t")),
-                "locality {locality}: {text}"
-            );
+            assert!(text.contains(&format!("\t{wanted}\t")), "locality {locality}: {text}");
         }
         // The one argument form, which means a read that wants all of the data afterwards.
         let text = asm("void warm(void *p) { __builtin_prefetch(p); }\n");
@@ -9037,10 +8084,7 @@ decl #0 x : int object external static defined
                 assert_eq!(result.messages, Vec::<String>::new(), "{source}");
                 let text = result.text();
                 assert!(text.contains("prfm"), "{source}{text}");
-                assert!(
-                    text.contains(&format!("{kind}{wanted}, [x0]")),
-                    "{source}{text}"
-                );
+                assert!(text.contains(&format!("{kind}{wanted}, [x0]")), "{source}{text}");
             }
         }
     }
@@ -9059,21 +8103,12 @@ decl #0 x : int object external static defined
     fn a_trap_is_the_instruction_the_machine_has_no_meaning_for() {
         let text = asm("void stop(void) { __builtin_trap(); }\n");
         assert!(text.contains("\tud2\n"), "{text}");
-        assert!(
-            !text.contains("\tcall"),
-            "a stop is not a call to anything: {text}"
-        );
+        assert!(!text.contains("\tcall"), "a stop is not a call to anything: {text}");
 
         let text = asm("int stop(int a) { __builtin_trap(); return a + 1; }\n");
         assert!(text.contains("\tud2\n"), "{text}");
-        assert!(
-            !text.contains("\taddl\t"),
-            "nothing is compiled under a stop: {text}"
-        );
-        assert!(
-            !text.contains("\tret"),
-            "and nothing returns after it: {text}"
-        );
+        assert!(!text.contains("\taddl\t"), "nothing is compiled under a stop: {text}");
+        assert!(!text.contains("\tret"), "and nothing returns after it: {text}");
     }
 
     /// `__builtin_cpu_init` is a call to libgcc's `__cpu_indicator_init` and nothing else, which
@@ -9107,23 +8142,11 @@ decl #0 x : int object external static defined
         let text = asm(rdtscp);
         assert!(text.contains("%ecx"), "{text}");
 
-        for (source, bytes) in [
-            (rdtsc, &[0x0f, 0x31][..]),
-            (rdtscp, &[0x0f, 0x01, 0xf9][..]),
-        ] {
+        for (source, bytes) in [(rdtsc, &[0x0f, 0x31][..]), (rdtscp, &[0x0f, 0x01, 0xf9][..])] {
             let object = obj(source);
-            assert!(
-                object.windows(bytes.len()).any(|w| w == bytes),
-                "{bytes:02x?}"
-            );
-            assert!(
-                !object.windows(9).any(|w| w == b"__rucc_ia"),
-                "an undefined name"
-            );
-            assert!(
-                !object.windows(5).any(|w| w == b"rdtsc"),
-                "an undefined name"
-            );
+            assert!(object.windows(bytes.len()).any(|w| w == bytes), "{bytes:02x?}");
+            assert!(!object.windows(9).any(|w| w == b"__rucc_ia"), "an undefined name");
+            assert!(!object.windows(5).any(|w| w == b"rdtsc"), "an undefined name");
         }
 
         // Anywhere else there is no instruction to write and nothing to call, so it is refused
@@ -9142,20 +8165,14 @@ decl #0 x : int object external static defined
     fn the_flags_register_is_a_push_and_a_pop_in_place() {
         let read = "unsigned long long f(void) { return __builtin_ia32_readeflags_u64(); }\n";
         let text = asm(read);
-        assert!(
-            text.contains("lea -128(%rsp), %rsp\n\tpushfq\n\tpopq %rax\n"),
-            "{text}"
-        );
+        assert!(text.contains("lea -128(%rsp), %rsp\n\tpushfq\n\tpopq %rax\n"), "{text}");
         assert!(!text.contains("\tcall\t"), "{text}");
         let write = "void f(unsigned long long v) { __builtin_ia32_writeeflags_u64(v | 0x100); }\n";
         let text = asm(write);
         assert!(text.contains("\tpopfq\n"), "{text}");
         assert!(!text.contains("\tcall\t"), "{text}");
         let object = obj(read);
-        assert!(
-            !object.windows(9).any(|w| w == b"readeflag"),
-            "an undefined name"
-        );
+        assert!(!object.windows(9).any(|w| w == b"readeflag"), "an undefined name");
 
         let mut opts = options();
         opts.emit = EmitKind::Asm;
@@ -9173,10 +8190,7 @@ decl #0 x : int object external static defined
         let ran = run(&opts, pair);
         assert_eq!(ran.messages, Vec::<String>::new());
         let text = ran.text();
-        assert!(
-            text.contains("\tpopfl\n") && text.contains("\tpushfl\n"),
-            "{text}"
-        );
+        assert!(text.contains("\tpopfl\n") && text.contains("\tpushfl\n"), "{text}");
         assert!(!text.contains("\tcall\t"), "{text}");
     }
 
@@ -9191,10 +8205,7 @@ decl #0 x : int object external static defined
                       __builtin_ia32_xsaves64(p, -1);\n}\n";
         let text = asm(source);
         for instruction in ["xsave", "xrstor", "xsaves64"] {
-            assert!(
-                text.contains(&format!("\t{instruction} (%")),
-                "{instruction}: {text}"
-            );
+            assert!(text.contains(&format!("\t{instruction} (%")), "{instruction}: {text}");
         }
         assert!(text.contains("shrq\t$32, %"), "the high half: {text}");
         assert!(text.contains(", %edx\n"), "{text}");
@@ -9207,16 +8218,10 @@ decl #0 x : int object external static defined
         assert_eq!(ran.messages, Vec::<String>::new());
         assert!(ran.text().contains("\txsave (%"), "{}", ran.text());
         let said = run(&opts, source).messages.join("\n");
-        assert!(
-            said.contains("`__builtin_ia32_xsaves64` is only available on x86_64"),
-            "{said}"
-        );
+        assert!(said.contains("`__builtin_ia32_xsaves64` is only available on x86_64"), "{said}");
         opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         let said = run(&opts, source).messages.join("\n");
-        assert!(
-            said.contains("`__builtin_ia32_xsave` is only available on x86"),
-            "{said}"
-        );
+        assert!(said.contains("`__builtin_ia32_xsave` is only available on x86"), "{said}");
     }
 
     /// rseq's `param_test` keeps a `pthread_t` array as long as the number of threads next to a
@@ -9236,10 +8241,8 @@ decl #0 x : int object external static defined
     /// by name has to agree with the function it names.
     #[test]
     fn a_call_by_a_label_the_file_defines_with_another_signature_goes_through_the_address() {
-        let text = asm(
-            "int f(void) {\n  extern int h(int, char **) __asm__(\"g\");\n  \
-             return h(1, 0) + 1;\n}\nint g(void) { return 7; }\n",
-        );
+        let text = asm("int f(void) {\n  extern int h(int, char **) __asm__(\"g\");\n  \
+             return h(1, 0) + 1;\n}\nint g(void) { return 7; }\n");
         assert!(text.contains("g(%rip)"), "{text}");
         assert!(text.contains("\tcall\t*%"), "{text}");
     }
@@ -9255,15 +8258,9 @@ decl #0 x : int object external static defined
     fn cpu_supports_is_a_bit_of_the_words_libgcc_fills_in() {
         let text = asm("int f(void) { return __builtin_cpu_supports(\"sse4.2\"); }\n");
         assert!(text.contains("__cpu_model"), "{text}");
-        assert!(
-            text.contains("12(%"),
-            "the fourth word of the model: {text}"
-        );
+        assert!(text.contains("12(%"), "the fourth word of the model: {text}");
         assert!(text.contains("$256"), "{text}");
-        assert!(
-            !text.contains("\tcall"),
-            "the answer is a read and not a call: {text}"
-        );
+        assert!(!text.contains("\tcall"), "the answer is a read and not a call: {text}");
 
         let text = asm("int f(void) { return __builtin_cpu_supports(\"vpclmulqdq\"); }\n");
         assert!(text.contains("__cpu_features2"), "{text}");
@@ -9271,17 +8268,11 @@ decl #0 x : int object external static defined
 
         let text = asm("int f(void) { return __builtin_cpu_supports(\"xsave\"); }\n");
         assert!(text.contains("__cpu_features2"), "{text}");
-        assert!(
-            text.contains("4(%"),
-            "the second word of the second object: {text}"
-        );
+        assert!(text.contains("4(%"), "the second word of the second object: {text}");
         assert!(text.contains("$131072"), "{text}");
 
         let text = asm("int f(void) { return __builtin_cpu_supports(\"avx512vbmi2\"); }\n");
-        assert!(
-            text.contains("set"),
-            "the top bit is answered as a one: {text}"
-        );
+        assert!(text.contains("set"), "the top bit is answered as a one: {text}");
     }
 
     /// `__builtin_cpu_is` is a compare of one word of `__cpu_model` with a number: the vendor for
@@ -9293,10 +8284,7 @@ decl #0 x : int object external static defined
         assert!(text.contains("$2,"), "{text}");
 
         let text = asm("int f(void) { return __builtin_cpu_is(\"znver4\"); }\n");
-        assert!(
-            text.contains("8(%"),
-            "the subtype is the third word: {text}"
-        );
+        assert!(text.contains("8(%"), "the subtype is the third word: {text}");
         assert!(text.contains("$29,"), "{text}");
     }
 
@@ -9339,10 +8327,7 @@ decl #0 x : int object external static defined
         ] {
             let result = run(&opts, source);
             assert!(
-                result
-                    .messages
-                    .iter()
-                    .any(|m| m.contains("only available on x86-64")),
+                result.messages.iter().any(|m| m.contains("only available on x86-64")),
                 "{source}{:?}",
                 result.messages
             );
@@ -9364,19 +8349,13 @@ decl #0 x : int object external static defined
     fn assume_aligned_is_its_first_argument_and_keeps_the_rest() {
         let text = asm("void *aligned(char *p) { return __builtin_assume_aligned(p, 16); }\n");
         assert!(!text.contains("assume_aligned"), "{text}");
-        assert!(
-            !text.contains("\tcall"),
-            "nothing is called for an alignment fact: {text}"
-        );
+        assert!(!text.contains("\tcall"), "nothing is called for an alignment fact: {text}");
 
         let source = "unsigned long width(void);\n\
                       void *aligned(char *p) { return __builtin_assume_aligned(p, width()); }\n";
         let text = asm(source);
         assert!(!text.contains("assume_aligned"), "{text}");
-        assert!(
-            text.contains("width"),
-            "the argument that is not the answer still runs: {text}"
-        );
+        assert!(text.contains("width"), "the argument that is not the answer still runs: {text}");
     }
 
     /// Where a frame is, which on this machine is what the frame pointer holds.
@@ -9391,15 +8370,9 @@ decl #0 x : int object external static defined
     #[test]
     fn the_frame_address_is_the_frame_pointer_after_walking_that_many_links() {
         let text = asm("void *here(void) { return __builtin_frame_address(0); }\n");
-        assert!(
-            text.contains("pushq\t%rbp"),
-            "a function that asks keeps a frame pointer: {text}"
-        );
+        assert!(text.contains("pushq\t%rbp"), "a function that asks keeps a frame pointer: {text}");
         assert!(text.contains("movq\t%rbp, %rax"), "{text}");
-        assert!(
-            !text.contains("\tcall"),
-            "a frame address is not a call to anything: {text}"
-        );
+        assert!(!text.contains("\tcall"), "a frame address is not a call to anything: {text}");
 
         let walk = |depth: u32| {
             let source = format!("void *up(void) {{ return __builtin_frame_address({depth}); }}\n");
@@ -9421,26 +8394,13 @@ decl #0 x : int object external static defined
     #[test]
     fn the_return_address_is_one_word_above_the_frame_the_walk_ended_at() {
         let text = asm("void *back(void) { return __builtin_return_address(0); }\n");
-        assert!(
-            text.contains("pushq\t%rbp"),
-            "a function that asks keeps a frame pointer: {text}"
-        );
+        assert!(text.contains("pushq\t%rbp"), "a function that asks keeps a frame pointer: {text}");
         assert!(text.contains("movq\t8(%rbp), %rax"), "{text}");
-        assert!(
-            !text.contains("\tcall"),
-            "a return address is not a call to anything: {text}"
-        );
+        assert!(!text.contains("\tcall"), "a return address is not a call to anything: {text}");
 
         let text = asm("void *back(void) { return __builtin_return_address(2); }\n");
-        assert_eq!(
-            text.matches("movq\t(%r").count(),
-            2,
-            "two links are two loads: {text}"
-        );
-        assert!(
-            text.contains("movq\t8(%r"),
-            "and the answer is above the last of them: {text}"
-        );
+        assert_eq!(text.matches("movq\t(%r").count(), 2, "two links are two loads: {text}");
+        assert!(text.contains("movq\t8(%r"), "and the answer is above the last of them: {text}");
     }
 
     /// A depth that is not a constant is refused, and so is one past the limit.
@@ -9482,19 +8442,9 @@ decl #0 x : int object external static defined
     fn an_alloca_takes_the_bytes_off_the_stack_pointer_and_answers_where_they_are() {
         let text =
             asm("void use(void *p); void f(unsigned long n) { use(__builtin_alloca(n)); }\n");
-        assert!(
-            text.contains("andq\t$-16"),
-            "the size is rounded up to sixteen: {text}"
-        );
-        assert!(
-            text.contains("subq\t%rdi, %rsp"),
-            "and taken off the stack pointer: {text}"
-        );
-        assert_eq!(
-            text.matches("\tcall").count(),
-            1,
-            "the only call is the one written: {text}"
-        );
+        assert!(text.contains("andq\t$-16"), "the size is rounded up to sixteen: {text}");
+        assert!(text.contains("subq\t%rdi, %rsp"), "and taken off the stack pointer: {text}");
+        assert_eq!(text.matches("\tcall").count(), 1, "the only call is the one written: {text}");
 
         // The plain name, which a program that declares it the way the C library does means the
         // same thing by. `gcc.c-torture/execute/20010122-1.c` is exactly this program.
@@ -9504,15 +8454,8 @@ decl #0 x : int object external static defined
             "void f(unsigned long n) { use(alloca(n)); }\n",
         );
         let text = asm(plain);
-        assert!(
-            text.contains("subq\t%rdi, %rsp"),
-            "the plain name is the same bytes: {text}"
-        );
-        assert_eq!(
-            text.matches("\tcall").count(),
-            1,
-            "and is not a call either: {text}"
-        );
+        assert!(text.contains("subq\t%rdi, %rsp"), "the plain name is the same bytes: {text}");
+        assert_eq!(text.matches("\tcall").count(), 1, "and is not a call either: {text}");
 
         // And a program that means something of its own by the name keeps it, which is what the
         // declaration is looked at for.
@@ -9520,10 +8463,7 @@ decl #0 x : int object external static defined
             "static void *alloca(unsigned long n) { return 0; }\n",
             "void *f(unsigned long n) { return alloca(n); }\n",
         );
-        assert!(
-            asm(own).contains("\tcall"),
-            "a name the program took back is a call"
-        );
+        assert!(asm(own).contains("\tcall"), "a name the program took back is a call");
     }
 
     /// A name nothing declared that the implementation knows the type of is declared with that
@@ -9561,25 +8501,15 @@ void f(unsigned long n) { use(alloca(n)); }
 
         opts.emit = EmitKind::Asm;
         let text = run(&opts, undeclared).text().to_owned();
-        assert!(
-            text.contains("subq\t%rdi, %rsp"),
-            "the bytes come off the stack: {text}"
-        );
-        assert_eq!(
-            text.matches("\tcall").count(),
-            1,
-            "the only call is the one written: {text}"
-        );
+        assert!(text.contains("subq\t%rdi, %rsp"), "the bytes come off the stack: {text}");
+        assert_eq!(text.matches("\tcall").count(), 1, "the only call is the one written: {text}");
 
         // The table's rule and not this one name's, so a name whose whole answer is the library
         // function of the same name gets that function's type and still reaches it. The argument
         // is not a constant, because gcc answers `strlen` of a literal at compile time.
         let string = "unsigned long f(const char *s) { return strlen(s); }\n";
         let text = run(&opts, string).text().to_owned();
-        assert!(
-            text.contains("call\tstrlen"),
-            "strlen is still a call: {text}"
-        );
+        assert!(text.contains("call\tstrlen"), "strlen is still a call: {text}");
 
         // A declaration the program wrote is the program's, whatever the table says. gcc keeps
         // this one and writes the call, which is what makes the type worth looking at.
@@ -9587,10 +8517,7 @@ void f(unsigned long n) { use(alloca(n)); }
             "static void *alloca(unsigned long n) { return 0; }\n",
             "void *f(unsigned long n) { return alloca(n); }\n",
         );
-        assert!(
-            asm(own).contains("\tcall"),
-            "a name the program took back is a call"
-        );
+        assert!(asm(own).contains("\tcall"), "a name the program took back is a call");
     }
 
     /// The bytes an alloca took live until the function returns and not until the end of the block
@@ -9611,16 +8538,10 @@ void f(unsigned long n) { use(alloca(n)); }
             // Every instruction that writes the stack pointer, which in a function that gives
             // nothing back is the alloca taking bytes and the epilogue putting the frame pointer
             // there. A restore would be a third kind, a move out of a register the save wrote.
-            for line in text
-                .lines()
-                .filter(|line| line.trim_end().ends_with(", %rsp"))
-            {
+            for line in text.lines().filter(|line| line.trim_end().ends_with(", %rsp")) {
                 let taking = line.contains("subq");
                 let leaving = line.contains("%rbp");
-                assert!(
-                    taking || leaving,
-                    "nothing puts the stack back: {line} in {text}"
-                );
+                assert!(taking || leaving, "nothing puts the stack back: {line} in {text}");
             }
         }
     }
@@ -9666,15 +8587,9 @@ void f(unsigned long n) { use(alloca(n)); }
         opts.emit = EmitKind::Object;
         opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
         let result = run(&opts, "int f(void) { return 0; }\n");
+        assert!(result.failed(), "an object nobody can read is worse than a message");
         assert!(
-            result.failed(),
-            "an object nobody can read is worse than a message"
-        );
-        assert!(
-            result
-                .messages
-                .iter()
-                .any(|m| m.contains("no object writer")),
+            result.messages.iter().any(|m| m.contains("no object writer")),
             "{:?}",
             result.messages
         );
@@ -9685,11 +8600,7 @@ void f(unsigned long n) { use(alloca(n)); }
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -9721,10 +8632,7 @@ void f(unsigned long n) { use(alloca(n)); }
                       int f(void) { return plain + fast + quiet + slow; }\n";
         let model = |text: &str, name: &str| {
             let head = format!("global @{name} ");
-            let line = text
-                .lines()
-                .find(|line| line.starts_with(&head))
-                .expect("the global");
+            let line = text.lines().find(|line| line.starts_with(&head)).expect("the global");
             let (_, rest) = line.split_once(", tls(").expect("a thread-local");
             rest.split(')').next().unwrap().to_owned()
         };
@@ -9759,11 +8667,7 @@ void f(unsigned long n) { use(alloca(n)); }
             opts.emit = EmitKind::Ir;
             opts.gnu89_inline = flag;
             let result = run(&opts, source);
-            assert_eq!(
-                result.messages,
-                Vec::<String>::new(),
-                "expected this to compile"
-            );
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
             result.text().to_owned()
         };
 
@@ -9793,20 +8697,11 @@ int element(int *a, long i) { return a[i]; }\n\
 float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let text = ir(source);
         assert!(text.contains(r#"!0 = tbaa "char""#), "the root: {text}");
-        assert!(
-            text.contains(r#"tbaa "int", parent !0"#),
-            "int under it: {text}"
-        );
-        assert!(
-            text.contains(r#"tbaa "float", parent !0"#),
-            "float under it: {text}"
-        );
+        assert!(text.contains(r#"tbaa "int", parent !0"#), "int under it: {text}");
+        assert!(text.contains(r#"tbaa "float", parent !0"#), "float under it: {text}");
         // One per access, and a function whose accesses all go through one type says so once per
         // access rather than once per function.
-        let named = text
-            .lines()
-            .filter(|line| line.contains(", tbaa !"))
-            .count();
+        let named = text.lines().filter(|line| line.contains(", tbaa !")).count();
         assert_eq!(named, 6, "six accesses: {text}");
     }
 
@@ -9823,11 +8718,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Ir;
         opts.strict_aliasing = false;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
         let text = result.text().to_owned();
         assert!(!text.contains("tbaa"), "not even the root: {text}");
     }
@@ -9854,50 +8745,26 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Ir;
         opts.instrument_functions = true;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
         let text = result.text().to_owned();
         let body = |name: &str| -> String {
             let open = format!("func @{name}(");
-            let start = text
-                .find(&open)
-                .unwrap_or_else(|| panic!("no {name}: {text}"));
+            let start = text.find(&open).unwrap_or_else(|| panic!("no {name}: {text}"));
             let rest = &text[start..];
             rest[..rest.find("\n}").unwrap_or(rest.len())].to_owned()
         };
         let pick = body("pick");
-        assert_eq!(
-            pick.matches("call @__cyg_profile_func_enter(").count(),
-            1,
-            "{pick}"
-        );
-        assert_eq!(
-            pick.matches("call @__cyg_profile_func_exit(").count(),
-            2,
-            "{pick}"
-        );
+        assert_eq!(pick.matches("call @__cyg_profile_func_enter(").count(), 1, "{pick}");
+        assert_eq!(pick.matches("call @__cyg_profile_func_exit(").count(), 2, "{pick}");
         assert!(pick.contains("return_address"), "{pick}");
         assert!(pick.contains("global_addr @pick"), "{pick}");
-        for quiet in [
-            "quiet",
-            "__cyg_profile_func_enter",
-            "__cyg_profile_func_exit",
-        ] {
-            assert!(
-                !body(quiet).contains("call "),
-                "{quiet} is left alone: {text}"
-            );
+        for quiet in ["quiet", "__cyg_profile_func_enter", "__cyg_profile_func_exit"] {
+            assert!(!body(quiet).contains("call "), "{quiet} is left alone: {text}");
         }
 
         opts.instrument_functions = false;
         let result = run(&opts, source);
-        assert!(
-            !result.text().contains("call @__cyg_profile"),
-            "off unless asked for"
-        );
+        assert!(!result.text().contains("call @__cyg_profile"), "off unless asked for");
     }
 
     /// Calls whose open scopes owe the same handlers share one landing pad, as gcc's do, and a call
@@ -9920,25 +8787,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Ir;
         opts.exceptions = true;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let text = result.text();
         // Six for the calls to `work`, and one for the call to `done` that `b`'s scope makes on
         // the way out, which still owes `a`'s. The one `b`'s pad makes goes to `a`'s pad too.
-        assert_eq!(
-            text.matches("= unwound").count(),
-            8,
-            "every call has its edge: {text}"
-        );
-        assert_eq!(
-            text.matches("= landing").count(),
-            2,
-            "one pad for a, one for b and a: {text}"
-        );
+        assert_eq!(text.matches("= unwound").count(), 8, "every call has its edge: {text}");
+        assert_eq!(text.matches("= landing").count(), 2, "one pad for a, one for b and a: {text}");
     }
 
     /// A `goto` out of two scopes runs their handlers in front of its branch, and under
@@ -9961,12 +8815,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Ir;
         opts.exceptions = true;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let text = result.text();
         // The goto's two for c and b, the two at the ends of the scopes of c and b, and the one
         // the pad for c makes after b's handler. The pad for b only runs a's, so it has none.
@@ -9990,34 +8839,19 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Ir;
         opts.exceptions = true;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         assert!(!result.text().contains("landing"), "{}", result.text());
 
         opts.non_call_exceptions = true;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let text = result.text();
         assert_eq!(text.matches("= unwound").count(), 2, "{text}");
         assert_eq!(text.matches("= landing").count(), 2, "{text}");
 
         opts.emit = EmitKind::Asm;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let text = result.text();
         assert!(text.contains(".cfi_lsda 0x1b,.LLSDA_load"), "{text}");
         assert!(text.contains(".cfi_lsda 0x1b,.LLSDA_divide"), "{text}");
@@ -10041,69 +8875,34 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
         assert!(!result.text().contains("landing"), "{}", result.text());
 
         opts.exceptions = true;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let text = result.text();
-        assert_eq!(
-            text.matches("= landing").count(),
-            1,
-            "only the call in calls: {text}"
-        );
+        assert_eq!(text.matches("= landing").count(), 1, "only the call in calls: {text}");
         assert!(text.contains("_Unwind_Resume"), "{text}");
 
         opts.emit = EmitKind::Asm;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let text = result.text();
-        assert!(
-            text.contains(".cfi_personality 0x9b,DW.ref.__gcc_personality_v0"),
-            "{text}"
-        );
+        assert!(text.contains(".cfi_personality 0x9b,DW.ref.__gcc_personality_v0"), "{text}");
         assert!(text.contains(".cfi_lsda 0x1b,.LLSDA_calls"), "{text}");
         assert!(text.contains(".gcc_except_table"), "{text}");
         assert_eq!(text.matches(".cfi_lsda").count(), 1, "{text}");
 
         opts.emit = EmitKind::Object;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let bytes = result.artifact.bytes();
         let has = |what: &[u8]| bytes.windows(what.len()).any(|window| window == what);
-        assert!(
-            has(b".gcc_except_table\0"),
-            "the call site table has a section"
-        );
+        assert!(has(b".gcc_except_table\0"), "the call site table has a section");
         assert!(has(b"zPLR\0"), "a header naming the personality routine");
-        assert!(
-            has(b"zR\0"),
-            "and the plain one for the functions with no pad"
-        );
-        assert!(
-            has(b"DW.ref.__gcc_personality_v0\0"),
-            "the pointer the header reads through"
-        );
+        assert!(has(b"zR\0"), "and the plain one for the functions with no pad");
+        assert!(has(b"DW.ref.__gcc_personality_v0\0"), "the pointer the header reads through");
 
         // A Mach-O target, whose unwind table is written without either, is refused rather than
         // given a pad the unwinder would never send it to.
@@ -10111,16 +8910,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.target = "aarch64-apple-darwin".parse::<Triple>().unwrap();
         let result = run(&opts, source);
         assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
-        assert!(
-            result.messages[0].contains("landing pad"),
-            "{:?}",
-            result.messages
-        );
-        assert!(
-            result.messages[0].contains(":3:"),
-            "the call in calls: {:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("landing pad"), "{:?}", result.messages);
+        assert!(result.messages[0].contains(":3:"), "the call in calls: {:?}", result.messages);
     }
 
     /// The kernel's `get_user`, cut down: a numbered label on a load whose address is an operand,
@@ -10149,10 +8940,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
         // One copy of the template at `-O0`, where `get` is a function of its own, and three at
         // `-O2`, where it is inlined into each call.
-        for (level, copies) in [
-            (rucc_session::OptLevel::O0, 1),
-            (rucc_session::OptLevel::O2, 3),
-        ] {
+        for (level, copies) in [(rucc_session::OptLevel::O0, 1), (rucc_session::OptLevel::O2, 3)] {
             let mut opts = options();
             opts.opt_level = level;
             opts.emit = EmitKind::Asm;
@@ -10180,17 +8968,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             assert_eq!(places.len(), 2 * copies, "{level:?}: {places:?}");
             // The jump back from each fixup lands in `.text`, another section, so each is one
             // relocation of its own.
-            assert_eq!(
-                part(".fixup").expect("the fixups").relocs.len(),
-                copies,
-                "{level:?}"
-            );
+            assert_eq!(part(".fixup").expect("the fixups").relocs.len(), copies, "{level:?}");
             let marks = part(".rodata.marks").expect("the section the file scope asm pushed");
-            assert_eq!(
-                marks.bytes,
-                [0, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff],
-                "{level:?}"
-            );
+            assert_eq!(marks.bytes, [0, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff], "{level:?}");
 
             opts.emit = EmitKind::Object;
             let result = run(&opts, source);
@@ -10215,43 +8995,20 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
-        assert_eq!(
-            result.text().matches("module asm ").count(),
-            2,
-            "{}",
-            result.text()
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
+        assert_eq!(result.text().matches("module asm ").count(), 2, "{}", result.text());
 
         opts.emit = EmitKind::Asm;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let text = result.text();
         assert!(text.contains("#APP\nvide: ret\n#NO_APP\n"), "{text}");
         let main = text.find("main:").expect("main");
-        assert!(
-            text.find("#NO_APP").expect("the markers") < main,
-            "templates first: {text}"
-        );
+        assert!(text.find("#NO_APP").expect("the markers") < main, "templates first: {text}");
 
         opts.emit = EmitKind::Object;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "{:?}",
-            result.messages
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "{:?}", result.messages);
         let (bytes, defines) = match result.artifact {
             Artifact::Object { bytes, defines } => (bytes, defines),
             other => panic!("expected an object, got {other:?}"),
@@ -10259,21 +9016,14 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(defines.iter().any(|name| name == "_us"), "{defines:?}");
         // `mov $0x1234abcd, %eax` and the `ret` after it, which only the assembler wrote.
         let us = [0xb8, 0xcd, 0xab, 0x34, 0x12, 0xc3];
-        assert!(
-            bytes.windows(us.len()).any(|window| window == us),
-            "the template's bytes"
-        );
+        assert!(bytes.windows(us.len()).any(|window| window == us), "the template's bytes");
 
         // Elsewhere there is no reader for the listing, so the template is still refused there.
         opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
         opts.emit = EmitKind::Ir;
         let result = run(&opts, source);
         assert!(!result.messages.is_empty(), "refused on Mach-O");
-        assert!(
-            result.messages[0].contains("the instruction 'movl'"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("the instruction 'movl'"), "{:?}", result.messages);
     }
 
     /// `return;` from a function that promised a value, which only C89 lets through and which
@@ -10290,30 +9040,17 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.std = Std::C89;
         let compiled = |source: &str| {
             let result = run(&opts, source);
-            assert_eq!(
-                result.messages,
-                Vec::<String>::new(),
-                "C89 has nothing to say about this"
-            );
+            assert_eq!(result.messages, Vec::<String>::new(), "C89 has nothing to say about this");
             result.text().to_owned()
         };
 
         let text = compiled("int f(int x) { if (x) return; return 3; }\n");
-        assert!(
-            text.contains("iconst.i32 0\n    return"),
-            "zero goes back: {text}"
-        );
-        assert!(
-            !text.contains("unreachable"),
-            "the branch that reached it is kept: {text}"
-        );
+        assert!(text.contains("iconst.i32 0\n    return"), "zero goes back: {text}");
+        assert!(!text.contains("unreachable"), "the branch that reached it is kept: {text}");
 
         // A floating point return needs the constant of its own kind rather than an integer one.
         let text = compiled("double f(int x) { if (x) return; return 1.0; }\n");
-        assert!(
-            text.contains("fconst.f64 0x0\n    return"),
-            "a float zero goes back: {text}"
-        );
+        assert!(text.contains("fconst.f64 0x0\n    return"), "a float zero goes back: {text}");
     }
 
     /// What C89 6.3.2.2 declares for a call to a name nothing declared, seen in the IR rather than
@@ -10330,41 +9067,26 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.std = Std::C89;
         let compiled = |source: &str| {
             let result = run(&opts, source);
-            assert_eq!(
-                result.messages,
-                Vec::<String>::new(),
-                "C89 has nothing to say about this"
-            );
+            assert_eq!(result.messages, Vec::<String>::new(), "C89 has nothing to say about this");
             result.text().to_owned()
         };
 
         // An `int` back, which is the whole of what the implicit declaration says.
         let text = compiled("int f(void) { return g(); }\n");
-        assert!(
-            text.contains("call @g"),
-            "the call is to the name that was written: {text}"
-        );
+        assert!(text.contains("call @g"), "the call is to the name that was written: {text}");
         assert!(text.contains("i32"), "and it gives back an int: {text}");
 
         // No prototype, so a `char` argument arrives promoted to `int` the way an argument to a
         // function whose parameters are unspecified does.
         let text = compiled("int f(char c) { return g(c); }\n");
-        assert!(
-            text.contains("sext.i32"),
-            "the argument is promoted: {text}"
-        );
+        assert!(text.contains("sext.i32"), "the argument is promoted: {text}");
 
         // A name written as a value rather than called is still undeclared, since the rule is
         // about a call and nothing else.
         let mut opts = options();
         opts.std = Std::C89;
-        let said = run(&opts, "int f(void) { return h; }\n")
-            .messages
-            .join("\n");
-        assert!(
-            said.contains("'h' undeclared"),
-            "not a call, so not declared: {said}"
-        );
+        let said = run(&opts, "int f(void) { return h; }\n").messages.join("\n");
+        assert!(said.contains("'h' undeclared"), "not a call, so not declared: {said}");
     }
 
     /// A file that calls a name above the definition of it, which is the shape the implicit
@@ -10381,21 +9103,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         opts.std = Std::C89;
-        let text = run(
-            &opts,
-            "int f(void) { return dummy(); }\ndummy () { return 7; }\n",
-        )
-        .text()
-        .to_owned();
+        let text = run(&opts, "int f(void) { return dummy(); }\ndummy () { return 7; }\n")
+            .text()
+            .to_owned();
         assert!(text.contains("func @f()"), "the caller is there: {text}");
-        assert!(
-            text.contains("func @dummy"),
-            "and so is what it calls: {text}"
-        );
-        assert!(
-            text.contains("iconst.i32 7"),
-            "with the body it was given: {text}"
-        );
+        assert!(text.contains("func @dummy"), "and so is what it calls: {text}");
+        assert!(text.contains("iconst.i32 7"), "with the body it was given: {text}");
     }
 
     /// An old style definition whose parameter is narrower than what a call passes it.
@@ -10414,10 +9127,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
         let text = compiled("f (c) unsigned char c; { return c; }\n");
         assert!(text.contains("func @f(i32"), "an int arrives: {text}");
-        assert!(
-            text.contains("trunc.i8"),
-            "and is cut down to what was declared: {text}"
-        );
+        assert!(text.contains("trunc.i8"), "and is cut down to what was declared: {text}");
         assert!(text.contains("zext.i32"), "then read back unsigned: {text}");
 
         // A `short` is the same shape and signed, so it comes back the other way.
@@ -10429,22 +9139,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // below has one f64 operand and one f32, which the verifier refuses as invalid IR.
         let text = compiled("f (x) float x; { return x * 2; }\n");
         assert!(text.contains("func @f(f64"), "a double arrives: {text}");
-        assert!(
-            text.contains("fptrunc.f32"),
-            "and is narrowed to the float: {text}"
-        );
+        assert!(text.contains("fptrunc.f32"), "and is narrowed to the float: {text}");
 
         // A parameter a prototype named arrives as itself and nothing is converted, which is the
         // case this must not have changed.
         let text = compiled("int f(unsigned char c) { return c; }\n");
-        assert!(
-            text.contains("func @f(i8 zext)"),
-            "the declared type arrives: {text}"
-        );
-        assert!(
-            !text.contains("trunc"),
-            "so there is nothing to cut down: {text}"
-        );
+        assert!(text.contains("func @f(i8 zext)"), "the declared type arrives: {text}");
+        assert!(!text.contains("trunc"), "so there is nothing to cut down: {text}");
     }
 
     /// The six rules gcc 14 turned from a warning into an error, and the three answers each one
@@ -10458,38 +9159,18 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn the_rules_gcc_promoted_are_decided_by_the_dialect_and_by_fpermissive() {
         // `-std=gnu89`, `-std=gnu17`, `-std=gnu17 -fpermissive`, and `-std=gnu23`.
-        let modes = [
-            (Std::C89, false),
-            (Std::C17, false),
-            (Std::C17, true),
-            (Std::C23, false),
-        ];
+        let modes = [(Std::C89, false), (Std::C17, false), (Std::C17, true), (Std::C23, false)];
         let cases = [
             ("static counted;\n", ["", "error", "warning", "error"]),
-            (
-                "int f(void) { return g(); }\n",
-                ["", "error", "warning", "error"],
-            ),
-            (
-                "int f(x) { return x; }\n",
-                ["", "error", "warning", "error"],
-            ),
-            (
-                "int *p;\nvoid h(void) { p = 1; }\n",
-                ["warning", "error", "warning", "error"],
-            ),
+            ("int f(void) { return g(); }\n", ["", "error", "warning", "error"]),
+            ("int f(x) { return x; }\n", ["", "error", "warning", "error"]),
+            ("int *p;\nvoid h(void) { p = 1; }\n", ["warning", "error", "warning", "error"]),
             (
                 "char *q;\nint *r;\nvoid k(void) { r = q; }\n",
                 ["warning", "error", "warning", "error"],
             ),
-            (
-                "int f(void) { return; }\n",
-                ["", "error", "warning", "error"],
-            ),
-            (
-                "void g(void) { return 1; }\n",
-                ["warning", "error", "warning", "error"],
-            ),
+            ("int f(void) { return; }\n", ["", "error", "warning", "error"]),
+            ("void g(void) { return 1; }\n", ["warning", "error", "warning", "error"]),
         ];
 
         for (source, wanted) in cases {
@@ -10532,26 +9213,16 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn the_rules_gcc_promoted_answer_to_their_own_options() {
         let cases = [
             ("static counted;\n", "implicit-int"),
-            (
-                "int f(void) { return g(); }\n",
-                "implicit-function-declaration",
-            ),
+            ("int f(void) { return g(); }\n", "implicit-function-declaration"),
             ("int f(x) { return x; }\n", "implicit-int"),
             ("int *p;\nvoid h(void) { p = 1; }\n", "int-conversion"),
-            (
-                "char *q;\nint *r;\nvoid k(void) { r = q; }\n",
-                "incompatible-pointer-types",
-            ),
+            ("char *q;\nint *r;\nvoid k(void) { r = q; }\n", "incompatible-pointer-types"),
             ("int f(void) { return; }\n", "return-mismatch"),
             ("void g(void) { return 1; }\n", "return-mismatch"),
         ];
 
         for (source, option) in cases {
-            let other = if option == "int-conversion" {
-                "implicit-int"
-            } else {
-                "int-conversion"
-            };
+            let other = if option == "int-conversion" { "implicit-int" } else { "int-conversion" };
             let lines = [
                 (vec![], "error"),
                 (vec!["-w".to_owned()], "error"),
@@ -10559,14 +9230,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 (vec![format!("-Wno-{option}")], ""),
                 (vec![format!("-Wno-error={option}")], "warning"),
                 (vec![format!("-Wno-error={option}"), "-w".to_owned()], ""),
-                (
-                    vec!["-Werror".to_owned(), format!("-Wno-error={option}")],
-                    "warning",
-                ),
-                (
-                    vec![format!("-Wno-{option}"), format!("-Werror={option}")],
-                    "error",
-                ),
+                (vec!["-Werror".to_owned(), format!("-Wno-error={option}")], "warning"),
+                (vec![format!("-Wno-{option}"), format!("-Werror={option}")], "error"),
                 (vec![format!("-Wno-{other}")], "error"),
                 (vec![format!("-Wno-error={other}")], "error"),
             ];
@@ -10612,12 +9277,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// gcc 16.2.0 on x86-64 Linux is where these came from.
     #[test]
     fn the_three_variadic_builtins_answer_a_bad_list_the_way_a_call_answers_a_bad_argument() {
-        let modes = [
-            (Std::C89, false),
-            (Std::C17, false),
-            (Std::C17, true),
-            (Std::C23, false),
-        ];
+        let modes = [(Std::C89, false), (Std::C17, false), (Std::C17, true), (Std::C23, false)];
         let cases = [
             (
                 "int f(int n, ...) { char *p; return __builtin_va_arg(p, int); }\n",
@@ -10664,11 +9324,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Ir;
         opts.safety = tier;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -10681,11 +9337,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.safety = rucc_session::Safety::Detect;
         opts.padding = padding;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -10775,11 +9427,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::SafetySummary;
         opts.safety = tier;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -10857,10 +9505,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "void *notes_open(void);\n\
              char *f(char *p) { char *q = notes_open(); return q ? q : p; }\n",
         );
-        assert!(
-            text.contains("\"crossings\": { \"entered\": 1, \"returned\": 1 }"),
-            "{text}"
-        );
+        assert!(text.contains("\"crossings\": { \"entered\": 1, \"returned\": 1 }"), "{text}");
         assert!(text.contains("\"notes_open\""), "{text}");
     }
 
@@ -10873,10 +9518,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "static int len(const char *p) { return p ? 1 : 0; }\n\
              int f(void) { return len(\"x\"); }\n",
         );
-        assert!(
-            text.contains("\"crossings\": { \"entered\": 0, \"returned\": 0 }"),
-            "{text}"
-        );
+        assert!(text.contains("\"crossings\": { \"entered\": 0, \"returned\": 0 }"), "{text}");
     }
 
     /// The granule report for `source`, insisting that it compiled cleanly.
@@ -10884,11 +9526,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.emit = EmitKind::TypeGranules;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -10930,10 +9568,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn a_witness_reaches_the_assembler_as_a_call_to_the_runtime() {
         // The count only means anything if the call is really there, and a summary saying one is
         // there is not evidence that the back end emitted it.
-        let text = safe_asm(
-            rucc_session::Safety::Detect,
-            "char *f(char *p) { return p; }\n",
-        );
+        let text = safe_asm(rucc_session::Safety::Detect, "char *f(char *p) { return p; }\n");
         assert!(text.contains("\tcall\t__rucc_cap_witness\n"), "{text}");
     }
 
@@ -10952,11 +9587,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.emit = EmitKind::Asm;
         opts.safety = tier;
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         result.text().to_owned()
     }
 
@@ -11015,19 +9646,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("global @d : i32 = 0,"), "{text}");
         assert!(text.contains("global @e : i32 = 1,"), "{text}");
         assert!(text.contains("global @h : i32 = 11,"), "{text}");
-        assert!(
-            !text.contains("__builtin_constant_p"),
-            "it is not a call to anything:\n{text}"
-        );
+        assert!(!text.contains("__builtin_constant_p"), "it is not a call to anything:\n{text}");
 
         // The argument is not evaluated, which is what gcc does with it as well, so `i` is
         // still zero. The second constant is the answer, which nothing reads and which the
         // first pass that looks for dead code will take out.
         let text = body("int f(void) { int i = 0; __builtin_constant_p(i++); return i; }\n");
-        assert_eq!(
-            text,
-            "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 0\n    return %0\n"
-        );
+        assert_eq!(text, "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 0\n    return %0\n");
     }
 
     /// A `pure` or `const` function whose value comes back through memory writes that memory, so
@@ -11056,10 +9681,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "void f(void) { int size = sizeof(int); __builtin_constant_p(size) ? (void)0 : g(); }\n",
             "void h(void) { int size = sizeof(int); if (!__builtin_constant_p(size)) g(); }\n",
         ));
-        assert!(
-            !text.contains("call\tg") && !text.contains("jmp\tg"),
-            "{text}"
-        );
+        assert!(!text.contains("call\tg") && !text.contains("jmp\tg"), "{text}");
     }
 
     /// Falling off the end of a function that returns a value comes back to the caller, since C
@@ -11073,10 +9695,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "void after(void);\n",
             "void f(void) { no_answer(1); after(); }\n",
         ));
-        assert!(
-            text.contains("call\tafter") || text.contains("jmp\tafter"),
-            "{text}"
-        );
+        assert!(text.contains("call\tafter") || text.contains("jmp\tafter"), "{text}");
     }
 
     /// A library builtin is the library function of the same name, and the call says so.
@@ -11097,10 +9716,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let text = ir("int f(const char *s) { return __builtin_puts(s) + __builtin_strlen(s); }\n");
         assert!(text.contains("call @puts(%0) : (ptr) -> i32"), "{text}");
         assert!(text.contains("call @strlen(%0) : (ptr) -> i64"), "{text}");
-        assert!(
-            !text.contains("__builtin_"),
-            "the prefix is not part of any name here:\n{text}"
-        );
+        assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
     }
 
     /// `__clear_cache` needs no declaration, as in gcc, and both spellings call the one libgcc
@@ -11108,15 +9724,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn clear_cache_is_a_call_to_the_libgcc_function_under_either_name() {
         let text = body("void f(char *p, char *q) { __clear_cache(p, q); }\n");
-        assert!(
-            text.contains("call @__clear_cache(%0, %1) : (ptr, ptr)"),
-            "{text}"
-        );
+        assert!(text.contains("call @__clear_cache(%0, %1) : (ptr, ptr)"), "{text}");
         let text = body("void f(char *p, char *q) { __builtin___clear_cache(p, q); }\n");
-        assert!(
-            text.contains("call @__clear_cache(%0, %1) : (ptr, ptr)"),
-            "{text}"
-        );
+        assert!(text.contains("call @__clear_cache(%0, %1) : (ptr, ptr)"), "{text}");
     }
 
     /// A `_chk` builtin reaches the checking function in the library with the object size still
@@ -11144,14 +9754,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("call @__memcpy_chk("), "{text}");
         assert!(text.contains("call @__strcpy_chk("), "{text}");
         assert!(text.contains("call @__memset_chk("), "{text}");
-        assert!(
-            text.contains("iconst.i64 8"),
-            "the object size reaches the call: {text}"
-        );
-        assert!(
-            !text.contains("__builtin_"),
-            "the prefix is not part of any name here:\n{text}"
-        );
+        assert!(text.contains("iconst.i64 8"), "the object size reaches the call: {text}");
+        assert!(!text.contains("__builtin_"), "the prefix is not part of any name here:\n{text}");
     }
 
     /// A checking call whose object size says nothing is known is the plain library call.
@@ -11183,18 +9787,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
         // The three whose object is not lose the argument and the name along with it. The type of
         // the call goes with them, which is what says the argument is gone rather than ignored.
-        assert!(
-            text.contains("call @memcpy(%6, %0, %1) : (ptr, ptr, i64) -> ptr"),
-            "{text}"
-        );
-        assert!(
-            text.contains("call @strcpy(%10, %0) : (ptr, ptr) -> ptr"),
-            "{text}"
-        );
-        assert!(
-            text.contains("call @stpncpy(%14, %0, %1) : (ptr, ptr, i64) -> ptr"),
-            "{text}"
-        );
+        assert!(text.contains("call @memcpy(%6, %0, %1) : (ptr, ptr, i64) -> ptr"), "{text}");
+        assert!(text.contains("call @strcpy(%10, %0) : (ptr, ptr) -> ptr"), "{text}");
+        assert!(text.contains("call @stpncpy(%14, %0, %1) : (ptr, ptr, i64) -> ptr"), "{text}");
 
         // The formatted one never folds, whatever the size says, because refusing a `%n` in a
         // writable format is the other half of what it was asked to do.
@@ -11208,10 +9803,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "}\n",
         ));
         assert!(asm.contains("call\tmemcpy"), "{asm}");
-        assert!(
-            !asm.contains("$-1"),
-            "the size that went away leaves no instruction:\n{asm}"
-        );
+        assert!(!asm.contains("$-1"), "the size that went away leaves no instruction:\n{asm}");
     }
 
     /// The `v` spellings take a `__builtin_va_list`, which is the first type in the table the
@@ -11234,10 +9826,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "}\n",
         ));
         assert!(text.contains("call @__vsprintf_chk("), "{text}");
-        assert!(
-            text.contains("iconst.i64 64"),
-            "the object size reaches the call: {text}"
-        );
+        assert!(text.contains("iconst.i64 64"), "the object size reaches the call: {text}");
     }
 
     /// The absolute value family is four instructions and not a call, whoever declared the name.
@@ -11315,10 +9904,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // swap happens at the width the name says and not at the width the program wrote.
         let text = body("unsigned f(unsigned char c) { return __builtin_bswap32(c); }\n");
         assert!(text.contains("zext.i32 %0"), "widened first: {text}");
-        assert!(
-            text.contains("bswap %1"),
-            "and swapped at four bytes: {text}"
-        );
+        assert!(text.contains("bswap %1"), "and swapped at four bytes: {text}");
     }
 
     /// Each of the three reverses in the width its name says, which is the type of the node.
@@ -11372,23 +9958,14 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn the_bit_counts_ask_about_the_width_their_name_says() {
         let text = body("int f(unsigned long long x) { return __builtin_clzll(x); }\n");
-        assert!(
-            text.starts_with("block0(%0: i64):"),
-            "counted at eight bytes: {text}"
-        );
+        assert!(text.starts_with("block0(%0: i64):"), "counted at eight bytes: {text}");
         assert!(text.contains("%1 = ctlz %0"), "{text}");
-        assert!(
-            text.contains("trunc.i32 %1"),
-            "and answered in an int: {text}"
-        );
+        assert!(text.contains("trunc.i32 %1"), "and answered in an int: {text}");
 
         // The same value asked about at the narrower width, which converts first and so counts
         // something else.
         let text = body("int f(unsigned long long x) { return __builtin_clz(x); }\n");
-        assert!(
-            text.contains("trunc.i32 %0"),
-            "narrowed to what was asked about: {text}"
-        );
+        assert!(text.contains("trunc.i32 %0"), "narrowed to what was asked about: {text}");
         assert!(text.contains("ctlz %1"), "and counted there: {text}");
 
         let text = body("int f(unsigned long x) { return __builtin_popcountl(x); }\n");
@@ -11417,19 +9994,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn the_first_set_bit_is_one_based_and_zero_for_a_zero() {
         let text = body("int f(int x) { return __builtin_ffs(x); }\n");
         assert!(text.contains("%1 = cttz %0"), "{text}");
-        assert!(
-            text.contains("%4 = add %1, %2"),
-            "one more than the count: {text}"
-        );
-        assert!(
-            text.contains("%5 = icmp ne %0, %3"),
-            "whether there was a bit at all: {text}"
-        );
+        assert!(text.contains("%4 = add %1, %2"), "one more than the count: {text}");
+        assert!(text.contains("%5 = icmp ne %0, %3"), "whether there was a bit at all: {text}");
         assert!(text.contains("%7 = sub %3, %6"), "spread to a mask: {text}");
-        assert!(
-            text.contains("%8 = and %4, %7"),
-            "and kept only then: {text}"
-        );
+        assert!(text.contains("%8 = and %4, %7"), "and kept only then: {text}");
         assert!(!text.contains("br_if"), "no branch: {text}");
     }
 
@@ -11446,19 +10014,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn the_redundant_sign_bit_count_is_instructions_and_not_a_call() {
         let text = body("int f(int x) { return __builtin_clrsb(x); }\n");
         assert!(text.contains("%1 = iconst.i32 31"), "{text}");
-        assert!(
-            text.contains("%2 = ashr %0, %1"),
-            "the sign over every bit: {text}"
-        );
+        assert!(text.contains("%2 = ashr %0, %1"), "the sign over every bit: {text}");
         assert!(text.contains("%3 = xor %0, %2"), "folded onto it: {text}");
-        assert!(
-            text.contains("%5 = shl %3, %4"),
-            "one less than the count: {text}"
-        );
-        assert!(
-            text.contains("%6 = or %5, %4"),
-            "with something to count at zero: {text}"
-        );
+        assert!(text.contains("%5 = shl %3, %4"), "one less than the count: {text}");
+        assert!(text.contains("%6 = or %5, %4"), "with something to count at zero: {text}");
         assert!(text.contains("%7 = ctlz %6"), "{text}");
         assert!(!text.contains("call"), "{text}");
         assert!(!text.contains("br_if"), "no branch: {text}");
@@ -11474,16 +10033,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let text = body("unsigned f(int x) { return __builtin_uabs(x); }\n");
         assert!(text.contains("%1 = iconst.i32 31"), "{text}");
         assert!(text.contains("%4 = sub %3, %2"), "{text}");
-        assert!(
-            !text.contains("call"),
-            "nothing declares uabs, so a call would not link: {text}"
-        );
+        assert!(!text.contains("call"), "nothing declares uabs, so a call would not link: {text}");
 
         let text = body("unsigned long long f(long long x) { return __builtin_ullabs(x); }\n");
-        assert!(
-            text.contains("iconst.i64 63"),
-            "at the width the name says: {text}"
-        );
+        assert!(text.contains("iconst.i64 63"), "at the width the name says: {text}");
 
         // The answer is the unsigned type and not the signed one, which is what a comparison
         // against it is decided by.
@@ -11521,10 +10074,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn an_overflow_predicate_writes_nothing_and_answers_the_bit_the_check_would() {
         let text =
             body("int f(int a, int b) { return __builtin_add_overflow_p(a, b, (int) 0); }\n");
-        assert!(
-            text.contains("%2, %3 = sadd_overflow.(i32, i1) %0, %1"),
-            "{text}"
-        );
+        assert!(text.contains("%2, %3 = sadd_overflow.(i32, i1) %0, %1"), "{text}");
         assert!(!text.contains("store"), "nothing is written: {text}");
         assert!(!text.contains("call"), "{text}");
 
@@ -11541,10 +10091,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "int g(void);\n",
             "int f(int a, int b) { return __builtin_sub_overflow_p(a, b, g()); }\n",
         ));
-        assert!(
-            !text.contains("call @g"),
-            "the third argument is not evaluated: {text}"
-        );
+        assert!(!text.contains("call @g"), "the third argument is not evaluated: {text}");
     }
 
     /// The three overflow checks are arithmetic and a flag, and not a call to anything.
@@ -11560,10 +10107,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn an_overflow_check_is_arithmetic_and_not_a_call() {
         let text =
             body("int f(int a, int b, int *r) { return __builtin_add_overflow(a, b, r); }\n");
-        assert!(
-            text.contains("%3, %4 = sadd_overflow.(i32, i1) %0, %1"),
-            "{text}"
-        );
+        assert!(text.contains("%3, %4 = sadd_overflow.(i32, i1) %0, %1"), "{text}");
         assert!(text.contains("store %3 -> %2"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
@@ -11618,14 +10162,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let text = body(
             "int f(unsigned a, int b, long long *r) { return __builtin_add_overflow(a, b, r); }\n",
         );
-        assert!(
-            text.contains("%3 = zext.i64 %0"),
-            "the unsigned operand keeps its value: {text}"
-        );
-        assert!(
-            text.contains("%4 = sext.i64 %1"),
-            "and so does the signed one: {text}"
-        );
+        assert!(text.contains("%3 = zext.i64 %0"), "the unsigned operand keeps its value: {text}");
+        assert!(text.contains("%4 = sext.i64 %1"), "and so does the signed one: {text}");
         assert!(text.contains("sadd_overflow.(i64, i1) %3, %4"), "{text}");
 
         // Three types that agree need no extension at all, which is what nearly every real call
@@ -11650,27 +10188,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn an_overflow_check_writes_the_wrapped_answer_whether_or_not_it_fit() {
         let text =
             body("int f(int a, int b, char *r) { return __builtin_sub_overflow(a, b, r); }\n");
-        assert!(
-            text.contains("%3, %4 = ssub_overflow.(i32, i1) %0, %1"),
-            "{text}"
-        );
-        assert!(
-            text.contains("%5 = trunc.i8 %3"),
-            "narrowed to where it goes: {text}"
-        );
+        assert!(text.contains("%3, %4 = ssub_overflow.(i32, i1) %0, %1"), "{text}");
+        assert!(text.contains("%5 = trunc.i8 %3"), "narrowed to where it goes: {text}");
         assert!(text.contains("%6 = sext.i32 %5"), "and back: {text}");
-        assert!(
-            text.contains("%7 = icmp ne %6, %3"),
-            "which is whether it fit: {text}"
-        );
-        assert!(
-            text.contains("store %5 -> %2"),
-            "the narrowed value is stored either way: {text}"
-        );
-        assert!(
-            text.contains("%8 = or %4, %7"),
-            "and either bit is an overflow: {text}"
-        );
+        assert!(text.contains("%7 = icmp ne %6, %3"), "which is whether it fit: {text}");
+        assert!(text.contains("store %5 -> %2"), "the narrowed value is stored either way: {text}");
+        assert!(text.contains("%8 = or %4, %7"), "and either bit is an overflow: {text}");
     }
 
     /// A call needing more than the widest type there is compiles, by not asking for such a type.
@@ -11688,10 +10211,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             );
             let mut opts = options();
             opts.emit = EmitKind::MirFinal;
-            assert!(
-                !run(&opts, &source).failed(),
-                "{name} was refused or stopped the back end"
-            );
+            assert!(!run(&opts, &source).failed(), "{name} was refused or stopped the back end");
         }
     }
 
@@ -11701,17 +10221,11 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn an_overflow_check_over_something_that_is_not_an_integer_says_so() {
         let messages =
             errors("int f(double a, int b, int *r) { return __builtin_add_overflow(a, b, r); }\n");
-        assert!(
-            messages.iter().any(|line| line.contains("E0671")),
-            "{messages:?}"
-        );
+        assert!(messages.iter().any(|line| line.contains("E0671")), "{messages:?}");
 
         let messages =
             errors("int f(int a, int b, double *r) { return __builtin_add_overflow(a, b, r); }\n");
-        assert!(
-            messages.iter().any(|line| line.contains("E0671")),
-            "{messages:?}"
-        );
+        assert!(messages.iter().any(|line| line.contains("E0671")), "{messages:?}");
     }
 
     /// An ordered access is an ordered access in the IR, with the ordering the program wrote.
@@ -11727,37 +10241,22 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn an_ordered_access_is_ordered_in_the_ir() {
         let text = body("int f(int *p) { return __atomic_load_n(p, 0); }\n");
-        assert!(
-            text.contains("atomic_load.i32 %0, align 4, relaxed"),
-            "{text}"
-        );
+        assert!(text.contains("atomic_load.i32 %0, align 4, relaxed"), "{text}");
 
         let text = body("long f(long *p) { return __atomic_load_n(p, 2); }\n");
-        assert!(
-            text.contains("atomic_load.i64 %0, align 8, acquire"),
-            "{text}"
-        );
+        assert!(text.contains("atomic_load.i64 %0, align 8, acquire"), "{text}");
 
         let text = body("void f(int *p, int v) { __atomic_store_n(p, v, 3); }\n");
-        assert!(
-            text.contains("atomic_store %1 -> %0, align 4, release"),
-            "{text}"
-        );
+        assert!(text.contains("atomic_store %1 -> %0, align 4, release"), "{text}");
 
         let text = body("void f(int *p, int v) { __atomic_store_n(p, v, 5); }\n");
-        assert!(
-            text.contains("atomic_store %1 -> %0, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("atomic_store %1 -> %0, align 4, seq_cst"), "{text}");
 
         // The value is converted to what the pointer points at before it is stored, which is what
         // the call would have done if it had a prototype to convert against.
         let text = body("void f(char *p, int v) { __atomic_store_n(p, v, 0); }\n");
         assert!(text.contains("trunc.i8 %1"), "{text}");
-        assert!(
-            text.contains("atomic_store %2 -> %0, align 1, relaxed"),
-            "{text}"
-        );
+        assert!(text.contains("atomic_store %2 -> %0, align 1, relaxed"), "{text}");
     }
 
     /// On this machine the ordered access is the plain instruction, except at the strongest
@@ -11772,28 +10271,16 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn an_ordered_access_is_the_plain_instruction_on_this_machine() {
         let text = asm("int f(int *p) { return __atomic_load_n(p, 5); }\n");
         assert!(text.contains("movl\t(%rdi), %eax"), "{text}");
-        assert!(
-            !text.contains("mfence"),
-            "a load needs no barrier here: {text}"
-        );
+        assert!(!text.contains("mfence"), "a load needs no barrier here: {text}");
 
         let text = asm("void f(int *p, int v) { __atomic_store_n(p, v, 3); }\n");
         assert!(text.contains("movl\t%esi, (%rdi)"), "{text}");
-        assert!(
-            !text.contains("mfence"),
-            "a release store needs no barrier here: {text}"
-        );
+        assert!(!text.contains("mfence"), "a release store needs no barrier here: {text}");
 
         let text = asm("void f(int *p, int v) { __atomic_store_n(p, v, 5); }\n");
         let (before, after) = text.split_once("mfence").expect("a barrier: {text}");
-        assert!(
-            before.contains("movl\t%esi, (%rdi)"),
-            "the store comes first: {text}"
-        );
-        assert!(
-            !after.contains("movl"),
-            "and nothing else is between them: {text}"
-        );
+        assert!(before.contains("movl\t%esi, (%rdi)"), "the store comes first: {text}");
+        assert!(!after.contains("movl"), "and nothing else is between them: {text}");
     }
 
     /// A barrier is one instruction at the strongest ordering and no instruction below it.
@@ -11812,10 +10299,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
         for weaker in ["1", "2", "3", "4"] {
             let source = format!("void f(void) {{ __atomic_thread_fence({weaker}); }}\n");
-            assert!(
-                !asm(&source).contains("mfence"),
-                "{weaker} costs nothing here"
-            );
+            assert!(!asm(&source).contains("mfence"), "{weaker} costs nothing here");
         }
     }
 
@@ -11830,11 +10314,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// written on any other call, which is the whole reason they have one.
     #[test]
     fn the_three_x86_fences_are_the_barrier_the_strongest_ordering_gives() {
-        for name in [
-            "__builtin_ia32_sfence",
-            "__builtin_ia32_lfence",
-            "__builtin_ia32_mfence",
-        ] {
+        for name in ["__builtin_ia32_sfence", "__builtin_ia32_lfence", "__builtin_ia32_mfence"] {
             let source = format!("void f(void) {{ {name}(); }}\n");
             assert!(asm(&source).contains("mfence"), "{name} is a barrier");
             let text = body(&source);
@@ -11843,11 +10323,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
         let result = run(&options(), "void f(void) { __builtin_ia32_sfence(1); }\n");
         assert_eq!(result.messages.len(), 1, "{:?}", result.messages);
-        assert!(
-            result.messages[0].contains("too many arguments"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("too many arguments"), "{:?}", result.messages);
     }
 
     /// The four compare and exchange names are one IR instruction producing two values.
@@ -11861,18 +10337,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // memory order argument and both are a full barrier, which is what `seq_cst` says.
         let text =
             body("int f(int *p, int e, int d) { return __sync_val_compare_and_swap(p, e, d); }\n");
-        assert!(
-            text.contains("%3, %4 = cmpxchg.(i32, i1) %0, %1, %2, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%3, %4 = cmpxchg.(i32, i1) %0, %1, %2, align 4, seq_cst"), "{text}");
         assert!(text.contains("return %3"), "the value it found: {text}");
 
         let text =
             body("int f(int *p, int e, int d) { return __sync_bool_compare_and_swap(p, e, d); }\n");
-        assert!(
-            text.contains("%3, %4 = cmpxchg.(i32, i1) %0, %1, %2, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%3, %4 = cmpxchg.(i32, i1) %0, %1, %2, align 4, seq_cst"), "{text}");
         assert!(text.contains("zext.i32 %4"), "whether it happened: {text}");
 
         // The C11 form, whose value expected arrives by pointer and is read before the exchange,
@@ -11881,10 +10351,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "int f(int *p, int *e, int d) { return __atomic_compare_exchange_n(p, e, d, 0, 4, 2); }\n",
         );
         assert!(text.contains("%3 = load.i32 %1, align 4"), "{text}");
-        assert!(
-            text.contains("%4, %5 = cmpxchg.(i32, i1) %0, %3, %2, align 4, acq_rel"),
-            "{text}"
-        );
+        assert!(text.contains("%4, %5 = cmpxchg.(i32, i1) %0, %3, %2, align 4, acq_rel"), "{text}");
         assert!(text.contains("br_if %5, block2, block1"), "{text}");
         assert!(text.contains("store %4 -> %1, align 4"), "{text}");
 
@@ -11895,10 +10362,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
         assert!(text.contains("%3 = load.i32 %1, align 4"), "{text}");
         assert!(text.contains("%4 = load.i32 %2, align 4"), "{text}");
-        assert!(
-            text.contains("%5, %6 = cmpxchg.(i32, i1) %0, %3, %4, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%5, %6 = cmpxchg.(i32, i1) %0, %3, %4, align 4, seq_cst"), "{text}");
     }
 
     /// On this machine it is `lock cmpxchg`, at the width of the object and at every ordering.
@@ -11909,30 +10373,19 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// gcc 16.2.0 writes for the same function.
     #[test]
     fn a_compare_and_exchange_is_a_locked_instruction_at_the_width_of_the_object() {
-        let widths = [
-            ("char", "b", "%dl"),
-            ("short", "w", "%dx"),
-            ("int", "l", "%edx"),
-        ];
+        let widths = [("char", "b", "%dl"), ("short", "w", "%dx"), ("int", "l", "%edx")];
         for (ty, suffix, reg) in widths {
             let source = format!(
                 "int f({ty} *p, {ty} e, {ty} d) {{ return __sync_bool_compare_and_swap(p, e, d); }}\n"
             );
             let text = asm(&source);
             assert!(text.contains("\tlock\n"), "{ty}: {text}");
-            assert!(
-                text.contains(&format!("cmpxchg{suffix}\t{reg}, (%rdi)")),
-                "{ty}: {text}"
-            );
+            assert!(text.contains(&format!("cmpxchg{suffix}\t{reg}, (%rdi)")), "{ty}: {text}");
             assert!(text.contains("sete\t"), "{ty}: {text}");
         }
         let source =
             "int f(long *p, long e, long d) { return __sync_bool_compare_and_swap(p, e, d); }\n";
-        assert!(
-            asm(source).contains("cmpxchgq\t%rdx, (%rdi)"),
-            "{}",
-            asm(source)
-        );
+        assert!(asm(source).contains("cmpxchgq\t%rdx, (%rdi)"), "{}", asm(source));
 
         // The ordering the program asked for changes nothing, because a locked instruction on this
         // machine orders everything whatever it was asked for, so there is never a barrier beside
@@ -11942,10 +10395,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             let source = format!("int f(int *p, int *e, int d) {{ return {call}; }}\n");
             let text = asm(&source);
             assert!(text.contains("cmpxchgl\t"), "{order}: {text}");
-            assert!(
-                !text.contains("mfence"),
-                "{order} needs no barrier here: {text}"
-            );
+            assert!(!text.contains("mfence"), "{order} needs no barrier here: {text}");
         }
     }
 
@@ -11989,52 +10439,28 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn a_read_modify_write_is_one_instruction_and_the_arithmetic_a_name_asks_for() {
         let text = body("int f(int *p, int v) { return __atomic_fetch_add(p, v, 5); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 add %0, %1, align 4, seq_cst"),
-            "{text}"
-        );
-        assert!(
-            text.contains("return %2"),
-            "the value that was there: {text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 add %0, %1, align 4, seq_cst"), "{text}");
+        assert!(text.contains("return %2"), "the value that was there: {text}");
 
         let text = body("int f(int *p, int v) { return __atomic_add_fetch(p, v, 5); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 add %0, %1, align 4, seq_cst"),
-            "{text}"
-        );
-        assert!(
-            text.contains("%3 = add %2, %1"),
-            "and the value afterwards: {text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 add %0, %1, align 4, seq_cst"), "{text}");
+        assert!(text.contains("%3 = add %2, %1"), "and the value afterwards: {text}");
 
         let text = body("int f(int *p, int v) { return __atomic_sub_fetch(p, v, 5); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 sub %0, %1, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 sub %0, %1, align 4, seq_cst"), "{text}");
         assert!(text.contains("%3 = sub %2, %1"), "{text}");
 
         // The older family, which passes no ordering and is a full barrier.
         let text = body("int f(int *p, int v) { return __sync_fetch_and_sub(p, v); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 sub %0, %1, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 sub %0, %1, align 4, seq_cst"), "{text}");
 
         // The exchange, and the older family's spelling of it, which is taking a lock and so is an
         // acquire rather than the full barrier the rest of that family is.
         let text = body("int f(int *p, int v) { return __atomic_exchange_n(p, v, 5); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 xchg %0, %1, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 xchg %0, %1, align 4, seq_cst"), "{text}");
 
         let text = body("int f(int *p, int v) { return __sync_lock_test_and_set(p, v); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 xchg %0, %1, align 4, acquire"),
-            "{text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 xchg %0, %1, align 4, acquire"), "{text}");
 
         // Giving the lock back, which is one of the two names in the family that is handed no value
         // to put there, because what it puts there is a zero.
@@ -12047,36 +10473,21 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // caller happened to name there, which is the one thing giving a lock back must not do.
         let text = body("void f(int *p, int guard) { __sync_lock_release(p, guard); }\n");
         assert!(text.contains("%2 = iconst.i32 0"), "{text}");
-        assert!(
-            text.contains("atomic_store %2 -> %0, align 4, release"),
-            "{text}"
-        );
+        assert!(text.contains("atomic_store %2 -> %0, align 4, release"), "{text}");
 
         // The bitwise four, which look no different here from the arithmetic ones: what the machine
         // has an instruction for is a question further down and this level does not ask it.
         let text = body("int f(int *p, int v) { return __atomic_fetch_and(p, v, 5); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 and %0, %1, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 and %0, %1, align 4, seq_cst"), "{text}");
 
         let text = body("int f(int *p, int v) { return __sync_or_and_fetch(p, v); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 or %0, %1, align 4, seq_cst"),
-            "{text}"
-        );
-        assert!(
-            text.contains("%3 = or %2, %1"),
-            "and the value afterwards: {text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 or %0, %1, align 4, seq_cst"), "{text}");
+        assert!(text.contains("%3 = or %2, %1"), "and the value afterwards: {text}");
 
         // The nand, which is the one of the six that is two operations. The flip is an exclusive or
         // against every bit set because the IR has no not and that is what one is.
         let text = body("int f(int *p, int v) { return __atomic_nand_fetch(p, v, 5); }\n");
-        assert!(
-            text.contains("%2 = atomic_rmw.i32 nand %0, %1, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%2 = atomic_rmw.i32 nand %0, %1, align 4, seq_cst"), "{text}");
         assert!(text.contains("%3 = and %2, %1"), "{text}");
         assert!(text.contains("%4 = iconst.i32 -1"), "{text}");
         assert!(text.contains("%5 = xor %3, %4"), "{text}");
@@ -12094,11 +10505,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// value that was read.
     #[test]
     fn a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange() {
-        let widths = [
-            ("char", "b", "%dl"),
-            ("short", "w", "%dx"),
-            ("int", "l", "%edx"),
-        ];
+        let widths = [("char", "b", "%dl"), ("short", "w", "%dx"), ("int", "l", "%edx")];
         for (ty, suffix, reg) in widths {
             for (name, call, insn) in [
                 ("and", "__atomic_fetch_and(p, v, 5)", "and"),
@@ -12112,27 +10519,14 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                     text.contains(&format!("cmpxchg{suffix}\t{reg}, (%rdi)")),
                     "{ty} {name}: {text}"
                 );
-                assert!(
-                    text.contains(&format!("{insn}{suffix}\t")),
-                    "{ty} {name}: {text}"
-                );
+                assert!(text.contains(&format!("{insn}{suffix}\t")), "{ty} {name}: {text}");
                 // The tab matters on the second of these, since `cmpxchg` ends in the other name.
-                assert!(
-                    !text.contains("\txadd"),
-                    "{ty} {name} is not an add: {text}"
-                );
-                assert!(
-                    !text.contains("\txchg"),
-                    "{ty} {name} is not an exchange: {text}"
-                );
+                assert!(!text.contains("\txadd"), "{ty} {name} is not an add: {text}");
+                assert!(!text.contains("\txchg"), "{ty} {name} is not an exchange: {text}");
             }
         }
         let source = "long f(long *p, long v) { return __atomic_fetch_or(p, v, 5); }\n";
-        assert!(
-            asm(source).contains("cmpxchgq\t%rdx, (%rdi)"),
-            "{}",
-            asm(source)
-        );
+        assert!(asm(source).contains("cmpxchgq\t%rdx, (%rdi)"), "{}", asm(source));
 
         // The nand, which puts two instructions inside the loop rather than one. The flip is an
         // exclusive or against every bit set in the IR and the folder turns that into the `not` the
@@ -12154,33 +10548,18 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn an_access_through_a_second_pointer_is_the_same_access_and_one_more() {
         let text = body("void f(int *p, int *r) { __atomic_load(p, r, 5); }\n");
-        assert!(
-            text.contains("%2 = atomic_load.i32 %0, align 4, seq_cst"),
-            "{text}"
-        );
-        assert!(
-            text.contains("store %2 -> %1, align 4"),
-            "and out through the place: {text}"
-        );
+        assert!(text.contains("%2 = atomic_load.i32 %0, align 4, seq_cst"), "{text}");
+        assert!(text.contains("store %2 -> %1, align 4"), "and out through the place: {text}");
 
         let text = body("void f(int *p, int *v) { __atomic_store(p, v, 3); }\n");
-        assert!(
-            text.contains("%2 = load.i32 %1, align 4"),
-            "in through the place: {text}"
-        );
-        assert!(
-            text.contains("atomic_store %2 -> %0, align 4, release"),
-            "{text}"
-        );
+        assert!(text.contains("%2 = load.i32 %1, align 4"), "in through the place: {text}");
+        assert!(text.contains("atomic_store %2 -> %0, align 4, release"), "{text}");
 
         // The exchange, which reads through one pointer and writes through another and is the same
         // instruction in between as the spelling that takes and answers values.
         let text = body("void f(int *p, int *v, int *r) { __atomic_exchange(p, v, r, 5); }\n");
         assert!(text.contains("%3 = load.i32 %1, align 4"), "{text}");
-        assert!(
-            text.contains("%4 = atomic_rmw.i32 xchg %0, %3, align 4, seq_cst"),
-            "{text}"
-        );
+        assert!(text.contains("%4 = atomic_rmw.i32 xchg %0, %3, align 4, seq_cst"), "{text}");
         assert!(text.contains("store %4 -> %2, align 4"), "{text}");
     }
 
@@ -12208,10 +10587,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
             let source = format!("void f({pointer} *p) {{ __atomic_clear(p, 3); }}\n");
             let text = body(&source);
-            assert!(
-                text.contains("atomic_store %2 -> %0, align 1, release"),
-                "{pointer}: {text}"
-            );
+            assert!(text.contains("atomic_store %2 -> %0, align 1, release"), "{pointer}: {text}");
         }
 
         // And on this machine, where the exchange carries no `lock` because one with memory locks
@@ -12230,39 +10606,22 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// `mfence` beside them. Every line below is what gcc 16.2.0 writes for the same function.
     #[test]
     fn a_read_modify_write_is_an_exchange_or_a_locked_add_at_the_width_of_the_object() {
-        let widths = [
-            ("char", "b", "%sil"),
-            ("short", "w", "%si"),
-            ("int", "l", "%esi"),
-        ];
+        let widths = [("char", "b", "%sil"), ("short", "w", "%si"), ("int", "l", "%esi")];
         for (ty, suffix, reg) in widths {
             let source =
                 format!("{ty} f({ty} *p, {ty} v) {{ return __atomic_fetch_add(p, v, 5); }}\n");
             let text = asm(&source);
             assert!(text.contains("\tlock\n"), "{ty}: {text}");
-            assert!(
-                text.contains(&format!("xadd{suffix}\t{reg}, (%rdi)")),
-                "{ty}: {text}"
-            );
+            assert!(text.contains(&format!("xadd{suffix}\t{reg}, (%rdi)")), "{ty}: {text}");
 
             let source =
                 format!("{ty} f({ty} *p, {ty} v) {{ return __atomic_exchange_n(p, v, 5); }}\n");
             let text = asm(&source);
-            assert!(
-                text.contains(&format!("xchg{suffix}\t{reg}, (%rdi)")),
-                "{ty}: {text}"
-            );
-            assert!(
-                !text.contains("\tlock\n"),
-                "an exchange is locked already: {ty}: {text}"
-            );
+            assert!(text.contains(&format!("xchg{suffix}\t{reg}, (%rdi)")), "{ty}: {text}");
+            assert!(!text.contains("\tlock\n"), "an exchange is locked already: {ty}: {text}");
         }
         let source = "long f(long *p, long v) { return __atomic_fetch_add(p, v, 5); }\n";
-        assert!(
-            asm(source).contains("xaddq\t%rsi, (%rdi)"),
-            "{}",
-            asm(source)
-        );
+        assert!(asm(source).contains("xaddq\t%rsi, (%rdi)"), "{}", asm(source));
 
         // A subtraction is the same instruction over the negated operand, which is right at every
         // width because the machine's arithmetic wraps.
@@ -12278,10 +10637,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 format!("int f(int *p, int v) {{ return __atomic_fetch_add(p, v, {order}); }}\n");
             let text = asm(&source);
             assert!(text.contains("xaddl\t"), "{order}: {text}");
-            assert!(
-                !text.contains("mfence"),
-                "{order} needs no barrier here: {text}"
-            );
+            assert!(!text.contains("mfence"), "{order} needs no barrier here: {text}");
         }
 
         // And the lock pair, which is the exchange and a store of a zero. Neither is a barrier
@@ -12293,10 +10649,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // plain `*p = 0` makes.
         let text = asm("void f(int *p) { __sync_lock_release(p); }\n");
         assert!(text.contains("movl\t$0, (%rdi)"), "{text}");
-        assert!(
-            !text.contains("mfence"),
-            "a release store needs no barrier here: {text}"
-        );
+        assert!(!text.contains("mfence"), "a release store needs no barrier here: {text}");
     }
 
     /// The two lock free questions are numbers in the program rather than calls to anything.
@@ -12317,19 +10670,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             let source =
                 format!("int f(void) {{ return __atomic_always_lock_free({size}, 0); }}\n");
             let text = asm(&source);
-            assert!(
-                text.contains("movb\t$1, %al"),
-                "{size} bytes is lock free: {text}"
-            );
+            assert!(text.contains("movb\t$1, %al"), "{size} bytes is lock free: {text}");
             assert!(!text.contains("call"), "and is not a call: {text}");
         }
         for size in ["3", "16", "sizeof(long double)"] {
             let source = format!("int f(void) {{ return __atomic_is_lock_free({size}, 0); }}\n");
             let text = asm(&source);
-            assert!(
-                text.contains("movb\t$0, %al"),
-                "{size} bytes is not: {text}"
-            );
+            assert!(text.contains("movb\t$0, %al"), "{size} bytes is not: {text}");
             assert!(!text.contains("call"), "and is not a call either: {text}");
         }
 
@@ -12337,15 +10684,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // whose type is aligned under the size asked about, which is the whole of what the second
         // argument is for.
         let text = asm("int f(int n) { return __atomic_is_lock_free(n, 0); }\n");
-        assert!(
-            text.contains("movb\t$0, %al"),
-            "a size nobody knows is not lock free: {text}"
-        );
+        assert!(text.contains("movb\t$0, %al"), "a size nobody knows is not lock free: {text}");
         let text = asm("int f(int *p) { return __atomic_always_lock_free(8, p); }\n");
-        assert!(
-            text.contains("movb\t$0, %al"),
-            "eight bytes at four is not: {text}"
-        );
+        assert!(text.contains("movb\t$0, %al"), "eight bytes at four is not: {text}");
         let text = asm("int f(long *p) { return __atomic_always_lock_free(8, p); }\n");
         assert!(text.contains("movb\t$1, %al"), "and at eight it is: {text}");
     }
@@ -12366,39 +10707,17 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.emit = EmitKind::Ir;
 
-        let acquire_store = run(
-            &opts,
-            "void f(int *p, int v) { __atomic_store_n(p, v, 2); }\n",
-        );
-        assert!(
-            acquire_store.text().contains("seq_cst"),
-            "{:?}",
-            acquire_store.text()
-        );
-        assert!(
-            acquire_store.messages[0].contains("[W0333]"),
-            "{:?}",
-            acquire_store.messages
-        );
+        let acquire_store = run(&opts, "void f(int *p, int v) { __atomic_store_n(p, v, 2); }\n");
+        assert!(acquire_store.text().contains("seq_cst"), "{:?}", acquire_store.text());
+        assert!(acquire_store.messages[0].contains("[W0333]"), "{:?}", acquire_store.messages);
 
         let nonsense = run(&opts, "int f(int *p) { return __atomic_load_n(p, 99); }\n");
         assert!(nonsense.text().contains("seq_cst"), "{:?}", nonsense.text());
-        assert!(
-            nonsense.messages[0].contains("[W0333]"),
-            "{:?}",
-            nonsense.messages
-        );
+        assert!(nonsense.messages[0].contains("[W0333]"), "{:?}", nonsense.messages);
 
-        let computed = run(
-            &opts,
-            "int f(int *p, int n) { return __atomic_load_n(p, n); }\n",
-        );
+        let computed = run(&opts, "int f(int *p, int n) { return __atomic_load_n(p, n); }\n");
         assert!(computed.text().contains("seq_cst"), "{:?}", computed.text());
-        assert_eq!(
-            computed.messages,
-            Vec::<String>::new(),
-            "a computed order is not a mistake"
-        );
+        assert_eq!(computed.messages, Vec::<String>::new(), "a computed order is not a mistake");
     }
 
     /// A conversion between a float and the widest unsigned integer, which the machine has not got.
@@ -12415,27 +10734,15 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn a_conversion_between_a_float_and_the_widest_unsigned_integer_is_written_without_a_branch() {
         let text = asm("double f(unsigned long long x) { return (double)x; }\n");
-        assert!(
-            text.contains("cvtsi2sdq"),
-            "the signed conversion is what runs: {text}"
-        );
+        assert!(text.contains("cvtsi2sdq"), "the signed conversion is what runs: {text}");
         assert!(text.contains("shrq"), "with the value halved first: {text}");
         assert!(text.contains("addsd"), "and doubled after: {text}");
         assert!(!text.contains("\tj"), "and no branch anywhere: {text}");
 
         let text = asm("unsigned long long f(double d) { return (unsigned long long)d; }\n");
-        assert!(
-            text.contains("cvttsd2siq"),
-            "the signed conversion is what runs: {text}"
-        );
-        assert!(
-            text.contains("subsd"),
-            "with half the range taken off first: {text}"
-        );
-        assert!(
-            text.contains("shlq\t$63"),
-            "and the top bit put back: {text}"
-        );
+        assert!(text.contains("cvttsd2siq"), "the signed conversion is what runs: {text}");
+        assert!(text.contains("subsd"), "with half the range taken off first: {text}");
+        assert!(text.contains("shlq\t$63"), "and the top bit put back: {text}");
         assert!(!text.contains("\tj"), "and no branch anywhere: {text}");
     }
 
@@ -12455,16 +10762,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "static long long llabs(long long b) { return 7; }\n",
             "long long f(long long x) { return llabs(x); }\n",
         );
-        assert!(
-            ir(taken).contains("call @llabs"),
-            "a static definition is the program's own"
-        );
+        assert!(ir(taken).contains("call @llabs"), "a static definition is the program's own");
 
         let retyped = concat!("int llabs(int b);\n", "int f(int x) { return llabs(x); }\n",);
-        assert!(
-            ir(retyped).contains("call @llabs"),
-            "another type is another function"
-        );
+        assert!(ir(retyped).contains("call @llabs"), "another type is another function");
 
         let plain = concat!(
             "long long llabs(long long b);\n",
@@ -12472,38 +10773,23 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
         let mut opts = options();
         opts.emit = EmitKind::Ir;
-        assert!(
-            !run(&opts, plain).text().contains("call @llabs"),
-            "the library's by default"
-        );
+        assert!(!run(&opts, plain).text().contains("call @llabs"), "the library's by default");
 
         opts.builtins = false;
-        assert!(
-            run(&opts, plain).text().contains("call @llabs"),
-            "-fno-builtin"
-        );
+        assert!(run(&opts, plain).text().contains("call @llabs"), "-fno-builtin");
 
         opts.builtins = true;
         opts.no_builtin = vec!["llabs".to_owned()];
-        assert!(
-            run(&opts, plain).text().contains("call @llabs"),
-            "-fno-builtin-llabs"
-        );
+        assert!(run(&opts, plain).text().contains("call @llabs"), "-fno-builtin-llabs");
         let one = "long labs(long b);\nlong f(long x) { return labs(x); }\n";
-        assert!(
-            !run(&opts, one).text().contains("call @labs"),
-            "one name and not the family"
-        );
+        assert!(!run(&opts, one).text().contains("call @labs"), "one name and not the family");
 
         // `-ffreestanding` reaches the front end as the same answer, which is what the driver
         // does with it in `compile`, and the prefixed spelling is untouched by any of it.
         opts.no_builtin = Vec::new();
         opts.builtins = false;
         let prefixed = "long long f(long long x) { return __builtin_llabs(x); }\n";
-        assert!(
-            !run(&opts, prefixed).text().contains("call @llabs"),
-            "the prefix is a promise"
-        );
+        assert!(!run(&opts, prefixed).text().contains("call @llabs"), "the prefix is a promise");
     }
 
     /// The hint builtins are their first argument, and nothing is left of the hint.
@@ -12528,10 +10814,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("global @a : i64 = 7,"), "{text}");
         assert!(text.contains("global @b : i64 = 9,"), "{text}");
         assert!(text.contains("global @c : i64 = 8,"), "{text}");
-        assert!(
-            !text.contains("__builtin_expect"),
-            "it is not a call to anything:\n{text}"
-        );
+        assert!(!text.contains("__builtin_expect"), "it is not a call to anything:\n{text}");
 
         // A narrower argument is widened by the prototype before it is handed back, and it is
         // widened with its sign, since the parameter is a signed `long`.
@@ -12542,10 +10825,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // and neither is the third. What is left of each statement is the first argument widened,
         // which nothing reads and which the first pass that looks for dead code will take out.
         let one = "block0:\n    %0 = iconst.i32 0\n    %1 = iconst.i32 1\n    %2 = sext.i64 %1\n    return %0\n";
-        assert_eq!(
-            body("int f(void) { int i = 0; __builtin_expect(1, i++); return i; }\n"),
-            one
-        );
+        assert_eq!(body("int f(void) { int i = 0; __builtin_expect(1, i++); return i; }\n"), one);
         let source = "int g(void) { int i = 0; __builtin_expect_with_probability(1, i++, 0.5); return i; }\n";
         assert_eq!(body(source), one);
 
@@ -12555,15 +10835,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // come out the same as the pair above.
         let kept = body("int f(int n) { int i = 0; __builtin_expect(n, i++); return i; }\n");
         assert!(kept.contains("add.nsw"), "the hint still runs: {kept}");
-        assert!(
-            kept.ends_with("return %3\n"),
-            "and the answer is what it left behind: {kept}"
-        );
+        assert!(kept.ends_with("return %3\n"), "and the answer is what it left behind: {kept}");
         let both = "int g(int n) { int i = 0; __builtin_expect_with_probability(n, i++, 0.5); return i; }\n";
-        assert!(
-            body(both).contains("add.nsw"),
-            "and so does the one with three arguments"
-        );
+        assert!(body(both).contains("add.nsw"), "and so does the one with three arguments");
     }
 
     /// Both are the address they were handed, and neither is a call to anything.
@@ -12590,10 +10864,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             !text.contains("unreachable_hint"),
             "the promise became the end of a block:\n{text}"
         );
-        assert!(
-            !text.contains("call"),
-            "it is not a call to anything:\n{text}"
-        );
+        assert!(!text.contains("call"), "it is not a call to anything:\n{text}");
 
         let after = body("int g(int x) { __builtin_unreachable(); return x; }\n");
         assert!(!after.contains("return"), "{after}");
@@ -12637,21 +10908,14 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn a_signal_fence_keeps_the_compiler_back_and_asks_nothing_of_the_machine() {
         for order in ["0", "2", "3", "5"] {
             let source = format!("void f(void) {{ __atomic_signal_fence({order}); }}\n");
-            assert!(
-                !asm(&source).contains("mfence"),
-                "{order} is no instruction"
-            );
+            assert!(!asm(&source).contains("mfence"), "{order} is no instruction");
         }
         let fenced = optimized(concat!(
             "int flag;\n",
             "void f(void) { flag = 1; __atomic_signal_fence(__ATOMIC_SEQ_CST); flag = 2; }\n",
         ));
-        let first = fenced
-            .find("$1,")
-            .unwrap_or_else(|| panic!("the first store stays: {fenced}"));
-        let second = fenced
-            .find("$2,")
-            .unwrap_or_else(|| panic!("so does the second: {fenced}"));
+        let first = fenced.find("$1,").unwrap_or_else(|| panic!("the first store stays: {fenced}"));
+        let second = fenced.find("$2,").unwrap_or_else(|| panic!("so does the second: {fenced}"));
         assert!(first < second, "in the order they were written: {fenced}");
         assert!(!fenced.contains("mfence"), "{fenced}");
     }
@@ -12715,14 +10979,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "  return __builtin_object_size(loc + 3, 0) + __builtin_object_size(ls.b + 2, 1);\n",
             "}\n",
         ));
-        assert!(
-            text.contains("iconst.i64 17"),
-            "twenty bytes with three used: {text}"
-        );
-        assert!(
-            text.contains("iconst.i64 10"),
-            "twelve bytes with two used: {text}"
-        );
+        assert!(text.contains("iconst.i64 17"), "twenty bytes with three used: {text}");
+        assert!(text.contains("iconst.i64 10"), "twelve bytes with two used: {text}");
     }
 
     /// An address whose object the walk cannot see answers at whichever end of the range the kind
@@ -12791,9 +11049,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 + "{ return __builtin_dynamic_object_size(p, -1); }\n",
         ] {
             let messages = errors(&source);
-            let named = messages
-                .iter()
-                .any(|m| m.contains("E0709") && m.contains("0 to 3"));
+            let named = messages.iter().any(|m| m.contains("E0709") && m.contains("0 to 3"));
             assert!(named, "expected a complaint about the kind in {messages:?}");
         }
     }
@@ -12813,18 +11069,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "}\n",
             "void g(void) { __builtin_longjmp(buf, 1); }\n",
         ));
-        assert!(
-            text.contains("= setjmp_marker.i32 %0\n"),
-            "the save answers a value: {text}"
-        );
-        assert!(
-            text.contains("    longjmp_marker %0\n"),
-            "the restore answers nothing: {text}"
-        );
-        assert!(
-            !text.contains("call @"),
-            "neither of them is a call: {text}"
-        );
+        assert!(text.contains("= setjmp_marker.i32 %0\n"), "the save answers a value: {text}");
+        assert!(text.contains("    longjmp_marker %0\n"), "the restore answers nothing: {text}");
+        assert!(!text.contains("call @"), "neither of them is a call: {text}");
     }
 
     /// Every local of a function that saves a place lives in the frame, and not in a value.
@@ -12842,19 +11089,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "int g(int x) { int a = 0; if (x) return a; a = 1; return x; }\n",
         ));
         let (saves, plain) = text.split_once("func @g").expect("both functions");
-        assert_eq!(
-            saves.matches("= alloca").count(),
-            2,
-            "the parameter and the local: {text}"
-        );
-        assert!(
-            saves.contains("store %9 -> %2"),
-            "the local is written through: {text}"
-        );
-        assert!(
-            !plain.contains("alloca"),
-            "nothing in the plain one needs a slot: {text}"
-        );
+        assert_eq!(saves.matches("= alloca").count(), 2, "the parameter and the local: {text}");
+        assert!(saves.contains("store %9 -> %2"), "the local is written through: {text}");
+        assert!(!plain.contains("alloca"), "nothing in the plain one needs a slot: {text}");
     }
 
     /// A value set before a library `sigsetjmp` and read after the `siglongjmp` keeps a spill slot
@@ -12867,10 +11104,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// twice.
     #[test]
     fn a_value_live_across_sigsetjmp_keeps_its_spill_slot() {
-        each_spill_slot_written_once(&across(
-            "int __sigsetjmp(sigjmp_buf, int);\n",
-            "__sigsetjmp",
-        ));
+        each_spill_slot_written_once(&across("int __sigsetjmp(sigjmp_buf, int);\n", "__sigsetjmp"));
     }
 
     /// The same shape through a function with a name nobody knows, which only the attribute says
@@ -12931,27 +11165,19 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
         let text = optimized(source);
         let lines: Vec<&str> = text.lines().collect();
-        let call = lines
-            .iter()
-            .position(|line| line.starts_with("\tcall\tstrlen"))
-            .expect("a call");
+        let call =
+            lines.iter().position(|line| line.starts_with("\tcall\tstrlen")).expect("a call");
         let stored: Vec<&str> = lines[..call]
             .iter()
             .rev()
             .take_while(|line| line.starts_with("\tmovq\t%") && line.ends_with("(%rsp)"))
             .filter_map(|line| line.strip_prefix("\tmovq\t"))
             .collect();
-        assert!(
-            !stored.is_empty(),
-            "nothing put away in front of the call:\n{text}"
-        );
+        assert!(!stored.is_empty(), "nothing put away in front of the call:\n{text}");
         for store in stored {
             let (reg, slot) = store.split_once(", ").expect("a store");
             let load = format!("\tmovq\t{slot}, {reg}");
-            assert!(
-                lines[call + 1..].contains(&load.as_str()),
-                "{load} behind the call:\n{text}"
-            );
+            assert!(lines[call + 1..].contains(&load.as_str()), "{load} behind the call:\n{text}");
         }
     }
 
@@ -12997,37 +11223,24 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             opts.emit = EmitKind::Asm;
             opts.opt_level = level;
             let result = run(&opts, source);
-            assert_eq!(
-                result.messages,
-                Vec::<String>::new(),
-                "expected this to compile"
-            );
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
             let text = result.text();
             let body = text.split_once("\nmain:\n").expect("the function").1;
             let lines: Vec<&str> = body.lines().map(str::trim).collect();
-            let save = lines
-                .iter()
-                .position(|l| *l == "call\t_setjmp")
-                .expect("the save");
+            let save = lines.iter().position(|l| *l == "call\t_setjmp").expect("the save");
             let jump = lines[save..]
                 .iter()
                 .position(|l| *l == "call\twork" || *l == "call\tlongjmp")
                 .map(|at| save + at)
                 .unwrap_or_else(|| panic!("the call that jumps back at {level:?}:\n{text}"));
-            let printf = lines
-                .iter()
-                .position(|l| *l == "call\tprintf")
-                .expect("the handler");
+            let printf = lines.iter().position(|l| *l == "call\tprintf").expect("the handler");
             // The load that hands `v` to `printf` as its second argument. The handler can be laid
             // out on either side of the first arm, since that arm ends in a call that does not
             // come back, so this is the nearest one in front of the call and not one after the jump.
             let place = lines[..printf]
                 .iter()
                 .rev()
-                .find_map(|l| {
-                    l.strip_suffix(", %rsi")
-                        .or_else(|| l.strip_suffix(", %esi"))
-                })
+                .find_map(|l| l.strip_suffix(", %rsi").or_else(|| l.strip_suffix(", %esi")))
                 .and_then(|l| l.split_once('\t'))
                 .map(|(_, place)| place)
                 .unwrap_or_else(|| panic!("the handler hands v to printf at {level:?}:\n{text}"));
@@ -13077,23 +11290,15 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     fn each_spill_slot_written_once(text: &str) {
         let mut stored = Vec::new();
         for line in text.lines().map(str::trim) {
-            let Some(operands) = line.strip_prefix("movq\t%") else {
-                continue;
-            };
+            let Some(operands) = line.strip_prefix("movq\t%") else { continue };
             if let Some((_, place)) = operands.split_once(", ") {
                 if place.ends_with("(%rsp)") {
-                    assert!(
-                        !stored.contains(&place),
-                        "{place} is written twice:\n{text}"
-                    );
+                    assert!(!stored.contains(&place), "{place} is written twice:\n{text}");
                     stored.push(place);
                 }
             }
         }
-        assert!(
-            !stored.is_empty(),
-            "something should have been spilled:\n{text}"
-        );
+        assert!(!stored.is_empty(), "something should have been spilled:\n{text}");
     }
 
     /// What the save writes and where it leaves control, which is a new block.
@@ -13106,47 +11311,21 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// word in it, since a function control comes back into cannot use the red zone.
     #[test]
     fn the_save_writes_gccs_three_words_and_carries_on_in_a_new_block() {
-        let text = asm(concat!(
-            "void *buf[5];\n",
-            "int f(void) { return __builtin_setjmp(buf); }\n",
-        ));
+        let text =
+            asm(concat!("void *buf[5];\n", "int f(void) { return __builtin_setjmp(buf); }\n",));
         let body = text.split_once("\nf:\n").expect("the function").1;
-        assert!(
-            body.contains("\tmovq\t%rsp, %rbp\n"),
-            "a frame pointer whatever: {text}"
-        );
+        assert!(body.contains("\tmovq\t%rsp, %rbp\n"), "a frame pointer whatever: {text}");
         assert!(body.contains("\tsubq\t$8, %rsp\n"), "no red zone: {text}");
-        assert!(
-            body.contains("\tmovq\t%rbp, (%rax)\n"),
-            "the frame pointer: {text}"
-        );
-        assert!(
-            body.contains("\tmovq\t%rsp, 16(%rax)\n"),
-            "the stack pointer: {text}"
-        );
-        assert!(
-            body.contains("\tleaq\t.Lf_1(%rip), %rcx\n"),
-            "where to come back to: {text}"
-        );
-        assert!(
-            body.contains("\tmovq\t%rcx, 8(%rax)\n"),
-            "and that goes in the buffer: {text}"
-        );
+        assert!(body.contains("\tmovq\t%rbp, (%rax)\n"), "the frame pointer: {text}");
+        assert!(body.contains("\tmovq\t%rsp, 16(%rax)\n"), "the stack pointer: {text}");
+        assert!(body.contains("\tleaq\t.Lf_1(%rip), %rcx\n"), "where to come back to: {text}");
+        assert!(body.contains("\tmovq\t%rcx, 8(%rax)\n"), "and that goes in the buffer: {text}");
         assert!(!body.contains("24(%rax)"), "no fourth word: {text}");
-        let back = body
-            .split_once(".Lf_1:\n")
-            .expect("the block control comes back to")
-            .1;
-        assert!(
-            back.starts_with("\tmovq\t(%rsp), %rax\n"),
-            "the answer is read back: {text}"
-        );
+        let back = body.split_once(".Lf_1:\n").expect("the block control comes back to").1;
+        assert!(back.starts_with("\tmovq\t(%rsp), %rax\n"), "the answer is read back: {text}");
         let rest = back.split_once("\n").expect("more than the load").1;
         assert!(rest.contains("$1, "), "a one for the next arrival: {text}");
-        assert!(
-            rest.contains(", (%rsp)\n"),
-            "written where the answer was read: {text}"
-        );
+        assert!(rest.contains(", (%rsp)\n"), "written where the answer was read: {text}");
     }
 
     /// Nothing stays in a register across the save, which is said with a write of every one of
@@ -13158,19 +11337,11 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// stack the restore put back, rather than whatever is in the registers when control arrives.
     #[test]
     fn a_save_destroys_every_register_the_allocator_hands_out() {
-        let text = asm(concat!(
-            "void *buf[5];\n",
-            "int f(void) { return __builtin_setjmp(buf); }\n",
-        ));
+        let text =
+            asm(concat!("void *buf[5];\n", "int f(void) { return __builtin_setjmp(buf); }\n",));
         for reg in ["%rbx", "%r12", "%r13", "%r14", "%r15"] {
-            assert!(
-                text.contains(&format!("\tpushq\t{reg}\n")),
-                "{reg} is saved: {text}"
-            );
-            assert!(
-                text.contains(&format!("\tpopq\t{reg}\n")),
-                "{reg} is restored: {text}"
-            );
+            assert!(text.contains(&format!("\tpushq\t{reg}\n")), "{reg} is saved: {text}");
+            assert!(text.contains(&format!("\tpopq\t{reg}\n")), "{reg} is restored: {text}");
         }
     }
 
@@ -13188,29 +11359,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             opts.opt_level = level;
             let source = "void *buf[5];\nvoid g(void) { __builtin_longjmp(buf, 1); }\n";
             let result = run(&opts, source);
-            assert_eq!(
-                result.messages,
-                Vec::<String>::new(),
-                "expected this to compile"
-            );
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
             let text = result.text().to_owned();
-            let jump = text
-                .find("\tjmp\t*%")
-                .unwrap_or_else(|| panic!("an indirect jump: {text}"));
-            assert!(
-                !text.contains("24("),
-                "no fourth word is read at {level:?}: {text}"
-            );
-            let stack = text
-                .find(", %rsp\n")
-                .unwrap_or_else(|| panic!("the stack back: {text}"));
-            let frame = text
-                .find(", %rbp\n")
-                .unwrap_or_else(|| panic!("the frame back: {text}"));
-            assert!(
-                stack < jump,
-                "the stack goes back first at {level:?}: {text}"
-            );
+            let jump = text.find("\tjmp\t*%").unwrap_or_else(|| panic!("an indirect jump: {text}"));
+            assert!(!text.contains("24("), "no fourth word is read at {level:?}: {text}");
+            let stack = text.find(", %rsp\n").unwrap_or_else(|| panic!("the stack back: {text}"));
+            let frame = text.find(", %rbp\n").unwrap_or_else(|| panic!("the frame back: {text}"));
+            assert!(stack < jump, "the stack goes back first at {level:?}: {text}");
             assert!(frame < jump, "and so does the frame at {level:?}: {text}");
         }
     }
@@ -13228,10 +11383,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         ] {
             let messages = errors(source);
             let named = messages.iter().any(|m| m.contains("E0710"));
-            assert!(
-                named,
-                "expected a complaint about the value in {messages:?}"
-            );
+            assert!(named, "expected a complaint about the value in {messages:?}");
         }
     }
 
@@ -13280,10 +11432,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                          return p() + table[0]() + reaches_deeper();\n\
                        }\n");
         for kept in ["by_address", "in_an_image", "deeper", "reaches_deeper"] {
-            assert!(
-                text.contains(&format!("func @{kept}")),
-                "expected {kept} in:\n{text}"
-            );
+            assert!(text.contains(&format!("func @{kept}")), "expected {kept} in:\n{text}");
         }
     }
 
@@ -13308,14 +11457,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// makes on a parameter it names stays, since nothing is assumed from the claim.
     #[test]
     fn nonnull_is_answered_yes_and_taken_with_or_without_operands() {
-        let text = ir(
-            "#if !__has_attribute(nonnull) || !__has_attribute(__nonnull__)\n\
+        let text = ir("#if !__has_attribute(nonnull) || !__has_attribute(__nonnull__)\n\
              #error nonnull\n\
              #endif\n\
              __attribute__((nonnull)) int first(char *p);\n\
              int both(char *a, int n, char *b) __attribute__((__nonnull__(1, 3)));\n\
-             int both(char *a, int n, char *b) { return first(a) + n + (b != 0); }\n",
-        );
+             int both(char *a, int n, char *b) { return first(a) + n + (b != 0); }\n");
         assert!(text.contains("func @both"), "{text}");
     }
 
@@ -13344,10 +11491,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         ] {
             let source = format!("int f(double x, double y) {{ return {builtin}(x, y); }}\n");
             let text = tast(&source);
-            assert!(
-                text.contains(&format!("{operator} : int")),
-                "for {builtin}:\n{text}"
-            );
+            assert!(text.contains(&format!("{operator} : int")), "for {builtin}:\n{text}");
         }
     }
 
@@ -13470,16 +11614,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // of the number, since the encoding of a value whose sign bit is clear rises with the
         // value in every format this compiles for.
         assert!(text.contains("%1 = bitcast.i64 %0"), "{text}");
-        assert!(
-            text.contains("%2 = iconst.i64 9223372036854775807"),
-            "{text}"
-        );
+        assert!(text.contains("%2 = iconst.i64 9223372036854775807"), "{text}");
         assert!(text.contains("%3 = and %1, %2"), "{text}");
         assert!(text.contains("%4 = iconst.i64 4503599627370496"), "{text}");
-        assert!(
-            text.contains("%5 = iconst.i64 9218868437227405312"),
-            "{text}"
-        );
+        assert!(text.contains("%5 = iconst.i64 9218868437227405312"), "{text}");
         assert!(text.contains("%6 = icmp uge %3, %4"), "{text}");
         assert!(text.contains("%7 = icmp ult %3, %5"), "{text}");
         assert!(text.contains("%8 = and %6, %7"), "{text}");
@@ -13589,16 +11727,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "long double c = __builtin_infl();\n",
             "double d = __builtin_huge_val();\n",
         ));
-        assert!(
-            text.contains("global @a : f64 = 0x7ff0000000000000,"),
-            "{text}"
-        );
+        assert!(text.contains("global @a : f64 = 0x7ff0000000000000,"), "{text}");
         assert!(text.contains("global @b : f32 = 0x7f800000,"), "{text}");
         assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
-        assert!(
-            text.contains("global @d : f64 = 0x7ff0000000000000,"),
-            "{text}"
-        );
+        assert!(text.contains("global @d : f64 = 0x7ff0000000000000,"), "{text}");
         assert!(!text.contains("call"), "{text}");
     }
 
@@ -13623,26 +11755,11 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "float g = __builtin_nansf(\"\");\n",
             "long double h = __builtin_nansl(\"\");\n",
         ));
-        assert!(
-            text.contains("global @a : f64 = 0x7ff8000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @b : f64 = 0x7ff8000000000001,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @c : f64 = 0x7ff8000000000008,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @d : f64 = 0x7ff4000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @e : f64 = 0x7ff0000000000001,"),
-            "{text}"
-        );
+        assert!(text.contains("global @a : f64 = 0x7ff8000000000000,"), "{text}");
+        assert!(text.contains("global @b : f64 = 0x7ff8000000000001,"), "{text}");
+        assert!(text.contains("global @c : f64 = 0x7ff8000000000008,"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x7ff4000000000000,"), "{text}");
+        assert!(text.contains("global @e : f64 = 0x7ff0000000000001,"), "{text}");
         assert!(text.contains("global @f : f32 = 0x7fc00001,"), "{text}");
         assert!(text.contains("global @g : f32 = 0x7fa00000,"), "{text}");
         assert!(text.contains("f80 0x7fffa000000000000000"), "{text}");
@@ -13707,15 +11824,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let body = format!("{header}size_t f(void) {{ return strlen(\"ab\"); }}\n");
         let mut opts = options();
         opts.emit = EmitKind::Ir;
-        assert!(
-            !run(&opts, &body).text().contains("call @strlen("),
-            "builtins on"
-        );
+        assert!(!run(&opts, &body).text().contains("call @strlen("), "builtins on");
         opts.no_builtin = vec!["strlen".to_owned()];
-        assert!(
-            run(&opts, &body).text().contains("call @strlen("),
-            "-fno-builtin-strlen"
-        );
+        assert!(run(&opts, &body).text().contains("call @strlen("), "-fno-builtin-strlen");
 
         let own = ir("int strlen(const char *s);\nint f(void) { return strlen(\"ab\"); }\n");
         assert!(own.contains("call @strlen("), "{own}");
@@ -13771,24 +11882,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "_Float128 f = __builtin_nanf128(\"0x1\");\n",
             "_Float16 g = __builtin_inff16();\n",
         ));
-        assert!(
-            text.contains("global @a : f128 = 0x7fff0000000000000000000000000000,"),
-            "{text}"
-        );
+        assert!(text.contains("global @a : f128 = 0x7fff0000000000000000000000000000,"), "{text}");
         assert!(text.contains("global @b : f32 = 0x7f800000,"), "{text}");
-        assert!(
-            text.contains("global @c : f64 = 0x7ff8000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @d : f64 = 0x7ff4000000000000,"),
-            "{text}"
-        );
+        assert!(text.contains("global @c : f64 = 0x7ff8000000000000,"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x7ff4000000000000,"), "{text}");
         assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
-        assert!(
-            text.contains("global @f : f128 = 0x7fff8000000000000000000000000001,"),
-            "{text}"
-        );
+        assert!(text.contains("global @f : f128 = 0x7fff8000000000000000000000000001,"), "{text}");
         assert!(text.contains("global @g : f16 = 0x7c00,"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
@@ -13802,10 +11901,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
         let result = run(&opts, "double f(void) { return __builtin_inff128(); }\n");
         assert!(
-            result
-                .messages
-                .iter()
-                .any(|m| m.contains("implicit declaration of function")),
+            result.messages.iter().any(|m| m.contains("implicit declaration of function")),
             "{:?}",
             result.messages
         );
@@ -13871,9 +11967,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // Six words and the address the arguments in memory start at, and eight vectors.
         assert!(text.matches("x64.mov_mr_64").count() >= 7, "{text}");
         assert!(text.matches("x64.movaps_mr").count() >= 8, "{text}");
-        for reg in [
-            "$rdi", "$rsi", "$rdx", "$rcx", "$r8", "$r9", "$xmm0", "$xmm7",
-        ] {
+        for reg in ["$rdi", "$rsi", "$rdx", "$rcx", "$r8", "$r9", "$xmm0", "$xmm7"] {
             assert!(text.contains(reg), "{reg} is not saved in\n{text}");
         }
 
@@ -13956,16 +12050,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(result.messages, Vec::<String>::new());
         let text = result.text();
         let (callee, caller) = text.split_once("mfunc @h").expect("both functions");
-        assert!(
-            callee.contains("$rdx") && callee.contains("$rax"),
-            "{callee}"
-        );
+        assert!(callee.contains("$rdx") && callee.contains("$rax"), "{callee}");
         assert!(callee.contains("x64.movq_to_xmm"), "{callee}");
         assert!(callee.contains("x64.movq_from_xmm"), "{callee}");
-        assert!(
-            caller.contains("$rcx") && caller.contains("$rax"),
-            "{caller}"
-        );
+        assert!(caller.contains("$rcx") && caller.contains("$rax"), "{caller}");
     }
 
     /// A shuffle whose operands gcc would refuse is refused, in gcc's words.
@@ -14012,17 +12100,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// build stopped. That is issue 630.
     #[test]
     fn the_plain_math_names_are_the_same_mask_and_not_a_call() {
-        let text = body(concat!(
-            "double fabs(double x);\n",
-            "double f(double x) { return fabs(x); }\n",
-        ));
+        let text =
+            body(concat!("double fabs(double x);\n", "double f(double x) { return fabs(x); }\n",));
         assert!(text.contains("iconst.i64 9223372036854775807"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
-        let text = body(concat!(
-            "float fabsf(float x);\n",
-            "float f(float x) { return fabsf(x); }\n",
-        ));
+        let text =
+            body(concat!("float fabsf(float x);\n", "float f(float x) { return fabsf(x); }\n",));
         assert!(text.contains("bitcast.i32 %0"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
@@ -14062,57 +12146,33 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "static double fabs(double b) { return 7; }\n",
             "double f(double x) { return fabs(x); }\n",
         );
-        assert!(
-            ir(taken).contains("call @fabs"),
-            "a static definition is the program's own"
-        );
+        assert!(ir(taken).contains("call @fabs"), "a static definition is the program's own");
 
         let retyped = concat!("int fabs(int b);\n", "int f(int x) { return fabs(x); }\n");
-        assert!(
-            ir(retyped).contains("call @fabs"),
-            "another type is another function"
-        );
+        assert!(ir(retyped).contains("call @fabs"), "another type is another function");
 
-        let plain = concat!(
-            "double fabs(double b);\n",
-            "double f(double x) { return fabs(x); }\n"
-        );
+        let plain = concat!("double fabs(double b);\n", "double f(double x) { return fabs(x); }\n");
         let mut opts = options();
         opts.emit = EmitKind::Ir;
-        assert!(
-            !run(&opts, plain).text().contains("call @fabs"),
-            "the library's by default"
-        );
+        assert!(!run(&opts, plain).text().contains("call @fabs"), "the library's by default");
 
         opts.builtins = false;
-        assert!(
-            run(&opts, plain).text().contains("call @fabs"),
-            "-fno-builtin"
-        );
+        assert!(run(&opts, plain).text().contains("call @fabs"), "-fno-builtin");
 
         opts.builtins = true;
         opts.no_builtin = vec!["fabs".to_owned()];
-        assert!(
-            run(&opts, plain).text().contains("call @fabs"),
-            "-fno-builtin-fabs"
-        );
+        assert!(run(&opts, plain).text().contains("call @fabs"), "-fno-builtin-fabs");
         let one = concat!(
             "double copysign(double a, double b);\n",
             "double f(double x) { return copysign(x, 1.0); }\n",
         );
-        assert!(
-            !run(&opts, one).text().contains("call @copysign"),
-            "one name and not the family"
-        );
+        assert!(!run(&opts, one).text().contains("call @copysign"), "one name and not the family");
 
         // The prefixed spelling is untouched by any of it, which is what the prefix is for.
         opts.no_builtin = Vec::new();
         opts.builtins = false;
         let prefixed = "double f(double x) { return __builtin_fabs(x); }\n";
-        assert!(
-            !run(&opts, prefixed).text().contains("call @fabs"),
-            "the prefix is not a library"
-        );
+        assert!(!run(&opts, prefixed).text().contains("call @fabs"), "the prefix is not a library");
     }
 
     /// The sign builtins answer a zero and a nan the way the bits say.
@@ -14136,26 +12196,11 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "long double h = __builtin_copysignl(1.0L, -1.0L);\n",
             "long double i = __builtin_fabsl(-__builtin_infl());\n",
         ));
-        assert!(
-            text.contains("global @a : f64 = 0x400c000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @b : f64 = 0xbff0000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @c : f64 = 0x8000000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @d : f64 = 0x7ff8000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @e : f64 = 0x7ff8000000000001,"),
-            "{text}"
-        );
+        assert!(text.contains("global @a : f64 = 0x400c000000000000,"), "{text}");
+        assert!(text.contains("global @b : f64 = 0xbff0000000000000,"), "{text}");
+        assert!(text.contains("global @c : f64 = 0x8000000000000000,"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x7ff8000000000000,"), "{text}");
+        assert!(text.contains("global @e : f64 = 0x7ff8000000000001,"), "{text}");
         assert!(text.contains("global @g : f32 = 0x0,"), "{text}");
         assert!(text.contains("f80 0xbfff8000000000000000"), "{text}");
         assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
@@ -14206,10 +12251,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // `~` on a complex operand is the same operator, which is the spelling the language has
         // had all along and the one a program that never included the header writes.
         let written = body("_Complex double f(_Complex double z) { return ~z; }\n");
-        assert_eq!(
-            written, text,
-            "the name and the operator are the same thing"
-        );
+        assert_eq!(written, text, "the name and the operator are the same thing");
 
         // The plain names, which are the ones the header declares and so the ones programs write.
         let text = body(concat!(
@@ -14230,15 +12272,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "static double creal(_Complex double z) { return 7; }\n",
             "double f(_Complex double z) { return creal(z); }\n",
         );
-        assert!(
-            ir(taken).contains("call @creal"),
-            "a static definition is the program's own"
-        );
+        assert!(ir(taken).contains("call @creal"), "a static definition is the program's own");
         let retyped = concat!("int cimag(int z);\n", "int f(int z) { return cimag(z); }\n");
-        assert!(
-            ir(retyped).contains("call @cimag"),
-            "another type is another function"
-        );
+        assert!(ir(retyped).contains("call @cimag"), "another type is another function");
         let plain = concat!(
             "double cimag(_Complex double z);\n",
             "double f(_Complex double z) { return cimag(z); }\n",
@@ -14246,16 +12282,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         opts.builtins = false;
-        assert!(
-            run(&opts, plain).text().contains("call @cimag"),
-            "-fno-builtin"
-        );
+        assert!(run(&opts, plain).text().contains("call @cimag"), "-fno-builtin");
         opts.builtins = true;
         opts.no_builtin = vec!["cimag".to_owned()];
-        assert!(
-            run(&opts, plain).text().contains("call @cimag"),
-            "-fno-builtin-cimag"
-        );
+        assert!(run(&opts, plain).text().contains("call @cimag"), "-fno-builtin-cimag");
 
         // A constant folds, which is what a static initializer written with one needs.
         let text = ir(concat!(
@@ -14263,14 +12293,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "double b = __builtin_cimag(1.5 + 2.5i);\n",
             "_Complex double c = __builtin_conj(1.5 + 2.5i);\n",
         ));
-        assert!(
-            text.contains("global @a : f64 = 0x3ff8000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @b : f64 = 0x4004000000000000,"),
-            "{text}"
-        );
+        assert!(text.contains("global @a : f64 = 0x3ff8000000000000,"), "{text}");
+        assert!(text.contains("global @b : f64 = 0x4004000000000000,"), "{text}");
         assert!(
             text.contains("{ f64 0x3ff8000000000000, f64 0xc004000000000000 }"),
             "the conjugate of a constant is the constant with the second half negated: {text}"
@@ -14295,10 +12319,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
         // The halves keep the type they were written in, so two floats are a `_Complex float`.
         let text = body("_Complex float f(float x, float y) { return __builtin_complex(x, y); }\n");
-        assert!(
-            !text.contains("fpext") && !text.contains("fptrunc"),
-            "{text}"
-        );
+        assert!(!text.contains("fpext") && !text.contains("fptrunc"), "{text}");
 
         // Constants fold into a static initializer, and a negative zero and an infinity are the
         // halves that were written rather than what a sum or a product would make of them.
@@ -14309,18 +12330,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "_Complex double *pa = &a, *pb = &b;\n",
             "_Complex float *pc = &c;\n",
         ));
-        assert!(
-            text.contains("{ f64 0x3ff8000000000000, f64 0x8000000000000000 }"),
-            "{text}"
-        );
-        assert!(
-            text.contains("{ f64 0x0, f64 0x7ff0000000000000 }"),
-            "{text}"
-        );
-        assert!(
-            text.contains("{ f32 0x80000000, f32 0x40200000 }"),
-            "{text}"
-        );
+        assert!(text.contains("{ f64 0x3ff8000000000000, f64 0x8000000000000000 }"), "{text}");
+        assert!(text.contains("{ f64 0x0, f64 0x7ff0000000000000 }"), "{text}");
+        assert!(text.contains("{ f32 0x80000000, f32 0x40200000 }"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
         // glibc's own definition of the macro, which casts each argument to the type it wants.
@@ -14329,10 +12341,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "#define INFINITY (__builtin_inff ())\n",
             "_Complex double z = CMPLX(0.0, INFINITY);\n",
         ));
-        assert!(
-            text.contains("{ f64 0x0, f64 0x7ff0000000000000 }"),
-            "{text}"
-        );
+        assert!(text.contains("{ f64 0x0, f64 0x7ff0000000000000 }"), "{text}");
     }
 
     /// `__builtin_complex` refuses what gcc refuses, in gcc's words.
@@ -14355,10 +12364,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 "float g; double d; void f(void) { __builtin_complex(g, d); }\n",
                 "operands of different types",
             ),
-            (
-                "double d; void f(void) { __builtin_complex(d); }\n",
-                "wrong number of arguments to",
-            ),
+            ("double d; void f(void) { __builtin_complex(d); }\n", "wrong number of arguments to"),
             (
                 "double d; void f(void) { __builtin_complex(d, d, d); }\n",
                 "wrong number of arguments to",
@@ -14426,15 +12432,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 continue;
             }
             let text = body(&source);
-            assert!(
-                text.contains(&format!("call @{wanted}(")),
-                "{call} with {params}:\n{text}"
-            );
+            assert!(text.contains(&format!("call @{wanted}(")), "{call} with {params}:\n{text}");
         }
         // The answer has the type of the function called.
-        let text = ir(&format!(
-            "{TGMATH}float x; int s = sizeof A(x), t = sizeof A(1);\n"
-        ));
+        let text = ir(&format!("{TGMATH}float x; int s = sizeof A(x), t = sizeof A(1);\n"));
         assert!(text.contains("global @s : i32 = 4,"), "{text}");
         assert!(text.contains("global @t : i32 = 8,"), "{text}");
         let text = ir("int yes = __has_builtin(__builtin_tgmath);\n");
@@ -14445,10 +12446,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn tgmath_refuses_what_gcc_refuses() {
         let cases = [
-            (
-                "__builtin_tgmath(af, a)",
-                "too few arguments to '__builtin_tgmath'",
-            ),
+            ("__builtin_tgmath(af, a)", "too few arguments to '__builtin_tgmath'"),
             (
                 "__builtin_tgmath(i, a, 1.0)",
                 "argument 1 of '__builtin_tgmath' is not a function pointer",
@@ -14469,14 +12467,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 "__builtin_tgmath(af, a, (void *)0)",
                 "invalid type of argument 1 of type-generic function",
             ),
-            (
-                "__builtin_tgmath(af, a, 1.0L)",
-                "no matching function for type-generic call",
-            ),
-            (
-                "N(1.0f128, 1.0)",
-                "no matching function for type-generic call",
-            ),
+            ("__builtin_tgmath(af, a, 1.0L)", "no matching function for type-generic call"),
+            ("N(1.0f128, 1.0)", "no matching function for type-generic call"),
         ];
         for (call, wanted) in cases {
             let source = format!("{TGMATH}int i; int u(int);\nvoid f(void) {{ {call}; }}\n");
@@ -14512,39 +12504,15 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "double ceil(double x);\n",
             "double i = ceil(2.25);\n",
         ));
-        assert!(
-            text.contains("global @a : f64 = 0x4000000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @b : f64 = 0x3ff0000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @c : f64 = 0xbff0000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @d : f64 = 0x4008000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @e : f64 = 0x8000000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @f : f64 = 0x4000000000000000,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @g : f64 = 0x3ff0000000000000,"),
-            "{text}"
-        );
+        assert!(text.contains("global @a : f64 = 0x4000000000000000,"), "{text}");
+        assert!(text.contains("global @b : f64 = 0x3ff0000000000000,"), "{text}");
+        assert!(text.contains("global @c : f64 = 0xbff0000000000000,"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x4008000000000000,"), "{text}");
+        assert!(text.contains("global @e : f64 = 0x8000000000000000,"), "{text}");
+        assert!(text.contains("global @f : f64 = 0x4000000000000000,"), "{text}");
+        assert!(text.contains("global @g : f64 = 0x3ff0000000000000,"), "{text}");
         assert!(text.contains("global @h : f32 = 0x40000000,"), "{text}");
-        assert!(
-            text.contains("global @i : f64 = 0x4008000000000000,"),
-            "{text}"
-        );
+        assert!(text.contains("global @i : f64 = 0x4008000000000000,"), "{text}");
         assert!(!text.contains("call"), "{text}");
     }
 
@@ -14597,17 +12565,11 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
         // `-fno-builtin-ceil` is a program saying it means its own `ceil`, and it leaves the
         // prefixed spelling alone, which is what writing the prefix is for.
-        let plain = concat!(
-            "double ceil(double x);\n",
-            "double f(void) { return ceil(2.25); }\n"
-        );
+        let plain = concat!("double ceil(double x);\n", "double f(void) { return ceil(2.25); }\n");
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         opts.no_builtin = vec!["ceil".to_owned()];
-        assert!(
-            run(&opts, plain).text().contains("call @ceil("),
-            "-fno-builtin-ceil"
-        );
+        assert!(run(&opts, plain).text().contains("call @ceil("), "-fno-builtin-ceil");
     }
 
     /// A `constexpr` object is a named constant, which is the whole reason the keyword exists.
@@ -14695,12 +12657,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
         let compiled = run(&opts, variable);
         assert!(compiled.messages.is_empty(), "{:?}", compiled.messages);
-        assert_eq!(
-            compiled.text().matches("alloca %").count(),
-            2,
-            "{}",
-            compiled.text()
-        );
+        assert_eq!(compiled.text().matches("alloca %").count(), 2, "{}", compiled.text());
 
         // gcc refuses the object everywhere else a constant is required.
         let elsewhere = "const int n = 4;\n_Static_assert(n == 4, \"\");\n";
@@ -14852,31 +12809,15 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "{ return a[0]; }\n",
         );
         let result = run(&opts, source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to compile:\n{source}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
         let text = result.text();
-        assert!(
-            text.contains("add : int(int, int) function external defined"),
-            "{text}"
-        );
-        assert!(
-            text.contains("promoted : int(int) function external defined"),
-            "{text}"
-        );
+        assert!(text.contains("add : int(int, int) function external defined"), "{text}");
+        assert!(text.contains("promoted : int(int) function external defined"), "{text}");
         // The body still sees the `char` it was declared as, whatever the caller hands over.
         assert!(text.contains("c : char object automatic defined"), "{text}");
-        assert!(
-            text.contains("narrow : int(char) function external defined"),
-            "{text}"
-        );
+        assert!(text.contains("narrow : int(char) function external defined"), "{text}");
         // An array parameter is a pointer here as much as it is in a prototype.
-        assert!(
-            text.contains("first : int(int *) function external defined"),
-            "{text}"
-        );
+        assert!(text.contains("first : int(int *) function external defined"), "{text}");
     }
 
     /// What the two halves of an old-style parameter list can disagree about.
@@ -14890,22 +12831,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.std = Std::C17;
         for (source, message) in [
-            (
-                "int f(a, a)\nint a;\n{ return a; }\n",
-                "1:10: error: multiple parameters named 'a'",
-            ),
+            ("int f(a, a)\nint a;\n{ return a; }\n", "1:10: error: multiple parameters named 'a'"),
             (
                 "int f(a)\nint a;\nint b;\n{ return a; }\n",
                 "3:5: error: declaration for parameter 'b' but no such parameter",
             ),
-            (
-                "int f(a)\nint a;\nint a;\n{ return a; }\n",
-                "3:5: error: redefinition of parameter",
-            ),
-            (
-                "int f(a)\nint a = 1;\n{ return a; }\n",
-                "2:5: error: parameter 'a' is initialized",
-            ),
+            ("int f(a)\nint a;\nint a;\n{ return a; }\n", "3:5: error: redefinition of parameter"),
+            ("int f(a)\nint a = 1;\n{ return a; }\n", "2:5: error: parameter 'a' is initialized"),
             (
                 "int f(a)\nstatic int a;\n{ return a; }\n",
                 "2:12: error: storage class specified for parameter 'a'",
@@ -14917,11 +12849,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         ] {
             let result = run(&opts, source);
             assert!(result.failed(), "expected this to fail:\n{source}");
-            assert!(
-                result.messages[0].contains(message),
-                "{:?}",
-                result.messages
-            );
+            assert!(result.messages[0].contains(message), "{:?}", result.messages);
         }
 
         // A name the declarations never mention. C89 gave it an `int` and gcc still takes it
@@ -14929,11 +12857,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let implicit = "int f(a, b)\nint a;\n{ return a + b; }\n";
         let mut older = options();
         older.std = Std::C89;
-        assert!(
-            !run(&older, implicit).failed(),
-            "{:?}",
-            run(&older, implicit).messages
-        );
+        assert!(!run(&older, implicit).failed(), "{:?}", run(&older, implicit).messages);
         let result = run(&opts, implicit);
         assert!(
             result.messages[0].contains("1:10: error: type of 'b' defaults to 'int'"),
@@ -14953,10 +12877,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             result.messages,
             ["/main.c:1:5: warning: old-style function definition [E0412]"]
         );
-        assert!(
-            run(&opts, plain).messages.is_empty(),
-            "and nothing to say in the dialects before"
-        );
+        assert!(run(&opts, plain).messages.is_empty(), "and nothing to say in the dialects before");
     }
 
     /// Five constraints gcc 16 refuses that were taken quietly, each with the words gcc uses.
@@ -14971,44 +12892,24 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.std = Std::C23;
         let errors = |source: &str| -> Vec<String> {
             let result = run(&opts, source);
-            result
-                .messages
-                .iter()
-                .filter(|m| m.contains(": error: "))
-                .cloned()
-                .collect()
+            result.messages.iter().filter(|m| m.contains(": error: ")).cloned().collect()
         };
         let said = errors("void f(static int x);\nvoid g(typedef int);\nvoid h(register int r);\n");
         assert_eq!(said.len(), 2, "{said:?}");
-        assert!(
-            said[0].contains("storage class specified for parameter 'x'"),
-            "{said:?}"
-        );
-        assert!(
-            said[1].contains("storage class specified for unnamed parameter"),
-            "{said:?}"
-        );
+        assert!(said[0].contains("storage class specified for parameter 'x'"), "{said:?}");
+        assert!(said[1].contains("storage class specified for unnamed parameter"), "{said:?}");
 
         let said = errors(
             "struct S { int a; };\nvoid f(register int p) { register struct S s; int *q = &s.a; \
              q = &p; (void)q; }\n",
         );
         assert_eq!(said.len(), 2, "{said:?}");
-        assert!(
-            said[0].contains("address of register variable 's' requested"),
-            "{said:?}"
-        );
-        assert!(
-            said[1].contains("address of register variable 'p' requested"),
-            "{said:?}"
-        );
+        assert!(said[0].contains("address of register variable 's' requested"), "{said:?}");
+        assert!(said[1].contains("address of register variable 'p' requested"), "{said:?}");
 
         let said = errors("struct B { int x : 3; } b;\ntypeof(b.x) y;\n");
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(
-            said[0].contains("'typeof' applied to a bit-field"),
-            "{said:?}"
-        );
+        assert!(said[0].contains("'typeof' applied to a bit-field"), "{said:?}");
 
         let said = errors(
             "int g;\nconstexpr int a = 1.0;\nconstexpr unsigned u = -1;\nconstexpr bool b = 2;\n\
@@ -15018,31 +12919,16 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let at = |line: usize, text: &str| {
             said[line - 2].starts_with(&format!("/main.c:{line}:")) && said[line - 2].contains(text)
         };
-        assert!(
-            at(
-                2,
-                "'constexpr' integer initializer is not an integer constant"
-            ),
-            "{said:?}"
-        );
-        assert!(
-            at(3, "'constexpr' initializer not representable"),
-            "{said:?}"
-        );
-        assert!(
-            at(4, "'constexpr' initializer not representable"),
-            "{said:?}"
-        );
+        assert!(at(2, "'constexpr' integer initializer is not an integer constant"), "{said:?}");
+        assert!(at(3, "'constexpr' initializer not representable"), "{said:?}");
+        assert!(at(4, "'constexpr' initializer not representable"), "{said:?}");
         assert!(at(5, "initializer element is not constant"), "{said:?}");
 
         let mut strict = options();
         strict.std = Std::C23;
         strict.named_warnings.pedantic_errors();
         let result = run(&strict, "int f(a)\nint a;\n{ return a; }\n");
-        assert_eq!(
-            result.messages,
-            ["/main.c:1:5: error: old-style function definition [E0412]"]
-        );
+        assert_eq!(result.messages, ["/main.c:1:5: error: old-style function definition [E0412]"]);
     }
 
     /// Three messages that said something true in words gcc 16 does not use.
@@ -15056,19 +12942,11 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         opts.std = Std::C23;
         let errors = |source: &str| -> Vec<String> {
             let result = run(&opts, source);
-            result
-                .messages
-                .iter()
-                .filter(|m| m.contains(": error: "))
-                .cloned()
-                .collect()
+            result.messages.iter().filter(|m| m.contains(": error: ")).cloned().collect()
         };
         let said = errors("int main(void) { long char c = 0; return c; }\n");
         assert_eq!(said.len(), 1, "{said:?}");
-        assert!(
-            said[0].contains("both 'long' and 'char' in declaration specifiers"),
-            "{said:?}"
-        );
+        assert!(said[0].contains("both 'long' and 'char' in declaration specifiers"), "{said:?}");
 
         let said = errors("int main(void) { foo x; x = 1; return x; }\n");
         assert_eq!(said.len(), 1, "{said:?}");
@@ -15098,11 +12976,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         for source in [array, member] {
             let result = run(&options(), source);
             assert!(!result.failed(), "{:?}", result.messages);
-            assert!(
-                result.messages.is_empty(),
-                "nothing to say: {:?}",
-                result.messages
-            );
+            assert!(result.messages.is_empty(), "nothing to say: {:?}", result.messages);
         }
 
         let mut asked = options();
@@ -15133,18 +13007,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "unsigned long b = sizeof(struct brim);\n",
             "unsigned long y = sizeof(struct bitty);\n",
         ));
-        assert!(
-            text.contains("global @h : i64 = 9223372036854775312,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @b : i64 = 9223372036854775807,"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @y : i64 = 9223372036854775804,"),
-            "{text}"
-        );
+        assert!(text.contains("global @h : i64 = 9223372036854775312,"), "{text}");
+        assert!(text.contains("global @b : i64 = 9223372036854775807,"), "{text}");
+        assert!(text.contains("global @y : i64 = 9223372036854775804,"), "{text}");
 
         let mut opts = options();
         opts.emit = EmitKind::Ir;
@@ -15183,32 +13048,17 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         source.push(0xff);
         source.extend_from_slice(b"';\n");
         let result = compile_bytes(&source);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "a raw byte in a literal is that byte"
-        );
-        assert!(
-            result.text().contains(r#"bytes "a\ffb\00""#),
-            "{}",
-            result.text()
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "a raw byte in a literal is that byte");
+        assert!(result.text().contains(r#"bytes "a\ffb\00""#), "{}", result.text());
         // Plain `char` is signed on this target, so the constant is minus one rather than 255.
-        assert!(
-            result.text().contains("global @c : i8 = -1,"),
-            "{}",
-            result.text()
-        );
+        assert!(result.text().contains("global @c : i8 = -1,"), "{}", result.text());
 
         let mut stray = b"int a".to_vec();
         stray.push(0xff);
         stray.extend_from_slice(b" = 1;\n");
         let result = compile_bytes(&stray);
         assert!(
-            result
-                .messages
-                .iter()
-                .any(|m| m.contains("source is not valid UTF-8 here")),
+            result.messages.iter().any(|m| m.contains("source is not valid UTF-8 here")),
             "{:?}",
             result.messages
         );
@@ -15217,10 +13067,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     #[test]
     fn an_object_becomes_a_global_with_an_image_and_a_function_becomes_a_func() {
         let text = ir("int x = 7;\nint add(int a, int b) { return a + b; }\n");
-        assert!(
-            text.contains("global @x : i32 = 7, align 4, linkage(external)\n"),
-            "{text}"
-        );
+        assert!(text.contains("global @x : i32 = 7, align 4, linkage(external)\n"), "{text}");
         let expected = "\
 func @add(i32, i32) -> i32, linkage(external) {
 block0(%0: i32, %1: i32):
@@ -15309,16 +13156,10 @@ block2(%7: i1):
             "int g;\nint f(int b) { if (b == 0 && (g-- && 0)) return 1; return 0; }\n",
         ] {
             let text = body(source);
-            let branch = text
-                .find("br_if")
-                .unwrap_or_else(|| panic!("a branch on the left side: {text}"));
-            let store = text
-                .find("store")
-                .unwrap_or_else(|| panic!("the decrement: {text}"));
-            assert!(
-                branch < store,
-                "the decrement is behind the branch:\n{source}\n{text}"
-            );
+            let branch =
+                text.find("br_if").unwrap_or_else(|| panic!("a branch on the left side: {text}"));
+            let store = text.find("store").unwrap_or_else(|| panic!("the decrement: {text}"));
+            assert!(branch < store, "the decrement is behind the branch:\n{source}\n{text}");
         }
     }
 
@@ -15403,20 +13244,14 @@ block4(%7: i32):
         );
         // The `continue` goes to the step and the `break` goes to the `t++` after the switch,
         // which is also where the default falls out to.
-        assert!(
-            text.contains("switch %3, block4, [0 => block5, 1 => block6]"),
-            "{text}"
-        );
+        assert!(text.contains("switch %3, block4, [0 => block5, 1 => block6]"), "{text}");
         assert!(text.contains("block5:\n    jump block7("), "{text}");
         assert!(text.contains("block6:\n    jump block8("), "{text}");
     }
 
     #[test]
     fn a_switch_with_nothing_to_branch_on_still_runs_what_comes_after_it() {
-        assert_eq!(
-            body("void f(int x) { switch (x) { } }\n"),
-            "block0(%0: i32):\n    return\n"
-        );
+        assert_eq!(body("void f(int x) { switch (x) { } }\n"), "block0(%0: i32):\n    return\n");
     }
 
     #[test]
@@ -15431,14 +13266,8 @@ block4(%7: i32):
         );
         // `case 2` lands on the body, `case 1` and the default land on the return, and the test
         // at the bottom of the loop comes back round to the body.
-        assert!(
-            text.contains("switch %0, block1(%1), [1 => block2, 2 => block3(%1)]"),
-            "{text}"
-        );
-        assert!(
-            text.contains("block3(%3: i32):\n    %4 = iconst.i32 1"),
-            "{text}"
-        );
+        assert!(text.contains("switch %0, block1(%1), [1 => block2, 2 => block3(%1)]"), "{text}");
+        assert!(text.contains("block3(%3: i32):\n    %4 = iconst.i32 1"), "{text}");
         assert!(text.contains("block4:\n    jump block3("), "{text}");
     }
 
@@ -15447,14 +13276,8 @@ block4(%7: i32):
         // The same thing through a `goto`. The first pass through the body runs whatever the
         // label is on, and only then does the loop reach its own test.
         let text = body("int f(int x, int n) { goto in; while (n) { in: n--; } return n; }\n");
-        assert!(
-            text.starts_with("block0(%0: i32, %1: i32):\n    jump block1(%1)"),
-            "{text}"
-        );
-        assert!(
-            text.contains("block1(%2: i32):\n    %3 = iconst.i32 1"),
-            "{text}"
-        );
+        assert!(text.starts_with("block0(%0: i32, %1: i32):\n    jump block1(%1)"), "{text}");
+        assert!(text.contains("block1(%2: i32):\n    %3 = iconst.i32 1"), "{text}");
         assert!(text.contains("br_if %6, block2, block3"), "{text}");
     }
 
@@ -15540,14 +13363,8 @@ block0(%0: ptr, %1: i32):
             body("struct s { unsigned b : 5; };\nunsigned f(struct s *p) { return p->b = 33; }\n");
         // 33 does not fit in five bits, and 1 is both what goes in the field and what the
         // assignment is worth.
-        assert!(
-            text.contains("%3 = iconst.i8 31\n    %4 = and %2, %3"),
-            "{text}"
-        );
-        assert!(
-            text.ends_with("%9 = zext.i32 %4\n    return %9\n"),
-            "{text}"
-        );
+        assert!(text.contains("%3 = iconst.i8 31\n    %4 = and %2, %3"), "{text}");
+        assert!(text.ends_with("%9 = zext.i32 %4\n    return %9\n"), "{text}");
     }
 
     #[test]
@@ -15556,10 +13373,7 @@ block0(%0: ptr, %1: i32):
         // has no use for it. Nothing here reads back what was stored.
         let text = body("struct s { signed b : 5; };\nvoid f(struct s *p) { p->b = 3; }\n");
         assert_eq!(text.matches("ashr").count(), 0, "{text}");
-        assert!(
-            text.ends_with("store %8 -> %0, align 1\n    return\n"),
-            "{text}"
-        );
+        assert!(text.ends_with("store %8 -> %0, align 1\n    return\n"), "{text}");
     }
 
     #[test]
@@ -15600,20 +13414,11 @@ block0(%0: ptr, %1: i32):
             text.contains("global @x : bytes 20 = { i32 1, i32 2, i32 0, i32 2, i32 3 }"),
             "{text}"
         );
-        assert!(
-            text.contains("global @y : bytes 4 = { i8 111, bytes \"wx\\00\" }"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @z : bytes 3 = { i8 57, i8 101, i8 98 }"),
-            "{text}"
-        );
+        assert!(text.contains("global @y : bytes 4 = { i8 111, bytes \"wx\\00\" }"), "{text}");
+        assert!(text.contains("global @z : bytes 3 = { i8 57, i8 101, i8 98 }"), "{text}");
         // The array with a length of its own still cuts the literal down to it, which is the
         // one case in C where a string initializer drops its terminator.
-        assert!(
-            text.contains("global @s : bytes 2 = { bytes \"hi\" }"),
-            "{text}"
-        );
+        assert!(text.contains("global @s : bytes 2 = { bytes \"hi\" }"), "{text}");
     }
 
     #[test]
@@ -15631,10 +13436,7 @@ block0(%0: ptr, %1: i32):
             "struct e { int a; int b[]; } elided = { 1, 2, 0 };\n",
         ));
         for (name, size) in [("one", 40), ("zero", 40), ("far", 72), ("elided", 12)] {
-            assert!(
-                text.contains(&format!("global @{name} : bytes {size} = ")),
-                "{name}: {text}"
-            );
+            assert!(text.contains(&format!("global @{name} : bytes {size} = ")), "{name}: {text}");
         }
     }
 
@@ -15650,10 +13452,7 @@ block0(%0: ptr, %1: i32):
         // The unnamed one first, so that the named one is the second parameter of the entry
         // block and not the first: the list says the order and not only how many there are.
         let text = ir("int g(int, int n) { return n; }\n");
-        assert!(
-            text.contains("block0(%0: i32, %1: i32):\n    return %1\n"),
-            "{text}"
-        );
+        assert!(text.contains("block0(%0: i32, %1: i32):\n    return %1\n"), "{text}");
     }
 
     #[test]
@@ -15693,15 +13492,10 @@ block0(%0: ptr, %1: i32):
         let text = result.text();
         assert_eq!(
             result.messages,
-            [
-                "/main.c:1:24: warning: initializer-string for array of 'const char' is too long \
-              (5 chars into 3 available) [E0637]"
-            ]
+            ["/main.c:1:24: warning: initializer-string for array of 'const char' is too long \
+              (5 chars into 3 available) [E0637]"]
         );
-        assert!(
-            text.contains("global @a : bytes 6 = { bytes \"123\", bytes \"xyz\" }"),
-            "{text}"
-        );
+        assert!(text.contains("global @a : bytes 6 = { bytes \"123\", bytes \"xyz\" }"), "{text}");
         assert!(
             text.contains(
                 "global @b : bytes 15 = { bytes \"12345\", bytes \"678\\00\", zero 1, \
@@ -15757,17 +13551,11 @@ block0(%0: ptr, %1: i32):
             "int n = (int){ 7 };\n",
             "struct u { struct s p; struct s q; } b = { (struct s){ 1 }, (struct s){ } };\n",
         ));
-        assert!(
-            text.contains("global @a : bytes 8 = { i32 2, i32 3 }"),
-            "{text}"
-        );
+        assert!(text.contains("global @a : bytes 8 = { i32 2, i32 3 }"), "{text}");
         assert!(text.contains("global @n : i32 = 7,"), "{text}");
         // The second literal names nothing, so what it puts in is the zeros of its own size and
         // not the tail of the object it went in, which would have been the same bytes by luck.
-        assert!(
-            text.contains("global @b : bytes 8 = { i32 1, zero 4 }"),
-            "{text}"
-        );
+        assert!(text.contains("global @b : bytes 8 = { i32 1, zero 4 }"), "{text}");
     }
 
     #[test]
@@ -15835,14 +13623,8 @@ block0(%0: ptr, %1: i32):
         // for it to be emitted. The image named `.Lanon.0` and the module defined no such
         // symbol, which the link would have been the first to find out.
         let text = ir("struct s { int x; };\nstruct s *q = &(struct s){ 9 };\n");
-        assert!(
-            text.contains("global @.Lanon.0 : i32 = 9, align 4, linkage(internal)"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @q : bytes 8 = { addr.8 @.Lanon.0 }"),
-            "{text}"
-        );
+        assert!(text.contains("global @.Lanon.0 : i32 = 9, align 4, linkage(internal)"), "{text}");
+        assert!(text.contains("global @q : bytes 8 = { addr.8 @.Lanon.0 }"), "{text}");
     }
 
     #[test]
@@ -15851,19 +13633,10 @@ block0(%0: ptr, %1: i32):
         // The image is there and is no zeros, which is not the global that has no image at all,
         // and it is what puts the object in `.bss` as gcc does rather than in `.data`.
         let text = ir("unsigned char foo[1][0];\nstatic struct k {} key = {};\nvoid *p = &key;\n");
-        assert!(
-            text.contains("global @foo : bytes 0 = { zero 0 }, align 1"),
-            "{text}"
-        );
-        assert!(
-            text.contains("global @key : bytes 0 = { zero 0 }, align 1"),
-            "{text}"
-        );
+        assert!(text.contains("global @foo : bytes 0 = { zero 0 }, align 1"), "{text}");
+        assert!(text.contains("global @key : bytes 0 = { zero 0 }, align 1"), "{text}");
         let mut names = Interner::new();
-        assert!(
-            rucc_ir::parse(&text, &mut names).is_ok(),
-            "the IR reader takes it back"
-        );
+        assert!(rucc_ir::parse(&text, &mut names).is_ok(), "the IR reader takes it back");
     }
 
     #[test]
@@ -15901,14 +13674,8 @@ struct s pick(int c, struct s x, struct s y) { return c ? x : y; }
         );
         // The join takes an address, each arm hands it the one it has, and nothing is copied.
         assert!(text.contains("block3(%7: ptr)"), "{text}");
-        assert!(
-            text.contains("jump block3(%3)") && text.contains("jump block3(%4)"),
-            "{text}"
-        );
-        assert!(
-            !text.contains("memcpy"),
-            "the arms are joined rather than copied: {text}"
-        );
+        assert!(text.contains("jump block3(%3)") && text.contains("jump block3(%4)"), "{text}");
+        assert!(!text.contains("memcpy"), "the arms are joined rather than copied: {text}");
     }
 
     /// GNU's `a ?: b` evaluates `a` once, and the arm answers the value that was tested.
@@ -15921,28 +13688,14 @@ struct s pick(int c, struct s x, struct s y) { return c ? x : y; }
     #[test]
     fn the_left_side_of_a_conditional_with_no_middle_is_evaluated_once() {
         let text = body("int f(int i) { return ++i ?: 10; }\n");
-        assert!(
-            text.contains("jump block3(%2)"),
-            "the arm is the value that was tested: {text}"
-        );
-        assert_eq!(
-            text.matches("add.nsw").count(),
-            1,
-            "incremented once: {text}"
-        );
+        assert!(text.contains("jump block3(%2)"), "the arm is the value that was tested: {text}");
+        assert_eq!(text.matches("add.nsw").count(), 1, "incremented once: {text}");
 
         // The arm still converts, since what the whole expression is worth is a `long` here and
         // the node under it is an `int`. What it converts is the value in hand.
         let text = body("long f(int i) { return ++i ?: 10L; }\n");
-        assert!(
-            text.contains("%5 = sext.i64 %2"),
-            "the arm widens what was tested: {text}"
-        );
-        assert_eq!(
-            text.matches("add.nsw").count(),
-            1,
-            "incremented once: {text}"
-        );
+        assert!(text.contains("%5 = sext.i64 %2"), "the arm widens what was tested: {text}");
+        assert_eq!(text.matches("add.nsw").count(), 1, "incremented once: {text}");
 
         // A call, which is where evaluating twice is a wrong answer rather than a slow one.
         let text = body("int g(void);\nint f(void) { return g() ?: 10; }\n");
@@ -15951,11 +13704,7 @@ struct s pick(int c, struct s x, struct s y) { return c ? x : y; }
         // Written out in full it is two reads of `i`, which is what C says it is, so the middle
         // operand being absent is the whole of the difference.
         let text = body("int f(int i) { return ++i ? ++i : 10; }\n");
-        assert_eq!(
-            text.matches("add.nsw").count(),
-            2,
-            "incremented twice: {text}"
-        );
+        assert_eq!(text.matches("add.nsw").count(), 2, "incremented twice: {text}");
     }
 
     #[test]
@@ -16023,10 +13772,7 @@ struct pair make(int a, int b);
 int second(void) { return make(1, 2).b; }
 ",
         );
-        assert!(
-            body.starts_with("block0:\n    %0 = alloca, size 8, align 4\n"),
-            "{body}"
-        );
+        assert!(body.starts_with("block0:\n    %0 = alloca, size 8, align 4\n"), "{body}");
         assert!(body.contains("store %3 -> %0, align 4\n"), "{body}");
     }
 
@@ -16040,21 +13786,13 @@ struct hfa { float x, y, z; };
 int take(struct hfa h);
 int give(struct hfa h) { return take(h); }
 ";
-        assert!(
-            ir(source).contains("func @take(f64, f32) -> i32"),
-            "{}",
-            ir(source)
-        );
+        assert!(ir(source).contains("func @take(f64, f32) -> i32"), "{}", ir(source));
         let mut opts = options();
         opts.emit = EmitKind::Ir;
         opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new());
-        assert!(
-            result.text().contains("func @take(f32, f32, f32) -> i32"),
-            "{}",
-            result.text()
-        );
+        assert!(result.text().contains("func @take(f32, f32, f32) -> i32"), "{}", result.text());
     }
 
     #[test]
@@ -16099,9 +13837,7 @@ out:
         let body = body(source);
         // Two ways out of the block and a restore on each: the jump and the end of the block.
         assert_eq!(body.matches("stackrestore").count(), 2, "{body}");
-        let (_, after) = body
-            .split_once("stackrestore")
-            .expect("the stack is given back");
+        let (_, after) = body.split_once("stackrestore").expect("the stack is given back");
         assert!(after.starts_with(" %4\n    jump block"), "{body}");
     }
 
@@ -16143,9 +13879,7 @@ again:
 ";
         let body = body(source);
         assert_eq!(body.matches("stacksave").count(), 1, "{body}");
-        let (_, after) = body
-            .split_once("stackrestore")
-            .expect("the stack is given back");
+        let (_, after) = body.split_once("stackrestore").expect("the stack is given back");
         assert!(after.starts_with(" %4\n    jump block1\n"), "{body}");
     }
 
@@ -16174,15 +13908,10 @@ void t(void) {
         // restore is in is the one the inner loop leaves through, and it goes back round the
         // outer loop rather than out of it.
         assert_eq!(body.matches("stacksave").count(), 1, "{body}");
-        let (_, after) = body
-            .split_once("stackrestore")
-            .expect("the stack is given back");
+        let (_, after) = body.split_once("stackrestore").expect("the stack is given back");
         // The rest of the block the restore is in, which is the last block here, so there is not
         // always another one after it to split on.
-        let next = after
-            .split("\n\n")
-            .next()
-            .expect("the block the restore is in");
+        let next = after.split("\n\n").next().expect("the block the restore is in");
         assert!(next.contains("jump block1("), "{body}");
     }
 
@@ -16326,11 +14055,7 @@ double f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); re
 struct s { long a[4]; };
 long f(__builtin_va_list ap) { struct s v = __builtin_va_arg(ap, struct s); return v.a[0]; }
 ";
-        assert!(
-            body(big).contains("va_object %0, size 32, align 8\n"),
-            "{}",
-            body(big)
-        );
+        assert!(body(big).contains("va_object %0, size 32, align 8\n"), "{}", body(big));
     }
 
     #[test]
@@ -16385,9 +14110,7 @@ block5:
             source.push_str(&format!(" &&a{index},"));
         }
         source.push_str(" };\n\tint w = n, x = n + 1, y = n + 2, z = n + 3;\n");
-        source.push_str(&format!(
-            "\tif (n < 0) return 0;\n\tgoto *table[n & {mask}];\n"
-        ));
+        source.push_str(&format!("\tif (n < 0) return 0;\n\tgoto *table[n & {mask}];\n"));
         for index in 0..labels {
             let step = match index % 4 {
                 0 => "w += x;",
@@ -16405,14 +14128,8 @@ block5:
 
     /// How many moves are written in front of the first jump through a register.
     fn in_front_of_the_jump(text: &str) -> usize {
-        let (before, _) = text
-            .split_once("\tjmp\t*%")
-            .expect("a jump through a register");
-        before
-            .lines()
-            .rev()
-            .take_while(|line| line.starts_with("\tmov"))
-            .count()
+        let (before, _) = text.split_once("\tjmp\t*%").expect("a jump through a register");
+        before.lines().rev().take_while(|line| line.starts_with("\tmov")).count()
     }
 
     /// What a branch writes in front of its jump is what it carries, not what every label it can
@@ -16428,14 +14145,8 @@ block5:
     fn a_jump_through_a_register_writes_what_it_carries_and_not_the_whole_table() {
         let small = in_front_of_the_jump(&asm(&dispatch(4)));
         let large = in_front_of_the_jump(&asm(&dispatch(32)));
-        assert_eq!(
-            small, large,
-            "eight times the labels and the same values in hand"
-        );
-        assert!(
-            large <= 8,
-            "the values the loop keeps, and not a set of them per label: {large}"
-        );
+        assert_eq!(small, large, "eight times the labels and the same values in hand");
+        assert!(large <= 8, "the values the loop keeps, and not a set of them per label: {large}");
     }
 
     /// The same interpreter with more values in hand than there are registers, which is what makes
@@ -16452,9 +14163,7 @@ block5:
             source.push_str(&format!("int v{value} = n + {value}; "));
         }
         let sum: Vec<String> = (0..VALUES).map(|value| format!("v{value}")).collect();
-        source.push_str(&format!(
-            "\n\tif (n < 0) return 0;\n\tgoto *table[n & {mask}];\n"
-        ));
+        source.push_str(&format!("\n\tif (n < 0) return 0;\n\tgoto *table[n & {mask}];\n"));
         for index in 0..labels {
             let (to, from) = (index % VALUES, (index + 1) % VALUES);
             source.push_str(&format!("a{index}:\n\tv{to} += v{from};\n"));
@@ -16480,9 +14189,7 @@ block5:
                 offset.parse().ok()
             })
             .max();
-        opened
-            .or(below)
-            .unwrap_or_else(|| panic!("a function with a frame:\n{text}"))
+        opened.or(below).unwrap_or_else(|| panic!("a function with a frame:\n{text}"))
     }
 
     /// A frame holds what a function wants at once, and an interpreter does not want the whole
@@ -16497,10 +14204,7 @@ block5:
     fn a_frame_holds_what_is_wanted_at_once_and_not_a_slot_for_every_label() {
         let small = the_frame(&asm(&crowded(16)));
         let large = the_frame(&asm(&crowded(64)));
-        assert_eq!(
-            small, large,
-            "four times the labels and the same values: {small}, {large}"
-        );
+        assert_eq!(small, large, "four times the labels and the same values: {small}, {large}");
     }
 
     /// Loops one after the other, each with eight values of its own and a call it rarely makes.
@@ -16540,18 +14244,11 @@ block5:
             opts.emit = EmitKind::Asm;
             opts.opt_level = rucc_session::OptLevel::O2;
             let result = run(&opts, &rare_calls(loops));
-            assert_eq!(
-                result.messages,
-                Vec::<String>::new(),
-                "expected this to compile"
-            );
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
             the_frame(result.text())
         };
         let (two, six) = (frame(2), frame(6));
-        assert_eq!(
-            two, six,
-            "three times the loops and the same values at once: {two}, {six}"
-        );
+        assert_eq!(two, six, "three times the loops and the same values at once: {two}, {six}");
     }
 
     /// A template that saves the callee-saved registers by name, which is micropython's non local
@@ -16658,10 +14355,7 @@ int f(int x) {
 }
 ";
         let text = body(source);
-        assert!(
-            text.contains("inline_asm \"incl %0\", \"+m,=m\", \"\"(%1, %2)\n"),
-            "{text}"
-        );
+        assert!(text.contains("inline_asm \"incl %0\", \"+m,=m\", \"\"(%1, %2)\n"), "{text}");
         assert!(text.contains("%1 = alloca, size 4, align 4\n"), "{text}");
         assert!(text.contains("%2 = alloca, size 8, align 4\n"), "{text}");
     }
@@ -16722,18 +14416,12 @@ block2:
                 "void f(void) { __asm__(\"\" : : \"m\"(1)); }\n",
                 "memory input 0 is not directly addressable",
             ),
-            (
-                "void f(void) { __asm__(L\"\"); }\n",
-                "wide string literal in 'asm'",
-            ),
+            ("void f(void) { __asm__(L\"\"); }\n", "wide string literal in 'asm'"),
             (
                 "void f(int x, int y) { __asm__(\"\" : [a] \"=r\"(x) : [a] \"r\"(y)); }\n",
                 "duplicate asm operand name 'a'",
             ),
-            (
-                "void f(int x) { __asm__(\"%[in]\" : \"=r\"(x)); }\n",
-                "undefined named operand 'in'",
-            ),
+            ("void f(int x) { __asm__(\"%[in]\" : \"=r\"(x)); }\n", "undefined named operand 'in'"),
         ] {
             let result = run(&opts, source);
             assert!(result.failed(), "expected this to be reported:\n{source}");
@@ -16765,10 +14453,7 @@ block2:
             "extern const int first[];\n",
             "extern const long last;\n",
         ));
-        assert!(
-            text.contains("global @first : bytes 8 = { i32 1, i32 2 }, align 8"),
-            "{text}"
-        );
+        assert!(text.contains("global @first : bytes 8 = { i32 1, i32 2 }, align 8"), "{text}");
         assert!(text.contains("global @last : i64 = 8"), "{text}");
     }
 
@@ -16824,10 +14509,7 @@ block2:
         // The label the template measured to is a local one and no symbol, so what the hole names
         // is the global it stands inside, which is the byte under `stuff`, and nothing further on
         // since it is the first byte of it.
-        assert!(
-            text.contains("global @.Lasm.1 : bytes 4 = { away.4 @stuff }"),
-            "{text}"
-        );
+        assert!(text.contains("global @.Lasm.1 : bytes 4 = { away.4 @stuff }"), "{text}");
     }
 
     /// A `.set` says one name stands for another, which is a second symbol at the first one's
@@ -16845,10 +14527,7 @@ block2:
         ));
         assert!(text.contains("alias @one = @base, linkage(weak)"), "{text}");
         assert!(text.contains("alias @two = @base"), "{text}");
-        assert!(
-            !text.contains("alias @three"),
-            "a definition of the name wins: {text}"
-        );
+        assert!(!text.contains("alias @three"), "a definition of the name wins: {text}");
         assert!(text.contains("func @three"), "{text}");
     }
 
@@ -16860,9 +14539,10 @@ block2:
     fn a_set_of_a_name_this_file_does_not_define_says_so() {
         let messages = errors("__asm__(\".set here, elsewhere\");\n");
         assert!(
-            messages.iter().any(|m| m
-                .contains("'here' is aliased to undefined symbol 'elsewhere'")
-                && m.contains("E0697")),
+            messages
+                .iter()
+                .any(|m| m.contains("'here' is aliased to undefined symbol 'elsewhere'")
+                    && m.contains("E0697")),
             "{messages:?}"
         );
     }
@@ -16882,10 +14562,7 @@ block2:
         let result = compile(&opts, "/main.c", &fs);
         assert_eq!(result.messages, Vec::<String>::new());
         let text = result.text();
-        assert!(
-            text.contains("global @blob : bytes 2 = { bytes \"hi\" }"),
-            "{text}"
-        );
+        assert!(text.contains("global @blob : bytes 2 = { bytes \"hi\" }"), "{text}");
     }
 
     /// A file that is not there is the mistake a build makes when it runs the compiler from the
@@ -16946,14 +14623,8 @@ block2:
         assert!(text.contains("\tmovq\t(%rsp), %rax\n"), "{text}");
         assert!(text.contains("\tjmp\tnlr_push_tail\n"), "{text}");
         assert!(text.contains("\tud2\n"), "{text}");
-        assert!(
-            !text.contains("\tpushq\t"),
-            "nothing is saved in front of it: {text}"
-        );
-        assert!(
-            !text.contains("\tret\n"),
-            "the jump is where it ends: {text}"
-        );
+        assert!(!text.contains("\tpushq\t"), "nothing is saved in front of it: {text}");
+        assert!(!text.contains("\tret\n"), "the jump is where it ends: {text}");
     }
 
     /// The three things a naked function may not ask for, each of which is a frame nothing sets up
@@ -16971,10 +14642,7 @@ block2:
                 "__attribute__((naked)) void f(int n) { char a[n]; __asm(\"nop\" ::\"r\"(a)); }\n",
                 "has no prologue to point a frame pointer at it with",
             ),
-            (
-                "void elsewhere(void); void f(void) { __asm(\"jmp elsewhere\"); }\n",
-                "jumps out of",
-            ),
+            ("void elsewhere(void); void f(void) { __asm(\"jmp elsewhere\"); }\n", "jumps out of"),
         ] {
             let result = run(&opts, source);
             assert!(result.failed(), "expected this to be refused:\n{source}");
@@ -16995,10 +14663,7 @@ block2:
         let result = run(&opts, source);
         assert!(result.failed(), "expected this to be reported:\n{source}");
         assert!(
-            result
-                .messages
-                .iter()
-                .any(|m| m.contains("not supported yet")),
+            result.messages.iter().any(|m| m.contains("not supported yet")),
             "{:?}",
             result.messages
         );
@@ -17012,11 +14677,7 @@ block2:
         let mut fs = MemoryFileSystem::new();
         fs.insert("/main.ir", printed.clone().into_bytes());
         let result = compile_ir(&opts, "/main.ir", &fs);
-        assert_eq!(
-            result.messages,
-            Vec::<String>::new(),
-            "expected this to read back:\n{printed}"
-        );
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to read back:\n{printed}");
         (printed, result.text().to_owned())
     }
 
@@ -17050,11 +14711,7 @@ block0:
         fs.insert("/main.ir", text.as_bytes().to_vec());
         let result = compile_ir(&opts, "/main.ir", &fs);
         assert!(result.failed());
-        assert!(
-            result.messages[0].contains("/main.ir:8"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("/main.ir:8"), "{:?}", result.messages);
     }
 
     #[test]
@@ -17079,11 +14736,7 @@ block0:
         fs.insert("/main.ir", text.as_bytes().to_vec());
         let result = compile_ir(&opts, "/main.ir", &fs);
         assert!(result.failed());
-        assert!(
-            result.messages[0].contains("invalid IR"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("invalid IR"), "{:?}", result.messages);
     }
 
     #[test]
@@ -17093,11 +14746,7 @@ block0:
         fs.insert("/main.ir", Vec::new());
         let result = compile_ir(&options(), "/main.ir", &fs);
         assert!(result.failed());
-        assert!(
-            result.messages[0].contains("can only be emitted as IR"),
-            "{:?}",
-            result.messages
-        );
+        assert!(result.messages[0].contains("can only be emitted as IR"), "{:?}", result.messages);
     }
 
     #[test]
@@ -17163,11 +14812,7 @@ away:
         assert!(text.starts_with("# 1 \"/main.c\""), "{text}");
         let asm = result.temps.assembly.expect("the assembly");
         assert!(asm.contains("a:"), "{asm}");
-        assert!(
-            matches!(result.artifact, Artifact::Object { .. }),
-            "{:?}",
-            result.artifact
-        );
+        assert!(matches!(result.artifact, Artifact::Object { .. }), "{:?}", result.artifact);
     }
 
     #[test]
@@ -17200,10 +14845,7 @@ away:
     fn two_stretches_that_meet_and_agree_come_out_as_one() {
         let one = span(0, 4, rucc_debug::Held::Reg(3));
         let two = span(4, 4, rucc_debug::Held::Reg(3));
-        assert_eq!(
-            settle(vec![two, one]),
-            vec![span(0, 8, rucc_debug::Held::Reg(3))]
-        );
+        assert_eq!(settle(vec![two, one]), vec![span(0, 8, rucc_debug::Held::Reg(3))]);
     }
 
     #[test]
@@ -17215,10 +14857,7 @@ away:
         let settled = settle(vec![one, two]);
         assert_eq!(
             settled,
-            vec![
-                span(0, 4, rucc_debug::Held::Reg(3)),
-                span(4, 8, rucc_debug::Held::Reg(4))
-            ]
+            vec![span(0, 4, rucc_debug::Held::Reg(3)), span(4, 8, rucc_debug::Held::Reg(4))]
         );
     }
 
@@ -17230,10 +14869,7 @@ away:
         let two = span(4, 4, rucc_debug::Held::Reg(4));
         assert_eq!(
             settle(vec![one, two]),
-            vec![
-                span(0, 4, rucc_debug::Held::Reg(3)),
-                span(4, 4, rucc_debug::Held::Reg(4))
-            ]
+            vec![span(0, 4, rucc_debug::Held::Reg(3)), span(4, 4, rucc_debug::Held::Reg(4))]
         );
     }
 
@@ -17241,10 +14877,7 @@ away:
     fn a_stretch_inside_another_that_agrees_with_it_cuts_nothing() {
         let one = span(0, 16, rucc_debug::Held::Reg(3));
         let two = span(4, 4, rucc_debug::Held::Reg(3));
-        assert_eq!(
-            settle(vec![one, two]),
-            vec![span(0, 16, rucc_debug::Held::Reg(3))]
-        );
+        assert_eq!(settle(vec![one, two]), vec![span(0, 16, rucc_debug::Held::Reg(3))]);
     }
 
     #[test]
@@ -17272,35 +14905,18 @@ away:
         let head = func.create_block();
         let tail = func.create_block();
         let push = func.build(head, opcode).finish();
-        let arrive = func
-            .build(head, opcode)
-            .def(Reg::physical(RDI), GPR)
-            .finish();
+        let arrive = func.build(head, opcode).def(Reg::physical(RDI), GPR).finish();
         let save = func
             .build(head, opcode)
             .def(Reg::physical(RBX), GPR)
             .uses(Reg::physical(RDI), GPR)
             .finish();
-        let call = func
-            .build(head, opcode)
-            .def(Reg::physical(RDI), GPR)
-            .finish();
+        let call = func.build(head, opcode).def(Reg::physical(RDI), GPR).finish();
         *func.succs_mut(head) = vec![BlockCall::to(tail)];
-        let read = func
-            .build(tail, opcode)
-            .uses(Reg::physical(RBX), GPR)
-            .finish();
-        let at = |at: usize, inst| rucc_asm::Row {
-            at,
-            span: Span::DUMMY,
-            inst: Some(inst),
-        };
+        let read = func.build(tail, opcode).uses(Reg::physical(RBX), GPR).finish();
+        let at = |at: usize, inst| rucc_asm::Row { at, span: Span::DUMMY, inst: Some(inst) };
         let rows = [
-            rucc_asm::Row {
-                at: 0,
-                span: Span::DUMMY,
-                inst: None,
-            },
+            rucc_asm::Row { at: 0, span: Span::DUMMY, inst: None },
             at(0, push),
             at(1, arrive),
             at(1, save),
@@ -17317,11 +14933,7 @@ away:
     /// A line table row at `at` built for the source bytes `lo` to `hi`.
     fn row(at: usize, lo: u32, hi: u32) -> rucc_asm::Row {
         let span = Span::new(lo, hi);
-        rucc_asm::Row {
-            at,
-            span,
-            inst: None,
-        }
+        rucc_asm::Row { at, span, inst: None }
     }
 
     #[test]
@@ -17340,12 +14952,7 @@ away:
 
     #[test]
     fn the_rows_of_a_scope_that_are_next_to_each_other_come_out_as_one_stretch() {
-        let rows = [
-            row(0, 0, 4),
-            row(4, 10, 14),
-            row(8, 14, 18),
-            row(12, 40, 44),
-        ];
+        let rows = [row(0, 0, 4), row(4, 10, 14), row(8, 14, 18), row(12, 40, 44)];
         let ends = ends(16, &rows);
         let scope = Span::new(8, 20);
         assert_eq!(
@@ -17362,24 +14969,14 @@ away:
         let over = spread(scope, &ends, &rows, &SourceMap::new());
         assert_eq!(
             over,
-            vec![
-                rucc_debug::Reach { from: 0, len: 4 },
-                rucc_debug::Reach { from: 8, len: 4 }
-            ]
+            vec![rucc_debug::Reach { from: 0, len: 4 }, rucc_debug::Reach { from: 8, len: 4 }]
         );
     }
 
     #[test]
     fn a_row_with_no_source_of_its_own_belongs_to_no_scope() {
         // The prologue is the one of these every function has, and it is not inside any block.
-        let rows = [
-            rucc_asm::Row {
-                at: 0,
-                span: Span::DUMMY,
-                inst: None,
-            },
-            row(4, 10, 14),
-        ];
+        let rows = [rucc_asm::Row { at: 0, span: Span::DUMMY, inst: None }, row(4, 10, 14)];
         let ends = ends(8, &rows);
         let scope = Span::new(0, 20);
         assert_eq!(
@@ -17397,11 +14994,7 @@ away:
     #[test]
     fn a_function_gets_the_scopes_its_own_locals_are_in_and_nothing_else() {
         // Two functions' worth of scopes in one table, and this one is in the second pair.
-        let scopes = [
-            scope(None, 0, 10),
-            scope(None, 20, 30),
-            scope(Some(1), 22, 26),
-        ];
+        let scopes = [scope(None, 0, 10), scope(None, 20, 30), scope(Some(1), 22, 26)];
         let rows = [row(0, 22, 24), row(4, 26, 28)];
         let (out, at) = nests(&[Some(2)], &scopes, 8, &rows, &SourceMap::new());
         // The one the local is in and the one that is inside, numbered from zero for this
@@ -17463,10 +15056,7 @@ away:
                 "call\text@PLT",
                 ".hidden __x86.get_pc_thunk.bx",
             ] {
-                assert!(
-                    text.contains(wanted),
-                    "no {wanted} under {pic:?} in:\n{text}"
-                );
+                assert!(text.contains(wanted), "no {wanted} under {pic:?} in:\n{text}");
             }
         }
         let mut opts = options();
@@ -17476,10 +15066,7 @@ away:
         let result = run(&opts, source);
         assert_eq!(result.messages, Vec::<String>::new());
         let text = result.text();
-        assert!(
-            !text.contains("get_pc_thunk") && !text.contains("@GOT"),
-            "{text}"
-        );
+        assert!(!text.contains("get_pc_thunk") && !text.contains("@GOT"), "{text}");
         assert!(!text.contains("@PLT"), "{text}");
     }
 }
