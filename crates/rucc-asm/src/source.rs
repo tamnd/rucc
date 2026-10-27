@@ -123,6 +123,10 @@ pub struct Flags {
     /// pads after an instruction, with no one byte `nop` in front. The private
     /// `Reader::after_data` says why.
     pub before_2_42: bool,
+    /// gas on RISC-V run without `-fpic`, where `la` is the address worked out from here, the same
+    /// as `lla`, rather than read out of the global offset table. A file built with `-fno-PIE`
+    /// is read that way, and the kernel's `head.S` is one.
+    pub nopic: bool,
 }
 
 /// The same, with what the command line said to the assembler.
@@ -217,6 +221,7 @@ pub fn read_with_debug(
             fatal_warnings: flags.fatal_warnings,
             noexecstack: flags.noexecstack,
             before_2_42: flags.before_2_42,
+            nopic: flags.nopic,
             debug: debug.cloned(),
             generating: debug.is_some(),
             ..Reader::default()
@@ -686,6 +691,8 @@ struct Reader {
     fatal_warnings: bool,
     /// [`Flags::before_2_42`].
     before_2_42: bool,
+    /// [`Flags::nopic`].
+    nopic: bool,
     /// Where each run of padding in code went under [`Flags::before_2_42`], as a piece, how far
     /// into it and how long, for the end of the file to write once the mode it ends in is known.
     old_padding: Vec<(usize, u64, usize)>,
@@ -1647,8 +1654,9 @@ impl Reader {
             self.row()?;
             return self.put(&half.to_le_bytes());
         }
-        let mut encoded = riscv64::encode(&line.mnemonic, &line.values)
-            .map_err(|why| self.bad(&why.to_string()))?;
+        let mnemonic = if self.nopic && line.mnemonic == "la" { "lla" } else { &line.mnemonic };
+        let mut encoded =
+            riscv64::encode(mnemonic, &line.values).map_err(|why| self.bad(&why.to_string()))?;
         // A conditional branch to a label reaches 4 KiB either way. One that turns out further
         // is grown the way gas grows it, into the opposite branch over a `jal` to the label.
         let mut branch = None;
@@ -7143,6 +7151,23 @@ _tls$tlv$init:
                 (12, "here", sum(2, true), 0),
             ]
         );
+    }
+
+    #[test]
+    fn a_riscv_la_without_pic_is_lla() {
+        // `head.S` is built with `-fno-PIE` and writes `la a0, _start`, which gas then reaches
+        // from here. With pic it goes through the table, which is also what the listing means.
+        let text = "\tla a0, _start + 8\n";
+        for (nopic, hi, word) in [
+            (true, riscv64::Fixup::PcrelHi20, 0x0005_0513),
+            (false, riscv64::Fixup::GotHi20, 0x0005_3503),
+        ] {
+            let flags = Flags { nopic, ..Flags::default() };
+            let read = read_with(text, Arch::Riscv64, ObjectFormat::Elf, flags).unwrap();
+            let part = read.parts.iter().find(|part| part.name == ".text").unwrap();
+            assert_eq!((part.relocs[0].kind, part.relocs[0].addend), (Reference::Riscv(hi), 8));
+            assert_eq!(part.bytes[4..8], u32::to_le_bytes(word));
+        }
     }
 
     #[test]
