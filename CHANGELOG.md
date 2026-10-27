@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.13
+
+This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow checks, the stack, global and alloca redzones, and the atomic checks. It also adds four UBSAN checks, `-finline-stringops`, more object size answers that agree with gcc, and faster NEON helpers on arm64.
+
 ### Added
 
 - `-finline-stringops`, `-fno-inline-stringops` and the `=` forms with `memcmp`, `memcpy`, `memmove` and `memset`, alone or in a list, as gcc 14 to 16 take them. Linux 7.3 probes for `-finline-stringops=memset` with `cc-option` and builds the vDSO with it on x86-64, arm64 and riscv64. rucc gave "unknown option", so the probe failed and `CONFIG_CC_OPT_INLINE_MEMSET` was empty where it has the flag for gcc 16. With `memset` on, each `__builtin_memset` and each structure fill that would be a call to `memset` is now a loop of stores, a word at a time and then a byte at a time, also when the length is not a constant. This is also true under `-ffreestanding` and `-fno-builtin`, where only a plain call to `memset` stays a call, as gcc does it. The other three names are accepted, but their code does not change yet. A persona before gcc 14 does not accept the flag. (#3761)
@@ -88,6 +92,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Dead store elimination now keeps track of the live bytes of a store as a set of spans, so a later store that lands in the middle of a fill leaves a hole there instead of being ignored. A fill covered by stores that come in any order is now removed or narrowed. Under `-ftrivial-auto-var-init=zero` this drops the zero fill of `struct stat` in the kernel's `cp_new_stat`, as gcc does (#3927).
 - With `-fcf-protection=branch` and optimization on, a `static` function that only a direct call reaches no longer starts with `endbr64`, as gcc does. Nothing takes its address, no `used` or alias names it, and so no indirect branch can land there. At `-O0` every function still gets one, also as gcc does (#3928).
 - A loop that runs once is now unrolled even when it has inline assembly in it, since only one copy is made and nothing is duplicated. The kernel's `mk_vma_flags` loops over a compound literal and calls `__set_bit`, and with the loop left in place the literal stayed on the stack and the bit number reached the `bts` in a register (#3931).
+- On x86-64 a constant handed to `asm` under a constraint that allows one, such as `"i"`, `"ir"` or `"Ir"`, is now written into the instruction the way gcc prints it, so the kernel's `__set_bit` is `btsq $8, (%rdi)` rather than a `mov` into a register and the `bts` that takes one. An `int` constant against a `q` instruction, as in `addq %1, %0` with `"i" (5)`, is no longer refused (#3932).
+- A `static` function called once where it can run and again behind a branch that never runs, such as `if (unlikely(!userfaultfd_wp(vma)))` in a kernel built without `CONFIG_USERFAULTFD`, now counts as called once and is inlined, as gcc does. In mm/memory.c this brings `do_anonymous_page` and `do_fault` into `handle_pte_fault` (#3933).
+- A `static` function called once is now weighed against `max-inline-functions-called-once-insns` the way gcc estimates it, not one instruction at a time, so a large body that gcc copies into its one caller is copied here too. `change_pte_range` in the kernel's mm/mprotect.c went from 11554 counted instructions to 3149 weighed ones and is now inlined (#3934).
 
 ## 0.30.12
 
