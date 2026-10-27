@@ -183,7 +183,13 @@ fn follow_until(func: &mut Func, an: &mut Analyses, stats: &mut Stats, no: bool)
         // The ranges again, for the branches on the value a yes was about. The kernel's
         // `statically_true(x)` is `__builtin_constant_p(x) && (x)`, and the second `x` is a branch
         // of its own that only the ranges settle when they are what settled the first.
-        round.merge(&Prune.run(func, an, &mut fuel));
+        // Only in a round that folded, chose or answered something, since that is what gives
+        // the ranges a branch to settle that they could not settle the round before. Asking
+        // them every round was four percent of the instructions of a build of tg3.c, most of it
+        // in the inliner's measure of the copies of callees that ask.
+        if round.changed() {
+            round.merge(&Prune.run(func, an, &mut fuel));
+        }
         an.clear();
         round.merge(&SimplifyCfg.run(func, an, &mut fuel));
         // The control flow pass leaves clearing the cache to the manager, and the next round is
