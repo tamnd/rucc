@@ -33,6 +33,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 assembler encodes the vector instructions the kernel writes by hand, `vsetvli`, `vsetivli`, `vsetvl`, the unit stride `vle` and `vse` loads and stores and `vmv.v.v`, `vmv.v.x` and `vmv.v.i`, and refuses `.option arch` for an extension it has no instructions for (#3909).
 - `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=tp` and `-mstack-protector-guard-offset=` on riscv64 put the canary in the running task the way a riscv kernel asks, and `-mstack-protector-guard=global` is taken there too (#3911).
 - The riscv64 assembler writes `vadd`, `vsub`, `vand`, `vor` and `vxor` with `.vv`, `.vx` and `.vi`, which `arch/riscv/lib/xor.S` on 6.12 needs (#3915).
+- The riscv64 assembler takes `.insn` as a number and in the `r`, `i` and `s` formats, so the kernel's `AS_HAS_INSN` probe passes the way it does with gas (#3916).
 
 ### Fixed
 
