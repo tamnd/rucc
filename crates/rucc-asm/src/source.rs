@@ -825,6 +825,11 @@ impl Reader {
             return self.directive(directive, rest);
         }
         if self.riscv {
+            if rest.contains(['*', '/', '<', '>', '|', '&', '^', '~', '(', '+', '-'])
+                || !self.values.is_empty()
+            {
+                return self.rv64(&format!("{word} {}", self.rv_sums(rest)));
+            }
             return self.rv64(text);
         }
         if self.aarch64 {
@@ -1034,6 +1039,55 @@ impl Reader {
             }
         }
         out
+    }
+
+    /// The operands of a RISC-V instruction with each one that is a constant, or a constant in
+    /// front of `(reg)`, worked out to its number.
+    ///
+    /// The kernel writes these through the preprocessor, `addi sp, sp, -12*SZREG` and
+    /// `REG_S s0, 1*SZREG(sp)` in the vDSO's ChaCha, and with `.set` names. An operand with a
+    /// symbol in it, `%lo(x)` or `.+8` is left to the reader, since only the linker or the place
+    /// knows what it is.
+    fn rv_sums(&self, rest: &str) -> String {
+        let constant = |text: &str| {
+            let text = text.trim();
+            let sum = !text.starts_with(['%', '.'])
+                && (self.values.contains_key(text)
+                    || text.contains(['*', '/', '<', '>', '|', '&', '^', '~', '('])
+                    || text.get(1..).is_some_and(|after| after.contains(['+', '-'])));
+            sum.then(|| {
+                Parser {
+                    text,
+                    at: 0,
+                    here: (0, 0),
+                    values: Some(&self.values),
+                    reader: None,
+                    guessed: None,
+                }
+                .whole()
+                .ok()?
+                .flat()
+            })
+            .flatten()
+        };
+        let mut pieces = Vec::new();
+        for piece in split(rest, ',') {
+            let text = piece.trim();
+            // An address is a displacement in front of a register in brackets, and `~(1 << 3)` is
+            // not one.
+            let at = text.strip_suffix(')').and_then(|inner| inner.rfind('(')).filter(|&open| {
+                let base = &text[open + 1..text.len() - 1];
+                open > 0 && base.bytes().all(|b| b.is_ascii_alphanumeric()) && !base.is_empty()
+            });
+            let worked = match at {
+                Some(open) => {
+                    constant(&text[..open]).map(|number| format!("{number}{}", &text[open..]))
+                }
+                None => constant(text).map(|number| number.to_string()),
+            };
+            pieces.push(worked.unwrap_or_else(|| text.to_owned()));
+        }
+        pieces.join(", ")
     }
 
     /// A load of a constant, `ldr x0, =value`, as a load of a word in a literal pool or a move.
@@ -2235,6 +2289,19 @@ impl Reader {
                 self.go(back);
             }
 
+            // rucc writes no compressed instruction and no relaxation, so the options that turn
+            // those on and off, and the extensions `arch` adds, change nothing here.
+            "option" if self.riscv => {
+                let option = args.first().map_or("", |arg| arg.trim());
+                if !matches!(
+                    option,
+                    "push" | "pop" | "rvc" | "norvc" | "relax" | "norelax" | "arch"
+                ) {
+                    return Err(
+                        self.bad(&format!(".option {option} is not one this assembler takes"))
+                    );
+                }
+            }
             "ltorg" | "pool" if self.aarch64 => self.literal_pool()?,
             // An instruction written as its number, which is how the arm64 kernel writes one the
             // assembler may not know.
@@ -2245,8 +2312,8 @@ impl Reader {
             }
             "byte" => self.data(&args, 1)?,
             // `.word` is two bytes on x86-64 and four on AArch64, where a word is an instruction.
-            "word" if self.aarch64 => self.data(&args, 4)?,
-            "short" | "word" | "hword" | "value" | "2byte" => self.data(&args, 2)?,
+            "word" if self.aarch64 || self.riscv => self.data(&args, 4)?,
+            "short" | "word" | "hword" | "half" | "value" | "2byte" => self.data(&args, 2)?,
             "long" | "int" | "4byte" => self.data(&args, 4)?,
             "quad" | "8byte" | "xword" | "dword" => self.data(&args, 8)?,
             "octa" => self.octa(&args)?,
@@ -6839,6 +6906,45 @@ _tls$tlv$init:
         );
         let label = read.names.iter().find(|name| name.name == ".Lpcrel_hi0").unwrap();
         assert!(matches!(label.at, Held::In { offset: 12, .. }), "{:?}", label.at);
+    }
+
+    #[test]
+    fn a_riscv_operand_worked_out_from_constants_is_its_number() {
+        // How the kernel's vDSO ChaCha sets up its frame once `SZREG` is through the preprocessor,
+        // inside the `.option` lines its alternatives write. A `.word` is four bytes here.
+        let read = match read(
+            concat!(
+                "\t.set FRAME, 4\n",
+                "\t.option push\n",
+                "\t.option norvc\n",
+                "\taddi sp, sp, -12*8\n",
+                "\tsd s0, 1*8(sp)\n",
+                "\tld s1, (FRAME-2)*8(sp)\n",
+                "\taddi a0, a0, FRAME\n",
+                "\tandi a1, a1, ~(1 << 3)\n",
+                "\t.option pop\n",
+                "\t.word 0x13\n",
+                "\t.half 1, 2\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        // The words GNU as writes for the same lines.
+        assert_eq!(
+            words(&read, ".text"),
+            [
+                0xfa01_0113,
+                0x0081_3423,
+                0x0101_3483,
+                0x0045_0513,
+                0xff75_f593,
+                0x0000_0013,
+                0x0002_0001
+            ]
+        );
+        assert!(super::read(".option pic\n", Arch::Riscv64).is_err());
     }
 
     #[test]
