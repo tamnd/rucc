@@ -186,6 +186,7 @@ pub static SYSV: CallRegs = CallRegs {
     fenced: false,
     rmw_bits: 8,
     unaligned: true,
+    rolled: 0,
     byte_swaps: &[16, 32],
     push: 4,
     link: None,
