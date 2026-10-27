@@ -2785,7 +2785,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 guard_symbol = Some(name);
             }
-            // Every one of gcc's choices, on the two back ends that clear registers. The four
+            // Every one of gcc's choices, on the back ends that clear registers. The four
             // without `-gpr` in them clear the vector registers and the x87 stack as well.
             _ if arg.starts_with("-fzero-call-used-regs=") => {
                 let choice = &arg["-fzero-call-used-regs=".len()..];
@@ -2808,11 +2808,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 };
                 let here = matches!(
                     arch,
-                    rucc_target::Arch::X86_64 | rucc_target::Arch::X86 | rucc_target::Arch::Aarch64
+                    rucc_target::Arch::X86_64
+                        | rucc_target::Arch::X86
+                        | rucc_target::Arch::Aarch64
+                        | rucc_target::Arch::Riscv64
                 );
                 if opts.zero_regs.is_some() && !here {
                     return Err(err(format!(
-                        "{arg}: registers are only cleared on return on x86-64, i386 and AArch64"
+                        "{arg}: registers are only cleared on return on x86-64, i386, AArch64 and RISC-V"
                     )));
                 }
             }
@@ -11011,7 +11014,7 @@ mod tests {
         let zero = |target: &str, flags: &[&str]| {
             compile(&[&[target, "-c", "a.c"], flags].concat()).0.zero_regs
         };
-        for target in [KERNEL_X86, KERNEL_ARM64] {
+        for target in [KERNEL_X86, KERNEL_ARM64, "--target=riscv64-linux-gnu"] {
             assert_eq!(zero(target, &[]), None);
             for (choice, read) in [
                 ("used-gpr", (false, false, false)),
