@@ -1537,10 +1537,11 @@ pub fn compile_recording(
         before: room.before,
         after: room.after,
     });
-    // The pad at the top of the function is left out of one whose type says `nocf_check`, and
-    // under `-mmanual-endbr` out of every one that does not say `cf_check`. The pads at its
-    // labels stay, since a computed `goto` is a different branch.
-    let asked = !flags.manual_endbr || source.attrs.set.contains(ir::AttrSet::CF_CHECK);
+    // The pad at the top of the function is left out of one whose type says `nocf_check`, under
+    // `-mmanual-endbr` out of every one that does not say `cf_check`, and out of one only a direct
+    // call reaches. The pads at its labels stay, since a computed `goto` is a different branch.
+    let asked = (!flags.manual_endbr || source.attrs.set.contains(ir::AttrSet::CF_CHECK))
+        && !elsewhere.only_called_directly(source.name);
     let entry = match targets {
         Some(targets) => Some(targets.call),
         None => landing.filter(|_| asked && !source.attrs.set.contains(ir::AttrSet::NOCF)),
