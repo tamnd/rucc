@@ -89,6 +89,7 @@ pub struct Elsewhere {
     defined: Set<Symbol>,
     aligned: Map<Symbol, u32>,
     unstubbed: Set<Symbol>,
+    direct: Set<Symbol>,
 }
 
 /// Which pointer a name on COFF is reached through, when it is reached through one.
@@ -534,6 +535,39 @@ impl Elsewhere {
             .map(|id| module[id].name)
             .collect();
         self
+    }
+
+    /// The functions here that only a direct call in this file can reach, which gcc writes no
+    /// landing pad at the top of under `-fcf-protection=branch`, since no indirect branch ever
+    /// arrives there. The driver says so when it optimizes, as gcc only does then.
+    ///
+    /// That is a `static` function whose address nothing takes, which is what the call graph says,
+    /// no `used` on it, since that may be a call from inline assembly, and no alias naming it, since
+    /// another file can take the address of the alias.
+    #[must_use]
+    pub fn called_directly(mut self, module: &Module, pic: Pic) -> Self {
+        let graph = rucc_opt::callgraph::CallGraph::of(module, pic);
+        let aliased: Set<Symbol> = module.aliases().map(|id| module[id].target).collect();
+        self.direct = module
+            .funcs()
+            .filter(|&id| {
+                let func = &module[id];
+                !func.is_declaration()
+                    && func.linkage == Linkage::Internal
+                    && !func.attrs.set.contains(AttrSet::USED)
+                    && !aliased.contains(&func.name)
+                    && graph.node(func.name).is_some_and(|node| !graph.address_taken(node))
+            })
+            .map(|id| module[id].name)
+            .collect();
+        self
+    }
+
+    /// Whether only a direct call in this file reaches that function. See
+    /// [`Self::called_directly`].
+    #[must_use]
+    pub fn only_called_directly(&self, name: Symbol) -> bool {
+        self.direct.contains(&name)
     }
 
     /// Whether a call to that name reads the address from the global offset table. See
