@@ -87,6 +87,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-fcf-protection=` with `branch`, `return` or `full` is refused off x86 in gcc 14's words, where before it was taken and did nothing, so the riscv kernel no longer turns on RISCV_USER_CFI and builds a CFI vDSO without landing pads (#3922).
 - Dead store elimination now keeps track of the live bytes of a store as a set of spans, so a later store that lands in the middle of a fill leaves a hole there instead of being ignored. A fill covered by stores that come in any order is now removed or narrowed. Under `-ftrivial-auto-var-init=zero` this drops the zero fill of `struct stat` in the kernel's `cp_new_stat`, as gcc does (#3927).
 - With `-fcf-protection=branch` and optimization on, a `static` function that only a direct call reaches no longer starts with `endbr64`, as gcc does. Nothing takes its address, no `used` or alias names it, and so no indirect branch can land there. At `-O0` every function still gets one, also as gcc does (#3928).
+- A loop that runs once is now unrolled even when it has inline assembly in it, since only one copy is made and nothing is duplicated. The kernel's `mk_vma_flags` loops over a compound literal and calls `__set_bit`, and with the loop left in place the literal stayed on the stack and the bit number reached the `bts` in a register (#3931).
 
 ## 0.30.12
 
