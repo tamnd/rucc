@@ -356,6 +356,14 @@ fn alu(mnemonic: &str) -> Option<(u32, u32, u32)> {
         "bext" => (0x33, 5, 0x24),
         "binv" => (0x33, 1, 0x34),
         "bset" => (0x33, 1, 0x14),
+        // Zbc, the carry-less multiplies.
+        "clmul" => (0x33, 1, 0x05),
+        "clmulr" => (0x33, 2, 0x05),
+        "clmulh" => (0x33, 3, 0x05),
+        // Zbkb.
+        "pack" => (0x33, 4, 0x04),
+        "packh" => (0x33, 7, 0x04),
+        "packw" => (0x3b, 4, 0x04),
         _ => return None,
     })
 }
@@ -410,6 +418,7 @@ fn unary(mnemonic: &str) -> Option<(u32, u32, i64)> {
         "zext.h" => (0x3b, 4, 0x080),
         "rev8" => (0x13, 5, 0x6b8),
         "orc.b" => (0x13, 5, 0x287),
+        "brev8" => (0x13, 5, 0x687),
         _ => return None,
     })
 }
@@ -479,6 +488,7 @@ fn branch(mnemonic: &str) -> Option<u32> {
 
 /// The `funct5`, the `funct3` and the ordering bits of the A extension's instructions, which are
 /// `lr`, `sc` and the `amo` operations, at `.w` or `.d`, with `.aq`, `.rl` or `.aqrl` after it.
+/// Zabha adds `.b` and `.h` to the `amo` operations, and `amocas.q` takes register pairs.
 fn atomic(mnemonic: &str) -> Option<(u32, u32, u32)> {
     let mut parts = mnemonic.split('.');
     let f5 = match parts.next()? {
@@ -500,8 +510,11 @@ fn atomic(mnemonic: &str) -> Option<(u32, u32, u32)> {
         _ => return None,
     };
     let f3 = match parts.next()? {
+        "b" if matches!(f5, 0x00..=0x01 | 0x04..=0x1c) => 0,
+        "h" if matches!(f5, 0x00..=0x01 | 0x04..=0x1c) => 1,
         "w" => 2,
         "d" => 3,
+        "q" if f5 == 0x05 => 4,
         _ => return None,
     };
     let order = match parts.next() {
@@ -512,6 +525,17 @@ fn atomic(mnemonic: &str) -> Option<(u32, u32, u32)> {
         Some(_) => return None,
     };
     parts.next().is_none().then_some((f5, f3, order))
+}
+
+/// The number of the CSR one of the floating point pseudo instructions reads or writes.
+fn fp_csr(mnemonic: &str) -> i64 {
+    if mnemonic.contains("csr") {
+        3
+    } else if mnemonic.contains("rm") {
+        2
+    } else {
+        1
+    }
 }
 
 /// The `funct3` of the CSR instructions that take a register, `csrrw`, `csrrs` and `csrrc`, and
@@ -681,6 +705,21 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         return Ok(out);
     }
     if let Some((op, f3, fp)) = load(mnemonic) {
+        // A load from a label is the `auipc` to it and the load from what that leaves, through
+        // the destination, or for a floating point one through the register written last.
+        let (rd, through) = match *values {
+            [Gpr(rd), Symbol(Operator::Plain)] if !fp => (rd, Some(rd)),
+            [Fpr(rd), Symbol(Operator::Plain), Gpr(temp)] if fp => (rd, Some(temp)),
+            [Gpr(rd) | Fpr(rd), Mem(_)] => (rd, None),
+            _ => return Err(unwritten()),
+        };
+        if let Some(through) = through {
+            out.fixups.push((0, Fixup::PcrelHi20));
+            out.fixups.push((1, Fixup::PcrelLo12I));
+            out.words.push(u(0x17, through, 0));
+            out.words.push(i(op, f3, rd, through, 0));
+            return Ok(out);
+        }
         let (rd, addr) = match *values {
             [Gpr(rd), Mem(addr)] if !fp => (rd, addr),
             [Fpr(rd), Mem(addr)] if fp => (rd, addr),
@@ -702,6 +741,14 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         return Ok(out);
     }
     if let Some((op, f3, fp)) = store(mnemonic) {
+        // A store to a label always names the register the `auipc` goes in.
+        if let [Gpr(rs2) | Fpr(rs2), Symbol(Operator::Plain), Gpr(temp)] = *values {
+            out.fixups.push((0, Fixup::PcrelHi20));
+            out.fixups.push((1, Fixup::PcrelLo12S));
+            out.words.push(u(0x17, temp, 0));
+            out.words.push(s(op, f3, temp, rs2, 0));
+            return Ok(out);
+        }
         let (rs2, addr) = match *values {
             [Gpr(rs2), Mem(addr)] if !fp => (rs2, addr),
             [Fpr(rs2), Mem(addr)] if fp => (rs2, addr),
@@ -742,6 +789,9 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
             }
             _ => return Err(unwritten()),
         };
+        if f3 == 4 && (rd % 2 != 0 || rs2 % 2 != 0) {
+            return Err(unwritten());
+        }
         out.words.push(r(0x2f, f3, f5 << 2 | order, rd, base, rs2));
         return Ok(out);
     }
@@ -775,6 +825,22 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         ("rdcycle", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc00)),
         ("rdtime", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc01)),
         ("rdinstret", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc02)),
+        // The floating point control and status register, its rounding mode and its flags.
+        ("frcsr" | "frrm" | "frflags", [Gpr(rd)]) => {
+            out.words.push(i(0x73, 2, *rd, ZERO, fp_csr(mnemonic)));
+        }
+        ("fscsr" | "fsrm" | "fsflags", [Gpr(rs)]) => {
+            out.words.push(i(0x73, 1, ZERO, *rs, fp_csr(mnemonic)));
+        }
+        ("fscsr" | "fsrm" | "fsflags", [Gpr(rd), Gpr(rs)]) => {
+            out.words.push(i(0x73, 1, *rd, *rs, fp_csr(mnemonic)));
+        }
+        ("fsrmi" | "fsflagsi", [Imm(imm)]) if (0..32).contains(imm) => {
+            out.words.push(i(0x73, 5, ZERO, *imm as u8, fp_csr(mnemonic)));
+        }
+        ("fsrmi" | "fsflagsi", [Gpr(rd), Imm(imm)]) if (0..32).contains(imm) => {
+            out.words.push(i(0x73, 5, *rd, *imm as u8, fp_csr(mnemonic)));
+        }
         // Zicfilp's landing pad, which is `auipc zero` with the label in the upper bits.
         ("lpad", [Imm(label)]) if (0..1 << 20).contains(label) => {
             out.words.push(u(0x17, ZERO, *label));
@@ -1066,6 +1132,26 @@ pub fn reaches(disp: i64) -> bool {
     fits(disp, 12)
 }
 
+/// Writes one of the few compressed instructions a file asks for by name, as two bytes.
+///
+/// The kernel's `head.S` starts with `c.li s4, -13`, which is the "MZ" an EFI loader looks for.
+///
+/// # Errors
+///
+/// When it is not one of `c.li`, `c.nop` and `c.ebreak` with operands it takes.
+pub fn compressed(mnemonic: &str, values: &[Value]) -> Result<u16, Error> {
+    let unwritten = || Error::Unwritten { mnemonic: mnemonic.to_owned(), operands: values.len() };
+    Ok(match (mnemonic, values) {
+        ("c.li", &[Value::Gpr(rd), Value::Imm(imm)]) if rd != ZERO && fits(imm, 6) => {
+            let imm = (imm & 0x3f) as u16;
+            0x4001 | (imm >> 5) << 12 | u16::from(rd) << 7 | (imm & 0x1f) << 2
+        }
+        ("c.nop", []) => 0x0001,
+        ("c.ebreak", []) => 0x9002,
+        _ => return Err(unwritten()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,6 +1256,43 @@ mod tests {
 
     /// Zba, Zbb, Zbs and Zacas, `move`, and a register instruction written with a constant, with
     /// the words llvm-mc 23 writes, since binutils 2.42 knows neither Zacas nor the last.
+    #[test]
+    fn the_crypto_bits_the_byte_atomics_and_the_float_csrs_are_the_words_llvm_mc_writes() {
+        let at = |base| Mem(Addr { base, offset: Offset::Imm(0) });
+        for (mnemonic, values, word) in [
+            ("clmul", &[Gpr(10), Gpr(11), Gpr(12)][..], 0x0ac5_9533),
+            ("clmulr", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_a533),
+            ("clmulh", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_b533),
+            ("pack", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_c533),
+            ("packh", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_f533),
+            ("packw", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_c53b),
+            ("brev8", &[Gpr(10), Gpr(11)], 0x6875_d513),
+            ("amoswap.h.aqrl", &[Gpr(10), Gpr(11), at(12)], 0x0eb6_152f),
+            ("amoadd.b", &[Gpr(10), Gpr(11), at(12)], 0x00b6_052f),
+            ("amocas.h", &[Gpr(10), Gpr(11), at(12)], 0x28b6_152f),
+            ("amocas.q.aqrl", &[Gpr(10), Gpr(12), at(14)], 0x2ec7_452f),
+            ("frcsr", &[Gpr(10)], 0x0030_2573),
+            ("fscsr", &[Gpr(11)], 0x0035_9073),
+            ("fscsr", &[Gpr(10), Gpr(11)], 0x0035_9573),
+            ("frrm", &[Gpr(10)], 0x0020_2573),
+            ("fsrm", &[Gpr(11)], 0x0025_9073),
+            ("frflags", &[Gpr(10)], 0x0010_2573),
+            ("fsflags", &[Gpr(11)], 0x0015_9073),
+            ("fsrmi", &[Imm(2)], 0x0021_5073),
+            ("fsflagsi", &[Gpr(10), Imm(3)], 0x0011_d573),
+        ] {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic}");
+        }
+        // A pair starts at an even register, and only the `amo` operations come in bytes.
+        assert!(encode("amocas.q", &[Gpr(11), Gpr(12), at(14)]).is_err());
+        assert!(encode("lr.b", &[Gpr(10), at(12)]).is_err());
+        assert_eq!(compressed("c.li", &[Gpr(20), Imm(-13)]), Ok(0x5a4d));
+        assert_eq!(compressed("c.nop", &[]), Ok(0x0001));
+        assert_eq!(compressed("c.ebreak", &[]), Ok(0x9002));
+        assert!(compressed("c.li", &[Gpr(0), Imm(1)]).is_err());
+        assert!(compressed("c.li", &[Gpr(10), Imm(32)]).is_err());
+    }
+
     #[test]
     fn the_bit_manipulation_instructions_are_the_words_llvm_mc_writes() {
         let words: &[(&str, &[Value], u32)] = &[

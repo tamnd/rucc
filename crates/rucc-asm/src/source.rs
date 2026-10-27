@@ -1073,11 +1073,13 @@ impl Reader {
         let mut pieces = Vec::new();
         for piece in split(rest, ',') {
             let text = piece.trim();
-            // An address is a displacement in front of a register in brackets, and `~(1 << 3)` is
-            // not one.
+            // An address is a displacement in front of a register in brackets, so neither
+            // `~(1 << 3)` nor `-(288)` is one.
             let at = text.strip_suffix(')').and_then(|inner| inner.rfind('(')).filter(|&open| {
                 let base = &text[open + 1..text.len() - 1];
-                open > 0 && base.bytes().all(|b| b.is_ascii_alphanumeric()) && !base.is_empty()
+                open > 0
+                    && base.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && base.bytes().all(|b| b.is_ascii_alphanumeric())
             });
             let worked = match at {
                 Some(open) => {
@@ -1585,6 +1587,13 @@ impl Reader {
     /// finds the high half by, so the `auipc` is given one. gas makes the same kind of label.
     fn rv64(&mut self, text: &str) -> Result<(), Trouble> {
         let line = riscv64::read(text).map_err(|why| self.bad(&why.to_string()))?;
+        if line.mnemonic.starts_with("c.") {
+            let half = riscv64::compressed(&line.mnemonic, &line.values)
+                .map_err(|why| self.bad(&why.to_string()))?;
+            self.generated();
+            self.row()?;
+            return self.put(&half.to_le_bytes());
+        }
         let mut encoded = riscv64::encode(&line.mnemonic, &line.values)
             .map_err(|why| self.bad(&why.to_string()))?;
         // A conditional branch to a label reaches 4 KiB either way. One that turns out further
@@ -6941,6 +6950,42 @@ _tls$tlv$init:
         );
         let label = read.names.iter().find(|name| name.name == ".Lpcrel_hi0").unwrap();
         assert!(matches!(label.at, Held::In { offset: 12, .. }), "{:?}", label.at);
+    }
+
+    #[test]
+    fn the_riscv_kernel_entry_reads_its_compressed_magic_and_loads_from_a_label() {
+        // The start of `head.S`, a frame size the preprocessor left in brackets, and the loads
+        // and stores from a label that `clear_page.S` and `uaccess.S` write.
+        let read = match read(
+            concat!(
+                "\tc.li s4, -13\n",
+                "\tc.nop\n",
+                "\taddi sp, sp, -(288)\n",
+                "\tld a1, size\n",
+                "\tsd a1, size, t0\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        // The words GNU as writes for the same lines.
+        assert_eq!(
+            words(&read, ".text"),
+            [0x0001_5a4d, 0xee01_0113, 0x0000_0597, 0x0005_b583, 0x0000_0297, 0x00b2_b023]
+        );
+        let text = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        assert_eq!(
+            relocs,
+            [
+                (8, "size", Reference::Riscv(riscv64::Fixup::PcrelHi20), 0),
+                (12, ".Lpcrel_hi0", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
+                (16, "size", Reference::Riscv(riscv64::Fixup::PcrelHi20), 0),
+                (20, ".Lpcrel_hi1", Reference::Riscv(riscv64::Fixup::PcrelLo12S), 0),
+            ]
+        );
     }
 
     #[test]
