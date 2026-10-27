@@ -1018,6 +1018,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // Either x86, since `-m32` on an x86-64 target only changes the machine once the loop is done.
     let x86 = matches!(arch, rucc_target::Arch::X86_64 | rucc_target::Arch::X86);
     let aarch64 = arch == rucc_target::Arch::Aarch64;
+    let riscv = arch == rucc_target::Arch::Riscv64;
     // The WebAssembly features. `-mcpu=` names a set, and `-m<feature>` and `-mno-<feature>` change
     // one feature. They are weighed after the loop, where the set comes first and the flags come
     // after it in the order written, whatever the order of `-mcpu=` and the flags. That is clang's
@@ -1047,6 +1048,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `sp_el0` is the copy an arm64 kernel keeps in each task.
     let mut guard_task = false;
     let mut guard_sp_el0 = false;
+    // The RISC-V one, `-mstack-protector-guard=tls` with `tp` as the register. That is where a
+    // riscv kernel keeps the task that is running, and the offset is the canary's place in it.
+    let mut guard_tls = false;
+    let mut guard_tp = false;
     // `-mpreferred-stack-boundary=`, weighed once the machine is settled.
     let mut boundary: Option<&str> = None;
 
@@ -2723,9 +2728,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-mstack-protector-guard=tls" if x86 => {
                 guard_global = false;
             }
-            "-mstack-protector-guard=global" if x86 || aarch64 => {
+            "-mstack-protector-guard=global" if x86 || aarch64 || riscv => {
                 guard_global = true;
                 guard_task = false;
+                guard_tls = false;
+            }
+            "-mstack-protector-guard=tls" if riscv => {
+                guard_global = false;
+                guard_tls = true;
+            }
+            _ if riscv && arg.starts_with("-mstack-protector-guard-reg=") => {
+                if &arg["-mstack-protector-guard-reg=".len()..] != "tp" {
+                    return Err(err(format!("{arg}: the register is tp")));
+                }
+                guard_tp = true;
             }
             "-mstack-protector-guard=sysreg" if aarch64 => {
                 guard_global = false;
@@ -2744,7 +2760,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     _ => return Err(err(format!("{arg}: the register is fs or gs"))),
                 });
             }
-            _ if (x86 || aarch64) && arg.starts_with("-mstack-protector-guard-offset=") => {
+            _ if (x86 || aarch64 || riscv)
+                && arg.starts_with("-mstack-protector-guard-offset=") =>
+            {
                 let text = &arg["-mstack-protector-guard-offset=".len()..];
                 // gcc reads it as C reads a number, so `0x28` is 40 too.
                 let (sign, digits) = text.strip_prefix('-').map_or((1, text), |rest| (-1, rest));
@@ -3808,6 +3826,28 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         } else {
             rucc_target::Guard::global("__stack_chk_guard", opts.pic != Pic::Absolute)
         });
+    }
+    // RISC-V reads the canary from the running task under `tls`, which gcc wants the register and
+    // the offset for, and the offset is one a load carries in its twelve bits. `global` is the
+    // plain `__stack_chk_guard`, which is also where the canary is with none of the flags.
+    if opts.target.arch == rucc_target::Arch::Riscv64 && elf {
+        if guard_tls {
+            let Some(at) = guard_offset.filter(|_| guard_tp) else {
+                return Err(err("both -mstack-protector-guard-offset and \
+                     -mstack-protector-guard-reg must be used with -mstack-protector-guard=tls"
+                    .to_owned()));
+            };
+            if !(-2048..2048).contains(&at) {
+                return Err(err(format!(
+                    "-mstack-protector-guard-offset={at}: the offset is from -2048 to 2047"
+                )));
+            }
+            opts.guard = Some(rucc_target::Guard::in_task(at));
+        } else if guard_global && guard_offset.is_some() {
+            return Err(err("-mstack-protector-guard=global and \
+                 -mstack-protector-guard-offset are not used together"
+                .to_owned()));
+        }
     }
     // i386 position independent code calls the hidden copy of the failure routine that the C
     // library's static half carries, as gcc does: a call to the shared one would go through the
@@ -10877,6 +10917,41 @@ mod tests {
             &["-mstack-protector-guard=tls"],
         ] {
             let line = [&[KERNEL_ARM64, "-c", "a.c"], bad].concat();
+            let said = refused(&line);
+            assert!(said.contains("-mstack-protector-guard"), "{bad:?}: {said}");
+        }
+    }
+
+    /// A riscv kernel keeps its canary in the task `tp` points at, and says so with all three flags
+    /// the way gcc wants them.
+    #[test]
+    fn a_riscv_kernel_can_move_the_canary_into_the_task() {
+        use rucc_target::Guard;
+
+        const RISCV: &str = "--target=riscv64-linux-gnu";
+        let guard = |more: &[&str]| {
+            let line = [&[RISCV, "-mabi=lp64", "-march=rv64imac", "-c", "a.c"], more].concat();
+            compile(&line).0.guard
+        };
+        let task = [
+            "-mstack-protector-guard=tls",
+            "-mstack-protector-guard-reg=tp",
+            "-mstack-protector-guard-offset=1080",
+        ];
+        assert_eq!(guard(&task), Some(Guard::in_task(1080)));
+        let global = guard(&["-mstack-protector-guard=global"]);
+        assert_eq!(global, guard(&[]));
+
+        for bad in [
+            &task[..1],
+            &task[..2],
+            &[task[0], "-mstack-protector-guard-offset=8"],
+            &[task[0], task[1], "-mstack-protector-guard-offset=2048"],
+            &["-mstack-protector-guard-reg=gp"],
+            &["-mstack-protector-guard=global", "-mstack-protector-guard-offset=8"],
+            &["-mstack-protector-guard=sysreg"],
+        ] {
+            let line = [&[RISCV, "-c", "a.c"], bad].concat();
             let said = refused(&line);
             assert!(said.contains("-mstack-protector-guard"), "{bad:?}: {said}");
         }
