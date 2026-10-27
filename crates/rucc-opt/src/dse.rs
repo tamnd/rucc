@@ -16,7 +16,11 @@
 //!
 //! From each store the pass walks forwards along every path, holding the bytes of it that are
 //! still live. A later store to the same object, at an offset both of them know, takes the bytes it
-//! covers off the front or the back of that span, and a path ends when nothing is left. A load, a
+//! covers out of them, from the front, the back or the middle, and a path ends when nothing is
+//! left. The middle matters because the stores that overwrite a fill need not come in order:
+//! `cp_new_stat` in fs/stat.c zeroes `__pad0` in the middle of its `struct stat` before it writes
+//! the fields on either side, and under `-ftrivial-auto-var-init=zero` the fill in front of all of
+//! them is only dead once the hole that store left is remembered. A load, a
 //! call, or anything else the alias oracle cannot rule out records the bytes it may read, and a
 //! return records all of them unless the store is to a local, whose storage is gone once the
 //! function has returned. A store where no path records a byte is dead. A `memset` or a `memcpy`
@@ -106,7 +110,9 @@ impl Pass for Dse {
             };
             for block in func.blocks() {
                 for (at, inst) in func.insts(block).enumerate() {
-                    let Some(store) = walk.candidate(inst) else { continue };
+                    let Some(store) = walk.candidate(inst) else {
+                        continue;
+                    };
                     match walk.fate(&store, block, at + 1) {
                         Fate::Kept => {}
                         Fate::TooFar => stats.missed(TOO_FAR),
@@ -188,7 +194,10 @@ impl Walk<'_> {
     /// and one carrying a memory token is one some pass is still reasoning about.
     fn candidate(&self, inst: Inst) -> Option<Store> {
         let data = &self.func[inst];
-        let bulk = matches!(data.opcode, Opcode::Memset | Opcode::Memcpy | Opcode::Memmove);
+        let bulk = matches!(
+            data.opcode,
+            Opcode::Memset | Opcode::Memcpy | Opcode::Memmove
+        );
         if !(bulk || data.opcode == Opcode::Store) || data.flags.contains(Flags::VOLATILE) {
             return None;
         }
@@ -204,40 +213,54 @@ impl Walk<'_> {
             Origin::Local(local) => !self.alias.escapes().escaped(local),
             _ => false,
         };
-        Some(Store { inst, access, lo, hi, private, bulk })
+        Some(Store {
+            inst,
+            access,
+            lo,
+            hi,
+            private,
+            bulk,
+        })
     }
 
     /// Whether this is the end of the lifetime of the local the store writes.
     fn ends(&self, store: &Store, inst: Inst) -> bool {
-        let Origin::Local(_) = store.access.origin else { return false };
-        self.alias.writes(inst).is_some_and(|ended| ended.origin == store.access.origin)
+        let Origin::Local(_) = store.access.origin else {
+            return false;
+        };
+        self.alias
+            .writes(inst)
+            .is_some_and(|ended| ended.origin == store.access.origin)
     }
 
     /// Walks every path from just after the store, which is in this block at this index.
     fn fate(&mut self, store: &Store, home: Block, next: usize) -> Fate {
         let mut needed: Option<(i128, i128)> = None;
         let mut steps = 0u32;
-        // The spans each block has been entered with. A block entered again with a span inside
-        // one it was already walked with can find nothing the first walk did not, since fewer live
-        // bytes can only be read less.
-        let mut entered: Map<Block, Vec<(i128, i128)>> = Map::default();
-        let mut stack = vec![(home, next, store.lo, store.hi)];
-        while let Some((block, from, mut lo, mut hi)) = stack.pop() {
+        // The live bytes each block has been entered with. A block entered again with bytes all
+        // among those it was already walked with can find nothing the first walk did not, since
+        // fewer live bytes can only be read less.
+        let mut entered: Map<Block, Vec<Live>> = Map::default();
+        let mut stack = vec![(home, next, Live::new(store.lo, store.hi))];
+        while let Some((block, from, mut live)) = stack.pop() {
             let mut ended = false;
             for inst in self.func.insts(block).skip(from) {
                 steps += 1;
                 if steps > rucc_cost::param!(DSE_WALK_LIMIT) {
                     return Fate::TooFar;
                 }
+                let (lo, hi) = live.hull();
                 if let Some(read) = self.read(store, inst, lo, hi) {
-                    needed = Some(hull(needed, read));
+                    if let Some(read) = live.within(read) {
+                        needed = Some(hull(needed, read));
+                    }
                 }
                 match self.func[inst].opcode {
                     Opcode::Return | Opcode::TailCall => {
                         // A local is gone when the function is, and anything else is still there
                         // for the caller to read.
                         if !matches!(store.access.origin, Origin::Local(_)) {
-                            needed = Some(hull(needed, (lo, hi)));
+                            needed = Some(hull(needed, live.hull()));
                         }
                         ended = true;
                         break;
@@ -258,14 +281,10 @@ impl Walk<'_> {
                     _ => {}
                 }
                 if let Some((start, end)) = self.covers(store, inst) {
-                    if start <= lo && hi <= end {
+                    live.remove(start, end);
+                    if live.is_empty() {
                         ended = true;
                         break;
-                    }
-                    if start <= lo && lo < end {
-                        lo = end;
-                    } else if start < hi && hi <= end {
-                        hi = start;
                     }
                 }
             }
@@ -274,18 +293,18 @@ impl Walk<'_> {
             }
             let successors = self.cfg.successors(block);
             if successors.is_empty() {
-                needed = Some(hull(needed, (lo, hi)));
+                needed = Some(hull(needed, live.hull()));
             }
             for &successor in successors {
                 if self.dom.dominates(successor, home) {
                     return Fate::Kept;
                 }
-                let spans = entered.entry(successor).or_default();
-                if spans.iter().any(|&(start, end)| start <= lo && hi <= end) {
+                let seen = entered.entry(successor).or_default();
+                if seen.iter().any(|before| live.within_all(before)) {
                     continue;
                 }
-                spans.push((lo, hi));
-                stack.push((successor, 0, lo, hi));
+                seen.push(live.clone());
+                stack.push((successor, 0, live.clone()));
             }
         }
         match needed {
@@ -345,10 +364,16 @@ impl Walk<'_> {
             // write of the whole of it that nothing may read back.
             Opcode::Store | Opcode::Memset | Opcode::AtomicStore | Opcode::LifetimeEnd => None,
             Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
-                if self.alias.read_by(&narrowed, inst).is_no() { None } else { live }
+                if self.alias.read_by(&narrowed, inst).is_no() {
+                    None
+                } else {
+                    live
+                }
             }
             _ => {
-                let Some(access) = self.alias.reads(inst) else { return live };
+                let Some(access) = self.alias.reads(inst) else {
+                    return live;
+                };
                 // The same object at offsets both know is a question the offsets answer, and the
                 // answer is which of the live bytes, not only whether.
                 let same = access.origin == store.access.origin;
@@ -356,7 +381,11 @@ impl Walk<'_> {
                     let (start, end) = (start.max(lo), end.min(hi));
                     return (start < end).then_some((start, end));
                 }
-                if self.alias.query(&narrowed, &access).is_no() { None } else { live }
+                if self.alias.query(&narrowed, &access).is_no() {
+                    None
+                } else {
+                    live
+                }
             }
         }
     }
@@ -393,6 +422,64 @@ fn plain_order(func: &Func, inst: Inst) -> bool {
     }
 }
 
+/// The bytes of a store still live on one path, as spans in order with gaps between them.
+///
+/// Never empty while a path is walked: the walk ends the path when the last span goes. A handful of
+/// spans at most in practice, since a span is only split by a store that lands inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Live(Vec<(i128, i128)>);
+
+impl Live {
+    fn new(lo: i128, hi: i128) -> Self {
+        Self(vec![(lo, hi)])
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The smallest span holding every live byte.
+    fn hull(&self) -> (i128, i128) {
+        let first = self.0.first().map_or(0, |&(lo, _)| lo);
+        let last = self.0.last().map_or(0, |&(_, hi)| hi);
+        (first, last)
+    }
+
+    /// Takes the bytes from `start` to `end` out.
+    fn remove(&mut self, start: i128, end: i128) {
+        let mut left = Vec::with_capacity(self.0.len() + 1);
+        for &(lo, hi) in &self.0 {
+            if end <= lo || hi <= start {
+                left.push((lo, hi));
+                continue;
+            }
+            if lo < start {
+                left.push((lo, start));
+            }
+            if end < hi {
+                left.push((end, hi));
+            }
+        }
+        self.0 = left;
+    }
+
+    /// The smallest span holding the live bytes of `start` to `end`, if any of them are live.
+    fn within(&self, (start, end): (i128, i128)) -> Option<(i128, i128)> {
+        self.0
+            .iter()
+            .map(|&(lo, hi)| (lo.max(start), hi.min(end)))
+            .filter(|&(lo, hi)| lo < hi)
+            .fold(None, |so_far, span| Some(hull(so_far, span)))
+    }
+
+    /// Whether every live byte here is live in `other` as well.
+    fn within_all(&self, other: &Self) -> bool {
+        self.0
+            .iter()
+            .all(|&(lo, hi)| other.0.iter().any(|&(start, end)| start <= lo && hi <= end))
+    }
+}
+
 /// The smallest span holding both.
 fn hull(so_far: Option<(i128, i128)>, (lo, hi): (i128, i128)) -> (i128, i128) {
     so_far.map_or((lo, hi), |(start, end)| (start.min(lo), end.max(hi)))
@@ -413,22 +500,40 @@ fn trim(func: &mut Func, inst: Inst, skip: i64, size: u64, bits: u32) {
     if skip != 0 {
         let ty = Type::int(bits);
         let imm = func.add_imm(Imm::int(i128::from(skip), ty.lane()));
-        let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+        let data = InstData {
+            extra: Extra::Imm(imm),
+            ..InstData::new(Opcode::IConst)
+        };
         let by = emit(func, inst, data, ty);
         for arg in &mut args[..moved] {
             let pair = func.push_values(&[*arg, by]);
             *arg = emit(
                 func,
                 inst,
-                InstData { args: pair, ..InstData::new(Opcode::PtrAdd) },
+                InstData {
+                    args: pair,
+                    ..InstData::new(Opcode::PtrAdd)
+                },
                 Type::PTR,
             );
         }
         align = align.min(1u32 << skip.trailing_zeros().min(31)).max(1);
     }
-    let mem = func.add_mem(MemInfo { size, align, ..info });
+    let mem = func.add_mem(MemInfo {
+        size,
+        align,
+        ..info
+    });
     let args = func.push_values(&args);
-    let made = func.create_inst(InstData { args, extra: Extra::Mem(mem), ..data }, &[], span);
+    let made = func.create_inst(
+        InstData {
+            args,
+            extra: Extra::Mem(mem),
+            ..data
+        },
+        &[],
+        span,
+    );
     func.insert_before(made, inst);
     func.remove_inst(inst);
 }
@@ -438,7 +543,10 @@ fn emit(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value {
     let span = func.span(before);
     let made = func.create_inst(data, &[ty], span);
     func.insert_before(made, before);
-    func[made].results().next().expect("one result was asked for")
+    func[made]
+        .results()
+        .next()
+        .expect("one result was asked for")
 }
 
 #[cfg(test)]
@@ -468,7 +576,10 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
             Dse.run(&mut module[id], &mut an, fuel);
         }
         if let Err(errors) = rucc_ir::verify(&module, &names) {
-            panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
+            panic!(
+                "the pass left invalid IR, {errors:?}\n{}",
+                rucc_ir::print(&module, &names)
+            );
         }
         rucc_ir::print(&module, &names)
     }
@@ -478,7 +589,9 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
     }
 
     fn stores(out: &str) -> usize {
-        out.lines().filter(|line| line.trim_start().starts_with("store")).count()
+        out.lines()
+            .filter(|line| line.trim_start().starts_with("store"))
+            .count()
     }
 
     const TWICE: &str = r#"
@@ -547,6 +660,43 @@ block0(%0: ptr):
         );
         assert!(!out.contains("memset"), "{out}");
         assert_eq!(stores(&out), 3, "{out}");
+    }
+
+    /// A fill covered by stores that start in its middle is removed all the same, the way
+    /// `cp_new_stat` zeroes `__pad0` before the fields around it, and one whose hole in the middle
+    /// is read before anything writes it stays.
+    #[test]
+    fn a_fill_covered_from_the_middle_out_goes() {
+        let fill = |between: &str| {
+            format!(
+                r#"
+func @f(ptr) -> i32, linkage(external) {{
+block0(%0: ptr):
+    %1 = iconst.i8 0
+    memset %0, %1, size 16, align 8
+    %2 = iconst.i32 1
+    %3 = iconst.i64 4
+    %4 = ptr_add %0, %3
+    store %2 -> %4, align 4
+    {between}
+    store %2 -> %0, align 4
+    %6 = iconst.i64 8
+    %7 = ptr_add %0, %6
+    %8 = iconst.i64 0
+    store %8 -> %7, align 8
+    return %5
+}}
+"#
+            )
+        };
+        let out = cleaned(&fill("%5 = iconst.i32 0"));
+        assert!(!out.contains("memset"), "{out}");
+        assert_eq!(stores(&out), 3, "{out}");
+        let out = cleaned(&fill("%5 = load.i32 %0, align 4"));
+        assert!(
+            out.contains("memset"),
+            "the load reads the first word, {out}"
+        );
     }
 
     /// A fill whose first half is overwritten becomes a fill of the second half.
