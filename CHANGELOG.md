@@ -64,6 +64,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The assembler reads `.intel_syntax noprefix` blocks inside inline asm, which bcachefs uses for its key comparison, and takes the Intel names of the widening instructions such as `cdq`, which the Xen entry code in head_64.S uses (#3886).
 - An x86 inline asm template that names several locals in memory reads each one from the stack pointer, instead of putting every address but one in a register. `smapi.o` in the kernel names nine locals and clobbers six registers, and the allocator panicked on it (#3888).
 - A variadic call on riscv64 passes the unnamed arguments in the integer registers, as LP64D says, and a variadic function homes a0 to a7 below the caller's stack arguments so `va_arg` walks them with a `void *` (#3893).
+- A riscv64 object writes `.dword sym - .` as an `R_RISCV_ADD64` and `R_RISCV_SUB64` pair against a local label on the place, as gas does, where it was refused (#3903).
 
 ## 0.30.12
 

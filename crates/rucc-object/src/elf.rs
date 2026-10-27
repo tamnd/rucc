@@ -193,13 +193,16 @@ pub(crate) fn r_type_aarch64(reference: Reference) -> Option<elf::RelocationType
 ///
 /// A field of an instruction is the relocation its fixup names, and a table of data holds an
 /// address at eight bytes or four, or a distance from the bytes themselves, which is what the
-/// unwind table says about a function.
+/// unwind table says about a function. The kernel's jump table holds one in eight bytes as well.
 pub(crate) fn r_type_riscv64(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
         Reference::Riscv(fixup) => elf::RelocationType(fixup.elf()),
         Reference::Address { bytes: 8 } => elf::R_RISCV_64,
         Reference::Address { bytes: 4 } => elf::R_RISCV_32,
         Reference::Data | Reference::Away => elf::R_RISCV_32_PCREL,
+        // There is no eight byte distance, so this is the first of a pair: the name added here
+        // and the place taken off by an `R_RISCV_SUB64` the caller writes after it.
+        Reference::AwayWide => elf::R_RISCV_ADD64,
         _ => return None,
     })
 }
