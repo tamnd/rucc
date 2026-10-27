@@ -75,6 +75,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 assembler writes a difference of two names it cannot work out, `.long a - b` with `b` in no section of the file, as an `R_RISCV_ADD` and `R_RISCV_SUB` pair on the same bytes the way gas does, in one, two, four or eight bytes (#3910).
 - The riscv64 assembler reads `la` in a file built without position independence as `lla`, the address worked out from the instruction, the way gas does without `-fpic`, rather than a read of the global offset table (#3912).
 - A 32-bit comparison on riscv64 keeps the `sext.w` in front of it when the word was cut out of a wider register, so `(int)(x >> 32)` or an `int` field of a small struct passed in a register no longer compares as an unsigned number (#3913).
+- An answer written before the instruction has read all of its sources, like the riscv64 select, no longer gets the same scratch register as a spilled source, which made the select pick the wrong value (#3914).
 
 ## 0.30.12
 
