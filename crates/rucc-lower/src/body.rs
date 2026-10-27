@@ -596,6 +596,35 @@ enum Local {
     Slot(Value),
 }
 
+/// An operand of `&&` or `||` that asks whether a bit-field is zero, which
+/// [`Body::merged_tests`] reads together with the ones next to it.
+#[derive(Debug, Clone, Copy)]
+struct Test {
+    /// The object the field is a member of.
+    base: ExprId,
+    /// Where the field starts, in bits from the start of the object.
+    at: u64,
+    /// How many bits the field is.
+    width: u32,
+    /// Whether the operand is true when the field is other than zero.
+    nonzero: bool,
+    /// The type the field was declared with.
+    ty: TypeId,
+}
+
+impl Test {
+    /// Whether a run of tests is one compare: each field one bit wide, so it is either all
+    /// clear or all set, or every operand asking the question that a mask answers for the whole
+    /// field at once, which is not zero in `||` and zero in `&&`. And the bytes they lie in no
+    /// more than eight, so one integer holds them.
+    fn fits(and: bool, tests: &[Test]) -> bool {
+        let lo = tests.iter().map(|test| test.at).min().unwrap_or(0);
+        let hi = tests.iter().map(|test| test.at + u64::from(test.width)).max().unwrap_or(lo);
+        let bytes = hi.div_ceil(8) - lo / 8;
+        bytes <= 8 && tests.iter().all(|test| test.width == 1 || test.nonzero != and)
+    }
+}
+
 /// An object the walk can read or write: either a variable or an address.
 #[derive(Debug, Clone, Copy)]
 struct Place {
@@ -9721,6 +9750,9 @@ impl<'u> Body<'_, 'u> {
     /// defined `g` links. tcc's own test does exactly that in `optimize_out_test`.
     fn short_circuit(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> Value {
         let and = op == BinaryOp::LogAnd;
+        if let Some(bit) = self.merged_tests(op, lhs, rhs, span) {
+            return bit;
+        }
         if let Some((effects, answer)) = self.decided_condition(lhs) {
             for effect in effects {
                 self.discard(effect);
@@ -9731,6 +9763,18 @@ impl<'u> Body<'_, 'u> {
             return self.condition(rhs);
         }
         let left = self.condition(lhs);
+        self.chain_on(and, left, |body| body.condition(rhs), span)
+    }
+
+    /// The rest of `a && b` or `a || b` once `left` is known, with `right` evaluated only on the
+    /// side where it decides the answer.
+    fn chain_on(
+        &mut self,
+        and: bool,
+        left: Value,
+        right: impl FnOnce(&mut Self) -> Value,
+        span: Span,
+    ) -> Value {
         let var = self.temp();
         let block = self.block();
         // The answer if the right side is never evaluated, which is the left side's own value.
@@ -9748,7 +9792,7 @@ impl<'u> Body<'_, 'u> {
 
         self.at = Some(other);
         self.conditions += 1;
-        let right = self.condition(rhs);
+        let right = right(self);
         self.conditions -= 1;
         let block = self.block();
         self.ssa.write(var, block, right);
@@ -9757,6 +9801,190 @@ impl<'u> Body<'_, 'u> {
         self.ssa.seal(self.func, join);
         self.at = Some(join);
         self.ssa.read(self.func, var, join, Type::I1)
+    }
+
+    /// `a && b` and `a || b` over bit-fields of one object, asked as one question about the bytes
+    /// they lie in, which is what gcc's `fold_truth_andor` does with them.
+    ///
+    /// `tlb_flush_mmu_tlbonly` in the kernel's `<asm-generic/tlb.h>` returns early unless one of
+    /// six one bit fields of its `mmu_gather` is set. Walked an operand at a time that is six loads
+    /// of the same two bytes, each with a shift and a branch, and the body was too large to copy
+    /// into its callers. gcc asks it with one `testw` and copies it into all of them.
+    ///
+    /// Reading a field the chain would have stopped before reading is safe when the object is the
+    /// one an operand already read, found the same way by a road that reads no memory and does
+    /// nothing. Each run of such operands next to each other becomes one load and one compare, and
+    /// the runs and the other operands are joined in the order the program wrote them.
+    fn merged_tests(
+        &mut self,
+        op: BinaryOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        span: Span,
+    ) -> Option<Value> {
+        let and = op == BinaryOp::LogAnd;
+        let mut operands = Vec::new();
+        self.chained(op, lhs, &mut operands);
+        self.chained(op, rhs, &mut operands);
+        let tests: Vec<Option<Test>> = operands.iter().map(|&it| self.bit_test(it)).collect();
+        let mut runs: Vec<(ExprId, Vec<Test>)> = Vec::new();
+        for (&operand, &test) in operands.iter().zip(&tests) {
+            if let (Some(test), Some((_, run))) = (test, runs.last_mut()) {
+                let same = run.first().is_some_and(|first| self.same_object(first.base, test.base));
+                run.push(test);
+                if same && Test::fits(and, run) {
+                    continue;
+                }
+                run.pop();
+            }
+            runs.push((operand, test.into_iter().collect()));
+        }
+        // A chain with an operand whose answer is known is left to the walk that drops what it
+        // decides, which a call behind a `0 &&` relies on to not be linked.
+        if runs.iter().all(|(_, run)| run.len() < 2)
+            || operands.iter().any(|&it| self.decided_condition(it).is_some())
+        {
+            return None;
+        }
+        let mut answer = None;
+        for (operand, run) in runs {
+            let bit = move |body: &mut Self| match run.as_slice() {
+                [] | [_] => body.condition(operand),
+                _ => body.tests_bit(and, &run, span),
+            };
+            answer = Some(match answer {
+                None => bit(self),
+                Some(left) => self.chain_on(and, left, bit, span),
+            });
+        }
+        answer
+    }
+
+    /// The operands of a chain of one of `&&` and `||`, in the order they are evaluated.
+    fn chained(&self, op: BinaryOp, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.tast()[expr].kind {
+            ExprKind::Binary { op: inner, lhs, rhs } if inner == op => {
+                self.chained(op, lhs, out);
+                self.chained(op, rhs, out);
+            }
+            ExprKind::Convert { kind: Conversion::Bool, operand }
+                if matches!(
+                    self.tast()[operand].kind,
+                    ExprKind::Binary { op: inner, .. } if inner == op
+                ) =>
+            {
+                self.chained(op, operand, out);
+            }
+            _ => out.push(expr),
+        }
+    }
+
+    /// The bit-field an operand of `&&` or `||` asks about and whether it asks for the field to be
+    /// other than zero, when the operand is that question and the field is one [`Self::tests_bit`]
+    /// can read with others.
+    fn bit_test(&self, expr: ExprId) -> Option<Test> {
+        let tast = self.tast();
+        match tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
+                let ExprKind::Member { base, field } = tast[operand].kind else { return None };
+                if !self.target().little_endian
+                    || self.is_volatile(tast[operand].ty)
+                    || self.is_volatile(tast[base].ty)
+                    || !self.place_reads_nothing(base, u64::MAX)
+                {
+                    return None;
+                }
+                let TypeKind::Record(id) = self.types().kind(self.types().canonical(tast[base].ty))
+                else {
+                    return None;
+                };
+                let info = self.types().record_info(id);
+                if info.reverse || info.variable.is_some() {
+                    return None;
+                }
+                let member = info.fields.get(field as usize)?;
+                let width = member.bits.filter(|&width| width > 0)?;
+                let at = member.offset * 8 + u64::from(member.bit);
+                Some(Test { base, at, width, nonzero: true, ty: tast[operand].ty })
+            }
+            ExprKind::Convert { kind: Conversion::Bool, operand } => self.bit_test(operand),
+            // A widening keeps whether the value is zero, and a narrowing may not.
+            ExprKind::Convert { kind: Conversion::Arithmetic, operand } => {
+                let test = self.bit_test(operand)?;
+                let into = repr::value_type(self.types(), self.target(), tast[expr].ty)?;
+                (into.is_int() && into.bits() >= test.width).then_some(test)
+            }
+            ExprKind::Unary { op: UnaryOp::Not, operand } => {
+                self.bit_test(operand).map(|test| Test { nonzero: !test.nonzero, ..test })
+            }
+            ExprKind::Binary { op: op @ (BinaryOp::Eq | BinaryOp::Ne), lhs, rhs } => {
+                let mut eval = Eval::new(tast, self.types(), self.target(), self.unit.names);
+                let zero = matches!(eval.integer(rhs), Ok(0)) && !eval.addressed();
+                if !zero || !eval.finish().is_empty() {
+                    return None;
+                }
+                let test = self.bit_test(lhs)?;
+                Some(Test { nonzero: test.nonzero == (op == BinaryOp::Ne), ..test })
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether two expressions name the same object by the same road, which [`Self::bit_test`]
+    /// has already said reads nothing.
+    fn same_object(&self, a: ExprId, b: ExprId) -> bool {
+        let tast = self.tast();
+        match (tast[a].kind, tast[b].kind) {
+            (ExprKind::Decl(x), ExprKind::Decl(y)) => x == y,
+            (ExprKind::Member { base: x, field: f }, ExprKind::Member { base: y, field: g }) => {
+                f == g && self.same_object(x, y)
+            }
+            (
+                ExprKind::Unary { op: UnaryOp::Deref, operand: x },
+                ExprKind::Unary { op: UnaryOp::Deref, operand: y },
+            ) => self.same_object(x, y),
+            (
+                ExprKind::Convert { kind: k, operand: x },
+                ExprKind::Convert { kind: l, operand: y },
+            ) => k == l && tast[a].ty == tast[b].ty && self.same_object(x, y),
+            _ => false,
+        }
+    }
+
+    /// A run of [`Test`]s of one object, all asked by one load of the bytes they lie in.
+    fn tests_bit(&mut self, and: bool, tests: &[Test], span: Span) -> Value {
+        let lo = tests.iter().map(|test| test.at).min().unwrap_or(0);
+        let hi = tests.iter().map(|test| test.at + u64::from(test.width)).max().unwrap_or(lo);
+        let base = tests[0].base;
+        let record = self.types().canonical(self.tast()[base].ty);
+        let place = self.place(base);
+        let addr = self.address_of(place, span);
+        let align =
+            self.alignment(addr).unwrap_or(repr::align_of(self.types(), self.target(), record));
+        // From the start of the first byte, so the masks are on the bits as they were loaded and
+        // nothing shifts them down first.
+        let byte = lo / 8;
+        let at = self.offset(addr, byte, span);
+        let width = u32::try_from(hi - byte * 8).unwrap_or(u32::MAX);
+        let run = Run::at(align, byte, 0, width);
+        let into = Type::int(run.unit());
+        let word = self.read_bits(at, run, tests[0].ty, into, span);
+        let (mut mask, mut set) = (0i128, 0i128);
+        for test in tests {
+            let bits = ((1i128 << test.width) - 1) << (test.at - byte * 8);
+            mask |= bits;
+            if test.nonzero {
+                set |= bits;
+            }
+        }
+        // Every operand true is the set bits set and the rest clear, and one of them true is the
+        // whole run being anything but every operand false.
+        let (pred, want) = if and { (IntPred::Eq, set) } else { (IntPred::Ne, mask & !set) };
+        let mut build = self.build(span);
+        let mask = build.iconst(into, mask);
+        let want = build.iconst(into, want);
+        let masked = build.binary(Opcode::And, word, mask, Flags::NONE);
+        build.icmp(pred, masked, want)
     }
 
     /// `cond ? then : otherwise`.
