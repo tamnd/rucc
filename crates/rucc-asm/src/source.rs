@@ -1633,6 +1633,104 @@ impl Reader {
         Ok(())
     }
 
+    /// `.insn`, an instruction given by its fields or as its number, which is how the kernel
+    /// writes the ones an older assembler does not know. The forms are the ones the kernel uses:
+    /// the bare number, with its length in front or not, and the `r`, `i` and `s` formats with
+    /// the opcode and the functions as numbers. An `i` takes its constant after the registers
+    /// or in front of the base the way a load writes it.
+    fn rv_insn(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let first = args.first().map_or("", |arg| arg.trim());
+        let (format, first) = match first.split_once(char::is_whitespace) {
+            Some((format @ ("r" | "i" | "s"), rest)) => (format, rest.trim()),
+            _ => ("", first),
+        };
+        let mut fields = std::iter::once(first)
+            .chain(args.iter().skip(1).map(|arg| arg.trim()))
+            .collect::<Vec<_>>();
+        if format.is_empty() {
+            let value = self.number(fields.last().copied().unwrap_or_default())?;
+            let length = if value & 3 == 3 { 4 } else { 2 };
+            let asked = match *fields {
+                [_] => length,
+                [length, _] => self.number(length)?,
+                _ => return Err(self.bad(".insn takes a number, or a length and a number")),
+            };
+            if asked != length || !(0..1 << (8 * length)).contains(&value) {
+                return Err(
+                    self.bad(&format!(".insn {value:#x} is not a {asked} byte instruction"))
+                );
+            }
+            self.generated();
+            self.row()?;
+            return self.put(&value.to_le_bytes()[..length as usize]);
+        }
+        // `simm12(rs1)` is two of the fields.
+        if let Some(last) = fields.pop() {
+            match last.strip_suffix(')').and_then(|inner| inner.split_once('(')) {
+                Some((offset, base)) if format != "r" => {
+                    fields.push(base.trim());
+                    fields.push(if offset.trim().is_empty() { "0" } else { offset.trim() });
+                }
+                _ => fields.push(last),
+            }
+        }
+        let field = |reader: &mut Self, text: &str, bits: u32| -> Result<u32, Trouble> {
+            let value = reader.number(text)?;
+            u32::try_from(value)
+                .ok()
+                .filter(|&value| value >> bits == 0)
+                .ok_or_else(|| reader.bad(&format!("{value} does not fit in {bits} bits in .insn")))
+        };
+        let gpr = |reader: &Self, text: &str| match riscv64::register(&text.to_ascii_lowercase()) {
+            Some(riscv64::Value::Gpr(number)) => Ok(u32::from(number)),
+            _ => Err(reader.bad(&format!("'{text}' is not a register in .insn"))),
+        };
+        let simm12 = |reader: &mut Self, text: &str| -> Result<u32, Trouble> {
+            let value = reader.number(text)?;
+            if !(-2048..2048).contains(&value) {
+                return Err(reader.bad(&format!("{value} does not fit in 12 bits in .insn")));
+            }
+            Ok((value as u32) & 0xfff)
+        };
+        let word = match (format, &fields[..]) {
+            ("r", &[opcode, func3, func7, rd, rs1, rs2]) => {
+                field(self, func7, 7)? << 25
+                    | gpr(self, rs2)? << 20
+                    | gpr(self, rs1)? << 15
+                    | field(self, func3, 3)? << 12
+                    | gpr(self, rd)? << 7
+                    | field(self, opcode, 7)?
+            }
+            ("i", &[opcode, func3, rd, rs1, imm]) => {
+                simm12(self, imm)? << 20
+                    | gpr(self, rs1)? << 15
+                    | field(self, func3, 3)? << 12
+                    | gpr(self, rd)? << 7
+                    | field(self, opcode, 7)?
+            }
+            ("s", &[opcode, func3, rs2, rs1, imm]) => {
+                let imm = simm12(self, imm)?;
+                (imm >> 5) << 25
+                    | gpr(self, rs2)? << 20
+                    | gpr(self, rs1)? << 15
+                    | field(self, func3, 3)? << 12
+                    | (imm & 0x1f) << 7
+                    | field(self, opcode, 7)?
+            }
+            _ => {
+                return Err(
+                    self.bad(&format!("this .insn {format} is not one this assembler takes"))
+                );
+            }
+        };
+        if word & 3 != 3 {
+            return Err(self.bad(&format!("the opcode of .insn {format} has to end in two ones")));
+        }
+        self.generated();
+        self.row()?;
+        self.put(&word.to_le_bytes())
+    }
+
     /// One RISC-V instruction, as the one or more words of it.
     ///
     /// The same as [`Reader::a64`], with two differences. A pseudo instruction such as `call` or
@@ -2394,6 +2492,7 @@ impl Reader {
                     }
                 }
             }
+            "insn" if self.riscv => self.rv_insn(&args)?,
             "ltorg" | "pool" if self.aarch64 => self.literal_pool()?,
             // An instruction written as its number, which is how the arm64 kernel writes one the
             // assembler may not know.
@@ -7191,6 +7290,55 @@ _tls$tlv$init:
         assert_eq!(text.len(), 6 + 1024 + 1);
         assert_eq!(text[..4], [0x00b5_1463, 0x0140_106f, 0x00d6_7463, 0x00c0_106f]);
         assert_eq!(text[1028..], [0x00b5_4463, 0xfedf_e06f, 0x0000_8067]);
+    }
+
+    #[test]
+    fn a_riscv_insn_is_the_instruction_its_fields_or_its_number_make() {
+        // How the kernel's insn-def.h writes `pause`, `wrs.nto`, `hfence.vvma` and the rest once
+        // the probe for `.insn` passes, and the probe itself.
+        let read = match read(
+            concat!(
+                "\t.insn 0x100000f\n",
+                "\t.insn 4, 0x00d00073\n",
+                "\t.insn r 51, 0, 0, t0, t0, zero\n",
+                "\t.insn r 115, 0, 17, x0, a0, a1\n",
+                "\t.insn i 19, 6, x0, a0, -32\n",
+                "\t.insn i 3, 3, a0, 8(sp)\n",
+                "\t.insn s 35, 3, a1, -8(sp)\n",
+                "\t.insn 0x0001\n",
+                "\t.insn 2, 0x4505\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        // The bytes GNU as writes for the same lines.
+        let mut bytes = Vec::new();
+        for word in [
+            0x0100_000f_u32,
+            0x00d0_0073,
+            0x0002_82b3,
+            0x22b5_0073,
+            0xfe05_6013,
+            0x0081_3503,
+            0xfeb1_3c23,
+        ] {
+            bytes.extend(word.to_le_bytes());
+        }
+        bytes.extend([0x01, 0x00, 0x05, 0x45]);
+        let part = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        assert_eq!(part.bytes, bytes);
+        for line in [
+            "\t.insn 0x13, 1\n",
+            "\t.insn 2, 0x13\n",
+            "\t.insn r 51, 8, 0, t0, t0, zero\n",
+            "\t.insn i 19, 0, a0, a0, 2048\n",
+            "\t.insn r 50, 0, 0, t0, t0, zero\n",
+            "\t.insn b 99, 0, a0, a1, 8\n",
+        ] {
+            assert!(super::read(line, Arch::Riscv64).is_err(), "{line}");
+        }
     }
 
     #[test]
