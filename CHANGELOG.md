@@ -74,6 +74,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A riscv64 file of assembly built with `-mabi=lp64` is marked soft float like the C beside it, so ld links the two, and the riscv64 assembler reads `.end`, `fmv.s.x` and `fmv.x.s`, and a name with a sum after it such as `init_thread_union + THREAD_SIZE` (#3908).
 - The riscv64 assembler writes a difference of two names it cannot work out, `.long a - b` with `b` in no section of the file, as an `R_RISCV_ADD` and `R_RISCV_SUB` pair on the same bytes the way gas does, in one, two, four or eight bytes (#3910).
 - The riscv64 assembler reads `la` in a file built without position independence as `lla`, the address worked out from the instruction, the way gas does without `-fpic`, rather than a read of the global offset table (#3912).
+- A 32-bit comparison on riscv64 keeps the `sext.w` in front of it when the word was cut out of a wider register, so `(int)(x >> 32)` or an `int` field of a small struct passed in a register no longer compares as an unsigned number (#3913).
 
 ## 0.30.12
 
