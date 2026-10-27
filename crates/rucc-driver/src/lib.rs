@@ -4071,6 +4071,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if hardened {
         harden(&mut opts, &mut link, args, &mut notes)?;
     }
+    // gcc 14 writes the landing pads and the shadow stack note on x86 alone and refuses the three
+    // choices that ask for them anywhere else, in these words. The riscv kernel's RISCV_USER_CFI
+    // asks for `-fcf-protection=full` with Zicfiss and Zicfilp, which only gcc 15 takes, and a yes
+    // here would build its CFI vDSO with no `lpad` in it.
+    if matches!(opts.control, Control::Branch | Control::Return | Control::Full)
+        && !matches!(opts.target.arch, rucc_target::Arch::X86_64 | rucc_target::Arch::X86)
+    {
+        return Err(err(format!(
+            "'-fcf-protection={}' is not supported for this target",
+            opts.control
+        )));
+    }
     let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
     if opts.rv32
         && (plan.link.is_some() || plan.jobs.iter().any(|job| job.phases.contains(&Phase::Compile)))
@@ -5757,6 +5769,10 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
             // whatever the version. And the `.riscv.attributes` section, which this assembler
             // never writes.
             "-misa-spec=2.2" | "-mno-arch-attr" if riscv => {}
+            // That no instruction is marked for the linker to relax, which this assembler never
+            // does. The kernel asks for it on modules, which are linked by the module loader and
+            // not by `ld`. `-mrelax` is the opposite and is refused.
+            "-mno-relax" if riscv => {}
             // A directory for `.include` and `.incbin`. The assembler reads no file but its input,
             // and refuses both directives, so a place to look for one changes nothing.
             "-I" => {
@@ -8307,7 +8323,7 @@ mod tests {
             "-std=gnu11",
             "a.c",
         ];
-        let (opts, _) = compile(&line);
+        let (opts, _) = compile(&[&[LINUX][..], &line].concat());
         assert_eq!(
             opts.switches,
             [
@@ -8402,7 +8418,7 @@ mod tests {
     /// questions to the hardware.
     #[test]
     fn which_control_flow_edges_are_checked_is_asked_for_by_name() {
-        let (opts, _) = compile(&["-c", "a.c"]);
+        let (opts, _) = compile(&[LINUX, "-c", "a.c"]);
         assert_eq!(opts.control, Control::None, "gcc's default on the targets this compiler has");
 
         for (arg, want) in [
@@ -8413,15 +8429,30 @@ mod tests {
             ("-fcf-protection=none", Control::None),
             ("-fcf-protection=check", Control::Check),
         ] {
-            let (opts, _) = compile(&["-c", arg, "a.c"]);
+            let (opts, _) = compile(&[LINUX, "-c", arg, "a.c"]);
             assert_eq!(opts.control, want, "{arg}");
+        }
+        // Only x86 has them, as in gcc 14, which takes `none` and `check` everywhere.
+        for target in ["--target=aarch64-linux-gnu", "--target=riscv64-linux-gnu"] {
+            for arg in ["-fcf-protection", "-fcf-protection=branch", "-fcf-protection=return"] {
+                let said = refused(&[target, "-c", arg, "a.c"]);
+                assert!(
+                    said.contains("is not supported for this target"),
+                    "{target} {arg}: {said}"
+                );
+            }
+            for arg in ["-fcf-protection=none", "-fcf-protection=check"] {
+                assert_eq!(compile(&[target, "-c", arg, "a.c"]).0.control.as_str(), &arg[16..]);
+            }
         }
 
         // The shape a package build uses: on in the global flags and off for the one directory
         // that cannot have it, whichever of the two spellings of off it reaches for.
-        let (opts, _) = compile(&["-c", "-fcf-protection=full", "-fno-cf-protection", "a.c"]);
+        let (opts, _) =
+            compile(&[LINUX, "-c", "-fcf-protection=full", "-fno-cf-protection", "a.c"]);
         assert_eq!(opts.control, Control::None);
-        let (opts, _) = compile(&["-c", "-fno-cf-protection", "-fcf-protection=branch", "a.c"]);
+        let (opts, _) =
+            compile(&[LINUX, "-c", "-fno-cf-protection", "-fcf-protection=branch", "a.c"]);
         assert_eq!(opts.control, Control::Branch, "the last one wins either way round");
 
         // Which functions open with a pad is a second question, asked apart from the first, and
@@ -10690,6 +10721,7 @@ mod tests {
             "-mno-relax",
             "-Wa,-misa-spec=2.2",
             "-Wa,-mno-arch-attr",
+            "-Wa,-mno-relax",
             "-c",
             "a.c",
         ];

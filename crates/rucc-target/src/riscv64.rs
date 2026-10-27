@@ -322,6 +322,8 @@ pub static LP64D: CallRegs = CallRegs {
     word: 8,
     // RVWMO is weakly ordered, so an acquire and a release each need a fence or an AMO.
     total_store_order: false,
+    fenced: true,
+    rmw_bits: 32,
     // The base ISA lets an implementation trap a misaligned access, and Linux then emulates it a
     // thousand times slower, so a copy keeps to the alignment it was given.
     unaligned: false,
@@ -485,7 +487,7 @@ fn machine_commutes(_name: &str) -> bool {
 /// What a RISC-V conditional branch becomes once the blocks are in an order.
 ///
 /// The test and the two jumps on it are always folded into `beqz` or `bnez`, which is what
-/// [`FOLDS`] says. Those reach four kilobytes either side, and a function longer than [`NEAR`]
+/// `FOLDS` says. Those reach four kilobytes either side, and a function longer than `NEAR`
 /// opcodes has its far branches written around a `j` instead.
 pub static BRANCH: BranchInsts = BranchInsts {
     prefix: "rv.",

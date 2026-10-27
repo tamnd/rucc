@@ -40,6 +40,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-fzero-call-used-regs=` is taken on riscv64 and clears the registers gcc clears, the integer ones with `li` and the float ones with `fmv.d.x`, so the kernel's `CC_HAS_ZERO_CALL_USED_REGS` probe passes there as it does on x86-64 and arm64 (#3921).
 - `--param asan-globals=1`, which is gcc's default and which Linux 7.3 gives for `CONFIG_KASAN_GENERIC`, now puts a redzone after each global under `-fsanitize=kernel-address`. A global that gets one is a definition that is not thread-local, is not weak or common, is not in a section that the program names, and has an alignment of 64 or less. Its alignment is raised to 32, and the redzone takes it to a multiple of 32 bytes with at least 32 bytes after it, as gcc does. The symbol size stays the size of the global. A constructor in `.init_array` gives a table of eight words for each global to `__asan_register_globals`, and the kernel then poisons the shadow of each redzone. A string literal that gets a redzone goes in `.rodata`, because a section that merges strings would take the redzone away. On x86-64 and AArch64 a test program that registers the table gets the report for a read past the end of a global array. (#3854)
 - Under `-fsanitize=kernel-address`, an atomic access is now checked, as gcc does. An atomic load calls `__asan_load4_noabort` or the routine of its size, and an atomic store, read-modify-write, exchange or compare and exchange calls `__asan_store4_noabort` or the routine of its size. This is a call in inline mode too, which is what gcc 16 gives for the `__atomic` and `__sync` builtins. (#3854)
+- RISC-V atomics: fences at every ordering, acquiring loads and releasing stores with the psABI fences around them, `amoswap` and `amoadd` for an exchange or an add of a word or a doubleword, and `lr` and `sc` loops for a compare and exchange, with a masked loop on the word for a byte or a half. Before this an acquire fence wrote nothing and the rest was refused. `-Wa,-mno-relax` is now taken on RISC-V (#3923).
 
 ### Fixed
 
@@ -85,6 +86,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A 32-bit comparison on riscv64 keeps the `sext.w` in front of it when the word was cut out of a wider register, so `(int)(x >> 32)` or an `int` field of a small struct passed in a register no longer compares as an unsigned number (#3913).
 - An answer written before the instruction has read all of its sources, like the riscv64 select, no longer gets the same scratch register as a spilled source, which made the select pick the wrong value (#3914).
 - The riscv64 `.insn s` form takes an offset in brackets of its own, as in `((32) & 0xfe0)(a0)` from the kernel's prefetch macros (#3918).
+- `-fcf-protection=` with `branch`, `return` or `full` is refused off x86 in gcc 14's words, where before it was taken and did nothing, so the riscv kernel no longer turns on RISCV_USER_CFI and builds a CFI vDSO without landing pads (#3922).
 
 ## 0.30.12
 

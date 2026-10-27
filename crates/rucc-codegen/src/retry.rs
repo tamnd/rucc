@@ -82,9 +82,12 @@ use rucc_ir::{
 /// on x86-64 in a function built with `cx16`. What the loop's compare and exchange becomes there
 /// is `crate::locked`'s business.
 ///
+/// `narrowest` is the narrowest integer in bits the machine has an exchange and an add for. It is
+/// thirty two on RISC-V, so a byte or a half is a loop there whatever the operation.
+///
 /// The function is changed in place. It gains two blocks and loses one instruction for each one
 /// rewritten, and every function without one of these is untouched.
-pub fn loops(func: &mut Func, word: u32) {
+pub fn loops(func: &mut Func, word: u32, narrowest: u32) {
     let stores: Vec<Inst> = func
         .blocks()
         .flat_map(|block| func.insts(block))
@@ -96,7 +99,7 @@ pub fn loops(func: &mut Func, word: u32) {
     let found: Vec<Inst> = func
         .blocks()
         .flat_map(|block| func.insts(block))
-        .filter(|&inst| wanted(func, inst, word))
+        .filter(|&inst| wanted(func, inst, word, narrowest))
         .collect();
     for inst in found {
         rewrite(func, inst, word);
@@ -139,12 +142,14 @@ fn exchanged(func: &mut Func, inst: Inst) {
 ///
 /// The three the machine has are left as they are unless the value is wider than a register, and
 /// so is anything whose value is not an integer at a width the machine compares and exchanges at,
-/// which is what the two floating operations are.
-fn wanted(func: &Func, inst: Inst, word: u32) -> bool {
+/// which is what the two floating operations are. So is one narrower than the machine has the
+/// three at.
+fn wanted(func: &Func, inst: Inst, word: u32, narrowest: u32) -> bool {
     let Extra::Rmw(op, _) = func[inst].extra else { return false };
     let Some(old) = func[inst].first_result else { return false };
     let ty = func[old].ty;
-    if matches!(op, RmwOp::Xchg | RmwOp::Add | RmwOp::Sub) && !wide(ty, word) {
+    let has = !wide(ty, word) && (!ty.is_int() || ty.bits() >= narrowest);
+    if matches!(op, RmwOp::Xchg | RmwOp::Add | RmwOp::Sub) && has {
         return false;
     }
     ty.is_int() && (matches!(ty.bits(), 8 | 16 | 32 | 64) || wide(ty, word))
@@ -340,7 +345,7 @@ mod tests {
     fn an_operation_with_no_instruction_becomes_a_loop() {
         for op in [RmwOp::And, RmwOp::Nand, RmwOp::Or, RmwOp::Xor] {
             let (mut names, mut func) = built(op, Type::int(32));
-            loops(&mut func, 8);
+            loops(&mut func, 8, 8);
             verified(&func, &mut names);
 
             let text = printed(&func, &mut names);
@@ -360,7 +365,7 @@ mod tests {
     #[test]
     fn the_loop_answers_the_value_that_was_there_before() {
         let (mut names, mut func) = built(RmwOp::Or, Type::int(32));
-        loops(&mut func, 8);
+        loops(&mut func, 8, 8);
 
         let exchange = only(&func, Opcode::Cmpxchg);
         let expected = func[func[exchange].args][1];
@@ -383,7 +388,7 @@ mod tests {
     #[test]
     fn a_use_below_the_loop_reads_the_block_parameter() {
         let (mut names, mut func) = built(RmwOp::Xor, Type::int(32));
-        loops(&mut func, 8);
+        loops(&mut func, 8, 8);
 
         let ret = only(&func, Opcode::Return);
         let block = func.block_of(ret).expect("the return is in a block");
@@ -400,7 +405,7 @@ mod tests {
     fn a_maximum_or_a_minimum_is_a_compare_and_a_select() {
         for op in [RmwOp::SMax, RmwOp::SMin, RmwOp::UMax, RmwOp::UMin] {
             let (mut names, mut func) = built(op, Type::int(64));
-            loops(&mut func, 8);
+            loops(&mut func, 8, 8);
             verified(&func, &mut names);
 
             let kinds = opcodes(&func);
@@ -420,15 +425,33 @@ mod tests {
     fn what_has_an_instruction_and_what_has_no_width_are_left_alone() {
         for op in [RmwOp::Xchg, RmwOp::Add, RmwOp::Sub] {
             let (_, mut func) = built(op, Type::int(32));
-            loops(&mut func, 8);
+            loops(&mut func, 8, 8);
             assert_eq!(func.blocks().count(), 1, "{op:?} has an instruction");
             assert!(opcodes(&func).contains(&Opcode::AtomicRmw), "{op:?}");
         }
         for op in [RmwOp::FAdd, RmwOp::FSub] {
             let (_, mut func) = built(op, Type::float(Float::F64));
-            loops(&mut func, 8);
+            loops(&mut func, 8, 8);
             assert_eq!(func.blocks().count(), 1, "{op:?} has no width to carry it");
             assert!(opcodes(&func).contains(&Opcode::AtomicRmw), "{op:?}");
+        }
+    }
+
+    /// RISC-V has the three at thirty two bits and up, so a byte or a half is a loop for them
+    /// as well, and a word is not.
+    #[test]
+    fn what_is_narrower_than_the_machine_has_the_three_at_is_a_loop() {
+        for op in [RmwOp::Xchg, RmwOp::Add, RmwOp::Sub] {
+            for bits in [8, 16] {
+                let (mut names, mut func) = built(op, Type::int(bits));
+                loops(&mut func, 8, 32);
+                assert_eq!(func.blocks().count(), 3, "{op:?} {bits}");
+                assert!(opcodes(&func).contains(&Opcode::Cmpxchg), "{op:?} {bits}");
+                verified(&func, &mut names);
+            }
+            let (_, mut func) = built(op, Type::int(32));
+            loops(&mut func, 8, 32);
+            assert_eq!(func.blocks().count(), 1, "{op:?} has an instruction at a word");
         }
     }
 
@@ -439,7 +462,7 @@ mod tests {
     fn everything_wider_than_a_register_is_a_loop() {
         for op in [RmwOp::Xchg, RmwOp::Add, RmwOp::Sub] {
             let (mut names, mut func) = built(op, Type::int(64));
-            loops(&mut func, 4);
+            loops(&mut func, 4, 8);
             assert_eq!(func.blocks().count(), 3, "{op:?}");
             let ops = opcodes(&func);
             assert!(!ops.contains(&Opcode::AtomicRmw), "{op:?}");
@@ -461,7 +484,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         build.atomic_store(value, addr, info(8), Flags::NONE);
         build.ret(&[]);
-        loops(&mut func, 4);
+        loops(&mut func, 4, 8);
         let ops = opcodes(&func);
         assert!(!ops.contains(&Opcode::AtomicStore) && ops.contains(&Opcode::Cmpxchg), "{ops:?}");
         verified(&func, &mut names);
