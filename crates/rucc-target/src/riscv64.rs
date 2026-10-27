@@ -34,16 +34,18 @@ mod insts;
 mod read;
 mod text;
 mod timing;
+mod vector;
 mod write;
 
 pub use crate::riscv64::encode::{
-    Addr, Encoded, Error, FAR, Fixup, Offset, Operator, Round, Value, encode, fits, li_words,
-    reaches,
+    Addr, Encoded, Error, FAR, Fixup, Offset, Operator, Round, Value, compressed, encode, fits,
+    li_words, reaches,
 };
 pub use crate::riscv64::insts::{ADDRESSES, Form, INSTS, TEMPLATE, address, form};
 pub use crate::riscv64::read::{Error as ReadError, Line, read, register};
 pub use crate::riscv64::text::{Arg, Missing, Operands, Written, fill, operand_width, written};
 pub use crate::riscv64::timing::{LOAD, MODEL, TIMING};
+pub use crate::riscv64::vector::vector;
 pub use crate::riscv64::write::write;
 
 use crate::bits::BitInsts;
@@ -133,6 +135,20 @@ pub fn named(name: &str) -> Option<(PhysReg, RegClass)> {
         "x" if number < 32 && number != 0 && number != 2 => Some((x(number), GPR)),
         "f" if number < 32 => Some((f(number), FPR)),
         _ => None,
+    }
+}
+
+/// Whether one of gcc's RISC-V immediate letters in an `asm` constraint takes that constant. `I`
+/// is the twelve bit signed number an `addi` carries, `J` is zero, and `K` is the five bit unsigned
+/// number a `csrrsi` carries, which is what the kernel's `csr_set` hands `"rK"`. A constant a letter
+/// does not take goes in a register. Any other letter takes any constant.
+#[must_use]
+pub fn takes(letter: char, number: i128) -> bool {
+    match letter {
+        'I' => (-2048..=2047).contains(&number),
+        'J' => number == 0,
+        'K' => (0..=31).contains(&number),
+        _ => true,
     }
 }
 

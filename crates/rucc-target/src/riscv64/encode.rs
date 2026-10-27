@@ -331,6 +331,39 @@ fn alu(mnemonic: &str) -> Option<(u32, u32, u32)> {
         "divuw" => (0x3b, 5, 1),
         "remw" => (0x3b, 6, 1),
         "remuw" => (0x3b, 7, 1),
+        // Zbb.
+        "andn" => (0x33, 7, 0x20),
+        "orn" => (0x33, 6, 0x20),
+        "xnor" => (0x33, 4, 0x20),
+        "min" => (0x33, 4, 0x05),
+        "minu" => (0x33, 5, 0x05),
+        "max" => (0x33, 6, 0x05),
+        "maxu" => (0x33, 7, 0x05),
+        "rol" => (0x33, 1, 0x30),
+        "ror" => (0x33, 5, 0x30),
+        "rolw" => (0x3b, 1, 0x30),
+        "rorw" => (0x3b, 5, 0x30),
+        // Zba.
+        "sh1add" => (0x33, 2, 0x10),
+        "sh2add" => (0x33, 4, 0x10),
+        "sh3add" => (0x33, 6, 0x10),
+        "add.uw" => (0x3b, 0, 0x04),
+        "sh1add.uw" => (0x3b, 2, 0x10),
+        "sh2add.uw" => (0x3b, 4, 0x10),
+        "sh3add.uw" => (0x3b, 6, 0x10),
+        // Zbs.
+        "bclr" => (0x33, 1, 0x24),
+        "bext" => (0x33, 5, 0x24),
+        "binv" => (0x33, 1, 0x34),
+        "bset" => (0x33, 1, 0x14),
+        // Zbc, the carry-less multiplies.
+        "clmul" => (0x33, 1, 0x05),
+        "clmulr" => (0x33, 2, 0x05),
+        "clmulh" => (0x33, 3, 0x05),
+        // Zbkb.
+        "pack" => (0x33, 4, 0x04),
+        "packh" => (0x33, 7, 0x04),
+        "packw" => (0x3b, 4, 0x04),
         _ => return None,
     })
 }
@@ -359,6 +392,54 @@ fn shift_imm(mnemonic: &str) -> Option<(u32, u32, u32, u32)> {
         "slliw" => (0x1b, 1, 0, 5),
         "srliw" => (0x1b, 5, 0, 5),
         "sraiw" => (0x1b, 5, 0x20 << 5, 5),
+        "rori" => (0x13, 5, 0x18 << 6, 6),
+        "roriw" => (0x1b, 5, 0x30 << 5, 5),
+        "slli.uw" => (0x1b, 1, 0x02 << 6, 6),
+        "bclri" => (0x13, 1, 0x12 << 6, 6),
+        "bexti" => (0x13, 5, 0x12 << 6, 6),
+        "binvi" => (0x13, 1, 0x1a << 6, 6),
+        "bseti" => (0x13, 1, 0x0a << 6, 6),
+        _ => return None,
+    })
+}
+
+/// The opcode, the `funct3` and the twelve bits that pick the operation, of the bit manipulation
+/// instructions with one source register.
+fn unary(mnemonic: &str) -> Option<(u32, u32, i64)> {
+    Some(match mnemonic {
+        "clz" => (0x13, 1, 0x600),
+        "ctz" => (0x13, 1, 0x601),
+        "cpop" => (0x13, 1, 0x602),
+        "sext.b" => (0x13, 1, 0x604),
+        "sext.h" => (0x13, 1, 0x605),
+        "clzw" => (0x1b, 1, 0x600),
+        "ctzw" => (0x1b, 1, 0x601),
+        "cpopw" => (0x1b, 1, 0x602),
+        "zext.h" => (0x3b, 4, 0x080),
+        "rev8" => (0x13, 5, 0x6b8),
+        "orc.b" => (0x13, 5, 0x287),
+        "brev8" => (0x13, 5, 0x687),
+        _ => return None,
+    })
+}
+
+/// The form with a constant of a register instruction written with one, `and t2, t2, 7`, which
+/// llvm-mc reads as `andi` and the kernel's `strcmp.S` writes.
+fn with_constant(mnemonic: &str) -> Option<&'static str> {
+    Some(match mnemonic {
+        "add" => "addi",
+        "addw" => "addiw",
+        "and" => "andi",
+        "or" => "ori",
+        "xor" => "xori",
+        "slt" => "slti",
+        "sltu" => "sltiu",
+        "sll" => "slli",
+        "srl" => "srli",
+        "sra" => "srai",
+        "sllw" => "slliw",
+        "srlw" => "srliw",
+        "sraw" => "sraiw",
         _ => return None,
     })
 }
@@ -401,6 +482,70 @@ fn branch(mnemonic: &str) -> Option<u32> {
         "bge" => 5,
         "bltu" => 6,
         "bgeu" => 7,
+        _ => return None,
+    })
+}
+
+/// The `funct5`, the `funct3` and the ordering bits of the A extension's instructions, which are
+/// `lr`, `sc` and the `amo` operations, at `.w` or `.d`, with `.aq`, `.rl` or `.aqrl` after it.
+/// Zabha adds `.b` and `.h` to the `amo` operations, and `amocas.q` takes register pairs.
+fn atomic(mnemonic: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = mnemonic.split('.');
+    let f5 = match parts.next()? {
+        "lr" => 0x02,
+        "sc" => 0x03,
+        "amoswap" => 0x01,
+        "amoadd" => 0x00,
+        "amoxor" => 0x04,
+        "amoand" => 0x0c,
+        "amoor" => 0x08,
+        "amomin" => 0x10,
+        "amomax" => 0x14,
+        "amominu" => 0x18,
+        "amomaxu" => 0x1c,
+        // Zacas, compare and swap.
+        "amocas" => 0x05,
+        // Zicfiss, the swap on the shadow stack.
+        "ssamoswap" => 0x09,
+        _ => return None,
+    };
+    let f3 = match parts.next()? {
+        "b" if matches!(f5, 0x00..=0x01 | 0x04..=0x1c) => 0,
+        "h" if matches!(f5, 0x00..=0x01 | 0x04..=0x1c) => 1,
+        "w" => 2,
+        "d" => 3,
+        "q" if f5 == 0x05 => 4,
+        _ => return None,
+    };
+    let order = match parts.next() {
+        None => 0,
+        Some("aq") => 2,
+        Some("rl") => 1,
+        Some("aqrl") => 3,
+        Some(_) => return None,
+    };
+    parts.next().is_none().then_some((f5, f3, order))
+}
+
+/// The number of the CSR one of the floating point pseudo instructions reads or writes.
+fn fp_csr(mnemonic: &str) -> i64 {
+    if mnemonic.contains("csr") {
+        3
+    } else if mnemonic.contains("rm") {
+        2
+    } else {
+        1
+    }
+}
+
+/// The `funct3` of the CSR instructions that take a register, `csrrw`, `csrrs` and `csrrc`, and
+/// of the pseudo instructions that write those with `zero` as the destination. The form that
+/// takes a five bit constant instead is four more.
+fn csr(mnemonic: &str) -> Option<u32> {
+    Some(match mnemonic {
+        "csrrw" | "csrw" | "csrrwi" | "csrwi" => 1,
+        "csrrs" | "csrs" | "csrrsi" | "csrsi" => 2,
+        "csrrc" | "csrc" | "csrrci" | "csrci" => 3,
         _ => return None,
     })
 }
@@ -533,6 +678,14 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
     let twelve = |imm: i64| if fits(imm, 12) { Ok(imm) } else { Err(immediate(imm)) };
     use Value::{Fpr, Gpr, Imm, Mem, Symbol};
 
+    if let (Some(constant), [Gpr(_), Gpr(_), Imm(_)]) = (with_constant(mnemonic), values) {
+        return encode(constant, values);
+    }
+    if let Some((op, f3, imm)) = unary(mnemonic) {
+        let [Gpr(rd), Gpr(rs)] = *values else { return Err(unwritten()) };
+        out.words.push(i(op, f3, rd, rs, imm));
+        return Ok(out);
+    }
     if let Some((op, f3, f7)) = alu(mnemonic) {
         let [Gpr(rd), Gpr(rs1), Gpr(rs2)] = *values else { return Err(unwritten()) };
         out.words.push(r(op, f3, f7, rd, rs1, rs2));
@@ -552,6 +705,21 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         return Ok(out);
     }
     if let Some((op, f3, fp)) = load(mnemonic) {
+        // A load from a label is the `auipc` to it and the load from what that leaves, through
+        // the destination, or for a floating point one through the register written last.
+        let (rd, through) = match *values {
+            [Gpr(rd), Symbol(Operator::Plain)] if !fp => (rd, Some(rd)),
+            [Fpr(rd), Symbol(Operator::Plain), Gpr(temp)] if fp => (rd, Some(temp)),
+            [Gpr(rd) | Fpr(rd), Mem(_)] => (rd, None),
+            _ => return Err(unwritten()),
+        };
+        if let Some(through) = through {
+            out.fixups.push((0, Fixup::PcrelHi20));
+            out.fixups.push((1, Fixup::PcrelLo12I));
+            out.words.push(u(0x17, through, 0));
+            out.words.push(i(op, f3, rd, through, 0));
+            return Ok(out);
+        }
         let (rd, addr) = match *values {
             [Gpr(rd), Mem(addr)] if !fp => (rd, addr),
             [Fpr(rd), Mem(addr)] if fp => (rd, addr),
@@ -573,6 +741,14 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         return Ok(out);
     }
     if let Some((op, f3, fp)) = store(mnemonic) {
+        // A store to a label always names the register the `auipc` goes in.
+        if let [Gpr(rs2) | Fpr(rs2), Symbol(Operator::Plain), Gpr(temp)] = *values {
+            out.fixups.push((0, Fixup::PcrelHi20));
+            out.fixups.push((1, Fixup::PcrelLo12S));
+            out.words.push(u(0x17, temp, 0));
+            out.words.push(s(op, f3, temp, rs2, 0));
+            return Ok(out);
+        }
         let (rs2, addr) = match *values {
             [Gpr(rs2), Mem(addr)] if !fp => (rs2, addr),
             [Fpr(rs2), Mem(addr)] if fp => (rs2, addr),
@@ -605,7 +781,108 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         }
     }
 
+    if let Some((f5, f3, order)) = atomic(mnemonic) {
+        let (rd, rs2, base) = match *values {
+            [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(0) })] if f5 == 0x02 => (rd, ZERO, base),
+            [Gpr(rd), Gpr(rs2), Mem(Addr { base, offset: Offset::Imm(0) })] if f5 != 0x02 => {
+                (rd, rs2, base)
+            }
+            _ => return Err(unwritten()),
+        };
+        if f3 == 4 && (rd % 2 != 0 || rs2 % 2 != 0) {
+            return Err(unwritten());
+        }
+        out.words.push(r(0x2f, f3, f5 << 2 | order, rd, base, rs2));
+        return Ok(out);
+    }
+    if let Some(f3) = csr(mnemonic) {
+        // The register form, or the constant form when the source is a number, which is how GNU
+        // as reads `csrs sstatus, 2` as `csrsi`. The pseudo instructions have no destination,
+        // and `csrr` is `csrrs` from `zero`.
+        let (rd, number, source) = match *values {
+            [Gpr(rd), Imm(number), source] if mnemonic.starts_with("csrr") => (rd, number, source),
+            [Imm(number), source] if !mnemonic.starts_with("csrr") => (ZERO, number, source),
+            _ => return Err(unwritten()),
+        };
+        if !(0..1 << 12).contains(&number) {
+            return Err(immediate(number));
+        }
+        let (f3, rs1) = match source {
+            Gpr(rs1) if !mnemonic.ends_with('i') => (f3, rs1),
+            Imm(imm) if (0..32).contains(&imm) => (f3 | 4, imm as u8),
+            Imm(imm) => return Err(immediate(imm)),
+            _ => return Err(unwritten()),
+        };
+        out.words.push(i(0x73, f3, rd, rs1, number));
+        return Ok(out);
+    }
+
     match (mnemonic, values) {
+        ("csrr", [Gpr(rd), Imm(number)]) if (0..1 << 12).contains(number) => {
+            out.words.push(i(0x73, 2, *rd, ZERO, *number));
+        }
+        // The counters, which are `csrr` of `cycle`, `time` and `instret`.
+        ("rdcycle", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc00)),
+        ("rdtime", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc01)),
+        ("rdinstret", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc02)),
+        // The floating point control and status register, its rounding mode and its flags.
+        ("frcsr" | "frrm" | "frflags", [Gpr(rd)]) => {
+            out.words.push(i(0x73, 2, *rd, ZERO, fp_csr(mnemonic)));
+        }
+        ("fscsr" | "fsrm" | "fsflags", [Gpr(rs)]) => {
+            out.words.push(i(0x73, 1, ZERO, *rs, fp_csr(mnemonic)));
+        }
+        ("fscsr" | "fsrm" | "fsflags", [Gpr(rd), Gpr(rs)]) => {
+            out.words.push(i(0x73, 1, *rd, *rs, fp_csr(mnemonic)));
+        }
+        ("fsrmi" | "fsflagsi", [Imm(imm)]) if (0..32).contains(imm) => {
+            out.words.push(i(0x73, 5, ZERO, *imm as u8, fp_csr(mnemonic)));
+        }
+        ("fsrmi" | "fsflagsi", [Gpr(rd), Imm(imm)]) if (0..32).contains(imm) => {
+            out.words.push(i(0x73, 5, *rd, *imm as u8, fp_csr(mnemonic)));
+        }
+        // Zicfilp's landing pad, which is `auipc zero` with the label in the upper bits.
+        ("lpad", [Imm(label)]) if (0..1 << 20).contains(label) => {
+            out.words.push(u(0x17, ZERO, *label));
+        }
+        // Zicfiss, which only takes `ra` or `t0` for the return address it pushes and checks.
+        ("sspush", [Gpr(rs2 @ (1 | 5))]) => out.words.push(r(0x73, 4, 0x67, ZERO, ZERO, *rs2)),
+        ("sspopchk", [Gpr(rs1 @ (1 | 5))]) => out.words.push(i(0x73, 4, ZERO, *rs1, 0xcdc)),
+        ("ssrdp", [Gpr(rd)]) if *rd != ZERO => out.words.push(i(0x73, 4, *rd, ZERO, 0xcdc)),
+        ("fence.i", []) => out.words.push(0x0000_100f),
+        ("fence.tso", []) => out.words.push(0x8330_000f),
+        ("pause", []) => out.words.push(0x0100_000f),
+        ("wfi", []) => out.words.push(0x1050_0073),
+        ("sret", []) => out.words.push(0x1020_0073),
+        ("mret", []) => out.words.push(0x3020_0073),
+        ("sfence.vma", []) => out.words.push(0x1200_0073),
+        ("sfence.vma", [Gpr(rs1)]) => out.words.push(r(0x73, 0, 0x09, ZERO, *rs1, ZERO)),
+        ("sfence.vma", [Gpr(rs1), Gpr(rs2)]) => out.words.push(r(0x73, 0, 0x09, ZERO, *rs1, *rs2)),
+        // The branches GNU as has as the others with their operands swapped or against `zero`.
+        ("bgt" | "ble" | "bgtu" | "bleu", [Gpr(rs1), Gpr(rs2), to]) => {
+            let f3 = match mnemonic {
+                "bgt" => 4,
+                "ble" => 5,
+                "bgtu" => 6,
+                _ => 7,
+            };
+            let imm = distance(to, 13, &mut out, Fixup::Branch).ok_or_else(unwritten)??;
+            out.words.push(b(f3, *rs2, *rs1, imm));
+        }
+        ("blez" | "bgez" | "bltz" | "bgtz", [Gpr(rs), to]) => {
+            let (f3, rs1, rs2) = match mnemonic {
+                "blez" => (5, ZERO, *rs),
+                "bgez" => (5, *rs, ZERO),
+                "bltz" => (4, *rs, ZERO),
+                _ => (4, ZERO, *rs),
+            };
+            let imm = distance(to, 13, &mut out, Fixup::Branch).ok_or_else(unwritten)??;
+            out.words.push(b(f3, rs1, rs2, imm));
+        }
+        ("zext.b", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 7, *rd, *rs, 0xff)),
+        ("jalr", [Gpr(rd), Gpr(rs), Imm(imm)]) => {
+            out.words.push(i(0x67, 0, *rd, *rs, twelve(*imm)?));
+        }
         ("lui", [Gpr(rd), Imm(imm)]) if (0..1 << 20).contains(imm) => {
             out.words.push(u(0x37, *rd, *imm));
         }
@@ -632,7 +909,7 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         // The pseudo instructions, as the base instructions GNU as writes for them.
         ("nop", []) => out.words.push(i(0x13, 0, ZERO, ZERO, 0)),
         ("li", [Gpr(rd), Imm(imm)]) => li(*rd, *imm, &mut out.words),
-        ("mv", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 0, *rd, *rs, 0)),
+        ("mv" | "move", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 0, *rd, *rs, 0)),
         ("not", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x13, 4, *rd, *rs, -1)),
         ("neg", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x33, 0, 0x20, *rd, ZERO, *rs)),
         ("negw", [Gpr(rd), Gpr(rs)]) => out.words.push(r(0x3b, 0, 0x20, *rd, ZERO, *rs)),
@@ -838,7 +1115,9 @@ fn float(mnemonic: &str, values: &[Value], out: &mut Encoded) -> Option<Result<(
         ("fmv", Some(to)) if rounding.is_none() => match (first, to, values) {
             ("x", "w", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x70, *rd, *rs, 0),
             ("x", "d", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x71, *rd, *rs, 0),
-            ("w", "x", [Fpr(rd), Gpr(rs)]) => r(0x53, 0, 0x78, *rd, *rs, 0),
+            // `fmv.s.x` and `fmv.x.s` are the old names, which the kernel's `fpu.S` still writes.
+            ("x", "s", [Gpr(rd), Fpr(rs)]) => r(0x53, 0, 0x70, *rd, *rs, 0),
+            ("w" | "s", "x", [Fpr(rd), Gpr(rs)]) => r(0x53, 0, 0x78, *rd, *rs, 0),
             ("d", "x", [Fpr(rd), Gpr(rs)]) => r(0x53, 0, 0x79, *rd, *rs, 0),
             _ => return Some(Err(unwritten())),
         },
@@ -853,6 +1132,26 @@ fn float(mnemonic: &str, values: &[Value], out: &mut Encoded) -> Option<Result<(
 #[must_use]
 pub fn reaches(disp: i64) -> bool {
     fits(disp, 12)
+}
+
+/// Writes one of the few compressed instructions a file asks for by name, as two bytes.
+///
+/// The kernel's `head.S` starts with `c.li s4, -13`, which is the "MZ" an EFI loader looks for.
+///
+/// # Errors
+///
+/// When it is not one of `c.li`, `c.nop` and `c.ebreak` with operands it takes.
+pub fn compressed(mnemonic: &str, values: &[Value]) -> Result<u16, Error> {
+    let unwritten = || Error::Unwritten { mnemonic: mnemonic.to_owned(), operands: values.len() };
+    Ok(match (mnemonic, values) {
+        ("c.li", &[Value::Gpr(rd), Value::Imm(imm)]) if rd != ZERO && fits(imm, 6) => {
+            let imm = (imm & 0x3f) as u16;
+            0x4001 | (imm >> 5) << 12 | u16::from(rd) << 7 | (imm & 0x1f) << 2
+        }
+        ("c.nop", []) => 0x0001,
+        ("c.ebreak", []) => 0x9002,
+        _ => return Err(unwritten()),
+    })
 }
 
 #[cfg(test)]
@@ -894,6 +1193,8 @@ mod tests {
         assert_eq!(one("fcvt.s.w", &[Fpr(10), Gpr(10)]), 0xd005_7553);
         assert_eq!(one("fcvt.wu.d", &[Gpr(10), Fpr(10), Value::Round(Round::Rtz)]), 0xc215_1553);
         assert_eq!(one("fmv.x.d", &[Gpr(10), Fpr(10)]), 0xe205_0553);
+        assert_eq!(one("fmv.s.x", &[Fpr(10), Gpr(10)]), 0xf005_0553);
+        assert_eq!(one("fmv.x.s", &[Gpr(10), Fpr(10)]), 0xe005_0553);
         assert_eq!(one("feq.d", &[Gpr(10), Fpr(10), Fpr(11)]), 0xa2b5_2553);
         assert_eq!(one("fneg.d", &[Fpr(10), Fpr(11)]), 0x22b5_9553);
         assert_eq!(one("sgtz", &[Gpr(10), Gpr(11)]), 0x00b0_2533);
@@ -901,6 +1202,162 @@ mod tests {
         assert_eq!(one("ret", &[]), 0x0000_8067);
         assert_eq!(one("ebreak", &[]), 0x0010_0073);
         assert_eq!(one("fence", &[Value::Order(3), Value::Order(3)]), 0x0330_000f);
+    }
+
+    /// The A extension, the CSR instructions and the system ones the kernel writes, with the words
+    /// GNU as writes for `-march=rv64g_zifencei_zihintpause`.
+    #[test]
+    fn the_atomics_and_the_system_instructions_are_the_words_gnu_as_writes() {
+        let words: &[(&str, &[Value], u32)] = &[
+            ("lr.w", &[Gpr(15), at(10, 0)], 0x1005_27af),
+            ("sc.d.rl", &[Gpr(15), Gpr(11), at(10, 0)], 0x1ab5_37af),
+            ("amoswap.w.aqrl", &[Gpr(15), Gpr(11), at(10, 0)], 0x0eb5_27af),
+            ("amoadd.d", &[Gpr(0), Gpr(11), at(10, 0)], 0x00b5_302f),
+            ("amoor.w.aq", &[Gpr(15), Gpr(11), at(10, 0)], 0x44b5_27af),
+            ("amomaxu.d", &[Gpr(15), Gpr(11), at(10, 0)], 0xe0b5_37af),
+            ("csrr", &[Gpr(10), Imm(0x100)], 0x1000_2573),
+            ("csrw", &[Imm(0x105), Gpr(10)], 0x1055_1073),
+            ("csrs", &[Imm(0x100), Imm(2)], 0x1001_6073),
+            ("csrc", &[Imm(0x104), Gpr(10)], 0x1045_3073),
+            ("csrrw", &[Gpr(10), Imm(0x140), Gpr(11)], 0x1405_9573),
+            ("csrrci", &[Gpr(10), Imm(0x100), Imm(2)], 0x1001_7573),
+            ("rdtime", &[Gpr(10)], 0xc010_2573),
+            ("fence.i", &[], 0x0000_100f),
+            ("fence.tso", &[], 0x8330_000f),
+            ("pause", &[], 0x0100_000f),
+            ("wfi", &[], 0x1050_0073),
+            ("sret", &[], 0x1020_0073),
+            ("sfence.vma", &[], 0x1200_0073),
+            ("sfence.vma", &[Gpr(10)], 0x1205_0073),
+            ("sfence.vma", &[Gpr(10), Gpr(11)], 0x12b5_0073),
+            ("bgt", &[Gpr(10), Gpr(11), Imm(8)], 0x00a5_c463),
+            ("bleu", &[Gpr(10), Gpr(11), Imm(8)], 0x00a5_f463),
+            ("blez", &[Gpr(10), Imm(8)], 0x00a0_5463),
+            ("bgtz", &[Gpr(10), Imm(8)], 0x00a0_4463),
+            ("zext.b", &[Gpr(10), Gpr(11)], 0x0ff5_f513),
+            ("jalr", &[Gpr(1), Gpr(10), Imm(4)], 0x0045_00e7),
+            // Zicfilp and Zicfiss, from llvm-mc, since binutils 2.42 does not know them.
+            ("lpad", &[Imm(0)], 0x0000_0017),
+            ("lpad", &[Imm(5)], 0x0000_5017),
+            ("sspush", &[Gpr(1)], 0xce10_4073),
+            ("sspush", &[Gpr(5)], 0xce50_4073),
+            ("sspopchk", &[Gpr(1)], 0xcdc0_c073),
+            ("sspopchk", &[Gpr(5)], 0xcdc2_c073),
+            ("ssrdp", &[Gpr(10)], 0xcdc0_4573),
+            ("ssamoswap.d", &[Gpr(10), Gpr(11), at(12, 0)], 0x48b6_352f),
+            ("ssamoswap.w.aqrl", &[Gpr(10), Gpr(11), at(12, 0)], 0x4eb6_252f),
+        ];
+        for &(mnemonic, values, word) in words {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
+        }
+        // An atomic takes no distance, and a CSR number past twelve bits is refused.
+        assert!(encode("amoadd.w", &[Gpr(15), Gpr(11), at(10, 4)]).is_err());
+        assert!(encode("csrr", &[Gpr(10), Imm(0x1000)]).is_err());
+        assert!(encode("csrsi", &[Imm(0x100), Imm(32)]).is_err());
+        assert!(encode("sspush", &[Gpr(10)]).is_err());
+        assert!(encode("lpad", &[Imm(1 << 20)]).is_err());
+    }
+
+    /// Zba, Zbb, Zbs and Zacas, `move`, and a register instruction written with a constant, with
+    /// the words llvm-mc 23 writes, since binutils 2.42 knows neither Zacas nor the last.
+    #[test]
+    fn the_crypto_bits_the_byte_atomics_and_the_float_csrs_are_the_words_llvm_mc_writes() {
+        let at = |base| Mem(Addr { base, offset: Offset::Imm(0) });
+        for (mnemonic, values, word) in [
+            ("clmul", &[Gpr(10), Gpr(11), Gpr(12)][..], 0x0ac5_9533),
+            ("clmulr", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_a533),
+            ("clmulh", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_b533),
+            ("pack", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_c533),
+            ("packh", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_f533),
+            ("packw", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_c53b),
+            ("brev8", &[Gpr(10), Gpr(11)], 0x6875_d513),
+            ("amoswap.h.aqrl", &[Gpr(10), Gpr(11), at(12)], 0x0eb6_152f),
+            ("amoadd.b", &[Gpr(10), Gpr(11), at(12)], 0x00b6_052f),
+            ("amocas.h", &[Gpr(10), Gpr(11), at(12)], 0x28b6_152f),
+            ("amocas.q.aqrl", &[Gpr(10), Gpr(12), at(14)], 0x2ec7_452f),
+            ("frcsr", &[Gpr(10)], 0x0030_2573),
+            ("fscsr", &[Gpr(11)], 0x0035_9073),
+            ("fscsr", &[Gpr(10), Gpr(11)], 0x0035_9573),
+            ("frrm", &[Gpr(10)], 0x0020_2573),
+            ("fsrm", &[Gpr(11)], 0x0025_9073),
+            ("frflags", &[Gpr(10)], 0x0010_2573),
+            ("fsflags", &[Gpr(11)], 0x0015_9073),
+            ("fsrmi", &[Imm(2)], 0x0021_5073),
+            ("fsflagsi", &[Gpr(10), Imm(3)], 0x0011_d573),
+        ] {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic}");
+        }
+        // A pair starts at an even register, and only the `amo` operations come in bytes.
+        assert!(encode("amocas.q", &[Gpr(11), Gpr(12), at(14)]).is_err());
+        assert!(encode("lr.b", &[Gpr(10), at(12)]).is_err());
+        assert_eq!(compressed("c.li", &[Gpr(20), Imm(-13)]), Ok(0x5a4d));
+        assert_eq!(compressed("c.nop", &[]), Ok(0x0001));
+        assert_eq!(compressed("c.ebreak", &[]), Ok(0x9002));
+        assert!(compressed("c.li", &[Gpr(0), Imm(1)]).is_err());
+        assert!(compressed("c.li", &[Gpr(10), Imm(32)]).is_err());
+    }
+
+    #[test]
+    fn the_bit_manipulation_instructions_are_the_words_llvm_mc_writes() {
+        let words: &[(&str, &[Value], u32)] = &[
+            ("andn", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_f533),
+            ("orn", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_e533),
+            ("xnor", &[Gpr(10), Gpr(11), Gpr(12)], 0x40c5_c533),
+            ("max", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_e533),
+            ("maxu", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_f533),
+            ("min", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_c533),
+            ("minu", &[Gpr(10), Gpr(11), Gpr(12)], 0x0ac5_d533),
+            ("rol", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_9533),
+            ("ror", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_d533),
+            ("rolw", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_953b),
+            ("rorw", &[Gpr(10), Gpr(11), Gpr(12)], 0x60c5_d53b),
+            ("rori", &[Gpr(10), Gpr(11), Imm(13)], 0x60d5_d513),
+            ("roriw", &[Gpr(10), Gpr(11), Imm(13)], 0x60d5_d51b),
+            ("clz", &[Gpr(10), Gpr(11)], 0x6005_9513),
+            ("ctz", &[Gpr(10), Gpr(11)], 0x6015_9513),
+            ("cpop", &[Gpr(10), Gpr(11)], 0x6025_9513),
+            ("clzw", &[Gpr(10), Gpr(11)], 0x6005_951b),
+            ("ctzw", &[Gpr(10), Gpr(11)], 0x6015_951b),
+            ("cpopw", &[Gpr(10), Gpr(11)], 0x6025_951b),
+            ("sext.b", &[Gpr(10), Gpr(11)], 0x6045_9513),
+            ("sext.h", &[Gpr(10), Gpr(11)], 0x6055_9513),
+            ("zext.h", &[Gpr(10), Gpr(11)], 0x0805_c53b),
+            ("rev8", &[Gpr(10), Gpr(11)], 0x6b85_d513),
+            ("orc.b", &[Gpr(10), Gpr(11)], 0x2875_d513),
+            ("sh1add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_a533),
+            ("sh2add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_c533),
+            ("sh3add", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_e533),
+            ("add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x08c5_853b),
+            ("sh1add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_a53b),
+            ("sh2add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_c53b),
+            ("sh3add.uw", &[Gpr(10), Gpr(11), Gpr(12)], 0x20c5_e53b),
+            ("slli.uw", &[Gpr(10), Gpr(11), Imm(13)], 0x08d5_951b),
+            ("bclr", &[Gpr(10), Gpr(11), Gpr(12)], 0x48c5_9533),
+            ("bclri", &[Gpr(10), Gpr(11), Imm(13)], 0x48d5_9513),
+            ("bext", &[Gpr(10), Gpr(11), Gpr(12)], 0x48c5_d533),
+            ("bexti", &[Gpr(10), Gpr(11), Imm(13)], 0x48d5_d513),
+            ("binv", &[Gpr(10), Gpr(11), Gpr(12)], 0x68c5_9533),
+            ("binvi", &[Gpr(10), Gpr(11), Imm(13)], 0x68d5_9513),
+            ("bset", &[Gpr(10), Gpr(11), Gpr(12)], 0x28c5_9533),
+            ("bseti", &[Gpr(10), Gpr(11), Imm(13)], 0x28d5_9513),
+            ("amocas.w", &[Gpr(10), Gpr(11), at(12, 0)], 0x28b6_252f),
+            ("amocas.d.aqrl", &[Gpr(10), Gpr(11), at(12, 0)], 0x2eb6_352f),
+            ("move", &[Gpr(5), Gpr(10)], 0x0005_0293),
+            ("and", &[Gpr(7), Gpr(7), Imm(7)], 0x0073_f393),
+            ("or", &[Gpr(10), Gpr(10), Imm(-2)], 0xffe5_6513),
+            ("xor", &[Gpr(10), Gpr(11), Imm(1)], 0x0015_c513),
+            ("add", &[Gpr(10), Gpr(10), Imm(16)], 0x0105_0513),
+            ("addw", &[Gpr(10), Gpr(10), Imm(-1)], 0xfff5_051b),
+            ("sll", &[Gpr(10), Gpr(11), Imm(3)], 0x0035_9513),
+            ("srl", &[Gpr(10), Gpr(11), Imm(63)], 0x03f5_d513),
+            ("sra", &[Gpr(10), Gpr(11), Imm(1)], 0x4015_d513),
+            ("sllw", &[Gpr(10), Gpr(11), Imm(31)], 0x01f5_951b),
+        ];
+        for &(mnemonic, values, word) in words {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
+        }
+        assert!(encode("rori", &[Gpr(10), Gpr(11), Imm(64)]).is_err());
+        assert!(encode("and", &[Gpr(10), Gpr(11), Imm(4096)]).is_err());
     }
 
     #[test]

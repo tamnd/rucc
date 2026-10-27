@@ -221,6 +221,9 @@ fn legalize(
                 // and the two are counted apart.
                 let at = match fixed {
                     Some(fixed) => fixed,
+                    None if operand.role == Role::EarlyDef => {
+                        taken.early_into(operand.class, &mut scratch)
+                    }
                     None if operand.role.is_def() => {
                         taken.written_into(operand.class, &mut scratch)
                     }
@@ -328,7 +331,9 @@ fn legalize(
 /// behind it. Those two spans do not meet, so one register does both jobs and the counting starts
 /// again rather than carrying on. What that rests on is the machine reading its operands before it
 /// writes its answer, which is true of every instruction the backends here emit and is the same
-/// thing that makes `addq %rax, %rax` mean what it looks like.
+/// thing that makes `addq %rax, %rax` mean what it looks like. The one exception is an answer
+/// written early, such as the RISC-V select, which moves one source into the answer and then
+/// reads the other. That answer is live while the reads are, so it counts as one of them.
 ///
 /// Where the count runs out is an instruction that reads three registers and writes none, because
 /// then there is no answer to fold back into a register an operand arrived in and the trick above
@@ -359,6 +364,20 @@ impl Taken {
     /// A register of a class for an answer the instruction writes.
     fn written_into(&mut self, class: RegClass, scratch: &mut Scratch<'_>) -> PhysReg {
         Self::take(&mut self.written, class, scratch, Role::Def)
+    }
+
+    /// A register of a class for an answer the instruction writes before it has read everything,
+    /// which is held from in front of the instruction like a value read in, so it is counted with
+    /// those. The answers written late count on from it as well, so that none of them is handed
+    /// the same register.
+    fn early_into(&mut self, class: RegClass, scratch: &mut Scratch<'_>) -> PhysReg {
+        let at = Self::take(&mut self.read, class, scratch, Role::EarlyDef);
+        let index = usize::from(class.number());
+        if self.written.len() <= index {
+            self.written.resize(index + 1, 0);
+        }
+        self.written[index] = self.written[index].max(self.read[index]);
+        at
     }
 
     /// The next register of a class out of one of the two counts, passing over any the instruction
@@ -455,8 +474,10 @@ impl Claimed {
 
     /// Whether handing that register out for a value travelling that way would lose a value.
     fn clashes(&self, role: Role, class: RegClass, at: PhysReg) -> bool {
+        let early = role == Role::EarlyDef;
         self.side(role).contains(&(class, at))
-            || (!role.is_def() && self.passed.contains(&(class, at)))
+            || (early && self.reads.contains(&(class, at)))
+            || ((early || !role.is_def()) && self.passed.contains(&(class, at)))
     }
 
     /// Whether the instruction names that register at all, which is what borrowing has to keep off:
@@ -849,6 +870,32 @@ mod tests {
         assert_eq!(regs(&legal), [RAX]);
         assert!(legal.before.is_empty());
         assert_eq!(legal.after, [(Move::new(Place::Reg(RCX), Place::Reg(RAX)), GPR)]);
+    }
+
+    #[test]
+    fn an_answer_written_early_is_not_given_the_register_a_value_is_read_into() {
+        // The RISC-V select moves one source into its answer and then reads the other. With
+        // both on the stack the answer had the register the second source was read into and the
+        // select picked the first source either way, which sent the kernel's vmap past its end.
+        let (mut func, opcode, block) = func();
+        let answer = func.new_vreg(GPR);
+        let sources: Vec<Reg> = (0..2).map(|_| func.new_vreg(GPR)).collect();
+        let inst = func
+            .build(block, opcode)
+            .operand(Operand::write_early(answer, GPR))
+            .uses(sources[0], GPR)
+            .uses(sources[1], GPR)
+            .finish();
+        let mut assignment = Assignment::empty(func.vregs());
+        for value in [answer, sources[0], sources[1]] {
+            let slot = assignment.take_slot(GPR);
+            assignment.put(value, Place::Slot(slot));
+        }
+
+        let legal = legal(&func, &mut assignment, inst);
+        let regs = regs(&legal);
+        assert_ne!(regs[0], regs[1], "the answer is the first source's register");
+        assert_ne!(regs[0], regs[2], "the answer is the second source's register");
     }
 
     #[test]
