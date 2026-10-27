@@ -96,7 +96,7 @@ use crate::capability;
 ///
 /// RISC-V is weakly ordered too and has no ordered load or store, so `fenced` says to write each
 /// as the plain access with the fences the RISC-V psABI puts around it, which is what gcc 14.2.0
-/// writes. See [`fenced`].
+/// writes. See `fenced`.
 ///
 /// This runs before every other pass here, so that what it produces is an ordinary load or store
 /// that the width legalisation and everything after it get to see. An ordered access at a width the
