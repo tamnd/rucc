@@ -5133,11 +5133,13 @@ impl<'a> Lowering<'a> {
         };
         // AArch64 is not total store order, so every ordering above relaxed is an instruction
         // there. An acquire fence only has to keep later accesses after earlier loads, which is
-        // `dmb ishld`, and everything stronger is the full `dmb ish` gcc writes for it.
+        // `dmb ishld`, and everything stronger is the full `dmb ish` gcc writes for it. RISC-V is
+        // not either, and has a `fence` for each of the four, which is what the psABI maps them to.
         let name = match order {
             MemOrder::NotAtomic | MemOrder::Relaxed => return Ok(()),
-            MemOrder::Acquire if self.on_aarch64() => "fence_acquire",
-            _ if self.on_aarch64() => self.selector.fence,
+            MemOrder::Acquire if self.on_aarch64() || self.on_riscv64() => "fence_acquire",
+            MemOrder::Release if self.on_riscv64() => "fence_release",
+            _ if self.on_aarch64() || self.on_riscv64() => self.selector.fence,
             MemOrder::SeqCst => self.selector.fence,
             _ => return Ok(()),
         };
@@ -5989,6 +5991,9 @@ impl<'a> Lowering<'a> {
         if self.on_aarch64() {
             return self.exchange_a64(inst, [addr, expected, desired], [old, exchanged]);
         }
+        if self.on_riscv64() {
+            return self.exchange_rv(inst, [addr, expected, desired], [old, exchanged]);
+        }
 
         // A value the machine can compare in one instruction, which is an integer or an address at
         // one of the four widths it has a compare and exchange for. Anything else is a type this
@@ -6068,6 +6073,9 @@ impl<'a> Lowering<'a> {
         }
         if self.on_aarch64() {
             return self.modify_a64(inst, op, [addr, operand], old);
+        }
+        if self.on_riscv64() {
+            return self.modify_rv(inst, op, [addr, operand], old);
         }
         let name = match op {
             RmwOp::Xchg => format!("xchg_{}", ty.bits()),
@@ -6220,6 +6228,61 @@ impl<'a> Lowering<'a> {
             }
             _ => Err(self.unsupported(inst)),
         }
+    }
+
+    /// A compare and exchange on RISC-V, which is a loop of `lr` and `sc` made one instruction for
+    /// the reason the AArch64 one is.
+    ///
+    /// A byte and a half have no `lr` and `sc` of their own, so theirs is the loop on the aligned
+    /// word around them, and it wants four registers more to work in. They are definitions of the
+    /// same instruction, written early, so that none of them is given a register the loop still
+    /// reads.
+    fn exchange_rv(
+        &mut self,
+        inst: Inst,
+        [addr, expected, desired]: [Value; 3],
+        [old, exchanged]: [Value; 2],
+    ) -> Result<(), Unsupported> {
+        let bits = self.atomic_bits(inst, self.source[old].ty)?;
+        let base = self.reg_of(addr)?;
+        let want = self.reg_of(expected)?;
+        let put = self.reg_of(desired)?;
+        let got = self.new_reg(old);
+        let flag = self.new_reg(exchanged);
+        let name = format!("cmpxchg_{bits}");
+        if bits >= 32 {
+            return self.written_as(inst, &name, &[got, flag, base, want, put]);
+        }
+        let work: [mir::Reg; 4] = std::array::from_fn(|_| self.out.new_vreg(self.gpr));
+        let [word, mask, wanted, given] = work;
+        self.written_as(inst, &name, &[got, flag, word, mask, wanted, given, base, want, put])
+    }
+
+    /// A read modify write on RISC-V, for the three that are one `amo` instruction at a word or a
+    /// doubleword. `crate::retry` made every narrower one a loop around a compare and exchange
+    /// before this, since the byte and half `amo` operations are an extension the base machine
+    /// has not got.
+    fn modify_rv(
+        &mut self,
+        inst: Inst,
+        op: RmwOp,
+        [addr, operand]: [Value; 2],
+        old: Value,
+    ) -> Result<(), Unsupported> {
+        let bits = self.atomic_bits(inst, self.source[old].ty)?;
+        let name = match op {
+            RmwOp::Xchg => "xchg",
+            RmwOp::Add => "xadd",
+            RmwOp::Sub => "xsub",
+            _ => return Err(self.unsupported(inst)),
+        };
+        if bits < 32 {
+            return Err(self.unsupported(inst));
+        }
+        let base = self.reg_of(addr)?;
+        let put = self.reg_of(operand)?;
+        let got = self.new_reg(old);
+        self.written_as(inst, &format!("{name}_{bits}"), &[got, base, put])
     }
 
     /// One `asm` statement.
