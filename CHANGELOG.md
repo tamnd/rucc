@@ -4,6 +4,16 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A store of zero into bytes that already hold zero on every path to it is now removed, as gcc's dead store pass does it. Under `-ftrivial-auto-var-init=zero` the kernel fills each local with zeros and then sets many fields to zero again. In Linux 7.2.8 this takes 708 bytes out of `lib/maple_tree.o`, 192 out of `kernel/signal.o`, 176 out of `fs/read_write.o` and 176 out of `mm/vma.o` (#3938).
+- `||` and `&&` chains that test several one-bit fields of the same object now load the word once and do a single masked test, the same fold gcc does, so small helpers like `tlb_flush_mmu_tlbonly` fit under the inline limit again (#3942)
+- Constants written one after another to bit-fields of the same object are now one read and one write of the bytes they share, so `__tlb_reset_range` is six instructions as with gcc and `tlb_flush_mmu_tlbonly` is inlined into its callers again (#3943)
+
+## 0.30.13
+
+This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow checks, the stack, global and alloca redzones, and the atomic checks. It also adds four UBSAN checks, `-finline-stringops`, more object size answers that agree with gcc, and faster NEON helpers on arm64.
+
 ### Added
 
 - `-finline-stringops`, `-fno-inline-stringops` and the `=` forms with `memcmp`, `memcpy`, `memmove` and `memset`, alone or in a list, as gcc 14 to 16 take them. Linux 7.3 probes for `-finline-stringops=memset` with `cc-option` and builds the vDSO with it on x86-64, arm64 and riscv64. rucc gave "unknown option", so the probe failed and `CONFIG_CC_OPT_INLINE_MEMSET` was empty where it has the flag for gcc 16. With `memset` on, each `__builtin_memset` and each structure fill that would be a call to `memset` is now a loop of stores, a word at a time and then a byte at a time, also when the length is not a constant. This is also true under `-ffreestanding` and `-fno-builtin`, where only a plain call to `memset` stays a call, as gcc does it. The other three names are accepted, but their code does not change yet. A persona before gcc 14 does not accept the flag. (#3761)
