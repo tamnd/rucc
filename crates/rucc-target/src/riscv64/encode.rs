@@ -421,6 +421,8 @@ fn atomic(mnemonic: &str) -> Option<(u32, u32, u32)> {
         "amomax" => 0x14,
         "amominu" => 0x18,
         "amomaxu" => 0x1c,
+        // Zicfiss, the swap on the shadow stack.
+        "ssamoswap" => 0x09,
         _ => return None,
     };
     let f3 = match parts.next()? {
@@ -691,6 +693,14 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         ("rdcycle", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc00)),
         ("rdtime", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc01)),
         ("rdinstret", [Gpr(rd)]) => out.words.push(i(0x73, 2, *rd, ZERO, 0xc02)),
+        // Zicfilp's landing pad, which is `auipc zero` with the label in the upper bits.
+        ("lpad", [Imm(label)]) if (0..1 << 20).contains(label) => {
+            out.words.push(u(0x17, ZERO, *label));
+        }
+        // Zicfiss, which only takes `ra` or `t0` for the return address it pushes and checks.
+        ("sspush", [Gpr(rs2 @ (1 | 5))]) => out.words.push(r(0x73, 4, 0x67, ZERO, ZERO, *rs2)),
+        ("sspopchk", [Gpr(rs1 @ (1 | 5))]) => out.words.push(i(0x73, 4, ZERO, *rs1, 0xcdc)),
+        ("ssrdp", [Gpr(rd)]) if *rd != ZERO => out.words.push(i(0x73, 4, *rd, ZERO, 0xcdc)),
         ("fence.i", []) => out.words.push(0x0000_100f),
         ("fence.tso", []) => out.words.push(0x8330_000f),
         ("pause", []) => out.words.push(0x0100_000f),
@@ -1054,6 +1064,16 @@ mod tests {
             ("bgtz", &[Gpr(10), Imm(8)], 0x00a0_4463),
             ("zext.b", &[Gpr(10), Gpr(11)], 0x0ff5_f513),
             ("jalr", &[Gpr(1), Gpr(10), Imm(4)], 0x0045_00e7),
+            // Zicfilp and Zicfiss, from llvm-mc, since binutils 2.42 does not know them.
+            ("lpad", &[Imm(0)], 0x0000_0017),
+            ("lpad", &[Imm(5)], 0x0000_5017),
+            ("sspush", &[Gpr(1)], 0xce10_4073),
+            ("sspush", &[Gpr(5)], 0xce50_4073),
+            ("sspopchk", &[Gpr(1)], 0xcdc0_c073),
+            ("sspopchk", &[Gpr(5)], 0xcdc2_c073),
+            ("ssrdp", &[Gpr(10)], 0xcdc0_4573),
+            ("ssamoswap.d", &[Gpr(10), Gpr(11), at(12, 0)], 0x48b6_352f),
+            ("ssamoswap.w.aqrl", &[Gpr(10), Gpr(11), at(12, 0)], 0x4eb6_252f),
         ];
         for &(mnemonic, values, word) in words {
             assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
@@ -1062,6 +1082,8 @@ mod tests {
         assert!(encode("amoadd.w", &[Gpr(15), Gpr(11), at(10, 4)]).is_err());
         assert!(encode("csrr", &[Gpr(10), Imm(0x1000)]).is_err());
         assert!(encode("csrsi", &[Imm(0x100), Imm(32)]).is_err());
+        assert!(encode("sspush", &[Gpr(10)]).is_err());
+        assert!(encode("lpad", &[Imm(1 << 20)]).is_err());
     }
 
     #[test]
