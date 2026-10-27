@@ -294,3 +294,24 @@ fn an_assembly_file_gets_the_landing_pad_and_the_note_from_cet_h() {
     let none = assembled("hand-none", &[]);
     assert!(!holds(&none, &endbr) && !holds(&none, b"GNU\0"), "nothing without the flag");
 }
+
+/// A `static` function only a direct call reaches opens with no landing pad when optimizing, as
+/// gcc writes it, since no indirect branch can arrive there. One whose address is kept still
+/// does, and at `-O0` both do, since gcc only works out who calls what when it optimizes.
+#[test]
+fn a_function_only_called_directly_has_no_pad_when_optimizing() {
+    const STATICS: &str = "\
+__attribute__((noinline)) static int direct(int x) { return x + 9; }
+__attribute__((noinline)) static int kept(int x) { return x * 3; }
+int (*pointer)(int) = kept;
+int entry(int x) { return direct(x) + kept(x); }
+";
+    let text = asm("direct", &["-O2", "-fcf-protection=branch"], STATICS);
+    assert_ne!(insts(&text, "direct").first(), Some(&"endbr64"), "{text}");
+    assert_eq!(insts(&text, "kept").first(), Some(&"endbr64"), "{text}");
+    assert_eq!(insts(&text, "entry").first(), Some(&"endbr64"), "{text}");
+    let text = asm("direct0", &["-O0", "-fcf-protection=branch"], STATICS);
+    for name in ["direct", "kept", "entry"] {
+        assert_eq!(insts(&text, name).first(), Some(&"endbr64"), "{name}, {text}");
+    }
+}

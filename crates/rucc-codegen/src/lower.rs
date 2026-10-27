@@ -965,6 +965,46 @@ fn bare_constant(
     false
 }
 
+/// The template with each operand that is a whole argument and has a number in `constants` written
+/// as that number, `%1` as `$8`, or nothing when no operand was written that way.
+///
+/// Only an argument that is the operand and nothing else, since `%1(%rsp)` is a distance into an
+/// address and `*%1` is a jump through it. One with a modifier is left as it is too.
+fn with_constants(template: &str, constants: &[Option<i128>]) -> Option<String> {
+    let bytes = template.as_bytes();
+    let mut text = String::with_capacity(template.len());
+    let mut any = false;
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'%' {
+            let next = template[at + 1..].find('%').map_or(bytes.len(), |found| at + 1 + found);
+            text.push_str(&template[at..next]);
+            at = next;
+            continue;
+        }
+        if bytes.get(at + 1) == Some(&b'%') {
+            text.push_str("%%");
+            at += 2;
+            continue;
+        }
+        let end = at + 1 + bytes[at + 1..].iter().take_while(|byte| byte.is_ascii_digit()).count();
+        let before = at.checked_sub(1).map(|front| bytes[front]);
+        let after = bytes.get(end).copied();
+        let alone = before.is_none_or(|byte| byte.is_ascii_whitespace() || byte == b',')
+            && after.is_none_or(|byte| byte.is_ascii_whitespace() || matches!(byte, b',' | b';'));
+        let number = template[at + 1..end].parse::<usize>().ok();
+        match number.and_then(|index| constants.get(index).copied().flatten()) {
+            Some(number) if alone => {
+                text.push_str(&format!("${number}"));
+                any = true;
+            }
+            _ => text.push_str(&template[at..end.max(at + 1)]),
+        }
+        at = end.max(at + 1);
+    }
+    any.then_some(text)
+}
+
 /// Whether a clobber names the x87 stack, `st` or `st(1)`, or one of the MMX registers over it.
 fn x87_named(entry: &str) -> bool {
     let digit = |rest: &str| rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit() && rest < "8";
@@ -6427,10 +6467,31 @@ impl<'a> Lowering<'a> {
         {
             return self.kept(inst, &template, &constraints, &list, &widths, &memory);
         }
+        // A constant its constraint lets the text have as itself is read as one, the way gcc
+        // prints it, rather than put in a register first. The kernel's `__set_bit` is `"Ir"`, and
+        // gcc writes `btsq $8, (%rsp)` where this wrote a `mov` into a register and the slower
+        // `bts` that takes one. The text the reader cannot take that way is read as it was.
+        let constants: Vec<Option<i128>> = list
+            .iter()
+            .map(|operand| {
+                let value = operand.value.filter(|_| {
+                    operand.result.is_none()
+                        && operand.tied.is_none()
+                        && operand.immediate
+                        && !operand.memory
+                })?;
+                let number = self.bare_number(value)?;
+                let bits = self.source[value].ty.bits();
+                (in_range(operand.range, number) && (number >= 0 || bits == 64)).then_some(number)
+            })
+            .collect();
+        let read = with_constants(&template, &constants)
+            .and_then(|text| x86_64::read_in(&text, &widths, &memory))
+            .or_else(|| x86_64::read_in(&template, &widths, &memory));
         let steps = if template.trim().is_empty() {
             Vec::new()
         } else {
-            match x86_64::read_in(&template, &widths, &memory) {
+            match read {
                 Some(steps) => steps,
                 None => return self.kept(inst, &template, &constraints, &list, &widths, &memory),
             }
