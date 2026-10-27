@@ -85,6 +85,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An answer written before the instruction has read all of its sources, like the riscv64 select, no longer gets the same scratch register as a spilled source, which made the select pick the wrong value (#3914).
 - The riscv64 `.insn s` form takes an offset in brackets of its own, as in `((32) & 0xfe0)(a0)` from the kernel's prefetch macros (#3918).
 - `-fcf-protection=` with `branch`, `return` or `full` is refused off x86 in gcc 14's words, where before it was taken and did nothing, so the riscv kernel no longer turns on RISCV_USER_CFI and builds a CFI vDSO without landing pads (#3922).
+- Dead store elimination now keeps track of the live bytes of a store as a set of spans, so a later store that lands in the middle of a fill leaves a hole there instead of being ignored. A fill covered by stores that come in any order is now removed or narrowed. Under `-ftrivial-auto-var-init=zero` this drops the zero fill of `struct stat` in the kernel's `cp_new_stat`, as gcc does (#3927).
 
 ## 0.30.12
 
