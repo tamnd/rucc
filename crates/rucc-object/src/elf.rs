@@ -65,7 +65,8 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         | Reference::Image
         | Reference::Section
         | Reference::Field(_)
-        | Reference::Riscv(_) => {
+        | Reference::Riscv(_)
+        | Reference::Sum { .. } => {
             return None;
         }
         // The i386 ways of reaching the global offset table, counted from a register holding it,
@@ -134,6 +135,7 @@ pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
         | Reference::Section
         | Reference::Field(_)
         | Reference::Riscv(_)
+        | Reference::Sum { .. }
         | Reference::Tls(Tls::Descriptor | Tls::DescriptorCall) => return None,
     })
 }
@@ -203,6 +205,17 @@ pub(crate) fn r_type_riscv64(reference: Reference) -> Option<elf::RelocationType
         // There is no eight byte distance, so this is the first of a pair: the name added here
         // and the place taken off by an `R_RISCV_SUB64` the caller writes after it.
         Reference::AwayWide => elf::R_RISCV_ADD64,
+        Reference::Sum { bytes, minus } => match (bytes, minus) {
+            (1, false) => elf::R_RISCV_ADD8,
+            (2, false) => elf::R_RISCV_ADD16,
+            (4, false) => elf::R_RISCV_ADD32,
+            (8, false) => elf::R_RISCV_ADD64,
+            (1, true) => elf::R_RISCV_SUB8,
+            (2, true) => elf::R_RISCV_SUB16,
+            (4, true) => elf::R_RISCV_SUB32,
+            (8, true) => elf::R_RISCV_SUB64,
+            _ => return None,
+        },
         _ => return None,
     })
 }

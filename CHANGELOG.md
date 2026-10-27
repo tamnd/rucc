@@ -71,6 +71,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 integrated assembler grows a conditional branch to a label more than 4 KiB away into the opposite branch over a `jal`, as gas does, instead of refusing the file (#3905).
 - `__builtin_prefetch` on riscv64 writes no instruction, as gcc does without Zicbop, instead of stopping on an opcode the target has no spelling for (#3907).
 - A riscv64 file of assembly built with `-mabi=lp64` is marked soft float like the C beside it, so ld links the two, and the riscv64 assembler reads `.end`, `fmv.s.x` and `fmv.x.s`, and a name with a sum after it such as `init_thread_union + THREAD_SIZE` (#3908).
+- The riscv64 assembler writes a difference of two names it cannot work out, `.long a - b` with `b` in no section of the file, as an `R_RISCV_ADD` and `R_RISCV_SUB` pair on the same bytes the way gas does, in one, two, four or eight bytes (#3910).
 
 ## 0.30.12
 

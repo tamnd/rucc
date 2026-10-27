@@ -5076,6 +5076,7 @@ impl Reader {
                         .to_owned(),
                 ));
             }
+            let mut taken = None;
             let (symbol, kind, addend, after) = match residue.left.as_slice() {
                 // A distance from the table or a slot of it is about a name, and a number on its
                 // own has neither.
@@ -5150,6 +5151,32 @@ impl Reader {
                         _ => Reference::Address { bytes: fixup.width },
                     };
                     (name.clone(), kind, residue.constant, 0)
+                }
+                // Two names on RISC-V where the one taken off is not in this section, which gas
+                // writes as two relocations on the same bytes, the first name added and the
+                // second taken off. The kernel's PE header says how long its text is that way,
+                // `.long __pecoff_data_virt_end - __pecoff_text_end`, both from the linker script.
+                [
+                    Left { coeff: 1, what: What::Symbol(name), .. },
+                    Left { coeff: -1, what: What::Symbol(minus), at },
+                ]
+                | [
+                    Left { coeff: -1, what: What::Symbol(minus), at },
+                    Left { coeff: 1, what: What::Symbol(name), .. },
+                ] if self.riscv
+                    && fixup.reach == Reach::Near
+                    && matches!(fixup.width, 1 | 2 | 4 | 8)
+                    && at.is_none_or(|(part, _)| part != fixup.part) =>
+                {
+                    let bytes = fixup.width;
+                    taken = Some(Reloc {
+                        at: fixup.at as usize,
+                        symbol: minus.clone(),
+                        kind: Reference::Sum { bytes, minus: true },
+                        addend: 0,
+                        after: 0,
+                    });
+                    (name.clone(), Reference::Sum { bytes, minus: false }, residue.constant, 0)
                 }
                 // The distance from these bytes to something, which is what a position independent
                 // table of offsets holds and what `.long foo - .` is asking for. The subtracted
@@ -5275,6 +5302,7 @@ impl Reader {
                 addend,
                 after,
             });
+            self.parts[fixup.part].relocs.extend(taken);
         }
         Ok(())
     }
@@ -7077,6 +7105,42 @@ _tls$tlv$init:
                 (4, ".Lpcrel_hi0", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
                 (8, "base", Reference::Riscv(riscv64::Fixup::PcrelHi20), 1),
                 (12, ".Lpcrel_hi1", Reference::Riscv(riscv64::Fixup::PcrelLo12I), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_riscv_difference_of_two_names_from_elsewhere_is_one_added_and_one_taken_off() {
+        // The kernel's PE header, `.long __pecoff_data_virt_end - __pecoff_text_end`, which gas
+        // writes as `R_RISCV_ADD32` and `R_RISCV_SUB32` on the same four bytes.
+        let read = match read(
+            concat!(
+                "\t.section .head.text,\"ax\"\n",
+                "\t.long end - start\n",
+                "\t.quad end - start + 8\n",
+                "\t.short end - here\n",
+                "\t.byte 0\n",
+                "\t.section .other,\"a\"\n",
+                "here:\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let text = read.parts.iter().find(|part| part.name == ".head.text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        let sum = |bytes, minus| Reference::Sum { bytes, minus };
+        assert_eq!(
+            relocs,
+            [
+                (0, "end", sum(4, false), 0),
+                (0, "start", sum(4, true), 0),
+                (4, "end", sum(8, false), 8),
+                (4, "start", sum(8, true), 0),
+                (12, "end", sum(2, false), 0),
+                (12, "here", sum(2, true), 0),
             ]
         );
     }
