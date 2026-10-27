@@ -83,6 +83,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A 32-bit comparison on riscv64 keeps the `sext.w` in front of it when the word was cut out of a wider register, so `(int)(x >> 32)` or an `int` field of a small struct passed in a register no longer compares as an unsigned number (#3913).
 - An answer written before the instruction has read all of its sources, like the riscv64 select, no longer gets the same scratch register as a spilled source, which made the select pick the wrong value (#3914).
 - The riscv64 `.insn s` form takes an offset in brackets of its own, as in `((32) & 0xfe0)(a0)` from the kernel's prefetch macros (#3918).
+- `-fcf-protection=` with `branch`, `return` or `full` is refused off x86 in gcc 14's words, where before it was taken and did nothing, so the riscv kernel no longer turns on RISCV_USER_CFI and builds a CFI vDSO without landing pads (#3922).
 
 ## 0.30.12
 
