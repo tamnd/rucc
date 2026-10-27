@@ -61,7 +61,12 @@ pub(crate) fn typ(reference: Reference, after: u8) -> Option<pe::RelocationType>
         // wants and is four more than the answer an image wants, and there is no addend field to
         // put the difference in because this format keeps the addend in the bytes themselves.
         Reference::Call | Reference::Data | Reference::Got | Reference::Thread => return None,
-        Reference::GotBare | Reference::GotKept | Reference::Field(_) | Reference::Riscv(_) => {
+        Reference::GotBare
+        | Reference::GotKept
+        | Reference::Field(_)
+        | Reference::Riscv(_)
+        | Reference::Sum { .. }
+        | Reference::Leb { .. } => {
             return None;
         }
         Reference::Away | Reference::AwayWide | Reference::Short | Reference::Tiny => return None,
@@ -144,6 +149,8 @@ pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
         | Reference::Slot
         | Reference::SlotKept
         | Reference::Riscv(_)
+        | Reference::Sum { .. }
+        | Reference::Leb { .. }
         | Reference::Tls(_) => {
             return None;
         }
@@ -188,7 +195,13 @@ pub(crate) fn i386(reference: Reference) -> Option<pe::RelocationType> {
         Reference::GotOffset | Reference::GotFront | Reference::Slot | Reference::SlotKept => {
             return None;
         }
-        Reference::Field(_) | Reference::Riscv(_) | Reference::Tls(_) => return None,
+        Reference::Field(_)
+        | Reference::Riscv(_)
+        | Reference::Sum { .. }
+        | Reference::Leb { .. }
+        | Reference::Tls(_) => {
+            return None;
+        }
     })
 }
 

@@ -195,3 +195,16 @@ fn the_stack_pointer_on_i386_is_esp() {
     assert!(text.contains("movl\t%esp, %eax"), "the stack pointer was not read:\n{text}");
     assert!(text.contains("call g"), "{text}");
 }
+
+#[test]
+fn riscv64_keeps_tp_and_sp_at_file_scope() {
+    // `asm/current.h` keeps `current` in `tp` and reads the stack pointer the same way, and both
+    // are read with a move where the read is.
+    let source = "struct task;\nregister struct task *cur asm (\"tp\");\n\
+                  register unsigned long sp asm (\"sp\");\n\
+                  struct task *f(void) { return cur; }\nunsigned long g(void) { return sp; }\n";
+    let (ok, text, said) = run_on("riscv64-linux-gnu", "tp-riscv64", source);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(text.contains("mv a0, tp"), "tp was not read:\n{text}");
+    assert!(text.contains("mv a0, sp"), "sp was not read:\n{text}");
+}

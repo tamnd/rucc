@@ -3,7 +3,7 @@
 //! Design: `spec/04-driver-and-cli.md` section 4.12, tamnd/rucc#2281 and tamnd/rucc#2335.
 //!
 //! What is compared is the run of clearing instructions in front of each `ret`, against what gcc
-//! 16 writes for the same function on x86-64 and gcc 13 on AArch64. The rest of the body is this compiler's own and is not the
+//! 16 writes for the same function on x86-64 and gcc 13 on AArch64 and RISC-V. The rest of the body is this compiler's own and is not the
 //! same as gcc's, so the functions here are ones where both put their values in the same
 //! registers.
 
@@ -50,7 +50,8 @@ fn cleared(text: &str, name: &str) -> Vec<String> {
         .map_while(|line| {
             let x86 = line.strip_prefix("xorl %").and_then(|rest| rest.split_once(','));
             let a64 = line.strip_prefix("mov ").and_then(|rest| rest.strip_suffix(", #0"));
-            x86.map(|(reg, _)| reg.to_string()).or(a64.map(str::to_string))
+            let rv = line.strip_prefix("li ").and_then(|rest| rest.strip_suffix(", 0"));
+            x86.map(|(reg, _)| reg.to_string()).or(a64.or(rv).map(str::to_string))
         })
         .collect();
     found.reverse();
@@ -97,6 +98,20 @@ fn used_gpr_clears_what_gcc_clears_on_aarch64() {
         ("callr", &["x1", "x16", "x17"]),
         ("six", &["x1", "x2", "x3", "x4", "x5"]),
         ("div", &["x1"]),
+    ] {
+        assert_eq!(cleared(&text, name), gcc, "{name}: {text}");
+    }
+}
+
+/// RISC-V counts no register a call through the PLT writes, so a call adds nothing.
+#[test]
+fn used_gpr_clears_what_gcc_clears_on_riscv64() {
+    let text = asm("riscv64", "used", USED, SOURCE);
+    for (name, gcc) in [
+        ("f", &["a1"][..]),
+        ("callr", &["a1"]),
+        ("six", &["a1", "a2", "a3", "a4", "a5"]),
+        ("div", &["a1"]),
     ] {
         assert_eq!(cleared(&text, name), gcc, "{name}: {text}");
     }
@@ -166,6 +181,8 @@ fn epilogue(text: &str, name: &str) -> Vec<String> {
             || line == &"vzeroall"
             || line.starts_with("movi v") && line.ends_with(".2d, #0")
             || line.starts_with("mov x") && line.ends_with(", #0")
+            || line.starts_with("li ") && line.ends_with(", 0")
+            || line.starts_with("fmv.d.x ") && line.ends_with(", zero")
     };
     let mut found: Vec<String> =
         body[..body.len() - 1].iter().rev().take_while(clears).cloned().collect();
@@ -326,6 +343,25 @@ fn all_clears_the_vector_registers_on_aarch64_like_gcc() {
     let mut f: Vec<String> = (1..8).map(|n| format!("mov x{n}, #0")).collect();
     f.extend((0..8).map(|n| format!("movi v{n}.2d, #0")));
     assert_eq!(epilogue(&text, "f"), f, "{text}");
+}
+
+/// RISC-V clears `ft0` to `ft7`, `fa0` to `fa7` and `ft8` to `ft11` with `fmv.d.x` after the
+/// integer registers, but only under a convention that passes a float in them.
+#[test]
+fn the_float_registers_are_cleared_on_riscv64_like_gcc() {
+    let wide = "long f(long a, long b) { return a * b + 3; }\ndouble d(double a, double b) { return a * b; }\n";
+    let text = asm("riscv64", "wide-used", &["-fzero-call-used-regs=used"], wide);
+    assert_eq!(epilogue(&text, "d"), ["fmv.d.x fa1, zero"], "{text}");
+    let text = asm("riscv64", "wide-all-arg", &["-fzero-call-used-regs=all-arg"], wide);
+    let mut f: Vec<String> = (1..8).map(|n| format!("li a{n}, 0")).collect();
+    f.extend((0..8).map(|n| format!("fmv.d.x fa{n}, zero")));
+    assert_eq!(epilogue(&text, "f"), f, "{text}");
+    let lp64 = ["-fzero-call-used-regs=all", "-march=rv64imac", "-mabi=lp64"];
+    let text = asm("riscv64", "wide-lp64", &lp64, SOURCE);
+    let mut f = strings(&["t0", "t1", "t2"]);
+    f.extend((1..8).map(|n| format!("a{n}")));
+    f.extend(strings(&["t3", "t4", "t5", "t6"]));
+    assert_eq!(cleared(&text, "f"), f, "{text}");
 }
 
 /// Every choice gcc 16 has is taken, so `__has_attribute` can answer as gcc does.
