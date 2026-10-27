@@ -596,6 +596,35 @@ enum Local {
     Slot(Value),
 }
 
+/// An operand of `&&` or `||` that asks whether a bit-field is zero, which
+/// [`Body::merged_tests`] reads together with the ones next to it.
+#[derive(Debug, Clone, Copy)]
+struct Test {
+    /// The object the field is a member of.
+    base: ExprId,
+    /// Where the field starts, in bits from the start of the object.
+    at: u64,
+    /// How many bits the field is.
+    width: u32,
+    /// Whether the operand is true when the field is other than zero.
+    nonzero: bool,
+    /// The type the field was declared with.
+    ty: TypeId,
+}
+
+impl Test {
+    /// Whether a run of tests is one compare: each field one bit wide, so it is either all
+    /// clear or all set, or every operand asking the question that a mask answers for the whole
+    /// field at once, which is not zero in `||` and zero in `&&`. And the bytes they lie in no
+    /// more than eight, so one integer holds them.
+    fn fits(and: bool, tests: &[Test]) -> bool {
+        let lo = tests.iter().map(|test| test.at).min().unwrap_or(0);
+        let hi = tests.iter().map(|test| test.at + u64::from(test.width)).max().unwrap_or(lo);
+        let bytes = hi.div_ceil(8) - lo / 8;
+        bytes <= 8 && tests.iter().all(|test| test.width == 1 || test.nonzero != and)
+    }
+}
+
 /// An object the walk can read or write: either a variable or an address.
 #[derive(Debug, Clone, Copy)]
 struct Place {
@@ -2348,9 +2377,16 @@ impl<'u> Body<'_, 'u> {
             Stmt::Expr(expr) => self.discard(expr),
             Stmt::Block(list) => {
                 self.open();
-                for index in 0..tast[list].len() {
+                let mut index = 0;
+                while index < tast[list].len() {
+                    let merged = self.merged_stores(&tast[list][index..]);
+                    if merged > 0 {
+                        index += merged;
+                        continue;
+                    }
                     let stmt = tast[list][index];
                     self.stmt(stmt);
+                    index += 1;
                 }
                 self.close(span);
             }
@@ -9721,6 +9757,9 @@ impl<'u> Body<'_, 'u> {
     /// defined `g` links. tcc's own test does exactly that in `optimize_out_test`.
     fn short_circuit(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> Value {
         let and = op == BinaryOp::LogAnd;
+        if let Some(bit) = self.merged_tests(op, lhs, rhs, span) {
+            return bit;
+        }
         if let Some((effects, answer)) = self.decided_condition(lhs) {
             for effect in effects {
                 self.discard(effect);
@@ -9731,6 +9770,18 @@ impl<'u> Body<'_, 'u> {
             return self.condition(rhs);
         }
         let left = self.condition(lhs);
+        self.chain_on(and, left, |body| body.condition(rhs), span)
+    }
+
+    /// The rest of `a && b` or `a || b` once `left` is known, with `right` evaluated only on the
+    /// side where it decides the answer.
+    fn chain_on(
+        &mut self,
+        and: bool,
+        left: Value,
+        right: impl FnOnce(&mut Self) -> Value,
+        span: Span,
+    ) -> Value {
         let var = self.temp();
         let block = self.block();
         // The answer if the right side is never evaluated, which is the left side's own value.
@@ -9748,7 +9799,7 @@ impl<'u> Body<'_, 'u> {
 
         self.at = Some(other);
         self.conditions += 1;
-        let right = self.condition(rhs);
+        let right = right(self);
         self.conditions -= 1;
         let block = self.block();
         self.ssa.write(var, block, right);
@@ -9757,6 +9808,301 @@ impl<'u> Body<'_, 'u> {
         self.ssa.seal(self.func, join);
         self.at = Some(join);
         self.ssa.read(self.func, var, join, Type::I1)
+    }
+
+    /// `a && b` and `a || b` over bit-fields of one object, asked as one question about the bytes
+    /// they lie in, which is what gcc's `fold_truth_andor` does with them.
+    ///
+    /// `tlb_flush_mmu_tlbonly` in the kernel's `<asm-generic/tlb.h>` returns early unless one of
+    /// six one bit fields of its `mmu_gather` is set. Walked an operand at a time that is six loads
+    /// of the same two bytes, each with a shift and a branch, and the body was too large to copy
+    /// into its callers. gcc asks it with one `testw` and copies it into all of them.
+    ///
+    /// Reading a field the chain would have stopped before reading is safe when the object is the
+    /// one an operand already read, found the same way by a road that reads no memory and does
+    /// nothing. Each run of such operands next to each other becomes one load and one compare, and
+    /// the runs and the other operands are joined in the order the program wrote them.
+    fn merged_tests(
+        &mut self,
+        op: BinaryOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        span: Span,
+    ) -> Option<Value> {
+        let and = op == BinaryOp::LogAnd;
+        let mut operands = Vec::new();
+        self.chained(op, lhs, &mut operands);
+        self.chained(op, rhs, &mut operands);
+        let tests: Vec<Option<Test>> = operands.iter().map(|&it| self.bit_test(it)).collect();
+        let mut runs: Vec<(ExprId, Vec<Test>)> = Vec::new();
+        for (&operand, &test) in operands.iter().zip(&tests) {
+            if let (Some(test), Some((_, run))) = (test, runs.last_mut()) {
+                let same = run.first().is_some_and(|first| self.same_object(first.base, test.base));
+                run.push(test);
+                if same && Test::fits(and, run) {
+                    continue;
+                }
+                run.pop();
+            }
+            runs.push((operand, test.into_iter().collect()));
+        }
+        // A chain with an operand whose answer is known is left to the walk that drops what it
+        // decides, which a call behind a `0 &&` relies on to not be linked.
+        if runs.iter().all(|(_, run)| run.len() < 2)
+            || operands.iter().any(|&it| self.decided_condition(it).is_some())
+        {
+            return None;
+        }
+        let mut answer = None;
+        for (operand, run) in runs {
+            let bit = move |body: &mut Self| match run.as_slice() {
+                [] | [_] => body.condition(operand),
+                _ => body.tests_bit(and, &run, span),
+            };
+            answer = Some(match answer {
+                None => bit(self),
+                Some(left) => self.chain_on(and, left, bit, span),
+            });
+        }
+        answer
+    }
+
+    /// The operands of a chain of one of `&&` and `||`, in the order they are evaluated.
+    fn chained(&self, op: BinaryOp, expr: ExprId, out: &mut Vec<ExprId>) {
+        match self.tast()[expr].kind {
+            ExprKind::Binary { op: inner, lhs, rhs } if inner == op => {
+                self.chained(op, lhs, out);
+                self.chained(op, rhs, out);
+            }
+            ExprKind::Convert { kind: Conversion::Bool, operand }
+                if matches!(
+                    self.tast()[operand].kind,
+                    ExprKind::Binary { op: inner, .. } if inner == op
+                ) =>
+            {
+                self.chained(op, operand, out);
+            }
+            _ => out.push(expr),
+        }
+    }
+
+    /// The bit-field an operand of `&&` or `||` asks about and whether it asks for the field to be
+    /// other than zero, when the operand is that question and the field is one [`Self::tests_bit`]
+    /// can read with others.
+    fn bit_test(&self, expr: ExprId) -> Option<Test> {
+        let tast = self.tast();
+        match tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => self.bit_field(operand),
+            ExprKind::Convert { kind: Conversion::Bool, operand } => self.bit_test(operand),
+            // A widening keeps whether the value is zero, and a narrowing may not.
+            ExprKind::Convert { kind: Conversion::Arithmetic, operand } => {
+                let test = self.bit_test(operand)?;
+                let into = repr::value_type(self.types(), self.target(), tast[expr].ty)?;
+                (into.is_int() && into.bits() >= test.width).then_some(test)
+            }
+            ExprKind::Unary { op: UnaryOp::Not, operand } => {
+                self.bit_test(operand).map(|test| Test { nonzero: !test.nonzero, ..test })
+            }
+            ExprKind::Binary { op: op @ (BinaryOp::Eq | BinaryOp::Ne), lhs, rhs } => {
+                let mut eval = Eval::new(tast, self.types(), self.target(), self.unit.names);
+                let zero = matches!(eval.integer(rhs), Ok(0)) && !eval.addressed();
+                if !zero || !eval.finish().is_empty() {
+                    return None;
+                }
+                let test = self.bit_test(lhs)?;
+                Some(Test { nonzero: test.nonzero == (op == BinaryOp::Ne), ..test })
+            }
+            _ => None,
+        }
+    }
+
+    /// The bit-field `expr` names, as a [`Test`] of it being other than zero, when it is one that
+    /// can be read or written with the fields next to it: not volatile, of a structure laid out
+    /// the usual way, and reached by a road that reads nothing in memory.
+    fn bit_field(&self, expr: ExprId) -> Option<Test> {
+        let tast = self.tast();
+        let ExprKind::Member { base, field } = tast[expr].kind else { return None };
+        if !self.target().little_endian
+            || self.is_volatile(tast[expr].ty)
+            || self.is_volatile(tast[base].ty)
+            || !self.place_reads_nothing(base, u64::MAX)
+        {
+            return None;
+        }
+        let TypeKind::Record(id) = self.types().kind(self.types().canonical(tast[base].ty)) else {
+            return None;
+        };
+        let info = self.types().record_info(id);
+        if info.reverse || info.variable.is_some() {
+            return None;
+        }
+        let member = info.fields.get(field as usize)?;
+        let width = member.bits.filter(|&width| width > 0)?;
+        let at = member.offset * 8 + u64::from(member.bit);
+        Some(Test { base, at, width, nonzero: true, ty: tast[expr].ty })
+    }
+
+    /// How many of `list` from its start are a constant given to a bit-field of one object, the
+    /// same one for each, when there are two or more and they were written as one read of the
+    /// bytes they lie in and one write. Nothing is written when the answer is zero.
+    ///
+    /// This is the clearing of the six flags at the end of `__tlb_reset_range` in the kernel,
+    /// which was eighteen instructions here to gcc's six and kept `tlb_flush_mmu_tlbonly`, the
+    /// helper it is inlined into, over the inline limit by two where gcc copies it everywhere.
+    fn merged_stores(&mut self, list: &[StmtId]) -> usize {
+        if self.at.is_none() {
+            return 0;
+        }
+        let mut stores: Vec<(Test, i128)> = Vec::new();
+        for &stmt in list {
+            let Some(store) = self.constant_store(stmt) else { break };
+            if let Some((first, _)) = stores.first() {
+                let mut tests: Vec<Test> = stores.iter().map(|&(test, _)| test).collect();
+                tests.push(store.0);
+                if !self.same_object(first.base, store.0.base) || !self.one_location(&tests) {
+                    break;
+                }
+            }
+            stores.push(store);
+        }
+        if stores.len() < 2 {
+            return 0;
+        }
+        let span = self.tast().stmt_span(list[0]);
+        self.stores_bit(&stores, span);
+        stores.len()
+    }
+
+    /// The field and the value when `stmt` is `object.field = constant;` with a bit-field that
+    /// [`Self::bit_field`] takes.
+    fn constant_store(&self, stmt: StmtId) -> Option<(Test, i128)> {
+        let tast = self.tast();
+        let Stmt::Expr(expr) = tast[stmt] else { return None };
+        let ExprKind::Assign { op: None, lhs, rhs, .. } = tast[expr].kind else { return None };
+        let test = self.bit_field(lhs)?;
+        let mut eval = Eval::new(tast, self.types(), self.target(), self.unit.names);
+        let value = eval.integer(rhs).ok().filter(|_| !eval.addressed())?;
+        eval.finish().is_empty().then_some((test, value))
+    }
+
+    /// Whether the bytes a run of fields of a structure lie in hold nothing but bit-fields, with
+    /// no field of zero width between them, so writing them all is writing one memory location
+    /// as C 3.14 has it, which is what a write of any one of them already does.
+    fn one_location(&self, tests: &[Test]) -> bool {
+        let lo = tests.iter().map(|test| test.at).min().unwrap_or(0);
+        let hi = tests.iter().map(|test| test.at + u64::from(test.width)).max().unwrap_or(lo);
+        let (first, last) = (lo / 8, hi.div_ceil(8));
+        if last - first > 8 {
+            return false;
+        }
+        let ty = self.types().canonical(self.tast()[tests[0].base].ty);
+        let TypeKind::Record(id) = self.types().kind(ty) else { return false };
+        let info = self.types().record_info(id);
+        info.kind == RecordKind::Struct
+            && info.fields.iter().all(|member| match member.bits {
+                Some(0) => {
+                    let at = member.offset * 8 + u64::from(member.bit);
+                    at <= lo || at >= hi
+                }
+                Some(_) => true,
+                None => {
+                    let size = repr::size_of(self.types(), self.target(), member.ty);
+                    member.offset + size <= first || member.offset >= last
+                }
+            })
+    }
+
+    /// A run of constants given to bit-fields of one object, written as one read of the bytes
+    /// they lie in, the fields cleared and set in it, and one write.
+    fn stores_bit(&mut self, stores: &[(Test, i128)], span: Span) {
+        let lo = stores.iter().map(|(test, _)| test.at).min().unwrap_or(0);
+        let hi = stores.iter().map(|(test, _)| test.at + u64::from(test.width)).max().unwrap_or(lo);
+        let (base, ty) = (stores[0].0.base, stores[0].0.ty);
+        let record = self.types().canonical(self.tast()[base].ty);
+        let place = self.place(base);
+        let addr = self.address_of(place, span);
+        let align =
+            self.alignment(addr).unwrap_or(repr::align_of(self.types(), self.target(), record));
+        // Whole bytes, so every piece of the write is all this run's and none of them is read
+        // again to keep what is around it.
+        let byte = lo / 8;
+        let at = self.offset(addr, byte, span);
+        let width = u32::try_from((hi.div_ceil(8) - byte) * 8).unwrap_or(u32::MAX);
+        let run = Run::at(align, byte, 0, width);
+        let into = Type::int(run.unit());
+        let word = self.read_bits(at, run, ty, into, span);
+        let (mut mask, mut set) = (0i128, 0i128);
+        // In the order they were written, so a field given twice keeps the second.
+        for &(test, value) in stores {
+            let bits = ((1i128 << test.width) - 1) << (test.at - byte * 8);
+            mask |= bits;
+            set = set & !bits | (value << (test.at - byte * 8)) & bits;
+        }
+        let mut build = self.build(span);
+        let keep = build.iconst(into, !mask);
+        let mut word = build.binary(Opcode::And, word, keep, Flags::NONE);
+        if set != 0 {
+            let set = build.iconst(into, set);
+            word = build.binary(Opcode::Or, word, set, Flags::NONE);
+        }
+        self.store_bits(at, run, ty, word, span);
+    }
+
+    /// Whether two expressions name the same object by the same road, which [`Self::bit_test`]
+    /// has already said reads nothing.
+    fn same_object(&self, a: ExprId, b: ExprId) -> bool {
+        let tast = self.tast();
+        match (tast[a].kind, tast[b].kind) {
+            (ExprKind::Decl(x), ExprKind::Decl(y)) => x == y,
+            (ExprKind::Member { base: x, field: f }, ExprKind::Member { base: y, field: g }) => {
+                f == g && self.same_object(x, y)
+            }
+            (
+                ExprKind::Unary { op: UnaryOp::Deref, operand: x },
+                ExprKind::Unary { op: UnaryOp::Deref, operand: y },
+            ) => self.same_object(x, y),
+            (
+                ExprKind::Convert { kind: k, operand: x },
+                ExprKind::Convert { kind: l, operand: y },
+            ) => k == l && tast[a].ty == tast[b].ty && self.same_object(x, y),
+            _ => false,
+        }
+    }
+
+    /// A run of [`Test`]s of one object, all asked by one load of the bytes they lie in.
+    fn tests_bit(&mut self, and: bool, tests: &[Test], span: Span) -> Value {
+        let lo = tests.iter().map(|test| test.at).min().unwrap_or(0);
+        let hi = tests.iter().map(|test| test.at + u64::from(test.width)).max().unwrap_or(lo);
+        let base = tests[0].base;
+        let record = self.types().canonical(self.tast()[base].ty);
+        let place = self.place(base);
+        let addr = self.address_of(place, span);
+        let align =
+            self.alignment(addr).unwrap_or(repr::align_of(self.types(), self.target(), record));
+        // From the start of the first byte, so the masks are on the bits as they were loaded and
+        // nothing shifts them down first.
+        let byte = lo / 8;
+        let at = self.offset(addr, byte, span);
+        let width = u32::try_from(hi - byte * 8).unwrap_or(u32::MAX);
+        let run = Run::at(align, byte, 0, width);
+        let into = Type::int(run.unit());
+        let word = self.read_bits(at, run, tests[0].ty, into, span);
+        let (mut mask, mut set) = (0i128, 0i128);
+        for test in tests {
+            let bits = ((1i128 << test.width) - 1) << (test.at - byte * 8);
+            mask |= bits;
+            if test.nonzero {
+                set |= bits;
+            }
+        }
+        // Every operand true is the set bits set and the rest clear, and one of them true is the
+        // whole run being anything but every operand false.
+        let (pred, want) = if and { (IntPred::Eq, set) } else { (IntPred::Ne, mask & !set) };
+        let mut build = self.build(span);
+        let mask = build.iconst(into, mask);
+        let want = build.iconst(into, want);
+        let masked = build.binary(Opcode::And, word, mask, Flags::NONE);
+        build.icmp(pred, masked, want)
     }
 
     /// `cond ? then : otherwise`.
