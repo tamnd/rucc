@@ -32,6 +32,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 integrated assembler encodes Zbc, Zbkb's `pack`, `packh`, `packw` and `brev8`, Zabha's byte and halfword atomics, `amocas.q`, the floating point CSR pseudo instructions, `c.li`, `c.nop` and `c.ebreak`, and loads and stores from a label, and reads `-(288)` as a number instead of an address (#3906).
 - The riscv64 assembler encodes the vector instructions the kernel writes by hand, `vsetvli`, `vsetivli`, `vsetvl`, the unit stride `vle` and `vse` loads and stores and `vmv.v.v`, `vmv.v.x` and `vmv.v.i`, and refuses `.option arch` for an extension it has no instructions for (#3909).
 - `-mstack-protector-guard=tls`, `-mstack-protector-guard-reg=tp` and `-mstack-protector-guard-offset=` on riscv64 put the canary in the running task the way a riscv kernel asks, and `-mstack-protector-guard=global` is taken there too (#3911).
+- The riscv64 assembler writes `vadd`, `vsub`, `vand`, `vor` and `vxor` with `.vv`, `.vx` and `.vi`, which `arch/riscv/lib/xor.S` on 6.12 needs (#3915).
 
 ### Fixed
 
