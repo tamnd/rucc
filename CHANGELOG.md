@@ -30,6 +30,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The riscv64 integrated assembler encodes Zicfilp's `lpad` and Zicfiss's `sspush`, `sspopchk`, `ssrdp` and `ssamoswap` (#3902).
 - The riscv64 integrated assembler encodes Zba, Zbb, Zbs and Zacas's `amocas.w` and `amocas.d`, reads `move` as `mv`, and reads a register instruction written with a constant, `and t2, t2, 7`, as its form with an immediate (#3904).
 - The riscv64 integrated assembler encodes Zbc, Zbkb's `pack`, `packh`, `packw` and `brev8`, Zabha's byte and halfword atomics, `amocas.q`, the floating point CSR pseudo instructions, `c.li`, `c.nop` and `c.ebreak`, and loads and stores from a label, and reads `-(288)` as a number instead of an address (#3906).
+- The riscv64 assembler encodes the vector instructions the kernel writes by hand, `vsetvli`, `vsetivli`, `vsetvl`, the unit stride `vle` and `vse` loads and stores and `vmv.v.v`, `vmv.v.x` and `vmv.v.i`, and refuses `.option arch` for an extension it has no instructions for (#3909).
 
 ### Fixed
 
