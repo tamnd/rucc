@@ -79,6 +79,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         noexecstack: opts.asm_noexecstack,
         keep_slots: opts.asm_keep_slots,
         before_2_42: opts.gnu_as < rucc_session::GasVersion { major: 2, minor: 42, patch: 0 },
+        nopic: opts.pic == rucc_session::Pic::Absolute,
     };
     // Under `-g` gas writes a line table for the file and a unit naming its functions, which is
     // where the BTF of a function written in assembly comes from.
