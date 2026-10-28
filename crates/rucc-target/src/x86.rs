@@ -35,6 +35,7 @@ use crate::operand::OperandDesc;
 use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
 };
+use crate::short::ShortInsts;
 use crate::x86_64::{Form, Kind, Mode, encoding_in, form, written};
 use rucc_abi::Convention;
 
@@ -717,6 +718,12 @@ fn machine_calls(name: &str) -> bool {
 fn machine_commutes(name: &str) -> bool {
     form_here(name).is_some() && (crate::x86_64::MACHINE.commutes)(name)
 }
+
+/// The shorter spellings of [`crate::x86_64::SHORT`] that hold on this machine.
+///
+/// All but the byte tests. Only the first four registers have a low byte here, and the pass that
+/// writes those does not ask which register it was given.
+pub static SHORT: ShortInsts = ShortInsts { byte_testing: &[], ..crate::x86_64::SHORT };
 
 /// What an i386 conditional branch becomes once the blocks are in an order.
 ///

@@ -360,7 +360,7 @@ impl Machine {
             flags: &x86_64::FLAGS,
             shapes: &x86::MACHINE,
             timing: &x86_64::TIMING,
-            short: &x86_64::SHORT,
+            short: &x86::SHORT,
             selector: &select::x86::SELECTOR,
             env: env(&order, &X86_SCRATCH),
             // Not on this machine. The kernel keeps `ebp` for its frame, and it has no byte form.
@@ -1251,7 +1251,7 @@ pub fn compile_recording(
 
     // The comparisons a branch may be folded into, which the passes on branches and selects
     // below each ask about.
-    let fused = layout::Fused::new(machine.branch, names);
+    let fused = layout::Fused::new(machine.branch, names).keeping(machine.flags);
 
     // In front of the question below, which only takes a comparison that is the instruction in
     // front of its branch, and before allocation, for the same reason that question is. Not at
