@@ -382,6 +382,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     conditional: &CONDITIONAL,
     fused: &FUSED,
     readings: &[],
+    flag_line: |_| None,
     moves: &MOVES,
     zero: &ZERO,
     bits: &ONE_BIT,

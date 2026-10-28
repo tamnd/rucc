@@ -419,6 +419,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     conditional: &CONDITIONAL,
     fused: &FUSED,
     readings: &READINGS,
+    flag_line,
     moves: &MOVES,
     zero: &[],
     bits: &[],
@@ -435,6 +436,29 @@ static CONDITIONAL: [&str; 16] = [
     "jcc_e", "jcc_ne", "jcc_l", "jcc_le", "jcc_g", "jcc_ge", "jcc_b", "jcc_be", "jcc_a", "jcc_ae",
     "jcc_s", "jcc_ns", "jcc_o", "jcc_no", "jcc_p", "jcc_np",
 ];
+
+/// The operand a `set<cond>` on a line of a kept template writes, and the entry in [`READINGS`]
+/// for the condition, which is what `asm` with `"=@ccz"` ends in. Every other spelling gcc takes
+/// for one of the ten is here too, since `CC_SET(z)` and `CC_SET(c)` are how the kernel writes
+/// them. The output has to be the byte itself: a wider one has a `movzbl` behind it.
+fn flag_line(line: &str) -> Option<(usize, &'static str)> {
+    let (op, hole) = line.trim().split_once(' ')?;
+    let at = hole.strip_prefix("\u{1}r")?.strip_suffix("b\u{2}")?.parse().ok()?;
+    let set = match op.strip_prefix("set")? {
+        "e" | "z" => "set_e",
+        "ne" | "nz" => "set_ne",
+        "l" | "nge" => "set_l",
+        "le" | "ng" => "set_le",
+        "g" | "nle" => "set_g",
+        "ge" | "nl" => "set_ge",
+        "b" | "c" | "nae" => "set_b",
+        "be" | "na" => "set_be",
+        "a" | "nbe" => "set_a",
+        "ae" | "nb" | "nc" => "set_ae",
+        _ => return None,
+    };
+    Some((at, set))
+}
 
 /// The ten `setcc` and the jump on the same condition. `rucc_codegen::borrow` writes one behind
 /// the `sbb` of the high halves of an ordered comparison of pairs, and a branch on its byte is the
@@ -1839,6 +1863,25 @@ mod tests {
     use crate::Role;
 
     use super::*;
+
+    /// The line a flag output ends in is read back as the operand it writes and a reading this
+    /// target has, under every name gcc gives the condition, and a line that is anything else is
+    /// not.
+    #[test]
+    fn the_line_behind_a_flag_output_is_the_byte_and_one_of_the_readings() {
+        let byte = template_reg(2, 'b');
+        assert_eq!(flag_line(&format!("\tsetz {byte}")), Some((2, "set_e")));
+        assert_eq!(flag_line(&format!("setc {byte}")), Some((2, "set_b")));
+        assert_eq!(flag_line(&format!("setnc {byte}")), Some((2, "set_ae")));
+        for cond in ["e", "ne", "l", "le", "g", "ge", "b", "be", "a", "ae", "nz", "nle", "na"] {
+            let (_, set) = flag_line(&format!("set{cond} {byte}")).expect("a condition gcc names");
+            assert!(READINGS.iter().any(|reading| reading.set == set), "{cond}");
+        }
+        let wide = template_reg(2, 'k');
+        assert_eq!(flag_line(&format!("sete {wide}")), None);
+        assert_eq!(flag_line(&format!("seto {byte}")), None);
+        assert_eq!(flag_line(&format!("movzbl {byte}, {wide}")), None);
+    }
 
     /// Every register in a list, and no register twice.
     fn covers(order: &[PhysReg], count: usize) -> bool {

@@ -87,7 +87,7 @@
 //! at all, writes a shorter table or an empty one.
 
 /// Every instruction a laid out branch is made of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub struct BranchInsts {
     /// What a rule file and the machine IR put in front of this target's opcodes, such as `x64.`,
     /// which says which target a term belongs to and is not part of the opcode.
@@ -140,6 +140,14 @@ pub struct BranchInsts {
     ///
     /// Empty is a target that writes no such byte ahead of a branch, and the layout then tests it.
     pub readings: &'static [Reading],
+    /// The byte a line of a kept `asm` template writes from the condition state, as the number of
+    /// the operand it writes and the [`Reading::set`] that writes it the same way.
+    ///
+    /// That line is the one [`crate::TargetInfo::flag_output`] puts behind the text of an `asm`
+    /// with a flag output, so a branch on the output is a branch on the flags the template left,
+    /// and the layout treats the line the way it treats one of [`Self::readings`]. Nothing for any
+    /// other line, and for every line on a target with no readings.
+    pub flag_line: fn(&str) -> Option<(usize, &'static str)>,
     /// The conditional moves a select on a comparison's answer can become.
     ///
     /// Empty is a target that does not do this, and every select keeps the test of its byte.

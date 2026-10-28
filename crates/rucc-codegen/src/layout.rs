@@ -862,12 +862,15 @@ fn along(
 ///
 /// The third is the comparisons of the first map that leave the condition state they found, which
 /// [`blocks`] jumps on without a test when the byte is kept for some other reader. See
-/// [`Fused::keeping`].
+/// [`Fused::keeping`]. The last two are the opcode of a kept `asm` template and how to read the
+/// line a flag output puts at the end of one. See [`flagged`].
 #[derive(Debug)]
 pub struct Fused(
     pub(crate) Map<mir::Opcode, &'static Fusion>,
     pub(crate) Map<mir::Opcode, &'static Reading>,
     pub(crate) Map<mir::Opcode, &'static Fusion>,
+    mir::Opcode,
+    fn(&str) -> Option<(usize, &'static str)>,
 );
 
 impl Fused {
@@ -884,7 +887,8 @@ impl Fused {
             .iter()
             .map(|reading| (mir::Opcode::new(names.join(insts.prefix, reading.set)), reading))
             .collect();
-        Fused(table, readings, Map::default())
+        let template = mir::Opcode::new(names.join(insts.prefix, insts.goto));
+        Fused(table, readings, Map::default(), template, insts.flag_line)
     }
 
     /// The same table, knowing which of its comparisons leave the condition state they found.
@@ -966,6 +970,30 @@ fn lines(text: &str) -> Option<usize> {
     Some(text.split(['\n', ';']).filter(|line| !line.trim().is_empty()).count())
 }
 
+/// The register a kept `asm` template writes from the flags on its last line, and the byte this
+/// target writes the same way, when that is how the template ends.
+///
+/// That line is the `setz` gcc and [`rucc_target::TargetInfo::flag_output`] put behind the text of
+/// an `asm` with `"=@ccz"`, which is how the kernel's `test_bit`, its atomics that answer whether
+/// they reached zero and `try_cmpxchg` are written. A branch on the output is then a branch on the
+/// flags the template left, and the line is one of the readings in all but where it is written.
+fn flagged(
+    func: &mir::Func,
+    fused: &Fused,
+    names: &Interner,
+    inst: mir::Inst,
+) -> Option<(mir::Reg, &'static Reading)> {
+    let data = func[inst];
+    if data.opcode != fused.3 {
+        return None;
+    }
+    let text = names.resolve(data.symbol?);
+    let (at, set) = (fused.4)(text.rsplit('\n').next()?)?;
+    let reading = fused.1.values().find(|reading| reading.set == set)?;
+    let byte = func[data.operands].get(at)?;
+    (byte.role != Role::Use).then_some((byte.reg, *reading))
+}
+
 /// The comparisons a branch on their answer is the whole of what reads, which [`blocks`] may fold
 /// the test out of.
 ///
@@ -991,22 +1019,27 @@ pub fn fusable(
     for block in func.blocks() {
         let insts: Vec<mir::Inst> = func.insts(block).collect();
         let [.., compare, last] = insts[..] else { continue };
-        let opcode = func[compare].opcode;
-        if func[last].opcode != branch
-            || !(fused.0.contains_key(&opcode) || fused.1.contains_key(&opcode))
-        {
+        if func[last].opcode != branch {
             continue;
         }
-        let operands = &func[func[compare].operands];
-        let Some(byte) = operands.first().filter(|operand| operand.role != Role::Use) else {
+        let opcode = func[compare].opcode;
+        let byte = if fused.0.contains_key(&opcode) || fused.1.contains_key(&opcode) {
+            let operands = &func[func[compare].operands];
+            let Some(byte) = operands.first().filter(|operand| operand.role != Role::Use) else {
+                continue;
+            };
+            byte.reg
+        } else if let Some((byte, _)) = flagged(func, fused, names, compare) {
+            byte
+        } else {
             continue;
         };
-        if !byte.reg.is_virtual() || reads.count(byte.reg) != 1 {
+        if !byte.is_virtual() || reads.count(byte) != 1 {
             continue;
         }
         // And it is this branch that reads it rather than one in some other block, which the
         // count alone does not say.
-        if func[func[last].operands].first().map(|operand| operand.reg) == Some(byte.reg) {
+        if func[func[last].operands].first().map(|operand| operand.reg) == Some(byte) {
             found.insert(compare);
         }
     }
@@ -1130,7 +1163,7 @@ pub fn joined(
             func[block].succs.len() == 2
                 && func.terminator(block).is_some_and(|last| func[last].opcode == branch)
         })
-        .filter_map(|block| folded(func, fused, fusable, block).map(|(compare, _)| compare))
+        .filter_map(|block| folded(func, fused, fusable, names, block).map(|(compare, _)| compare))
         .collect()
 }
 
@@ -1146,6 +1179,7 @@ fn folded(
     func: &mir::Func,
     fused: &Fused,
     fusable: &Set<mir::Inst>,
+    names: &Interner,
     block: mir::Block,
 ) -> Option<(mir::Inst, Folded)> {
     let insts: Vec<mir::Inst> = func.insts(block).collect();
@@ -1154,20 +1188,26 @@ fn folded(
         return None;
     }
     let opcode = func[compare].opcode;
-    let fusion = match (fused.0.get(&opcode), fused.1.get(&opcode)) {
-        (Some(&fusion), _) => Folded::Compare(fusion),
-        (None, Some(&reading)) => Folded::Reading(reading),
-        (None, None) => return None,
+    let (fusion, byte) = match (fused.0.get(&opcode), fused.1.get(&opcode)) {
+        (Some(&fusion), _) => (Folded::Compare(fusion), func[func[compare].operands].first()?.reg),
+        (None, Some(&reading)) => {
+            (Folded::Reading(reading), func[func[compare].operands].first()?.reg)
+        }
+        (None, None) => {
+            let (byte, reading) = flagged(func, fused, names, compare)?;
+            (Folded::Template(reading), byte)
+        }
     };
-    let byte = func[func[compare].operands].first()?.reg;
     (func[func[last].operands].first()?.reg == byte).then_some((compare, fusion))
 }
 
-/// What a branch is folded into: a comparison that keeps the flags, or a byte that goes.
+/// What a branch is folded into: a comparison that keeps the flags, a byte that goes, or the last
+/// line of a template that goes.
 #[derive(Debug, Clone, Copy)]
 enum Folded {
     Compare(&'static Fusion),
     Reading(&'static Reading),
+    Template(&'static Reading),
 }
 
 /// The one thing that writes an instruction here, over the function it writes into.
@@ -1272,7 +1312,9 @@ impl Writer<'_> {
         // is true for leaves the other jump and the arms the other way round.
         let (if_true, if_false) = match fused {
             Some((_, Folded::Compare(fusion))) => (fusion.if_true, fusion.if_false),
-            Some((_, Folded::Reading(reading))) => (reading.if_true, reading.if_false),
+            Some((_, Folded::Reading(reading) | Folded::Template(reading))) => {
+                (reading.if_true, reading.if_false)
+            }
             None => kept.unwrap_or((self.insts.if_true, self.insts.if_false)),
         };
         let arms: Vec<mir::Block> = self.func[block].succs.iter().map(|arm| arm.block).collect();
@@ -1294,6 +1336,18 @@ impl Writer<'_> {
             // nothing a jump that compares with zero could make itself.
             Some((set, Folded::Reading(_))) => {
                 self.func.remove_inst(set);
+                let opcode = self.opcode(name);
+                self.func.build(block, opcode).finish();
+                return bridge;
+            }
+            // The same with the byte written by the last line of a template, which is the line
+            // that goes. The operand stays, written by nothing, so that the numbers the rest of
+            // the text names its operands by still say the same ones.
+            Some((template, Folded::Template(_))) => {
+                let symbol = self.func[template].symbol.expect("a template has its text");
+                let text = self.names.resolve(symbol);
+                let rest = text.rfind('\n').map_or_else(String::new, |at| text[..at].to_owned());
+                self.func[template].symbol = Some(self.names.intern(&rest));
                 let opcode = self.opcode(name);
                 self.func.build(block, opcode).finish();
                 return bridge;
@@ -1386,7 +1440,7 @@ impl Writer<'_> {
 
     /// The comparison the block's branch can be folded into, when there is one. See [`folded`].
     fn fused(&self, block: mir::Block) -> Option<(mir::Inst, Folded)> {
-        folded(self.func, self.fused, self.fusable, block)
+        folded(self.func, self.fused, self.fusable, self.names, block)
     }
 
     /// The two jumps on the flags the instruction in front of the branch left, when that is what
@@ -1394,21 +1448,25 @@ impl Writer<'_> {
     ///
     /// For when [`Self::fused`] has nothing, which is when something else reads the byte too. The
     /// byte is then kept and only the test of it goes. A byte written from the flags the
-    /// instruction before it left does not change them, and a comparison in [`Fused::keeping`]
-    /// leaves the ones it made. Asked after allocation, as [`folded`] is, since the two have to be
+    /// instruction before it left does not change them, a comparison in [`Fused::keeping`]
+    /// leaves the ones it made, and so does a template whose last line is a [`flagged`] byte. Asked after allocation, as [`folded`] is, since the two have to be
     /// next to each other and the branch has to read the register the byte was written to.
     fn kept(&self, block: mir::Block) -> Option<(&'static str, &'static str)> {
         let insts: Vec<mir::Inst> = self.func.insts(block).collect();
         let [.., set, last] = insts[..] else { return None };
         let opcode = self.func[set].opcode;
-        let jumps = match (self.fused.2.get(&opcode), self.fused.1.get(&opcode)) {
-            (Some(fusion), _) => (fusion.if_true, fusion.if_false),
-            (None, Some(reading)) => (reading.if_true, reading.if_false),
-            (None, None) => return None,
+        let first =
+            self.func[self.func[set].operands].first().filter(|byte| byte.role != Role::Use);
+        let (byte, jumps) = match (self.fused.2.get(&opcode), self.fused.1.get(&opcode)) {
+            (Some(fusion), _) => (first?.reg, (fusion.if_true, fusion.if_false)),
+            (None, Some(reading)) => (first?.reg, (reading.if_true, reading.if_false)),
+            (None, None) => {
+                let (byte, reading) = flagged(self.func, self.fused, self.names, set)?;
+                (byte, (reading.if_true, reading.if_false))
+            }
         };
-        let byte = self.func[self.func[set].operands].first()?;
         let read = self.func[self.func[last].operands].first()?;
-        (byte.role != Role::Use && read.reg == byte.reg).then_some(jumps)
+        (read.reg == byte).then_some(jumps)
     }
 
     /// Turns a comparison that wrote a byte into the same comparison that writes nothing.
@@ -2045,6 +2103,63 @@ mod tests {
         assert!(text.contains("x64.cmp_set_l_32"), "{text}");
         assert!(text.contains("x64.test_rr_8"), "{text}");
         assert!(!text.contains("x64.cmp_rr_32"), "{text}");
+    }
+
+    /// A template whose last line writes its output from the flags, the way an `asm` with
+    /// `"=@ccc"` ends, followed by a branch on that output. See [`flagged`].
+    fn flag_output(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        block: mir::Block,
+        arms: &[mir::Block],
+    ) -> Reg {
+        let byte = func.new_vreg(GPR);
+        let bit = rucc_target::template::template_reg(1, 'k');
+        let set = rucc_target::template::template_reg(0, 'b');
+        let text = names.intern(&format!("btl $3, {bit}\n\tsetc {set}"));
+        let opcode = Opcode::new(names.intern("x64.template"));
+        func.build(block, opcode)
+            .def(byte, GPR)
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .symbol(text)
+            .finish();
+        let opcode = Opcode::new(names.intern("x64.br_cond_8"));
+        func.build(block, opcode).operand(Operand::read(byte, GPR)).finish();
+        *func.succs_mut(block) = arms.iter().map(|&arm| BlockCall::to(arm)).collect();
+        byte
+    }
+
+    /// A branch on a flag output only the branch reads is the template without its `setc` and a
+    /// jump on the carry, which is what gcc writes for the kernel's `test_bit`.
+    #[test]
+    fn a_branch_on_a_flag_output_jumps_on_the_flags_and_the_set_comes_out_of_the_text() {
+        let (mut names, mut func, made) = blank(3);
+        flag_output(&mut func, &mut names, made[0], &[made[1], made[2]]);
+
+        let text = laid_out(&mut func, &mut names);
+
+        assert!(text.iter().any(|line| line.contains("btl $3")), "{text:?}");
+        assert!(!text.iter().any(|line| line.contains("setc")), "{text:?}");
+        assert!(!text.iter().any(|line| line.starts_with("x64.test_rr_8")), "{text:?}");
+        assert!(text.contains(&"x64.jcc_ae block2, block1".to_owned()), "{text:?}");
+    }
+
+    /// The same flag output with something else reading it keeps the `setc` and loses the test.
+    #[test]
+    fn a_flag_output_something_else_reads_keeps_its_set_and_the_jump_reads_the_flags() {
+        let (mut names, mut func, made) = blank(3);
+        let byte = flag_output(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        let opcode = Opcode::new(names.intern("x64.mov_rr_64"));
+        func.build(made[1], opcode)
+            .def(Reg::physical(RAX), GPR)
+            .operand(Operand::read(byte, GPR))
+            .finish();
+
+        let text = laid_out(&mut func, &mut names);
+
+        assert!(text.iter().any(|line| line.contains("setc")), "{text:?}");
+        assert!(!text.iter().any(|line| line.starts_with("x64.test_rr_8")), "{text:?}");
+        assert!(text.contains(&"x64.jcc_ae block2, block1".to_owned()), "{text:?}");
     }
 
     /// [`joined`] gives the comparison [`blocks`] folds, and gives nothing once a reload comes

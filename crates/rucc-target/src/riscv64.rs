@@ -502,6 +502,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     conditional: &["b_eq", "b_ne"],
     fused: &[],
     readings: &[],
+    flag_line: |_| None,
     moves: &[],
     zero: &FOLDS,
     bits: &[],
