@@ -632,9 +632,17 @@ fn hand_out(budget: u64, weight: &[u64], gone: &[bool], side: bool, parts: &mut 
 /// The quality is [`Quality::Guessed`] because a hint is what somebody expected and not what
 /// anybody measured. Section 11.2 says the same thing about the number itself, which is ninety
 /// percent rather than certainty: the other arm still has to run correctly.
+///
+/// The inliner runs before `crate::expect` does and guesses how often a call runs from these, so
+/// an instruction still standing behind the branch is read for what it will write. gcc has moved
+/// the hint by then, and without it a put under `unlikely` in `vma_start_read` looked as likely as
+/// the path through, and was counted against the body where gcc does not.
 fn claimed(func: &Func, term: Inst) -> Option<Probability> {
     let at = func.target_list(term).iter().next()?;
-    let parts = func[at].hint.taken()?;
+    let parts = match func[at].hint.taken() {
+        Some(parts) => parts,
+        None => crate::expect::claims(func, term)?.first()?.taken()?,
+    };
     Some(Probability::new(parts, Quality::Guessed))
 }
 
