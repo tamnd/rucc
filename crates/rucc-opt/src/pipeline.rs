@@ -391,6 +391,13 @@ const O1: &[&str] = &[
 /// run leaves of each shift is a vector built a lane at a time, and `lanes` straight after it turns
 /// that back into one shift of the whole vector.
 ///
+/// `sccp` runs a second time after `unroll` and the `simplify-cfg` behind it. An inlined function
+/// hands back its result as a block parameter, and the first run sees the truncation on one side of
+/// the jump and the extension on the other, so it cannot put the two together. Once the blocks are
+/// merged the pair is in one place. The kernel's `page_to_nid` is that shape, a node number masked
+/// to six bits, returned as an `int` and sign extended to index `node_data`, and x86-64 wrote an
+/// `and` and a `movslq` for it on every call where gcc writes the shift alone.
+///
 /// `canon` and `licm` run a second time after `split`, and that pair is the only thing here that
 /// looks at what `split` wrote. A guard goes in the preheader of the loop being split, which for an
 /// inner loop is a block inside the loops around it, and the guard asks the runtime how big each
@@ -458,6 +465,7 @@ const O2: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "sccp",
     "thread",
     "fold",
     "sroa",
@@ -529,6 +537,7 @@ const O3: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "sccp",
     "thread",
     "fold",
     "sroa",
