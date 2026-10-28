@@ -1772,6 +1772,43 @@ mod tests {
     }
 
     #[test]
+    fn a_join_that_tests_the_not_of_a_bit_it_was_given_is_threaded() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(1));
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, arms[0], &[], arms[1], &[]);
+        for (arm, value) in arms.iter().zip([0, -1]) {
+            let mut build = Builder::new(&mut func, *arm);
+            let it = build.iconst(Type::int(1), value);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        let ones = build.iconst(Type::int(1), -1);
+        let not = build.binary(Opcode::Xor, param, ones, Flags::default());
+        build.br_if(not, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        let stats = thread(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
+        // The arm carrying 0 goes to the side the `!` is true on, and the one carrying 1 to the
+        // other side.
+        assert_eq!(goes_to(&func, 1), vec![4]);
+        assert_eq!(goes_to(&func, 2), vec![5]);
+        assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
+    }
+
+    #[test]
     fn an_edge_whose_mask_leaves_the_test_no_way_to_hold_is_threaded() {
         // `(x & ~mask) == 6`, with the mask 0xf8 on one way in and 0xfc on the other. Along the
         // second the left side is at most 3, so the test is false whatever `x` is. Along the first
@@ -1814,43 +1851,6 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
         assert_eq!(goes_to(&func, arms[0].index()), vec![join.index()]);
         assert_eq!(goes_to(&func, arms[1].index()), vec![no.index()]);
-    }
-
-    #[test]
-    fn a_join_that_tests_the_not_of_a_bit_it_was_given_is_threaded() {
-        let mut names = Interner::new();
-        let mut func = Func::new(names.intern("f"), Signature::new());
-        let entry = func.create_block();
-        let arms = [func.create_block(), func.create_block()];
-        let join = func.create_block();
-        let param = func.append_param(join, Type::int(1));
-        let yes = func.create_block();
-        let no = func.create_block();
-
-        let mut build = Builder::new(&mut func, entry);
-        let cond = build.iconst(Type::int(1), 1);
-        build.br_if(cond, arms[0], &[], arms[1], &[]);
-        for (arm, value) in arms.iter().zip([0, -1]) {
-            let mut build = Builder::new(&mut func, *arm);
-            let it = build.iconst(Type::int(1), value);
-            build.jump(join, &[it]);
-        }
-        let mut build = Builder::new(&mut func, join);
-        let ones = build.iconst(Type::int(1), -1);
-        let not = build.binary(Opcode::Xor, param, ones, Flags::default());
-        build.br_if(not, yes, &[], no, &[]);
-        for block in [yes, no] {
-            let mut build = Builder::new(&mut func, block);
-            build.ret(&[]);
-        }
-
-        let stats = thread(&mut func);
-        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
-        // The arm carrying 0 goes to the side the `!` is true on, and the one carrying 1 to the
-        // other side.
-        assert_eq!(goes_to(&func, 1), vec![4]);
-        assert_eq!(goes_to(&func, 2), vec![5]);
-        assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
     }
 
     #[test]
