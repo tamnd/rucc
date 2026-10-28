@@ -411,6 +411,9 @@ pub struct Kasan {
     /// Whether the locals whose address is taken get redzones around them, from
     /// `--param asan-stack=`. gcc's default is on.
     pub stack: bool,
+    /// Whether the globals get redzones after them and a table the runtime is given at startup,
+    /// from `--param asan-globals=`. gcc's default is on.
+    pub globals: bool,
 }
 
 /// Whether pointer races are watched, from `-fsafety-races=`.
@@ -3161,7 +3164,7 @@ impl Options {
             sanitize_coverage_pc: false,
             sanitize_coverage_cmp: false,
             sanitize: Sanitize::default(),
-            kasan: Kasan { call_threshold: 7000, stack: true, ..Kasan::default() },
+            kasan: Kasan { call_threshold: 7000, stack: true, globals: true, ..Kasan::default() },
             pic: Pic::default(),
             interposition: true,
             async_unwind_tables: true,

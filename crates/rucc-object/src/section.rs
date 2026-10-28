@@ -610,6 +610,10 @@ pub struct Object {
     /// Every place in its image that holds the address of a symbol, counted from the start of
     /// the image rather than from the start of the section it lands in.
     pub relocs: Vec<Reloc>,
+    /// How many zero bytes at the end of the image, or of the room when there is no image, the
+    /// symbol's size leaves out. The redzone `--param asan-globals=1` puts after a variable, and
+    /// zero for every other one.
+    pub redzone: u64,
 }
 
 /// Which section a variable goes in.

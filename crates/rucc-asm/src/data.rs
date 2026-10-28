@@ -122,6 +122,7 @@ impl Globals {
                 visibility: Visibility::Default,
                 retain: false,
                 pieces: vec![Piece::Addr { symbol: target, addend: 0, bytes: 8 }],
+                redzone: 0,
             });
         }
     }
@@ -179,6 +180,9 @@ pub struct Variable {
     pub retain: bool,
     /// Its image, in order.
     pub pieces: Vec<Piece>,
+    /// The zero bytes after the image that the symbol's size leaves out. See
+    /// `rucc_ir::Global::redzone`.
+    pub redzone: u64,
 }
 
 /// As much of an image as one directive says.
@@ -259,6 +263,7 @@ impl Globals {
                 binding: var.binding,
                 visibility: var.visibility,
                 relocs: Vec::new(),
+                redzone: var.redzone,
             };
             if matches!(
                 var.place,
@@ -316,6 +321,7 @@ impl Globals {
                     }
                 }
             }
+            object.bytes.resize(object.bytes.len() + var.redzone as usize, 0);
             data.objects.push(object);
         }
         data
@@ -595,7 +601,8 @@ fn variable(
     let visibility = visibility(global.visibility);
     let retain = global.retain && format == ObjectFormat::Elf;
     let align = u64::from(global.align);
-    Ok(Variable { name, size, align, place, binding, visibility, retain, pieces })
+    let redzone = global.redzone;
+    Ok(Variable { name, size, align, place, binding, visibility, retain, pieces, redzone })
 }
 
 /// How wide a character is in an image that is one string and nothing after it, and nothing for
