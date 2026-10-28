@@ -1809,6 +1809,44 @@ mod tests {
     }
 
     #[test]
+    fn a_join_that_tests_a_bit_it_was_given_widened_to_an_int_is_threaded() {
+        // What `if (!valid(p))` is once a `_Bool` function is inlined: the answer comes in as one
+        // bit and the caller compares it with zero as an `int`.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(1));
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, arms[0], &[], arms[1], &[]);
+        for (arm, value) in arms.iter().zip([0, -1]) {
+            let mut build = Builder::new(&mut func, *arm);
+            let it = build.iconst(Type::int(1), value);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        let wide = build.unary(Opcode::ZExt, param, Type::int(32));
+        let zero = build.iconst(Type::int(32), 0);
+        let test = build.icmp(IntPred::Eq, wide, zero);
+        build.br_if(test, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        let stats = thread(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
+        assert_eq!(goes_to(&func, 1), vec![4]);
+        assert_eq!(goes_to(&func, 2), vec![5]);
+        assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
+    }
+
+    #[test]
     fn an_edge_that_does_not_decide_the_test_is_left_alone() {
         let mut names = Interner::new();
         let signature = Signature::new().with_params(&[Type::int(32)]);
