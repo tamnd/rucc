@@ -43,8 +43,8 @@ use rucc_cost::heuristics::{
     LARGE_UNIT_INSNS,
 };
 use rucc_ir::{
-    AttrSet, Block, Def, Extra, Func, FuncId, Imm, Inst, Linkage, Module, Opcode, Pic, SymbolRef,
-    Type, Value,
+    AttrSet, Block, DataLayout, Def, Extra, Func, FuncId, Imm, Inst, Linkage, Module, Opcode, Pic,
+    SymbolRef, Type, Value,
 };
 use rucc_target::TargetInfo;
 
@@ -263,8 +263,9 @@ pub(super) fn run(
     }
     let settled = if second.constants { settled(module, &graph) } else { Map::default() };
     let defined: Vec<FuncId> = module.funcs().filter(|&id| !module[id].is_declaration()).collect();
+    let layout = module.datalayout;
     let sizes: Map<FuncId, usize> =
-        defined.iter().map(|&id| (id, measure(&module[id], how.names))).collect();
+        defined.iter().map(|&id| (id, measure(&module[id], layout, how.names))).collect();
     let unit: usize = sizes.values().sum();
     // gcc's `compute_max_insns`: the unit may grow by `inline-unit-growth` percent of itself, or of
     // `large-unit-insns` when it is smaller than that.
@@ -371,7 +372,8 @@ impl Heap<'_> {
     fn profile(&mut self, module: &Module, id: FuncId) -> &Profile {
         let version = self.version(id);
         if self.profiles.get(&id).is_none_or(|&(seen, _)| seen != version) {
-            self.profiles.insert(id, (version, profile(&module[id], self.how.names)));
+            let found = profile(&module[id], module.datalayout, self.how.names);
+            self.profiles.insert(id, (version, found));
         }
         &self.profiles[&id].1
     }
@@ -936,12 +938,12 @@ fn calls_to(func: &Func, name: Symbol) -> usize {
 }
 
 /// How large a function is, the way the second pass counts the unit and a caller.
-fn measure(func: &Func, names: &Interner) -> usize {
-    folded_size(func, Set::default(), Map::default(), Some(names))
+fn measure(func: &Func, layout: DataLayout, names: &Interner) -> usize {
+    folded_size(func, layout, Set::default(), Map::default(), Some(names))
 }
 
 /// What [`Profile`] says about a function.
-fn profile(func: &Func, names: &Interner) -> Profile {
+fn profile(func: &Func, layout: DataLayout, names: &Interner) -> Profile {
     let cfg = Cfg::new(func);
     let loops = Loops::new(&cfg, &Dominators::new(&cfg));
     let guessed = Frequencies::of(func, &cfg, &loops, &Callees::nothing());
@@ -953,7 +955,7 @@ fn profile(func: &Func, names: &Interner) -> Profile {
         // Counted as gcc counts, so a block in one loop is one deep.
         depth.insert(block, loops.innermost(block).map_or(0, |inner| loops.depth(inner) + 1));
     }
-    let summary = Summary::of(func, names, Some(&frequency));
+    let summary = Summary::of(func, layout, names, Some(&frequency));
     let time = summed_time(&summary, func, Map::default(), names, &frequency);
     let mut calls: Map<Symbol, (f64, u32)> = Map::default();
     for inst in direct(func) {
