@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Blocks that hold the same instructions and go to the same place are now merged before the layout, the cross jumping gcc does, so the hundred or so `jmp __x64_sys_ni_syscall` cases in the kernel's system call switch are written once and the bench objects are 6215 bytes smaller (#3963)
+
 ### Fixed
 
 - On x86-64 a run of two or more stores of a zero in one block now stores it from a register, so a structure cleared a field at a time is `movq %rax, 8(%rsp)` at five bytes rather than `movq $0, 8(%rsp)` at nine (#3957)

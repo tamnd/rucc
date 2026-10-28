@@ -1694,6 +1694,13 @@ pub fn compile_recording(
     // The cleanup took the byte each of these writes as never written. See `layout::joined`.
     let still = layout::joined(&func, machine.branch, &fused, &fusable, names);
     assert!(joined.is_subset(&still), "a comparison came apart from its branch after the cleanup");
+    // After the assert, since a block this empties takes its comparisons with it, and before the
+    // order is chosen, so that the order never sees the copies. A tail call in a block that went
+    // is the one in the block it went to.
+    let mut tails = std::borrow::Cow::Borrowed(&stack.tails[..]);
+    if flags.reorder && layout::merge(&mut func, machine.branch, names, &fusable, &loops) > 0 {
+        tails.to_mut().retain(|tail| func.block_of(tail.call).is_some());
+    }
     layout::blocks(&mut func, machine.branch, &fused, names, &fusable, &loops, flags.reorder);
 
     // After the layout for the reason the branches wait for it: a select that reads what a
@@ -1760,9 +1767,9 @@ pub fn compile_recording(
     // A frame laid out as anything but a leaf is fine with a call left in it, and a protected one
     // is one of those: its check comes between the call and the `ret`, so the call has to stay
     // where it is, and the frame already leaves the stack pointer where a call needs it.
-    let jumped = tail::jumps(&mut func, &stack.tails, machine.insts, machine.branch, names)?;
+    let jumped = tail::jumps(&mut func, &tails, machine.insts, machine.branch, names)?;
     assert!(
-        stack.kept || !layout.leaf || jumped == stack.tails.len(),
+        stack.kept || !layout.leaf || jumped == tails.len(),
         "a leaf whose tail calls did not all become jumps"
     );
 
