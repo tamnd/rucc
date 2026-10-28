@@ -196,11 +196,7 @@ pub fn blocks(
 /// and a block whose address an instruction takes stays reached as well, since the address is a
 /// way in that no arm of that block shows.
 pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) -> usize {
-    let mut opcode = |name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
-    let branch = opcode(insts.cond);
-    let indirect = opcode(insts.indirect);
-    let goto = opcode(insts.goto);
-    let conditional: Vec<mir::Opcode> = insts.conditional.iter().map(|name| opcode(name)).collect();
+    let ends = Ends::new(insts, names);
     let blocks: Vec<mir::Block> = func.blocks().collect();
     let entry = func.entry();
 
@@ -231,23 +227,9 @@ pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) 
         }
     }
 
-    // A jump through a table goes to a place among the arms rather than to a block, so moving the
-    // arm moves where the table goes too. A computed `goto` with no table goes to an address. A
-    // block that ends any other way this pass did not expect keeps its arms, which keeps every
-    // block they go to reached.
-    let tabled = |func: &mir::Func, last: mir::Inst| func.tables.iter().any(|it| it.jump == last);
     let mut moved = 0;
     for &block in &blocks {
-        let last = func.terminator(block);
-        let op = last.map(|last| func[last].opcode);
-        let ours = match func[block].succs.len() {
-            0 => continue,
-            1 => op.is_none_or(|op| op != indirect && op != goto && !conditional.contains(&op)),
-            2 => op == Some(branch),
-            _ => false,
-        };
-        let ours = ours || last.is_some_and(|last| op == Some(indirect) && tabled(func, last));
-        if !ours {
+        if !ends.ours(func, block) {
             continue;
         }
         for index in 0..func[block].succs.len() {
@@ -281,6 +263,197 @@ pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) 
         }
     }
     moved
+}
+
+/// The jumps a block can end in, as far as moving its arms goes. See [`Ends::ours`].
+struct Ends {
+    branch: mir::Opcode,
+    indirect: mir::Opcode,
+    goto: mir::Opcode,
+    conditional: Vec<mir::Opcode>,
+}
+
+impl Ends {
+    fn new(insts: &BranchInsts, names: &mut Interner) -> Self {
+        let mut opcode = |name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
+        let branch = opcode(insts.cond);
+        let indirect = opcode(insts.indirect);
+        let goto = opcode(insts.goto);
+        let conditional = insts.conditional.iter().map(|name| opcode(name)).collect();
+        Ends { branch, indirect, goto, conditional }
+    }
+
+    /// Whether the block's arms can be sent somewhere else by rewriting the arms alone, which is
+    /// when [`blocks`] writes the jump that takes them.
+    ///
+    /// A jump through a table goes to a place among the arms rather than to a block, so moving the
+    /// arm moves where the table goes too. A computed `goto` with no table goes to an address. A
+    /// block that ends any other way keeps its arms, which keeps every block they go to reached.
+    fn ours(&self, func: &mir::Func, block: mir::Block) -> bool {
+        let last = func.terminator(block);
+        let op = last.map(|last| func[last].opcode);
+        let ours = match func[block].succs.len() {
+            0 => return false,
+            1 => op.is_none_or(|op| {
+                op != self.indirect && op != self.goto && !self.conditional.contains(&op)
+            }),
+            2 => op == Some(self.branch),
+            _ => false,
+        };
+        let tabled = |last: mir::Inst| func.tables.iter().any(|it| it.jump == last);
+        ours || last.is_some_and(|last| op == Some(self.indirect) && tabled(last))
+    }
+}
+
+/// Sends every way into a block that does what another block does on to that other block, and
+/// gives back how many blocks it emptied.
+///
+/// Run after allocation and after [`forward`], and only when the blocks are being put in an order
+/// of their own. Two blocks do the same thing when they hold the same instructions, with the same
+/// registers, numbers, addresses and unwind rows, and both go to the same block carrying nothing
+/// or both go nowhere. Every register is a machine register by now, so the two do the same thing
+/// whatever ran before them. The kernel's system call switch is where this pays: about a hundred
+/// of its cases end in `jmp __x64_sys_ni_syscall`, which gcc writes once and jumps to from the
+/// rest. That is what gcc calls cross jumping.
+///
+/// A block takes part only when each way into it is an arm `Ends::ours` says can be moved and
+/// nothing else says how it is reached, which leaves out the entry, a landing pad, a named block
+/// and a block whose address an instruction takes. A block holding an `asm` template, a call a
+/// landing pad belongs to, a comparison waiting to be folded into its branch or a stack walk stays
+/// too, since something outside the block holds on to each of those. So does a block of a single
+/// instruction, since the jump to the other copy is no shorter than the one instruction, and an
+/// arm that would end up next to another arm of its block to the same place, since a branch whose
+/// two arms agree is a test that decides nothing.
+///
+/// A block emptied this way loses its instructions and its arm and is said to never run, the way
+/// a block [`forward`] leaves unreached is. The one kept runs as often as the two did. Merging two
+/// can make their predecessors the same, so this goes round until a pass finds nothing.
+pub fn merge(
+    func: &mut mir::Func,
+    insts: &BranchInsts,
+    names: &mut Interner,
+    fusable: &Set<mir::Inst>,
+    walks: &[mir::Inst],
+) -> usize {
+    let ends = Ends::new(insts, names);
+    let template = mir::Opcode::new(names.join(insts.prefix, insts.goto));
+    let calls: Set<mir::Inst> = func.landings.iter().map(|&(call, _)| call).collect();
+    let mut merged = 0;
+    loop {
+        let blocks: Vec<mir::Block> = func.blocks().collect();
+        let mut preds = vec![Vec::new(); func.block_count()];
+        let mut fixed = vec![false; func.block_count()];
+        for &block in &blocks {
+            let ours = ends.ours(func, block);
+            for arm in &func[block].succs {
+                preds[arm.block.index()].push(block);
+                fixed[arm.block.index()] |= !ours;
+            }
+            for inst in func.insts(block) {
+                if let Some(named) = func[inst].mem.and_then(|mem| func[mem].block) {
+                    fixed[named.index()] = true;
+                }
+            }
+        }
+        for &(_, pad) in &func.landings {
+            fixed[pad.index()] = true;
+        }
+        for &(block, _) in &func.labels {
+            fixed[block.index()] = true;
+        }
+        if let Some(entry) = func.entry() {
+            fixed[entry.index()] = true;
+        }
+
+        // Candidates in the order they are laid out, put together by what is cheap to compare, so
+        // that the instructions are only compared within a group.
+        let mut groups: Vec<Vec<mir::Block>> = Vec::new();
+        let mut keys = Map::default();
+        for &block in &blocks {
+            let data = &func[block];
+            let to = match &data.succs[..] {
+                [] => None,
+                [arm] if arm.args.is_empty() && arm.block != block => Some(arm.block.index()),
+                _ => continue,
+            };
+            let Some(last) = func.terminator(block) else { continue };
+            let count = func.insts(block).count();
+            let held = |inst: mir::Inst| {
+                func[inst].opcode == template
+                    || calls.contains(&inst)
+                    || fusable.contains(&inst)
+                    || walks.contains(&inst)
+            };
+            if fixed[block.index()] || !data.params.is_empty() || count < 2 {
+                continue;
+            }
+            if func.insts(block).any(held) {
+                continue;
+            }
+            let key = (to, count, data.dead_end, data.cold, func[last].opcode, func[last].symbol);
+            let at = *keys.entry(key).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[at].push(block);
+        }
+
+        let mut round = 0;
+        for group in &groups {
+            let mut kept: Vec<mir::Block> = Vec::new();
+            for &block in group {
+                let Some(&into) = kept.iter().find(|&&one| same(func, one, block)) else {
+                    kept.push(block);
+                    continue;
+                };
+                let ways = &preds[block.index()];
+                if ways.iter().any(|&pred| func[pred].succs.iter().any(|arm| arm.block == into)) {
+                    kept.push(block);
+                    continue;
+                }
+                for pred in std::mem::take(&mut preds[block.index()]) {
+                    for arm in func.succs_mut(pred) {
+                        if arm.block == block {
+                            arm.block = into;
+                        }
+                    }
+                    preds[into.index()].push(pred);
+                }
+                let weight = func[into].weight.raw().saturating_add(func[block].weight.raw());
+                func.set_weight(into, mir::Weight::parts(weight));
+                let gone: Vec<mir::Inst> = func.insts(block).collect();
+                for inst in gone {
+                    func.remove_inst(inst);
+                }
+                func.succs_mut(block).clear();
+                func.set_dead_end(block);
+                func.set_weight(block, mir::Weight::NEVER);
+                round += 1;
+            }
+        }
+        merged += round;
+        if round == 0 {
+            return merged;
+        }
+    }
+}
+
+/// Whether two blocks hold the same instructions and go to the same places. See [`merge`].
+fn same(func: &mir::Func, one: mir::Block, other: mir::Block) -> bool {
+    let arms = |block: mir::Block| func[block].succs.iter().map(|arm| arm.block);
+    let alike = |a: mir::Inst, b: mir::Inst| {
+        let (x, y) = (&func[a], &func[b]);
+        x.opcode == y.opcode
+            && x.symbol == y.symbol
+            && x.flags == y.flags
+            && func[x.operands] == func[y.operands]
+            && x.imm.map(|imm| func[imm]) == y.imm.map(|imm| func[imm])
+            && x.mem.map(|mem| func[mem]) == y.mem.map(|mem| func[mem])
+            && func.cfi_after(a).eq(func.cfi_after(b))
+    };
+    arms(one).eq(arms(other))
+        && func.insts(one).count() == func.insts(other).count()
+        && func.insts(one).zip(func.insts(other)).all(|(a, b)| alike(a, b))
 }
 
 /// Marks cold the blocks [`crate::cold::mark`] did not and that only cold blocks reach.
@@ -863,7 +1036,7 @@ fn along(
 /// The third is the comparisons of the first map that leave the condition state they found, which
 /// [`blocks`] jumps on without a test when the byte is kept for some other reader. See
 /// [`Fused::keeping`]. The last two are the opcode of a kept `asm` template and how to read the
-/// line a flag output puts at the end of one. See [`flagged`].
+/// line a flag output puts at the end of one. See `flagged`.
 #[derive(Debug)]
 pub struct Fused(
     pub(crate) Map<mir::Opcode, &'static Fusion>,
@@ -1533,7 +1706,8 @@ impl Writer<'_> {
 #[cfg(test)]
 mod tests {
     use rucc_mir::{BlockCall, Mem, Opcode, Operand, Reg};
-    use rucc_target::x86_64::{BRANCH, FLAGS, GPR, RAX, RCX, REGS};
+    use rucc_target::PhysReg;
+    use rucc_target::x86_64::{BRANCH, FLAGS, GPR, RAX, RCX, RDX, REGS};
 
     use super::*;
 
@@ -1621,6 +1795,67 @@ mod tests {
         assert_eq!(forward(&mut func, &BRANCH, &mut names), 0);
         assert_eq!(func[made[1]].succs.len(), 1);
         assert!(!func[made[1]].dead_end);
+    }
+
+    /// A block that copies `from` into `rax` and returns, which is what the end of a function
+    /// that returns one of two values looks like once it is allocated.
+    fn returns(func: &mut mir::Func, names: &mut Interner, block: mir::Block, from: PhysReg) {
+        let mov = Opcode::new(names.intern("x64.mov_rr_64"));
+        func.build(block, mov)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(from), GPR))
+            .finish();
+        let ret = Opcode::new(names.intern("x64.ret"));
+        func.build(block, ret).finish();
+    }
+
+    /// Two branches, each with an arm to a block that copies `rcx` and returns, and the second
+    /// branch's other arm to a block that copies `rdx`.
+    fn two_ways(other: PhysReg) -> (Interner, mir::Func, Vec<mir::Block>) {
+        let (mut names, mut func, made) = blank(5);
+        branch(&mut func, &mut names, made[0], &[made[1], made[3]]);
+        branch(&mut func, &mut names, made[3], &[made[2], made[4]]);
+        returns(&mut func, &mut names, made[1], RCX);
+        returns(&mut func, &mut names, made[2], other);
+        returns(&mut func, &mut names, made[4], RDX);
+        (names, func, made)
+    }
+
+    #[test]
+    fn a_block_that_does_what_another_does_is_emptied_and_its_branch_goes_to_the_other() {
+        let (mut names, mut func, made) = two_ways(RCX);
+
+        assert_eq!(merge(&mut func, &BRANCH, &mut names, &Set::default(), &[]), 1);
+
+        let arms: Vec<usize> = func[made[3]].succs.iter().map(|arm| arm.block.index()).collect();
+        assert_eq!(arms, [1, 4]);
+        assert_eq!(func.insts(made[2]).count(), 0);
+        assert!(func[made[2]].dead_end);
+        assert_eq!(func[made[2]].weight, mir::Weight::NEVER);
+        assert_eq!(func[made[1]].weight.raw(), 2 * mir::Weight::SCALE);
+        let text = laid_out(&mut func, &mut names);
+        assert_eq!(text.iter().filter(|line| line.contains("x64.ret")).count(), 2, "{text:?}");
+    }
+
+    #[test]
+    fn a_block_that_reads_another_register_is_left_alone() {
+        // The block behind the first branch copies `rcx` and the one behind the second copies
+        // `rdx`, and the two blocks that do agree are both arms of the second branch.
+        let (mut names, mut func, made) = two_ways(RDX);
+        assert_eq!(merge(&mut func, &BRANCH, &mut names, &Set::default(), &[]), 0);
+        assert_eq!(func.insts(made[2]).count(), 2);
+        assert_eq!(func.insts(made[4]).count(), 2);
+    }
+
+    #[test]
+    fn two_arms_of_one_branch_to_blocks_that_agree_are_left_apart() {
+        // Sending both to one block would leave a branch that decides nothing.
+        let (mut names, mut func, made) = blank(3);
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        returns(&mut func, &mut names, made[1], RCX);
+        returns(&mut func, &mut names, made[2], RCX);
+        assert_eq!(merge(&mut func, &BRANCH, &mut names, &Set::default(), &[]), 0);
+        assert_eq!(func.insts(made[2]).count(), 2);
     }
 
     #[test]

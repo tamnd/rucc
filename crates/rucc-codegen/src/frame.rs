@@ -1052,11 +1052,16 @@ pub fn keeps_frame_pointer(layout: &Layout<'_>) -> bool {
     let conv = layout.conv;
     let saved = layout.vectors && !conv.sse_saved.is_empty();
     let vector = conv.sse_kept.map_or_else(|| width(layout, conv.sse_class), u32::from);
+    // A function that may not use the vector registers has no value in one to spill. Counting the
+    // slot anyway kept a frame pointer in every function of a kernel, whose stack is only on a
+    // multiple of eight, and so took `rbp` away from the allocator everywhere.
+    let spilled = layout.vectors.then(|| width(layout, conv.sse_class));
     let most = layout
         .locals
         .iter()
         .map(|local| local.align)
-        .chain([width(layout, conv.int_class), width(layout, conv.sse_class)])
+        .chain([width(layout, conv.int_class)])
+        .chain(spilled)
         .chain(saved.then_some(vector))
         .fold(conv.word, u32::max);
     layout.frame_pointer
@@ -1312,6 +1317,8 @@ mod tests {
         let base = Layout::new(&SYSV, REGS);
         let wide = [Local { size: 32, align: 32 }];
         let narrow = [Local { size: 16, align: 16 }];
+        // The kernel's stack, which is on a multiple of eight and has no vector register in it.
+        let eight = SYSV.aligned_to(8);
         let layouts = [
             (base, false),
             (Layout { locals: &narrow, ..base }, false),
@@ -1319,6 +1326,7 @@ mod tests {
             (Layout { frame_pointer: true, ..base }, true),
             (Layout { grows: true, red_zone: false, ..base }, true),
             (Layout { locals: &wide, ..base }, true),
+            (Layout { conv: eight, vectors: false, ..base }, false),
         ];
         // What is asked before allocation is what the frame says once there is one, for every
         // reason a frame keeps one and for the near misses of each. tamnd/rucc#2777.
@@ -1326,6 +1334,9 @@ mod tests {
             assert_eq!(keeps_frame_pointer(&layout), kept, "layout {at}");
             assert_eq!(Frame::of(&func, &allocation, &layout).frame_pointer(), kept, "layout {at}");
         }
+        // Where a vector might be spilled the answer has to allow for its slot, which is wider
+        // than a stack on a multiple of eight.
+        assert!(keeps_frame_pointer(&Layout { conv: eight, ..base }));
     }
 
     #[test]

@@ -103,6 +103,12 @@ const UNEXTENDED: &str = "extension of a truncation whose dropped bits were know
 /// Recorded for an extension that could have gone after the fuel ran out.
 const NO_FUEL_UNEXTEND: &str = "extension of a truncation kept, the pass ran out of fuel";
 
+/// Recorded once for each mask that kept every bit its operand could have set.
+const UNMASKED: &str = "mask that cleared only bits already known zero replaced by what it masked";
+
+/// Recorded for a mask that could have gone after the fuel ran out.
+const NO_FUEL_UNMASK: &str = "mask kept, the pass ran out of fuel";
+
 /// How many bits a pointer is followed at.
 ///
 /// The IR gives a pointer no width, because that belongs to the target, so the fixpoint follows
@@ -152,6 +158,7 @@ impl Pass for Sccp {
         replace(func, &solved, fuel, &mut stats);
         align(func, &solved, fuel, &mut stats);
         unextend(func, &solved, fuel, &mut stats);
+        unmask(func, &solved, fuel, &mut stats);
         stats
     }
 }
@@ -892,6 +899,56 @@ fn unextend(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats
     }
 }
 
+/// Points the readers of `and x, c` at `x`, when every bit the constant clears is known zero in `x`.
+///
+/// The kernel's `page_to_nid` is `(page->flags >> 58) & 63`, and a shift right by 58 leaves six
+/// bits that can be set, which are the six the mask keeps. Gcc writes the shift alone and x86-64
+/// wrote an `and` after it on every call.
+fn unmask(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats) {
+    let blocks: Vec<Block> = func.blocks().filter(|block| solved.reached[block.index()]).collect();
+    let mut forward = Map::default();
+    for block in blocks {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            if data.opcode != Opcode::And {
+                continue;
+            }
+            let (Some(result), &[left, right]) = (data.results().next(), &func[data.args]) else {
+                continue;
+            };
+            let ty = func[result].ty;
+            if !ty.is_int() || !ty.is_scalar() {
+                continue;
+            }
+            let known = |value: Value| match solved.facts.get(value.index()) {
+                Some(&Fact::Known(bits)) => Some(bits),
+                _ => None,
+            };
+            let (Some(one), Some(other)) = (known(left), known(right)) else { continue };
+            let width = mask(ty.bits());
+            // The operand that stays is the one whose possible ones the other keeps.
+            let may = |bits: Bits| (bits.value() | bits.unknown_bits()) & width;
+            let kept = if constant(Fact::Known(other), ty).is_some() && may(one) & !may(other) == 0
+            {
+                left
+            } else if constant(Fact::Known(one), ty).is_some() && may(other) & !may(one) == 0 {
+                right
+            } else {
+                continue;
+            };
+            if !fuel.take() {
+                stats.missed(NO_FUEL_UNMASK);
+                continue;
+            }
+            forward.insert(result, kept);
+            stats.optimized(UNMASKED);
+        }
+    }
+    if !forward.is_empty() {
+        uses::substitute(func, &forward);
+    }
+}
+
 /// The low `width` bits.
 const fn mask(width: u32) -> u128 {
     if width >= u128::BITS { u128::MAX } else { (1u128 << width) - 1 }
@@ -1112,6 +1169,32 @@ block0(%0: i64):
         assert!(out.contains("%14 = add %6, %8"), "the unmasked one stays, {out}");
         assert!(out.contains("%15 = add %14, %12"), "bit 31 is the sign of the int, {out}");
         assert!(out.contains("%16 = add %15, %10"), "and is zero extended as it was, {out}");
+    }
+
+    /// A mask over a shift that leaves only the bits it keeps is the shift, on either side of the
+    /// `and`, and a mask that clears a bit the shift could have set stays.
+    #[test]
+    fn a_mask_that_keeps_every_bit_that_could_be_set_is_what_it_masked() {
+        let out = solved(
+            r#"
+func @f(i64) -> i64, linkage(external) {
+block0(%0: i64):
+    %1 = iconst.i64 58
+    %2 = lshr.i64 %0, %1
+    %3 = iconst.i64 63
+    %4 = and.i64 %2, %3
+    %5 = iconst.i64 255
+    %6 = and.i64 %5, %2
+    %7 = iconst.i64 31
+    %8 = and.i64 %2, %7
+    %9 = add.i64 %4, %6
+    %10 = add.i64 %9, %8
+    return %10
+}
+"#,
+        );
+        assert!(out.contains("%9 = add %2, %2"), "{out}");
+        assert!(out.contains("%10 = add %9, %8"), "bit five could be set, {out}");
     }
 
     /// A parameter that is a constant on every edge into its block is that constant, and one that

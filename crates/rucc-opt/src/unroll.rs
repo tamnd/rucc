@@ -85,7 +85,15 @@
 //! # Which level
 //!
 //! `-O2` and `-O3`. Not `-Os` or `-Oz`, because the copies are code and the whole point of them is
-//! speed. Section 29.6 says a trip count of two or three is worth unrolling even for size, since
+//! speed. At `-O2` it is [`FREE`], which takes a loop with a call in it only when the copies come
+//! to no more instructions than the loop was. That is gcc's rule for every loop at `-O2`, where
+//! `flag_cunroll_grow_size` is off unless `-O3` or `-funroll-loops` asks for it, and the kernel's
+//! loops of four over a call, like the one `exit_task_stack_account` has, were copied out four
+//! times here and kept as a loop there. Next to a call the loop overhead a copy saves is nothing.
+//! A loop with no call keeps the larger limit, because that is the loop over the lanes of a local
+//! that `crate::sroa` can only take once the copies are made, and the SSE2 salsa20 core is three
+//! times slower kept as a loop. [`ANY`] is the unroller that may grow the code for any loop, and it
+//! is what `-O3` and `-funroll-loops` run. Section 29.6 says a trip count of two or three is worth unrolling even for size, since
 //! the loop overhead that goes away is comparable to the body that arrives, and that is recorded
 //! rather than built: it is a second threshold and a second pass name for a case the corpus has not
 //! asked for yet.
@@ -105,6 +113,8 @@ const UNROLLED: &str = "loop copied out into a straight line, it runs a known nu
 const NO_COUNT: &str = "loop left as it was, how many times it runs is not a number known here";
 const TOO_MANY: &str = "loop left as it was, it runs more times than a loop is unrolled away";
 const TOO_BIG: &str = "loop left as it was, the copies would be more code than the limit allows";
+const GROWS: &str =
+    "loop left as it was, it makes a call and the copies would be more code than the loop was";
 const TOO_DEEP: &str = "loop left as it was, it is nested deeper than an unrolled loop may be";
 const SHAPE: &str =
     "loop left as it was, its exit is not a two way branch that runs on every iteration";
@@ -118,11 +128,23 @@ const NO_FUEL: &str = "loop left as it was, the pass ran out of fuel";
 
 /// Section 29's complete unrolling.
 #[derive(Debug)]
-pub struct Unroll;
+pub struct Unroll {
+    /// What the pass calls itself, one name for each of the two below.
+    name: &'static str,
+    /// Whether the copies may come to more code than the loop was.
+    grow: bool,
+}
+
+/// The unroller that may grow the code, up to the limits in [`heuristics`].
+pub static ANY: Unroll = Unroll { name: "unroll", grow: true };
+
+/// The unroller that takes a loop with a call in it only when the copies are no more code than the
+/// loop.
+pub static FREE: Unroll = Unroll { name: "unroll-free", grow: false };
 
 impl Pass for Unroll {
     fn name(&self) -> &'static str {
-        "unroll"
+        self.name
     }
 
     fn describe(&self) -> &'static str {
@@ -146,7 +168,7 @@ impl Pass for Unroll {
         let mut done: Set<Block> = Set::default();
         let mut say = true;
         'rounds: loop {
-            let jobs = plan(func, an, &done, &mut stats, say);
+            let jobs = plan(func, an, &done, &mut stats, say, self.grow);
             if jobs.is_empty() {
                 break;
             }
@@ -208,13 +230,14 @@ fn plan(
     done: &Set<Block>,
     stats: &mut Stats,
     say: bool,
+    grow: bool,
 ) -> Vec<Job> {
     let cfg = an.cfg(func);
     let doms = an.dominators(func);
     let loops = an.loops(func);
     let mut scev = Scev::new(func, cfg, loops);
     // Both walk the whole function, so they are worked out once a round rather than once a loop.
-    let round = Round { addressed: copy::addressed(func), readers: readers(func) };
+    let round = Round { addressed: copy::addressed(func), readers: readers(func), grow };
     let mut found: Vec<Job> = Vec::new();
     for id in loops.all() {
         if done.contains(&loops.header(id)) {
@@ -245,6 +268,8 @@ struct Round {
     addressed: Set<Block>,
     /// The blocks that read each block's values, from [`readers`].
     readers: Map<Block, Set<Block>>,
+    /// Whether the copies may come to more code than the loop was, which is [`Unroll::grow`].
+    grow: bool,
 }
 
 /// Whether this loop can be unrolled away, and why not when it cannot.
@@ -335,6 +360,22 @@ fn consider(
     let size = size_after(func, scev, id, &blocks, times).ok_or(TOO_BIG)?;
     if size > rucc_cost::param!(heuristics::UNROLL_MAX_INSNS) {
         return Err(TOO_BIG);
+    }
+    // The loop as it stands, the test and the counter included, which is what the copies are
+    // measured against when they may not grow. A constant is not an instruction the machine runs
+    // and a plain jump joins two blocks that follow each other, and the inliner leaves the body
+    // of a loop it made full of both, so neither is counted on either side.
+    let before: usize = blocks
+        .iter()
+        .flat_map(|&block| func.insts(block))
+        .filter(|&inst| !matches!(func[inst].opcode, Opcode::IConst | Opcode::Jump))
+        .count();
+    let calls = blocks
+        .iter()
+        .flat_map(|&block| func.insts(block))
+        .any(|inst| matches!(func[inst].opcode, Opcode::Call | Opcode::CallIndirect));
+    if !round.grow && calls && usize::try_from(size).map_or(true, |size| size > before) {
+        return Err(GROWS);
     }
     Ok(Job {
         header,
@@ -519,14 +560,15 @@ mod tests {
     use rucc_target::{TargetInfo, Triple};
 
     use super::{
-        ADDRESSED, ESCAPES, EXITS, NO_COUNT, NO_FUEL, PAYLOAD, TOO_BIG, TOO_MANY, UNROLLED, Unroll,
+        ADDRESSED, ANY, ESCAPES, EXITS, FREE, GROWS, NO_COUNT, NO_FUEL, PAYLOAD, TOO_BIG, TOO_MANY,
+        UNROLLED,
     };
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
 
     /// Runs the pass over the function as it stands.
     fn unroll(func: &mut Func, fuel: &mut Fuel) -> Stats {
-        Unroll.run(func, &mut crate::machine::fixtures::analyses(), fuel)
+        ANY.run(func, &mut crate::machine::fixtures::analyses(), fuel)
     }
 
     /// Insists the function is one the rest of the compiler may believe.
@@ -830,6 +872,51 @@ block2(%6: i32):
 
         let stats = unroll(&mut it.func, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Missed, EXITS), 1);
+        sound(&it.func, &mut it.names);
+    }
+
+    /// The `-O2` unroller, which is the one that grows the code only for a loop with no call.
+    fn free(func: &mut Func) -> Stats {
+        FREE.run(func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+    }
+
+    /// A loop of four over a call is kept at `-O2` when the copies would be more code than it, as
+    /// the kernel's `exit_task_stack_account` is, and copied out by the unroller that may grow.
+    #[test]
+    fn a_loop_with_a_call_is_unrolled_at_o2_only_when_the_copies_do_not_grow() {
+        let with_call = || {
+            let mut it = rotated(4);
+            let callee = it.names.intern("g");
+            let signature = Signature::new().with_params(&[Type::int(32)]);
+            let mut build = Builder::new(&mut it.func, it.body);
+            let signature = build.func().add_signature(signature);
+            let mut running = build.func()[it.body].params[1];
+            for _ in 0..2 {
+                running = build.binary(Opcode::Mul, running, running, Flags::NONE);
+            }
+            build.call(callee, signature, &[running]);
+            tucked(&mut it.func, it.body);
+            it
+        };
+        // Seven instructions in the loop, and four copies of the four the counter does not
+        // settle are sixteen.
+        let mut it = with_call();
+        let stats = free(&mut it.func);
+        assert_eq!(stats.count(Kind::Missed, GROWS), 1);
+        assert_eq!(tally(&it.func, Opcode::Call), 1);
+        let mut it = with_call();
+        let stats = unroll(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, UNROLLED), 1);
+        assert_eq!(tally(&it.func, Opcode::Call), 4);
+        sound(&it.func, &mut it.names);
+    }
+
+    /// A loop with no call in it grows at `-O2` as it does at `-O3`.
+    #[test]
+    fn a_loop_with_no_call_is_unrolled_at_o2_even_when_it_grows() {
+        let mut it = rotated(3);
+        let stats = free(&mut it.func);
+        assert_eq!(stats.count(Kind::Optimized, UNROLLED), 1);
         sound(&it.func, &mut it.names);
     }
 

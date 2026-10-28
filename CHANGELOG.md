@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Blocks that hold the same instructions and go to the same place are now merged before the layout, the cross jumping gcc does, so the hundred or so `jmp __x64_sys_ni_syscall` cases in the kernel's system call switch are written once and the bench objects are 6215 bytes smaller (#3963)
+
 ### Fixed
 
 - On x86-64 a run of two or more stores of a zero in one block now stores it from a register, so a structure cleared a field at a time is `movq %rax, 8(%rsp)` at five bytes rather than `movq $0, 8(%rsp)` at nine (#3957)
@@ -11,6 +15,9 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64 a test of a register against a constant whose bits all sit in the low byte now tests the byte, so `testq $4, %rax` at six bytes is `testb $4, %al` at two, which is what gcc writes (#3960)
 - On x86-64 a branch on a comparison whose answer something else also reads now jumps on the flags the comparison left, so `setne %dl; testb %dl, %dl; jne` is `setne %dl; jne` and the byte stays for the other reader (#3961)
 - On x86-64 a branch on an `asm` flag output, such as the kernel's `test_bit` or an atomic that answers whether it reached zero, now jumps on the flags the template left, so `lock decl (%rdi); sete %al; testb %al, %al; jne` is `lock decl (%rdi); je` as gcc writes it (#3962)
+- A function built with `-mno-sse` on a stack aligned to eight bytes, which is every kernel function, no longer keeps a frame pointer for a vector spill slot it can never have, so `rbp` is handed to the allocator again and the bench objects are 4793 bytes smaller (#3965)
+- An `and` with a constant that only clears bits already known to be zero is dropped, and `sccp` runs again after `unroll` so it sees an inlined function's truncation and extension once their blocks are merged, which takes the `and` and the `movslq` out of the kernel's `page_to_nid` and makes the bench objects 1840 bytes smaller (#3966)
+- At `-O2` a loop with a call in it is unrolled completely only when the copies are no more code than the loop, which is the rule gcc keeps at `-O2`, so the kernel's loops of four over a call stay loops and the bench objects are 320 bytes smaller. `-O3` and `-funroll-loops` still grow the code (#3967)
 
 ## 0.30.15
 
