@@ -780,6 +780,7 @@ mod tests {
             visibility: Visibility::Default,
             retain: false,
             pieces: Vec::new(),
+            redzone: 0,
         };
         let mut apple = String::new();
         Directives::MachO.variable(&mut apple, &var, Sections::default());

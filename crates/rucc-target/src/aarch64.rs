@@ -908,6 +908,7 @@ const fn aapcs64(
         fenced: false,
         rmw_bits: 8,
         unaligned: true,
+        rolled: 0,
         byte_swaps: &[32, 64],
         push: 16,
         link: Some(LR),
