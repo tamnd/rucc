@@ -530,6 +530,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     prefix: "a64.",
     zeroing: &[],
     narrowing: &[],
+    byte_testing: &[],
     testing: &[],
     stepping: &[],
     copying: &[],
