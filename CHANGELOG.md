@@ -22,6 +22,7 @@ This patch release adds the rest of the KASAN work that Linux 7.3 asks gcc for: 
 - The inliner now reads `__builtin_expect` when it guesses how often a call runs, and a large copy on an unlikely path is not counted against the body it went into, so `vma_start_read` is inlined into `lock_vma_under_rcu` and `lock_next_vma` as with gcc (#3944)
 - The inliner counts nothing for a load or a store through a local that scalar replacement would turn into a value, the way gcc weighs a body after its early SRA, so `start_dir_add` in fs/dcache.c is measured at gcc's size (#3945)
 - The inliner's first pass takes only what grows the caller by six or less, the way gcc's early inliner does, and leaves the rest to the second pass, which now refuses a growing call on a path run less than once in a thousand calls and takes the body of a static function off the unit size once its last call is copied (#3948)
+- The inliner's second pass counts a function out of line 3 larger than its body, for the overhead and the return gcc counts in it, so a static function whose calls are all copied saves what it does in gcc and `lib/maple_tree.c` no longer hits the unit growth limit early (#3949)
 
 ## 0.30.13
 

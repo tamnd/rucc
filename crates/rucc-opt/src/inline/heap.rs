@@ -101,6 +101,12 @@ impl Second {
     }
 }
 
+/// What gcc counts in the size of a function out of line beyond its body, which is 2 for being
+/// out of line and 1 for its return, neither of them in a copy. Without it a static function was
+/// smaller next to its calls than gcc has it, so copying all of them looked to grow the program
+/// where gcc sees no growth, and `lib/maple_tree.c` reached the limit on the unit early.
+const OUT_OF_LINE: usize = 3;
+
 /// What the first pass leaves the second about the calls it looked at.
 #[derive(Debug, Default)]
 pub(super) struct Later {
@@ -274,7 +280,7 @@ pub(super) fn run(
     let layout = module.datalayout;
     let sizes: Map<FuncId, usize> =
         defined.iter().map(|&id| (id, measure(&module[id], layout, how.names))).collect();
-    let unit: usize = sizes.values().sum();
+    let unit: usize = sizes.values().map(|size| size + OUT_OF_LINE).sum();
     // gcc's `compute_max_insns`: the unit may grow by `inline-unit-growth` percent of itself, or of
     // `large-unit-insns` when it is smaller than that.
     let floor = usize::try_from(rucc_cost::param!(LARGE_UNIT_INSNS)).unwrap_or(usize::MAX);
@@ -578,13 +584,14 @@ impl Heap<'_> {
         // otherwise look as if inlining it at every call made the program smaller.
         let offline = if removable {
             let raw = size(callee);
-            if raw >= growth * as_i64(count)
+            let body = if raw >= growth * as_i64(count)
                 && raw <= as_i64(self.reach(kind, hints, args).saturating_mul(super::TRIED))
             {
                 raw.min(as_i64(how.specialized_size(module, callee, &Map::default(), Some(names))))
             } else {
                 raw
-            }
+            };
+            body + as_i64(OUT_OF_LINE)
         } else {
             0
         };
@@ -870,7 +877,7 @@ impl Heap<'_> {
                         && !self.how.elsewhere.contains(&target.name);
                     if *total == 0 && removable {
                         let gone = self.sizes.get(&weighed.callee).copied().unwrap_or(0);
-                        self.unit = self.unit.saturating_sub(gone);
+                        self.unit = self.unit.saturating_sub(gone + OUT_OF_LINE);
                     }
                 }
                 for &(inst, name) in &calls {
