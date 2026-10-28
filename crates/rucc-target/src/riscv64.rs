@@ -551,6 +551,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     prefix: "rv.",
     zeroing: &[],
     narrowing: &[],
+    byte_testing: &[],
     testing: &[],
     stepping: &[],
     copying: &[],

@@ -733,6 +733,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     prefix: "x64.",
     zeroing: &SHORTER_ZEROS,
     narrowing: &NARROWER_MOVES,
+    byte_testing: &BYTE_TESTS,
     testing: &ZERO_COMPARES,
     stepping: &STEPS,
     copying: &BARE_ADDRESSES,
@@ -774,6 +775,31 @@ static SHORTER_ZEROS: [Zeroed; 3] = [
 /// byte in front of a sixteen bit instruction costs.
 static NARROWER_MOVES: [Narrowed; 1] =
     [Narrowed { name: "mov_ri_64", into: "mov_ri_32", writes: 32 }];
+
+/// Testing bits of a register in its low byte, when every bit the constant names is in that byte.
+///
+/// `testq $4, %rax` is six bytes, a prefix, the opcode and four bytes of number, and `testb $4, %al`
+/// is two. For any other register it is seven against three, and four for the ones that need a
+/// prefix to name their low byte. gcc writes the byte test, and the kernel's flag checks are
+/// mostly this shape.
+///
+/// The flags are what decides how many bits. A test leaves the zero, the sign and the parity of
+/// what the and kept, and clears the carry and the overflow. With every bit of the constant in the
+/// low byte the zero and the parity are the same at any width, and the sign is clear at both
+/// widths as long as the constant leaves the top bit of the byte alone, so seven bits says the
+/// same thing to every condition. A test that keeps `e` or `ne` reads the zero alone, so it has
+/// the whole byte.
+static BYTE_TESTS: [Narrowed; 9] = [
+    Narrowed { name: "test_ri_16", into: "test_ri_8", writes: 7 },
+    Narrowed { name: "test_ri_32", into: "test_ri_8", writes: 7 },
+    Narrowed { name: "test_ri_64", into: "test_ri_8", writes: 7 },
+    Narrowed { name: "test_set_e_ri_16", into: "test_set_e_ri_8", writes: 8 },
+    Narrowed { name: "test_set_e_ri_32", into: "test_set_e_ri_8", writes: 8 },
+    Narrowed { name: "test_set_e_ri_64", into: "test_set_e_ri_8", writes: 8 },
+    Narrowed { name: "test_set_ne_ri_16", into: "test_set_ne_ri_8", writes: 8 },
+    Narrowed { name: "test_set_ne_ri_32", into: "test_set_ne_ri_8", writes: 8 },
+    Narrowed { name: "test_set_ne_ri_64", into: "test_set_ne_ri_8", writes: 8 },
+];
 
 /// Asking whether a register is zero without a zero written on the instruction.
 ///

@@ -85,6 +85,9 @@ fn body<'a>(asm: &'a str, name: &str) -> Vec<&'a str> {
 }
 
 /// At `-O2` none of the three writes the answer to a byte or tests one, and each has one `cmov`.
+///
+/// A test of a byte against a number is the question itself asked in the low byte, which is what
+/// gcc writes for `x & 2`, and is not the kept answer this is about.
 #[test]
 fn a_select_past_arithmetic_keeps_no_byte() {
     let dir = dir("asm");
@@ -95,7 +98,7 @@ fn a_select_past_arithmetic_keeps_no_byte() {
     let asm = std::fs::read_to_string(dir.join("a.s")).expect("a.s was written");
     for name in ["flip", "same", "lower"] {
         let lines = body(&asm, name);
-        let byte = |line: &&str| line.starts_with("set") || line.starts_with("testb");
+        let byte = |line: &&str| line.starts_with("set") || line.starts_with("testb\t%");
         assert!(!lines.iter().any(byte), "{name}: {lines:#?}");
         let moves = lines.iter().filter(|line| line.starts_with("cmov")).count();
         assert_eq!(moves, 1, "{name}: {lines:#?}");
