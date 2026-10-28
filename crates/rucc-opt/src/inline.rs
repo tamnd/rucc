@@ -851,7 +851,7 @@ fn to_all_callers(module: &Module, names: &Interner, isa: Isa) -> Set<Symbol> {
         if calls.iter().any(|&(caller, ..)| refused(caller)) {
             continue;
         }
-        let summary = summary::Summary::of(callee, names, None);
+        let summary = summary::Summary::of(callee, module.datalayout, names, None);
         let mut growth = 0_i64;
         for &(caller, _, call) in &calls {
             let func = &module[caller];
@@ -1060,7 +1060,7 @@ impl How<'_> {
         if let Some(&size) = self.sizes.borrow().get(&key) {
             return size;
         }
-        let size = specialized_size(&module[callee], values, weighed);
+        let size = specialized_size(&module[callee], module.datalayout, values, weighed);
         self.sizes.borrow_mut().insert(key, size);
         size
     }
@@ -1075,9 +1075,9 @@ impl How<'_> {
         weighed: Option<&Interner>,
     ) -> (usize, bool) {
         let mut summaries = self.summaries.borrow_mut();
-        let summary = summaries
-            .entry(callee)
-            .or_insert_with(|| summary::Summary::of(&module[callee], self.names, None));
+        let summary = summaries.entry(callee).or_insert_with(|| {
+            summary::Summary::of(&module[callee], module.datalayout, self.names, None)
+        });
         summed_size(summary, &module[callee], values, weighed)
     }
 }
@@ -1279,7 +1279,8 @@ fn settle(
         };
         let (mut large, cut) = match kind {
             Kind::Asks => {
-                (answered_size(&module[callee], passed(&module[id], call, &module[callee])), false)
+                let values = passed(&module[id], call, &module[callee]);
+                (answered_size(&module[callee], module.datalayout, values), false)
             }
             Kind::Hinted => {
                 how.copy_size(module, callee, passed(&module[id], call, &module[callee]), None)
@@ -1603,7 +1604,7 @@ fn made_of_params(
 /// such a call by. Without it the arithmetic a `BUILD_BUG_ON` checks the constant with counts
 /// against the body, and in the kernel that is most of a body that asks, so a function the size
 /// of a hinted one looks two or three times larger than it is.
-fn answered_size(func: &Func, values: Map<Value, (Imm, Type)>) -> usize {
+fn answered_size(func: &Func, layout: DataLayout, values: Map<Value, (Imm, Type)>) -> usize {
     let Some(entry) = func.entry() else { return size(func) };
     let asked = asked(func);
     let known = func[entry]
@@ -1613,7 +1614,7 @@ fn answered_size(func: &Func, values: Map<Value, (Imm, Type)>) -> usize {
         .filter(|(at, _)| asked.contains(at))
         .map(|(_, &value)| value)
         .collect();
-    folded_size(func, known, values, None)
+    folded_size(func, layout, known, values, None)
 }
 
 /// The callee's parameters this call passes a constant for, with the constant, which is what
@@ -1647,6 +1648,7 @@ fn passed(func: &Func, call: Inst, callee: &Func) -> Map<Value, (Imm, Type)> {
 /// twelve callers.
 fn specialized_size(
     callee: &Func,
+    layout: DataLayout,
     values: &Map<Value, (Imm, Type)>,
     weighed: Option<&Interner>,
 ) -> usize {
@@ -1718,7 +1720,7 @@ fn specialized_size(
             }
         }
     }
-    folded_size(&copy, Set::default(), Map::default(), weighed)
+    folded_size(&copy, layout, Set::default(), Map::default(), weighed)
 }
 
 /// How many instructions a body has that are still work once what only depends on constants and
@@ -1734,11 +1736,12 @@ fn specialized_size(
 /// arms it does not take are not counted at all, as they are gone from the copy once it folds.
 fn folded_size(
     func: &Func,
+    layout: DataLayout,
     known: Set<Value>,
     values: Map<Value, (Imm, Type)>,
     weighed: Option<&Interner>,
 ) -> usize {
-    folded(func, known, values, weighed, None).0
+    folded(func, layout, known, values, weighed, None).0
 }
 
 /// Who reads each value and as which operand, the argument of a jump to a block being read by a
@@ -1804,10 +1807,36 @@ impl Readers {
     }
 }
 
+/// The addresses into the locals of `func` that [`crate::sroa`] would turn into values, the
+/// `alloca` of each and every constant offset from one.
+///
+/// A load or a store through one of them is no code once the early passes have run, and gcc
+/// weighs a body after its early scalar replacement, so it counts nothing for them. In
+/// `start_dir_add` from fs/dcache.c the sequence count is read into a local and written back, and
+/// counted that made the body six larger than gcc has it.
+fn slots(func: &Func, layout: DataLayout) -> Set<Value> {
+    let mut slots = crate::sroa::scalarizable(func, layout);
+    if slots.is_empty() {
+        return slots;
+    }
+    let cfg = Cfg::new(func);
+    for block in cfg.reverse_postorder() {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            let base = func[data.args].first().is_some_and(|arg| slots.contains(arg));
+            if data.opcode == Opcode::PtrAdd && base {
+                slots.extend(data.results());
+            }
+        }
+    }
+    slots
+}
+
 /// What [`folded_size`] counts, with how long it takes as well, which is each instruction counted
 /// weighed by how often `frequency` says its block runs.
 fn folded(
     func: &Func,
+    layout: DataLayout,
     mut known: Set<Value>,
     mut values: Map<Value, (Imm, Type)>,
     weighed: Option<&Interner>,
@@ -1822,6 +1851,7 @@ fn folded(
         |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| readers.only(value, fits);
     let address =
         |opcode: Opcode, at: usize| matches!((opcode, at), (Opcode::Load, 0) | (Opcode::Store, 1));
+    let slots = slots(func, layout);
     let cfg = Cfg::new(func);
     let mut live: Set<Block> = cfg.entry().into_iter().collect();
     let mut work = 0;
@@ -1917,6 +1947,8 @@ fn folded(
                 Opcode::ICmp => only(data.results().next(), &|opcode, at| {
                     matches!((opcode, at), (Opcode::BrIf | Opcode::Expect, 0))
                 }),
+                Opcode::Load => args.first().is_some_and(|arg| slots.contains(arg)),
+                Opcode::Store => args.get(1).is_some_and(|arg| slots.contains(arg)),
                 Opcode::Expect => true,
                 Opcode::Alloca => args.is_empty(),
                 Opcode::Return | Opcode::LifetimeEnd => true,
@@ -1993,7 +2025,7 @@ fn summed_size(
     let size = if weighed.is_some() { estimate.weighed } else { estimate.plain };
     debug_assert_eq!(
         size,
-        folded_size(callee, Set::default(), values, weighed),
+        folded_size(callee, summary.layout(), Set::default(), values, weighed),
         "the summary of {:?} is not the walk",
         callee.name
     );
@@ -2013,7 +2045,8 @@ fn summed_time(
         return summary.timed(callee, values, names, frequency);
     };
     if cfg!(debug_assertions) {
-        let walked = folded(callee, Set::default(), values, Some(names), Some(frequency)).1;
+        let layout = summary.layout();
+        let walked = folded(callee, layout, Set::default(), values, Some(names), Some(frequency)).1;
         let near = (estimate.time - walked).abs() <= 1e-9 * walked.abs().max(1.0);
         assert!(
             near,
