@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: install nightly
         run: rustup toolchain install nightly --profile minimal --component rust-src
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: san-${{ matrix.san }}
       # The compiler manipulates arena indices and does its own bit packing, and its unsafe
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - name: install nightly with miri
         run: rustup toolchain install nightly --profile minimal --component miri
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: miri
       # Unit tests only. The integration tests spawn the compiler binary and read the case
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.2
+      - uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-deny
       # The per-commit job checks the advisory database as it stood when the commit landed.
@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: cost
       - name: install the target library
@@ -122,7 +122,7 @@ jobs:
       PG_SHA256: 555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: build rucc
         run: cargo build --release --bin rucc
       - name: fetch postgres
@@ -155,7 +155,7 @@ jobs:
             | sort | uniq -c | tee -a "$GITHUB_STEP_SUMMARY" || true
       - name: keep what the suites said
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: postgres-cassert
           path: |
@@ -175,7 +175,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install lld 19, wine, MinGW GCC and tclsh
         run: |
           sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
@@ -191,7 +191,7 @@ jobs:
           tests/sqlite/windows.sh "$PWD/target/release/rucc" "$RUNNER_TEMP/sqlite-windows" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: keep what the suites said
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: sqlite-windows
           path: |
@@ -216,7 +216,7 @@ jobs:
             ./rustup-init.exe -y --profile minimal --default-toolchain none
             echo "$USERPROFILE\.cargo\bin" >> "$GITHUB_PATH"
           fi
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: fetch llvm-mingw
         run: |
           curl -fsSL -o llvm-mingw.zip https://github.com/mstorsjo/llvm-mingw/releases/download/20260922/llvm-mingw-20260922-ucrt-aarch64.zip
@@ -233,7 +233,7 @@ jobs:
           ARCH=aarch64 tests/sqlite/windows.sh "$PWD/target/release/rucc.exe" "$RUNNER_TEMP/sqlite-windows" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: keep what the suites said
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: sqlite-windows-arm
           path: |
@@ -253,7 +253,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install lld and Wasmtime
         run: |
           set -euo pipefail
@@ -283,8 +283,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
-      - uses: actions/setup-node@v7.0.0
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
       - name: install lld, Wasmtime and wasi-sdk
