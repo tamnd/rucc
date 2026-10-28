@@ -6,7 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## 0.30.14
 
-This patch release adds the rest of the KASAN work that Linux 7.3 asks gcc for: the redzones after the globals, the redzones around `alloca` and variable length arrays, and the checks before the atomic accesses. It also makes kernel code smaller and faster: stores of zero into bytes that already hold zero go, `||` and `&&` chains over one-bit fields are one test, constants written to neighbouring bit-fields are one store, and the inliner reads `__builtin_expect` and weighs a callee as gcc does after its early scalar replacement. The asm constant test no longer fails when two of its calls run at the same time, which is what stopped the 0.30.13 tag check.
+This patch release adds the rest of the KASAN work that Linux 7.3 asks gcc for: the redzones after the globals, the redzones around `alloca` and variable length arrays, and the checks before the atomic accesses. It also makes kernel code smaller and faster: stores of zero into bytes that already hold zero go, `||` and `&&` chains over one-bit fields are one test, constants written to neighbouring bit-fields are one store, and the inliner reads `__builtin_expect` and weighs a callee as gcc does after its early scalar replacement. The inliner also splits its work between two passes as gcc's early and late inliners do, and counts the size of a function out of line as gcc does. The asm constant test no longer fails when two of its calls run at the same time, which is what stopped the 0.30.13 tag check.
 
 ### Added
 
