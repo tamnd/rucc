@@ -1398,10 +1398,10 @@ fn above(
     path: &mut Vec<Block>,
     depth: u32,
 ) -> Option<BlockCall> {
-    if !redone(func, from, path)
-        && let Some(call) = implied(func, term, subst, from, at)
-    {
-        return Some(call);
+    if !redone(func, from, path) {
+        if let Some(call) = implied(func, term, subst, from, at) {
+            return Some(call);
+        }
     }
     if depth == 0 {
         return None;
@@ -1428,10 +1428,10 @@ fn redone(func: &Func, from: Block, path: &[Block]) -> bool {
     }
     let Some(&known) = func[func[before].args].first() else { return true };
     let mut read = vec![known];
-    if let Def::Result { inst, .. } = func[known].def
-        && func[inst].opcode == Opcode::ICmp
-    {
-        read.extend_from_slice(&func[func[inst].args]);
+    if let Def::Result { inst, .. } = func[known].def {
+        if func[inst].opcode == Opcode::ICmp {
+            read.extend_from_slice(&func[func[inst].args]);
+        }
     }
     read.iter().any(|&value| defined_in(func, value).is_some_and(|block| path.contains(&block)))
 }
