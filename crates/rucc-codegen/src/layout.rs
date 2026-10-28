@@ -316,7 +316,7 @@ impl Ends {
 /// of its cases end in `jmp __x64_sys_ni_syscall`, which gcc writes once and jumps to from the
 /// rest. That is what gcc calls cross jumping.
 ///
-/// A block takes part only when each way into it is an arm [`Ends::ours`] says can be moved and
+/// A block takes part only when each way into it is an arm `Ends::ours` says can be moved and
 /// nothing else says how it is reached, which leaves out the entry, a landing pad, a named block
 /// and a block whose address an instruction takes. A block holding an `asm` template, a call a
 /// landing pad belongs to, a comparison waiting to be folded into its branch or a stack walk stays
@@ -1036,7 +1036,7 @@ fn along(
 /// The third is the comparisons of the first map that leave the condition state they found, which
 /// [`blocks`] jumps on without a test when the byte is kept for some other reader. See
 /// [`Fused::keeping`]. The last two are the opcode of a kept `asm` template and how to read the
-/// line a flag output puts at the end of one. See [`flagged`].
+/// line a flag output puts at the end of one. See `flagged`.
 #[derive(Debug)]
 pub struct Fused(
     pub(crate) Map<mir::Opcode, &'static Fusion>,
