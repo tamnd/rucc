@@ -37,7 +37,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: cargo fmt
         run: cargo fmt --all --check
       # Before the rest, because a path Windows will not write fails the checkout of the Windows
@@ -99,7 +99,7 @@ jobs:
             profile: dev
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: ${{ matrix.profile }}
       - name: cargo build
@@ -132,7 +132,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # Every crate is published, so every crate's documentation has to build. A broken
       # intra-doc link is a broken link on docs.rs.
       - name: cargo doc
@@ -144,7 +144,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # The release from upstream rather than the one in the distribution, which is four years
       # old here and does not know the name of the logic a question about arrays and floats at
       # once is asked in. It answers such a question anyway, after saying it ignored the logic,
@@ -199,7 +199,7 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: install
         run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           key: msrv
       # A compiler that needs last week's stable Rust is a compiler people cannot use on the
@@ -214,7 +214,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # spec/02-the-goal.md makes byte-identical output a requirement, and there are two halves
       # to it. The tree's own artefacts have to build twice to the same bytes, which is what the
       # first step asks, and what the compiler makes out of a C file has to be the same in every
@@ -245,7 +245,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # The refresh is allowed to fail and the install is not. The runner image carries third
       # party apt sources this job has no use for, and one of them serving an index that does not
       # match its hashes makes `apt-get update` exit non-zero after it has already refreshed
@@ -275,7 +275,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # The reference is compiled for the target rather than for the host, so the standard library
       # for that target has to be there even though it is the same machine. The archive under test
       # needs nothing installed, which is the whole point of it being C this compiler builds.
@@ -298,7 +298,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: run the same arithmetic both ways
         run: cargo xtask wide
 
@@ -312,7 +312,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: run the same divisions both ways
         run: cargo xtask divide
 
@@ -325,7 +325,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: run the same calls both ways
         run: cargo xtask tail
 
@@ -341,7 +341,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # GNU readelf is already on the image as part of binutils. llvm-readelf is not, and the
       # refresh is allowed to fail for the reason the disasm job above explains at length. What
       # matters is that both readers are present before the check runs, because `cargo xtask stubs`
@@ -367,7 +367,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # llvm-20 by name rather than the `llvm` the jobs above install, because that one is llvm 18 on
       # this image and llvm 18 writes a different import library from every llvm since: the handling
       # of a .def rename was rewritten for ARM64EC in 19. The check refuses an older tool rather than
@@ -398,7 +398,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install lld 19, wine and MinGW GCC
         run: |
           sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
@@ -431,7 +431,7 @@ jobs:
         run: cargo xtask abi-differential --target x86_64-windows-gnu
       - name: hash the objects
         run: tests/exec/windows/objects.sh "$PWD/target/release/rucc --target=x86_64-windows-gnu" > objects-linux.txt
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: objects-linux
           path: objects-linux.txt
@@ -465,7 +465,7 @@ jobs:
           curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # Made here with a limit on it, so that a prefix that does not come up says so in its own
       # step rather than as the first program never finishing. Mono and Gecko are left out, since
       # nothing here needs them and asking for them is what waits on a dialog.
@@ -500,7 +500,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install the cross packages, lld and qemu
         run: |
           sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
@@ -523,7 +523,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install the i386 libc and lld
         run: |
           sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
@@ -543,7 +543,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install the wasm32-wasip1 target and Wasmtime
         run: |
           set -euo pipefail
@@ -585,8 +585,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
-      - uses: actions/setup-node@v7.0.0
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: 24
       - name: install lld, llvm-mc, Wasmtime and wasm-tools
@@ -690,7 +690,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install lld, wasm-component-ld, Wasmtime and wasm-tools
         run: |
           set -euo pipefail
@@ -739,7 +739,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install lld
         run: |
           sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
@@ -768,7 +768,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: build rucc, the sysroot and the runtime
         run: |
           cargo build --release --bin rucc
@@ -778,7 +778,7 @@ jobs:
         run: tests/exec/windows/run.sh "$PWD/target/release/rucc.exe"
       - name: hash the objects
         run: tests/exec/windows/objects.sh "$PWD/target/release/rucc.exe" > objects-windows.txt
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: objects-windows
           path: objects-windows.txt
@@ -815,7 +815,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: build rucc, the sysroot and the runtime
         run: |
           cargo build --release --bin rucc
@@ -843,7 +843,7 @@ jobs:
             ./rustup-init.exe -y --profile minimal --default-toolchain none
             echo "$USERPROFILE\.cargo\bin" >> "$GITHUB_PATH"
           fi
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: fetch llvm-mingw
         run: |
           curl -fsSL -o llvm-mingw.zip https://github.com/mstorsjo/llvm-mingw/releases/download/20260922/llvm-mingw-20260922-ucrt-aarch64.zip
@@ -873,7 +873,7 @@ jobs:
     needs: [wine, windows]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v8.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: objects-*
           merge-multiple: true
@@ -890,7 +890,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       # The runtime is compiled for the target rather than for the host, so the standard library
       # for that target has to be there even though it is the same machine.
       - name: install the target library
@@ -915,7 +915,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install the target library
         run: rustup target add x86_64-unknown-linux-gnu
       - name: build tests/safety with the elimination off and on
@@ -938,7 +938,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install the target library
         run: rustup target add x86_64-unknown-linux-gnu
       - name: fetch the sqlite amalgamation
@@ -987,7 +987,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: compile the signature corpus both ways round and run it
         run: cargo xtask abi-differential
 
@@ -1006,7 +1006,7 @@ jobs:
         check: [dso, unwind, debugger, real-libc]
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install gdb
         if: matrix.check == 'debugger'
         run: |
@@ -1047,7 +1047,7 @@ jobs:
             flags: -mbranch-protection=standard
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: install gdb, perf and lld
         run: |
           sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
@@ -1087,7 +1087,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.2
+      - uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-deny
       # Licenses, advisories, banned crates and unknown registries, all configured in
@@ -1208,7 +1208,7 @@ jobs:
           done
       - name: keep the report
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: differential-${{ matrix.libc }}
           path: compat/results/
@@ -1230,7 +1230,7 @@ jobs:
       PG_SHA256: 555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: build rucc
         run: cargo build --release --bin rucc
       - name: fetch postgres
@@ -1253,7 +1253,7 @@ jobs:
         run: make -C "$RUNNER_TEMP/postgresql-$PG_VERSION" check
       - name: keep the differences
         if: failure()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: postgres-regress
           path: |

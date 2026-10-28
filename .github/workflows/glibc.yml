@@ -35,7 +35,7 @@ jobs:
       GLIBC_SHA256: d1775e32e4628e64ef930f435b67bb63af7599acb6be2b335b9f19f16509f17f
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: build rucc
         run: cargo build --release --bin rucc
       - name: install what the glibc build needs
@@ -53,7 +53,7 @@ jobs:
           WORK="$RUNNER_TEMP/build" tests/tools/glibc-headers.sh target/release/rucc "$RUNNER_TEMP/glibc-$GLIBC_VERSION" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: keep what the tests said
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: glibc-headers
           path: |
