@@ -4,11 +4,19 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.15
+
+This patch release has the changes of 0.30.14, which was tagged but not published because its tag check found the feature table in `docs/FEATURES.md` out of date. It also fixes a stack slot that the inliner gave to two bodies, lets jump threading decide more branches in inlined kernel code, reads the kernel's `current` once per function, asks for huge pages only when the kernel has free blocks of 2 MiB, and makes `-E` faster on large files.
+
 ### Fixed
 
+- A body the inliner copies into a caller no longer takes the stack slot of a body it sits inside, which in kernel/time/timer.c let a local zeroed in `add_timer` overwrite the saved `flags` and left interrupts off after the unlock (#3951)
 - Jump threading now decides a branch that compares a widened one bit value, which is how an inlined function returning `_Bool` reaches its caller, so `if (!valid_section(ms))` after `ms &&` jumps straight to where it goes instead of testing a zero again (#3954)
 - Jump threading now decides a branch on a condition that a branch further up already tested, looking back through blocks with one way in, and runs once more after the late value numbering at `-O2` and `-O3`, so `is_swap_pte(x)` followed by `pte_none(x)` tests `x` once (#3955)
 - A load of a global declared `const` is no longer read again after a store, a call or an `asm`, including one through `%gs`, so the kernel's `current` is read once per function the way gcc reads it (#3956)
+- rucc now asks for huge pages only when `/proc/buddyinfo` shows at least 512 free blocks of 2 MiB. On a busy host the huge page faults stopped to compact memory, and a Linux 7.3 X64 `defconfig` build spent 1630 s of system time in the compiles, where it now spends 807 s (#3884)
+- The `-E` printer keeps the span of the last source line and finds the file and line of a token on that line without a search, so `rucc -E` on the kallsyms file of a Linux 7.3 `defconfig` takes 1.15 to 1.41 s of user time where it took 1.76 to 1.97 s (#3889)
+- `docs/FEATURES.md` is written again from `features.toml`, and each PR now runs `cargo xtask features --check`, so a new row with a stale table fails on the PR and not on the tag check (#3952)
 
 ## 0.30.14
 
@@ -30,7 +38,6 @@ This patch release adds the rest of the KASAN work that Linux 7.3 asks gcc for: 
 - The inliner's first pass takes only what grows the caller by six or less, the way gcc's early inliner does, and leaves the rest to the second pass, which now refuses a growing call on a path run less than once in a thousand calls and takes the body of a static function off the unit size once its last call is copied (#3948)
 - The inliner's second pass counts a function out of line 3 larger than its body, for the overhead and the return gcc counts in it, so a static function whose calls are all copied saves what it does in gcc and `lib/maple_tree.c` no longer hits the unit growth limit early (#3949)
 - The inliner no longer lets a constant a call passes settle a branch read through `__builtin_expect` when it weighs the copy, since gcc's summary keeps the hint as a call, so `__tlb_remove_folio_pages_size` in mm/mmu_gather.c weighs what it does in gcc (#3950)
-- A body the inliner copies into a caller no longer takes the stack slot of a body it sits inside, which in kernel/time/timer.c let a local zeroed in `add_timer` overwrite the saved `flags` and left interrupts off after the unlock (#3951)
 
 ## 0.30.13
 
