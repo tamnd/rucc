@@ -281,7 +281,7 @@ impl Pass for Thread {
         let mut spare = Spare::default();
         let mut seen = Seen::default();
         'blocks: for block in func.blocks().collect::<Vec<Block>>() {
-            if block == entry || func[block].params.is_empty() {
+            if block == entry {
                 continue;
             }
             let Some(term) = func.terminator(block) else { continue };
@@ -305,7 +305,11 @@ impl Pass for Thread {
                     continue;
                 }
                 let subst = bind(func, block, at);
-                let Some(call) = taken(func, term, &subst) else { continue };
+                let Some(call) = taken(func, term, &subst)
+                    .or_else(|| above(func, &edges, term, &subst, from, at, 4))
+                else {
+                    continue;
+                };
                 if call.block == block {
                     continue;
                 }
@@ -1375,6 +1379,35 @@ fn implied(
     func[targets].get(usize::from(!held)).copied()
 }
 
+/// Where `term`, a `br_if`, goes when control came along edge `at` out of `from` and a `br_if` on
+/// the same condition decided the way to `from`.
+///
+/// That branch is the one at the end of `from`, or one further up a line of blocks that each have
+/// one way in. The line is what inlining leaves when a `WARN_ON (cond)` is put in front of a
+/// later `if (cond)`: the warning is a block of its own on the true arm, and it jumps to the block
+/// that tests the condition again. Up to `depth` blocks of the line are looked at.
+fn above(
+    func: &Func,
+    edges: &Edges,
+    term: Inst,
+    subst: &Bindings,
+    from: Block,
+    at: Idx<BlockCall>,
+    depth: u32,
+) -> Option<BlockCall> {
+    if let Some(call) = implied(func, term, subst, from, at) {
+        return Some(call);
+    }
+    if depth == 0 {
+        return None;
+    }
+    let &[(before, at)] = edges.get(&from)?.as_slice() else { return None };
+    if before == from {
+        return None;
+    }
+    above(func, edges, term, subst, before, at, depth - 1)
+}
+
 /// Whether two conditions are one, either the same value or the same comparison of the same two
 /// values once `subst` has said what the first one's operands stand for.
 fn same_test(func: &Func, asked: Value, known: Value, subst: &Bindings) -> bool {
@@ -1769,6 +1802,37 @@ mod tests {
         assert!(!super::decided_towards(&func, join, yes, |block| block == exit));
         assert!(!super::decided_towards(&func, join, yes, |block| block == looped));
         assert!(!super::decided_towards(&func, join, no, |block| block == looped));
+    }
+
+    #[test]
+    fn a_test_again_of_a_condition_a_branch_above_decided_is_threaded() {
+        // `WARN_ON (c); if (c) ...` once inlined: the warning is the true arm of the first test and
+        // jumps to the block that tests `c` again, which has no parameter to bind.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let c = func.append_param(entry, Type::int(1));
+        let warn = func.create_block();
+        let join = func.create_block();
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        build.br_if(c, warn, &[], join, &[]);
+        let mut build = Builder::new(&mut func, warn);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        build.br_if(c, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        let stats = copying(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
+        assert_eq!(goes_to(&func, warn.index()), vec![yes.index()]);
+        assert_eq!(goes_to(&func, entry.index()), vec![warn.index(), no.index()]);
+        assert!(!blocks(&func).contains(&join.index()));
     }
 
     #[test]
