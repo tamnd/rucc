@@ -5,6 +5,7 @@
 //! was the wrong width for the instruction.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SOURCE: &str = "\
 void set8(unsigned long *p) { asm volatile(\"btsq %1,%0\" : : \"m\"(*p), \"Ir\"(8L) : \"memory\"); }
@@ -13,8 +14,13 @@ void add5(long *p) { asm(\"addq %1,%0\" : \"+m\"(*p) : \"i\"(5)); }
 void dec(int *p) { asm(\"lock; addl %1,%0\" : \"+m\"(*p) : \"ir\"(-1)); }
 ";
 
+/// Each call gets its own directory. The tests run on threads of one process, and a directory
+/// named for the process alone was taken away by one test while the other still read from it.
+static CALLS: AtomicUsize = AtomicUsize::new(0);
+
 fn assembly() -> String {
-    let dir = std::env::temp_dir().join(format!("rucc-asm-constant-{}", std::process::id()));
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("rucc-asm-constant-{}-{call}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, SOURCE).expect("the fixture can be written");
