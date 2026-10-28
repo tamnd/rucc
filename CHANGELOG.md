@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The inliner's first pass takes only what grows the caller by six or less, the way gcc's early inliner does, and leaves the rest to the second pass, which now refuses a growing call on a path run less than once in a thousand calls and takes the body of a static function off the unit size once its last call is copied (#3948)
 - The inliner's second pass counts a function out of line 3 larger than its body, for the overhead and the return gcc counts in it, so a static function whose calls are all copied saves what it does in gcc and `lib/maple_tree.c` no longer hits the unit growth limit early (#3949)
 - The inliner no longer lets a constant a call passes settle a branch read through `__builtin_expect` when it weighs the copy, since gcc's summary keeps the hint as a call, so `__tlb_remove_folio_pages_size` in mm/mmu_gather.c weighs what it does in gcc (#3950)
+- A body the inliner copies into a caller no longer takes the stack slot of a body it sits inside, which in kernel/time/timer.c let a local zeroed in `add_timer` overwrite the saved `flags` and left interrupts off after the unlock (#3951)
 
 ## 0.30.13
 

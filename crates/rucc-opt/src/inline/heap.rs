@@ -734,7 +734,7 @@ impl Heap<'_> {
         }
         let layout = module.datalayout;
         let own = self.own.get(&caller).copied().unwrap_or_else(|| frame(func, layout));
-        let body = pool.growth(target, layout);
+        let body = pool.growth(target, call, layout);
         let bound = self.frames.get(&caller).copied();
         if !bound.is_some_and(|now| fits(own, now, body, self.how.growth)) {
             let now = frame(func, layout);

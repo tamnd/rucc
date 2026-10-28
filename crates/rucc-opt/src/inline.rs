@@ -1367,7 +1367,7 @@ fn settle(
             grown
         });
         if kind != Kind::Always {
-            let body = pool.growth(&module[callee], module.datalayout);
+            let body = pool.growth(&module[callee], call, module.datalayout);
             if !fits(own, grown, body, how.growth) {
                 grown = frame(&module[id], module.datalayout);
                 if !fits(own, grown, body, how.growth) {
@@ -2241,6 +2241,12 @@ fn calls_twice(module: &Module, func: &Func, names: &Interner) -> bool {
 /// may be wanted across every call it makes, and a body inside a body already spliced came in with
 /// that body and was pooled or not there, in the callee.
 ///
+/// The heap does copy calls that a copy brought, though, and such a call is made while the locals
+/// of every body it sits in are still wanted. So a slot is never taken by a splice inside a body
+/// that holds it. In kernel/time/timer.c the heap copied `__mod_timer` into `add_timer` and then a
+/// call inside that copy, and the local the call zeroed was the `flags` slot that
+/// `lock_timer_base` had filled. The unlock restored flags of zero and left interrupts off.
+///
 /// Only slots of the same size are shared, for the reason the lowering gives for its own sharing:
 /// the size of an `alloca` is the size every later pass reads as the object's, and
 /// `__builtin_object_size` would answer for the smaller with the larger. One slot is taken at most
@@ -2259,8 +2265,14 @@ struct Pool {
     on: bool,
     /// Which splice this is, counting from one.
     site: u32,
-    /// The slots so far, each with its size and the last splice that took it.
-    slots: Vec<(Inst, u64, u32)>,
+    /// The slots so far, each with its size and every splice that has a local in it.
+    slots: Vec<(Inst, u64, Vec<u32>)>,
+    /// The splice that brought each call it copied in, for a call the heap copies later.
+    brought: Map<Inst, u32>,
+    /// The splice whose body each splice was inside, for one that was inside one.
+    inside: Map<u32, u32>,
+    /// This splice and the ones whose bodies it is inside, none of whose slots it can take.
+    live: Vec<u32>,
     /// The largest clique the caller's accesses name, worked out at the first splice and kept up
     /// to date by each one after it, which only adds accesses. Working it out again for each splice
     /// walked the whole caller each time, and blake2b.c at `-O2` inlines `rotr64` into one body
@@ -2349,12 +2361,11 @@ impl Pool {
             return None;
         }
         let wanted = callee[mem];
-        let site = self.site;
-        let (inst, _, taken) = self
-            .slots
-            .iter_mut()
-            .find(|&&mut (_, size, taken)| size == wanted.size && taken != site)?;
-        *taken = site;
+        let live = &self.live;
+        let (inst, _, users) = self.slots.iter_mut().find(|(_, size, users)| {
+            *size == wanted.size && !users.iter().any(|user| live.contains(user))
+        })?;
+        users.push(self.site);
         let Extra::Mem(held) = func[*inst].extra else { return None };
         func.align_mem(held, wanted.align);
         // A slot that holds a local wanting a canary wants one whichever local is in it.
@@ -2362,11 +2373,38 @@ impl Pool {
         func[*inst].first_result
     }
 
-    /// How many bytes splicing `callee` in would add to the caller's frame, which is its [`frame`]
-    /// less the slots it would take over.
-    fn growth(&self, callee: &Func, layout: DataLayout) -> u64 {
+    /// The splices whose bodies `call` is inside, the innermost first, which is none for a call
+    /// the caller was written with.
+    fn around(&self, call: Inst) -> Vec<u32> {
+        let mut sites = Vec::new();
+        let mut at = self.brought.get(&call).copied();
+        while let Some(site) = at {
+            sites.push(site);
+            at = self.inside.get(&site).copied();
+        }
+        sites
+    }
+
+    /// Starts the splice that copies a body in place of `call`.
+    fn enter(&mut self, call: Inst) {
+        self.site += 1;
+        self.live = self.around(call);
+        if let Some(&outer) = self.live.first() {
+            self.inside.insert(self.site, outer);
+        }
+        self.live.push(self.site);
+    }
+
+    /// How many bytes splicing `callee` in place of `call` would add to the caller's frame, which
+    /// is its [`frame`] less the slots it would take over.
+    fn growth(&self, callee: &Func, call: Inst, layout: DataLayout) -> u64 {
+        let around = self.around(call);
         let mut free: Vec<u64> = if self.on {
-            self.slots.iter().map(|&(_, size, _)| size).collect()
+            self.slots
+                .iter()
+                .filter(|(_, _, users)| !users.iter().any(|user| around.contains(user)))
+                .map(|&(_, size, _)| size)
+                .collect()
         } else {
             Vec::new()
         };
@@ -2395,7 +2433,7 @@ impl Pool {
     fn add(&mut self, func: &Func, inst: Inst, callee: &Func, extra: Extra) {
         let Extra::Mem(mem) = extra else { return };
         if self.on && func[inst].first_result.is_some() {
-            self.slots.push((inst, callee[mem].size, self.site));
+            self.slots.push((inst, callee[mem].size, vec![self.site]));
         }
     }
 }
@@ -3208,7 +3246,7 @@ fn copy(
     }
     let mut exits = Vec::new();
     let mut made = Vec::new();
-    pool.site += 1;
+    pool.enter(call);
     for from in callee.blocks() {
         if !live[from.index()] {
             continue;
@@ -3258,6 +3296,9 @@ fn copy(
             }
             if data.opcode == Opcode::Return {
                 exits.push(new);
+            }
+            if matches!(opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall) {
+                pool.brought.insert(new, pool.site);
             }
             made.push((inst, new));
         }
@@ -4178,6 +4219,75 @@ block0(%0: i32):
         };
         assert_eq!(slots(true), [64, 640, 640]);
         assert_eq!(slots(false), [64, 640, 640, 640]);
+    }
+
+    /// A body the copy of another brought in is spliced while the locals of the outer body are
+    /// still wanted, so it takes none of their slots. Here `hold` keeps its local across the call
+    /// through the pointer it is given, which turns into a call to `zero` once `hold` is in `g`,
+    /// and the local `zero` clears must not be the one `hold` reads back after it.
+    #[test]
+    fn a_body_inside_a_spliced_body_takes_none_of_its_slots() {
+        let body = r#"
+func @use(ptr), linkage(external);
+func @take(i64), linkage(external);
+
+func @zero(), linkage(internal), attrs(always_inline) {
+block0:
+    %0 = alloca, size 8, align 8
+    %1 = iconst.i64 0
+    store %1 -> %0, align 8
+    call @use(%0) : (ptr)
+    return
+}
+
+func @hold(ptr), linkage(internal), attrs(always_inline) {
+block0(%0: ptr):
+    %1 = alloca, size 8, align 8
+    call @use(%1) : (ptr)
+    call_indirect %0() : ()
+    %2 = load.i64 %1, align 8
+    call @take(%2) : (i64)
+    return
+}
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @zero
+    call @hold(%0) : (ptr)
+    return
+}
+"#;
+        let mut names = Interner::new();
+        let text = format!("{HEAD}{body}");
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        run(
+            &mut module,
+            &names,
+            None,
+            false,
+            Isa::baseline(),
+            Growth::DEFAULT,
+            true,
+            Pic::Executable,
+            false,
+            None,
+        );
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the inliner left invalid IR, {errors:?}");
+        }
+        let g = module.funcs().find(|&id| names.resolve(module[id].name) == "g").expect("g");
+        let func = &module[g];
+        let out = rucc_ir::print(&module, &names);
+        let calls = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| matches!(func[inst].opcode, Opcode::Call | Opcode::CallIndirect));
+        assert_eq!(calls.count(), 3, "both bodies are in g\n{out}");
+        let slots = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Alloca);
+        assert_eq!(slots.count(), 2, "{out}");
     }
 
     /// A local that scalar replacement makes a value of keeps a slot of its own, and only the
