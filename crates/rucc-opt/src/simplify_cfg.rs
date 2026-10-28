@@ -161,12 +161,14 @@ use std::collections::VecDeque;
 use rucc_base::Idx;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Block, BlockCall, Def, Extra, Func, Hint, Imm, Inst, InstData, IntPred, Opcode, SwitchInfo,
-    Type, Value,
+    Block, BlockCall, Def, Extra, Flags, Func, Hint, Imm, Inst, InstData, IntPred, Opcode,
+    SwitchInfo, Type, Value,
 };
 
 use crate::copy::addressed;
 use crate::fold::constant;
+use crate::range::Range;
+use crate::range::ops::{self, Truth};
 use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats, uses};
 
 /// Recorded once for each branch that turned into a jump.
@@ -1507,9 +1509,74 @@ fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
     }
     let Extra::IntPred(pred) = data.extra else { return None };
     let args = &func[data.args];
-    let (lhs, ty) = numbered(func, resolve(subst, *args.first()?))?;
-    let (rhs, _) = numbered(func, resolve(subst, *args.get(1)?))?;
-    Some(crate::fold::compare(pred, lhs, rhs, ty))
+    let (lhs, rhs) = (resolve(subst, *args.first()?), resolve(subst, *args.get(1)?));
+    if let (Some((lhs, ty)), Some((rhs, _))) = (numbered(func, lhs), numbered(func, rhs)) {
+        return Some(crate::fold::compare(pred, lhs, rhs, ty));
+    }
+    // Not two constants, but the bits the edge leaves known can still settle it. An inlined
+    // `mte_parent_slot_mask` hands its caller 0xf8 or 0xfc as a block parameter, and the caller
+    // tests `(parent & 0xff & ~mask) == 6`. Along the edge that carries 0xfc the left side is at
+    // most 3, so the test is false there, which is the edge gcc threads in `mas_ascend`.
+    let (lhs, rhs) = (ranged(func, lhs, subst, RANGE_DEPTH), ranged(func, rhs, subst, RANGE_DEPTH));
+    if lhs.width() != rhs.width() {
+        return None;
+    }
+    match ops::compare(pred, lhs, rhs) {
+        Truth::Always => Some(true),
+        Truth::Never => Some(false),
+        Truth::Either => None,
+    }
+}
+
+/// How many instructions [`ranged`] looks back through.
+const RANGE_DEPTH: u32 = 4;
+
+/// What an integer can be along the edge, from the bitwise work that made it and what `subst`
+/// binds.
+///
+/// Only the operations whose range is worked out from the ranges of their operands alone, and only
+/// `depth` of them deep, so this stays a few steps per question. Anything else is every value of
+/// its type, which is always true.
+fn ranged(func: &Func, value: Value, subst: &Bindings, depth: u32) -> Range {
+    let value = resolve(subst, value);
+    let ty = func[value].ty;
+    if !ty.is_int() || !ty.is_scalar() {
+        return Range::of(ty);
+    }
+    let width = ty.bits();
+    if let Some((imm, _)) = constant(func, value) {
+        return Range::exactly(imm.unsigned(), width);
+    }
+    let Def::Result { inst, .. } = func[value].def else { return Range::of(ty) };
+    if depth == 0 {
+        return Range::of(ty);
+    }
+    let data = &func[inst];
+    let args = &func[data.args];
+    let operand = |index: usize| match args.get(index) {
+        Some(&arg) => ranged(func, arg, subst, depth - 1),
+        None => Range::of(ty),
+    };
+    match data.opcode {
+        Opcode::And | Opcode::Or | Opcode::Xor | Opcode::Shl | Opcode::LShr => {
+            let (a, b) = (operand(0), operand(1));
+            if a.width() != width || b.width() != width {
+                return Range::of(ty);
+            }
+            // No flags, since a shift that promised not to overflow is a promise about this
+            // program and a range is sound without it.
+            match data.opcode {
+                Opcode::And => ops::and(a, b),
+                Opcode::Or => ops::or(a, b),
+                Opcode::Xor => ops::xor(a, b),
+                Opcode::Shl => ops::shl(a, b, Flags::NONE),
+                _ => ops::lshr(a, b, Flags::NONE),
+            }
+        }
+        Opcode::Trunc => ops::trunc(operand(0), width),
+        Opcode::ZExt => ops::zext(operand(0), width),
+        _ => Range::of(ty),
+    }
 }
 
 /// The constant this value is, or the constant a pointer made from one is, which is how a null

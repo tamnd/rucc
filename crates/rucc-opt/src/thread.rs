@@ -1772,6 +1772,51 @@ mod tests {
     }
 
     #[test]
+    fn an_edge_whose_mask_leaves_the_test_no_way_to_hold_is_threaded() {
+        // `(x & ~mask) == 6`, with the mask 0xf8 on one way in and 0xfc on the other. Along the
+        // second the left side is at most 3, so the test is false whatever `x` is. Along the first
+        // it can still be 6.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(64)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let x = func.append_param(entry, Type::int(64));
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let mask = func.append_param(join, Type::int(64));
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let two = build.iconst(Type::int(64), 2);
+        let bit = build.binary(Opcode::And, x, two, Flags::NONE);
+        let zero = build.iconst(Type::int(64), 0);
+        let set = build.icmp(IntPred::Ne, bit, zero);
+        build.br_if(set, arms[0], &[], arms[1], &[]);
+        for (arm, value) in arms.iter().zip([0xf8, 0xfc]) {
+            let mut build = Builder::new(&mut func, *arm);
+            let it = build.iconst(Type::int(64), value);
+            build.jump(join, &[it]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        let ones = build.iconst(Type::int(64), -1);
+        let not = build.binary(Opcode::Xor, mask, ones, Flags::NONE);
+        let low = build.binary(Opcode::And, x, not, Flags::NONE);
+        let six = build.iconst(Type::int(64), 6);
+        let test = build.icmp(IntPred::Eq, low, six);
+        build.br_if(test, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        let stats = thread(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
+        assert_eq!(goes_to(&func, arms[0].index()), vec![join.index()]);
+        assert_eq!(goes_to(&func, arms[1].index()), vec![no.index()]);
+    }
+
+    #[test]
     fn a_join_that_tests_the_not_of_a_bit_it_was_given_is_threaded() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"), Signature::new());
