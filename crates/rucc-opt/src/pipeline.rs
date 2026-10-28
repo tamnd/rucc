@@ -463,7 +463,7 @@ const O2: &[&str] = &[
     "header-copy",
     "canon",
     "licm",
-    "unroll",
+    "unroll-free",
     "simplify-cfg",
     "sccp",
     "thread",
@@ -969,6 +969,16 @@ impl Options {
         names.dedup();
         for (name, on) in &self.toggles {
             let name = name.as_str();
+            // `-funroll-loops` is gcc's leave for the copies to grow, so the unroller that may grow
+            // them goes where the one that may not was, and `-fno-unroll-loops` takes out both.
+            let free = crate::unroll::FREE.name();
+            if name == crate::unroll::ANY.name() && names.contains(&free) {
+                if *on {
+                    names.iter_mut().filter(|it| **it == free).for_each(|it| *it = name);
+                } else {
+                    names.retain(|it| *it != free);
+                }
+            }
             match *on {
                 true if !names.contains(&name) => names.push(name),
                 true => {}
@@ -1934,7 +1944,8 @@ mod tests {
         assert_eq!(adds_of_zero(&module), 0, "the fixture already has one before anything runs");
         let report = super::run(&mut module, &mut names, &Options::for_level(OptLevel::O2));
         assert!(report.broke.is_empty(), "{:?}", report.broke);
-        assert!(spent(&report, "unroll").is_some_and(|it| it > 0), "the loop was not unrolled");
+        let spent = spent(&report, "unroll-free");
+        assert!(spent.is_some_and(|it| it > 0), "the loop was not unrolled");
         assert_eq!(adds_of_zero(&module), 0, "{}", rucc_ir::print(&module, &names));
     }
 
@@ -2082,6 +2093,24 @@ mod tests {
         // level itself, and issue 359.
         assert_eq!(names(&Options::for_level(OptLevel::O0)), ["expect", "simplify-cfg"]);
         assert!(names(&Options::for_level(OptLevel::O2)).len() > 1);
+    }
+
+    /// `-funroll-loops` at `-O2` puts the unroller that may grow the code where the one that may
+    /// not was, rather than at the end of the list, and `-fno-unroll-loops` takes out either.
+    #[test]
+    fn the_gcc_unroll_flag_swaps_the_unroller_in_place() {
+        let plain = names(&Options::for_level(OptLevel::O2));
+        let at = plain.iter().position(|it| *it == "unroll-free").expect("-O2 unrolls");
+        assert!(!plain.contains(&"unroll"), "{plain:?}");
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.toggles.push(("unroll".to_owned(), true));
+        let grown = names(&opts);
+        assert_eq!(grown.iter().position(|it| *it == "unroll"), Some(at), "{grown:?}");
+        assert!(!grown.contains(&"unroll-free"), "{grown:?}");
+        let mut opts = Options::for_level(OptLevel::O2);
+        opts.toggles.push(("unroll".to_owned(), false));
+        let none = names(&opts);
+        assert!(!none.iter().any(|it| it.starts_with("unroll")), "{none:?}");
     }
 
     #[test]
