@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- On x86-64 a run of two or more stores of a zero in one block now stores it from a register, so a structure cleared a field at a time is `movq %rax, 8(%rsp)` at five bytes rather than `movq $0, 8(%rsp)` at nine (#3957)
+
 ## 0.30.15
 
 This patch release has the changes of 0.30.14, which was tagged but not published because its tag check found the feature table in `docs/FEATURES.md` out of date. It also fixes a stack slot that the inliner gave to two bodies, lets jump threading decide more branches in inlined kernel code, reads the kernel's `current` once per function, asks for huge pages only when the kernel has free blocks of 2 MiB, and makes `-E` faster on large files.

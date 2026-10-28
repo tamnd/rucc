@@ -1138,6 +1138,11 @@ pub fn compile_recording(
     if std::ptr::eq(machine.shapes, &x86::MACHINE) && !elsewhere.based() {
         fold::named_stores(&mut func, names, machine.shapes);
     }
+    // A run of stores of a zero reads it from a register on x86-64. After the folds, which may
+    // have put a store's address together, and only where a level optimizes.
+    if flags.reloads && std::ptr::eq(machine.shapes, &x86_64::MACHINE) {
+        fold::zeros(&mut func, names, machine.shapes, machine.conv.int_class);
+    }
     // AArch64's loads and stores carry the low bits of a variable's address, so its `add` goes.
     // After the folds above, which have nothing to say about a symbol on this machine, and before
     // allocation, while each address is one register written once.
