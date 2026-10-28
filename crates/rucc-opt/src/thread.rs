@@ -281,7 +281,7 @@ impl Pass for Thread {
         let mut spare = Spare::default();
         let mut seen = Seen::default();
         'blocks: for block in func.blocks().collect::<Vec<Block>>() {
-            if block == entry || func[block].params.is_empty() {
+            if block == entry {
                 continue;
             }
             let Some(term) = func.terminator(block) else { continue };
@@ -305,7 +305,9 @@ impl Pass for Thread {
                     continue;
                 }
                 let subst = bind(func, block, at);
-                let Some(call) = taken(func, term, &subst) else { continue };
+                let decided = taken(func, term, &subst)
+                    .or_else(|| above(func, &edges, block, term, &subst, from, at));
+                let Some(call) = decided else { continue };
                 if call.block == block {
                     continue;
                 }
@@ -1375,6 +1377,60 @@ fn implied(
     func[targets].get(usize::from(!held)).copied()
 }
 
+/// How many blocks with one way in [`above`] walks back through before giving up.
+const ABOVE: usize = 8;
+
+/// Where `term` goes when control came along edge `at` out of `from`, decided by a branch on the
+/// same condition further up.
+///
+/// The edge itself is asked first, as [`implied`] does. Past that, a block with exactly one way
+/// in is only ever reached along that one edge, so a branch at the far end of a chain of them has
+/// told every path through the chain what its condition was. That is `if (!x) return; if (x & 1)
+/// a(); if (x) b();` once the first test has been inlined from a helper, where the join before
+/// the last test is reached from inside the arm that already knows `x` is not zero.
+///
+/// A condition worked out in `join` itself, or from something `join` works out, is a new value
+/// each time control arrives there, so what a branch said about it on an earlier trip around a
+/// loop is not about this one. Neither is a chain that passes through `join` on its way back.
+fn above(
+    func: &Func,
+    edges: &Edges,
+    join: Block,
+    term: Inst,
+    subst: &Bindings,
+    from: Block,
+    at: Idx<BlockCall>,
+) -> Option<BlockCall> {
+    let asked = *func[func[term].args].first()?;
+    let asked = subst.get(&asked).copied().unwrap_or(asked);
+    let fresh = |value: Value| {
+        let value = subst.get(&value).copied().unwrap_or(value);
+        defined_in(func, value) == Some(join)
+    };
+    let made = match func[asked].def {
+        Def::Result { inst, .. } => func[func[inst].args].iter().any(|&arg| fresh(arg)),
+        Def::Param { .. } => false,
+    };
+    if fresh(asked) || made {
+        return None;
+    }
+    if let Some(call) = implied(func, term, subst, from, at) {
+        return Some(call);
+    }
+    let mut block = from;
+    for _ in 0..ABOVE {
+        let [(up, slot)] = edges.get(&block)?[..] else { return None };
+        if up == block || up == from || up == join {
+            return None;
+        }
+        if let Some(call) = implied(func, term, subst, up, slot) {
+            return Some(call);
+        }
+        block = up;
+    }
+    None
+}
+
 /// Whether two conditions are one, either the same value or the same comparison of the same two
 /// values once `subst` has said what the first one's operands stand for.
 fn same_test(func: &Func, asked: Value, known: Value, subst: &Bindings) -> bool {
@@ -1844,6 +1900,80 @@ mod tests {
         assert_eq!(goes_to(&func, 1), vec![4]);
         assert_eq!(goes_to(&func, 2), vec![5]);
         assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn a_join_that_tests_what_a_branch_above_it_already_tested_is_threaded() {
+        // `if (x) { a(); } if (x) b();` with the first arm two blocks long, so the edge into the
+        // join from it is only decided by walking back to the branch that started the arm.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(64)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let x = func.append_param(entry, Type::int(64));
+        let first = func.create_block();
+        let second = func.create_block();
+        let join = func.create_block();
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(64), 0);
+        let set = build.icmp(IntPred::Ne, x, zero);
+        build.br_if(set, first, &[], join, &[]);
+        let mut build = Builder::new(&mut func, first);
+        build.jump(second, &[]);
+        let mut build = Builder::new(&mut func, second);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        build.br_if(set, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        let stats = copying_with(&FREE, &mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
+        assert_eq!(goes_to(&func, 0), vec![1, 5]);
+        assert_eq!(goes_to(&func, 2), vec![4]);
+        assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn a_test_the_join_works_out_again_on_each_trip_is_not_decided_from_the_last_one() {
+        // The loop's body branches on the join's own comparison, but by the time the latch is
+        // back at the join the comparison is of the next value, so the body's branch says nothing.
+        // The join's way into the body is the same trip and is decided, which is the one thread.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let start = func.append_param(entry, Type::int(32));
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+        let body = func.create_block();
+        let latch = func.create_block();
+        let exit = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        build.jump(join, &[start]);
+        let mut build = Builder::new(&mut func, join);
+        let one = build.iconst(Type::int(32), 1);
+        let next = build.binary(Opcode::Add, param, one, Flags::NONE);
+        let ten = build.iconst(Type::int(32), 10);
+        let done = build.icmp(IntPred::Eq, next, ten);
+        build.br_if(done, exit, &[], body, &[]);
+        let mut build = Builder::new(&mut func, body);
+        build.br_if(done, exit, &[], latch, &[]);
+        let mut build = Builder::new(&mut func, latch);
+        build.jump(join, &[next]);
+        let mut build = Builder::new(&mut func, exit);
+        build.ret(&[]);
+
+        let stats = copying_with(&FREE, &mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
+        assert_eq!(goes_to(&func, 1), vec![4, 3]);
+        assert_eq!(goes_to(&func, 3), vec![1]);
     }
 
     #[test]
@@ -2533,9 +2663,12 @@ mod tests {
         let region = crate::machine::fixtures::analyses().loops(&func).irreducible().to_vec();
         assert_eq!(region, [Block::from_usize(1), Block::from_usize(2), Block::from_usize(3)]);
         let stats = thread(&mut func);
-        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
+        // The second is the entry's way into `second`, which tests the condition the entry
+        // already went that way on.
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
         assert_eq!(stats.count(Kind::Missed, super::WOULD_BREAK_A_LOOP), 0);
         assert_eq!(goes_to(&func, 1), vec![3]);
+        assert_eq!(goes_to(&func, 0), vec![1, 4]);
     }
 
     #[test]
