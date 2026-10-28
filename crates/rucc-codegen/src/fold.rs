@@ -949,7 +949,7 @@ const ZERO_GAP: usize = 8;
 /// shorter still and slower to start.
 ///
 /// A call or anything this machine does not describe ends a run, since a zero kept across a call
-/// is a callee saved register, and so does a gap of more than [`ZERO_GAP`] instructions, so the
+/// is a callee saved register, and so does a gap of more than `ZERO_GAP` instructions, so the
 /// register is live only where it is used. Before allocation, while the zero is a register of its
 /// own.
 pub fn zeros(
