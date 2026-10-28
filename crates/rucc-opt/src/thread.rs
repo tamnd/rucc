@@ -2588,9 +2588,12 @@ mod tests {
         let region = crate::machine::fixtures::analyses().loops(&func).irreducible().to_vec();
         assert_eq!(region, [Block::from_usize(1), Block::from_usize(2), Block::from_usize(3)]);
         let stats = thread(&mut func);
-        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
+        // The second thread is the entry's false edge into block 3, which tests the entry's
+        // parameter again and so goes out to block 4 whenever it is reached that way.
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
         assert_eq!(stats.count(Kind::Missed, super::WOULD_BREAK_A_LOOP), 0);
         assert_eq!(goes_to(&func, 1), vec![3]);
+        assert_eq!(goes_to(&func, 0), vec![1, 4]);
     }
 
     #[test]
