@@ -492,6 +492,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 "nobss" => global.nobss = true,
                 "nodirect_extern_access" => global.indirect = true,
                 "shared" => global.shared = true,
+                "redzone" => global.redzone = self.u64()?,
                 other => return self.fail(format!("a global has no `{other}`")),
             }
         }

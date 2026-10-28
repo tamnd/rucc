@@ -588,6 +588,14 @@ pub struct CallRegs {
     /// ever touches. `-mstrict-align` makes it false there, and then a load or store less aligned
     /// than its width is split too. See [`CallRegs::strictly_aligned`].
     pub unaligned: bool,
+    /// The largest copy or fill of a known size written as a loop of words, in a function without
+    /// the vector registers, when it is too large for a run of moves. Zero for none.
+    ///
+    /// Two hundred and fifty six on x86-64, which is where gcc 16 stops writing the loop and calls
+    /// `memcpy` or `memset` under `-mno-sse`, so a kernel built for x86-64 makes the same calls.
+    /// Zero everywhere else, which keeps the threshold of `cargo xtask stringop`. See the
+    /// `rolled` lowering in `rucc-codegen`.
+    pub rolled: u32,
     /// The widths in bits a byte reversal is one instruction at, which the selector has a rule for.
     ///
     /// Sixteen, thirty two and sixty four on x86-64, where the two wider ones are `bswap` and the
@@ -1271,6 +1279,7 @@ mod tests {
             fenced: false,
             rmw_bits: 8,
             unaligned: true,
+            rolled: 0,
             byte_swaps: &[16, 32, 64],
             push: 8,
             link: None,

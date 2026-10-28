@@ -21,6 +21,15 @@ __attribute__((noinline)) void cp16(struct two *d, struct two *s) { *d = *s; }
 __attribute__((noinline)) void cp(void *d, const void *s, u64 n) { __builtin_memcpy(d, s, n); }
 __attribute__((noinline)) int over(int i) { int a[8] = {0}; a[i] = 1; return a[i ^ 1]; }
 __attribute__((no_sanitize_address)) int quiet(int *p) { return *p; }
+int table[10];
+__attribute__((noinline)) int xadd(int *p) { return __atomic_fetch_add(p, 1, 5); }
+__attribute__((noinline)) int at(int i) { return table[i]; }
+__attribute__((noinline)) char vla(int n, int i) {
+    char a[n];
+    for (int k = 0; k < n; k++)
+        a[k] = k;
+    return a[i];
+}
 #ifdef __SANITIZE_ADDRESS__
 int sanitizes_address;
 #endif
@@ -41,11 +50,13 @@ static volatile int reports, kind;
 static void *volatile last;
 QUIET static void report(void *p, int k) { reports++; last = p; kind = k; }
 QUIET void __asan_report_load1_noabort(void *p) { report(p, 1); }
+QUIET void __asan_report_store1_noabort(void *p) { report(p, 11); }
 QUIET void __asan_report_load4_noabort(void *p) { report(p, 4); }
 QUIET void __asan_report_store4_noabort(void *p) { report(p, 14); }
 QUIET void __asan_report_load8_noabort(void *p) { report(p, 8); }
 QUIET void __asan_report_load16_noabort(void *p) { report(p, 16); }
 QUIET void __asan_report_store16_noabort(void *p) { report(p, 116); }
+QUIET void __asan_store4_noabort(void *p) { report(p, 24); }
 QUIET void __asan_report_load_n_noabort(void *p, u64 n) { report(p, 1000 + (int)n); }
 QUIET void *__asan_memcpy(void *d, const void *s, u64 n) {
     char *to = d;
@@ -72,6 +83,67 @@ QUIET static int frames(void) {
     return 0;
 }
 QUIET static int saw(int count, void *p, int k) { return reports == count && last == p && kind == k; }
+// The kernel's `struct kasan_global`, and what `__asan_register_globals` does with it: the shadow
+// of the redzone after each global says its bytes are not to be used.
+struct global { u64 beg, size, size_with_redzone; const char *name, *module; u64 dynamic, at, odr; };
+static volatile int registered;
+QUIET void __asan_register_globals(struct global *g, u64 n) {
+    for (; n--; g++) {
+        signed char *s = (signed char *)((g->beg >> 3) + 0x100000000000UL);
+        u64 end = (u64)s + g->size_with_redzone / 8;
+        for (u64 page = (u64)s & ~4095UL; page < end; page += 4096)
+            mmap((void *)page, 4096, 3, 0x100022, -1, 0);
+        for (u64 b = g->size / 8; b < g->size_with_redzone / 8; b++)
+            s[b] = -7;
+        if (g->size % 8)
+            s[g->size / 8] = g->size % 8;
+        registered++;
+    }
+}
+QUIET void __asan_unregister_globals(struct global *g, u64 n) {}
+QUIET static int globals(void) {
+    if (registered == 0)
+        return 70;
+    if (at(9) != 0 || reports != 9)
+        return 71;
+    if (at(10) != 0 || !saw(10, &table[10], 4))
+        return 72;
+    // An atomic is a call whatever the shadow says, and the runtime does the check.
+    if (xadd((int *)(BUF + 64)) != 9 || !saw(11, BUF + 64, 24) || *(int *)(BUF + 64) != 10)
+        return 73;
+    return 0;
+}
+// What the kernel's `__asan_alloca_poison` and `__asan_allocas_unpoison` do with the shadow.
+#define SHADOW_OF(p) (*(signed char *)(((u64)(p) >> 3) + 0x100000000000UL))
+static volatile int poisoned, unpoisoned;
+QUIET void __asan_alloca_poison(char *a, u64 n) {
+    u64 end = ((n + 31) & ~31UL) + 32;
+    poisoned += (u64)a % 32 ? 100 : 1;
+    for (int b = 1; b <= 4; b++)
+        SHADOW_OF(a - 8 * b) = -54;
+    for (u64 b = 0; b < end; b += 8)
+        SHADOW_OF(a + b) = b + 8 <= n ? 0 : b < n ? (signed char)(n - b) : -53;
+}
+QUIET void __asan_allocas_unpoison(char *top, char *bottom) {
+    unpoisoned++;
+    for (; top < bottom; top += 8)
+        SHADOW_OF(top) = 0;
+}
+QUIET static int allocas(void) {
+    char probe;
+    if (vla(20, 19) != 19 || reports != 11 || poisoned != 1 || unpoisoned == 0)
+        return 80;
+    vla(20, 20);
+    if (reports != 12 || kind != 1)
+        return 82;
+    vla(20, -1);
+    if (reports != 13 || kind != 1 || poisoned != 3)
+        return 83;
+    for (char *p = &probe - 4096; p < &probe; p += 8)
+        if (SHADOW_OF(p) != 0)
+            return 84;
+    return 0;
+}
 QUIET int main(void) {
     if (mmap(BUF, 1 << 16, 3, 0x32, -1, 0) != BUF || mmap(SHADOW, 1 << 13, 3, 0x32, -1, 0) != SHADOW)
         return 40;
@@ -108,7 +180,9 @@ QUIET int main(void) {
         return 51;
     if (ldu((struct pk *)(BUF + 9)) != 9 << 16 || !saw(7, BUF + 10, 1004))
         return 52;
-    return frames();
+    int bad = frames();
+    bad = bad ? bad : globals();
+    return bad ? bad : allocas();
 }
 "#;
 
@@ -198,6 +272,46 @@ fn every_access_reads_its_shadow_and_reports_with_gcc_names() {
     let (_, cp16) = listing("x86_64-unknown-linux-gnu", &args, "cp16");
     assert!(cp16.contains("__asan_report_load16_noabort"), "an aligned copy:\n{cp16}");
     assert!(cp16.contains("__asan_report_store16_noabort"), "an aligned copy:\n{cp16}");
+    let (_, xadd) = listing("x86_64-unknown-linux-gnu", &args, "xadd");
+    assert!(xadd.contains("call\t__asan_store4_noabort"), "an atomic is a call:\n{xadd}");
+    assert!(!xadd.contains("shrq"), "and has no inline check:\n{xadd}");
+}
+
+#[test]
+fn a_global_gets_a_redzone_and_a_line_in_the_table() {
+    let mut args = vec!["-O2"];
+    args.extend(KERNEL);
+    let (text, _) = listing("x86_64-unknown-linux-gnu", &args, "at");
+    let start = text.find("\ntable:").expect("the array is defined");
+    let table = &text[start..];
+    assert!(text.contains("\t.p2align\t5\n\t.type\ttable, @object\n"), "aligned to 32:\n{text}");
+    assert!(
+        table.contains("\t.size\ttable, .-table\n\t.space\t56\n"),
+        "a redzone after the size:\n{text}"
+    );
+    for word in
+        ["\t.quad\ttable\n\t.quad\t40\n\t.quad\t96\n", "\"table\\000\"", "__asan_gen_module"]
+    {
+        assert!(text.contains(word), "{word}:\n{text}");
+    }
+    assert!(text.contains(".init_array"), "{text}");
+    assert!(text.contains("\tjmp\t__asan_register_globals"), "{text}");
+    assert!(text.contains("\tjmp\t__asan_unregister_globals"), "{text}");
+}
+
+#[test]
+fn the_memory_of_a_variable_length_array_has_redzones_around_it() {
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] {
+        let mut args = vec!["-O2"];
+        args.extend(KERNEL);
+        args.extend(["--param", "asan-instrument-allocas=1"]);
+        let (_, vla) = listing(target, &args, "vla");
+        assert_eq!(vla.matches("__asan_alloca_poison").count(), 1, "{target}:\n{vla}");
+        assert!(vla.contains("__asan_allocas_unpoison"), "{target}:\n{vla}");
+        args.extend(["--param", "asan-instrument-allocas=0"]);
+        let (_, vla) = listing(target, &args, "vla");
+        assert!(!vla.contains("__asan_alloca"), "{target}:\n{vla}");
+    }
 }
 
 #[test]
@@ -219,6 +333,7 @@ fn the_settings_the_kernel_gives_are_read() {
     assert!(!text.contains("__asan_report"), "{text}");
     assert!(!text.contains("__asan_memcpy"), "the routines are named only when asked:\n{text}");
     assert!(!text.contains("__asan_gen_frame"), "asan-stack=0 makes no frame record:\n{text}");
+    assert!(!text.contains("__asan_register_globals"), "asan-globals=0 makes no table:\n{text}");
 
     let (text, _) =
         listing(target, &["-O2", "-fsanitize=kernel-address", "-fno-sanitize-recover=all"], "ld4");
@@ -283,10 +398,6 @@ fn a_fill_or_copy_the_source_spells_is_the_runtime_call() {
 #[test]
 fn what_is_not_made_yet_is_refused() {
     let on = "-fsanitize=kernel-address";
-    for param in ["asan-globals=1", "asan-instrument-allocas=1"] {
-        let said = refused(&[on, "--param", param, "-S", "-o", "-"]);
-        assert!(said.contains("redzones"), "{param}: {said}");
-    }
     let said = refused(&["-fasan-shadow-offset=0x1000", "-S", "-o", "-"]);
     assert!(said.contains("should only be used with -fsanitize=kernel-address"), "{said}");
     let said = refused(&["--target=riscv64-unknown-linux-gnu", on, "-S", "-o", "-"]);

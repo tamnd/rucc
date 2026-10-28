@@ -372,3 +372,48 @@ fn a_function_called_once_is_weighed_as_gcc_weighs_it() {
     assert_eq!(reaches(&listing, "run", "many"), 0, "{listing}");
     assert_eq!(reaches(&listing, "run", "work"), 1500);
 }
+
+/// `vma_start_read` in the kernel's mm/mmap_lock.c, cut down. The puts on its two unlikely paths
+/// are too large for gcc's early inliner, and gcc weighs the body for the callers with them still
+/// calls, so it is under the limit and goes into both. Weighed with the puts in it, and with the
+/// hints not read because `__builtin_expect` is still an instruction when the inliner runs, it was
+/// over the limit here and stayed a call.
+#[test]
+fn a_large_copy_on_an_unlikely_path_is_not_counted_against_the_body_it_went_into() {
+    let source = "struct obj { int ref; int seq; long a, b, c, d; void *owner; };\n\
+        void wake(struct obj *, long);\n\
+        void note(long);\n\
+        static inline int get_ref(int *r) {\n\
+            int old = __atomic_load_n(r, 0);\n\
+            do {\n\
+                if (!old || old > 1000) return 0;\n\
+            } while (!__atomic_compare_exchange_n(r, &old, old + 1, 0, 2, 0));\n\
+            return 1;\n\
+        }\n\
+        static inline void put_ref(struct obj *o) {\n\
+            int left = __atomic_sub_fetch(&o->ref, 1, 3);\n\
+            if (left == 1) wake(o, o->a * o->b + o->c);\n\
+            else if (left == 2) wake(o + 1, o->c - o->d);\n\
+            else if (left == 4) wake(o + 4, o->a * 4 + o->b);\n\
+            else if (left == 5) wake(o + 5, o->a * 5 + o->b);\n\
+            else if (left == 6) wake(o + 6, o->a * 6 + o->b);\n\
+            else if (left == 3) note(o->a ^ o->d);\n\
+        }\n\
+        static inline struct obj *start_read(struct obj *o, void *owner, int seq) {\n\
+            if (__atomic_load_n(&o->seq, 0) == seq) return 0;\n\
+            if (!get_ref(&o->ref)) return 0;\n\
+            if (__builtin_expect(o->owner != owner, 0)) { put_ref(o); return 0; }\n\
+            if (__builtin_expect(__atomic_load_n(&o->seq, 2) == seq, 0)) {\n\
+                put_ref(o);\n\
+                return 0;\n\
+            }\n\
+            note(o->c * o->d);\n\
+            return o;\n\
+        }\n\
+        struct obj *one(struct obj *o, void *w, int s) { return start_read(o, w, s); }\n\
+        struct obj *two(struct obj *o, void *w, int s) { return start_read(o + 1, w, s); }\n";
+    let listing = asm("unlikely", &["-O2"], source);
+    for caller in ["one", "two"] {
+        assert_eq!(reaches(&listing, caller, "start_read"), 0, "{caller}:\n{listing}");
+    }
+}

@@ -124,7 +124,9 @@ use crate::Stats;
 use crate::callgraph::trusted;
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
+use crate::frequency::Frequencies;
 use crate::loops::Loops;
+use crate::predict::{Callees, Predictor};
 
 mod heap;
 mod summary;
@@ -525,6 +527,7 @@ pub fn run(
             later,
             sizes: &sizes,
             summaries: RefCell::default(),
+            late: RefCell::default(),
         };
         let mut state = Map::default();
         for id in module.funcs().collect::<Vec<FuncId>>() {
@@ -576,6 +579,7 @@ pub fn run(
             later: None,
             sizes: &sizes,
             summaries: RefCell::default(),
+            late: RefCell::default(),
         };
         done.extend(heap::run(module, &how, &later, &own, second, pic));
         // The heap takes the blocks its copies stranded out of each caller once it is finished,
@@ -952,6 +956,27 @@ fn runs_once(func: &Func, names: &Interner) -> bool {
     !func.attrs.set.contains(AttrSet::HOT) && (main || func.attrs.set.contains(AttrSet::NORETURN))
 }
 
+/// The direct calls a function makes under `unlikely`, in blocks its static profile says run a
+/// tenth as often as it is entered or less with a branch on `__builtin_expect` above them. A call
+/// in one of ten arms of a `switch` runs as seldom, but nobody said it would, and the arms of the
+/// one in `mas_wr_store_entry` in lib/maple_tree.c taken for that put it in six callers.
+fn rare_calls(func: &Func) -> Set<Inst> {
+    let cfg = Cfg::new(func);
+    let dom = Dominators::new(&cfg);
+    let loops = Loops::new(&cfg, &dom);
+    let guessed = Frequencies::of(func, &cfg, &loops, &Callees::nothing());
+    let entry = guessed.entry().raw().max(1) as f64;
+    let claimed = |block: Block| {
+        std::iter::successors(dom.immediate_dominator(block), |&up| dom.immediate_dominator(up))
+            .any(|up| guessed.told().by(up) == Predictor::Expect)
+    };
+    func.blocks()
+        .filter(|&block| guessed.get(block).raw() as f64 <= entry / 10.0 && claimed(block))
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Call)
+        .collect()
+}
+
 /// The direct calls a function makes outside its loops.
 fn flat(func: &Func) -> Set<Inst> {
     let cfg = Cfg::new(func);
@@ -1006,6 +1031,11 @@ struct How<'a> {
     /// The summary of each callee a call declared `inline` or small enough to take was weighed
     /// against, made the first time one is and kept for the round for the same reason as `sizes`.
     summaries: RefCell<Map<FuncId, summary::Summary>>,
+    /// How much of each body is copies gcc's early inliner would have left as calls, which grow
+    /// the body by more than [`How::early`]. gcc measures a callee declared `inline` before those
+    /// are in it and copies them into the caller after, a call at a time, so they are not counted
+    /// against the callee here either.
+    late: RefCell<Map<FuncId, usize>>,
 }
 
 /// What [`How::specialized_size`] keeps an answer under: the callee, how many values, instructions
@@ -1196,6 +1226,9 @@ fn settle(
     };
     let mut stats = Stats::new();
     let mut spliced = false;
+    // The calls in the body that run a tenth as often as it is entered or less, worked out the
+    // first time a copy needs to know. See [`How::late`].
+    let mut rare: Option<Set<Inst>> = None;
     let mut pool = Pool { on: how.share, results: Some(Results::default()), ..Pool::default() };
     let mut next = 0;
     while let Some(&(_, call, callee, kind)) = calls.get(next) {
@@ -1263,6 +1296,8 @@ fn settle(
             ),
             Kind::Always | Kind::Small => (size(&module[callee]), false),
         };
+        let whole = large;
+        let late = how.late.borrow().get(&callee).copied().unwrap_or(0);
         // A call to a function that never comes back is one gcc predicts is never made, so it
         // is no more hot than one in a cold function. `machine_real_restart` in
         // arch/x86/kernel/reboot.c ends in an `ljmpl` objtool only accepts there, and gcc keeps
@@ -1282,6 +1317,12 @@ fn settle(
             let values = passed(&module[id], call, &module[callee]);
             let weighed = (kind == Kind::Auto).then_some(how.names);
             large = large.min(how.specialized_size(module, callee, &values, weighed));
+        }
+        // `vma_start_read` in mm/mmap_lock.c is 57 to gcc when it weighs it for
+        // `lock_vma_under_rcu` on every page fault, with the two puts on its unlikely paths still
+        // calls in it. Weighed with them in it was over 70 here, and it stayed a call.
+        if kind == Kind::Hinted {
+            large = large.saturating_sub(late);
         }
         if large > most {
             // Left for the second pass to weigh with its hints, which says why if it refuses too.
@@ -1320,9 +1361,35 @@ fn settle(
             }
         }
         let mark = module[id].counts().insts;
+        // gcc's early inliner leaves a copy that grows the body by more than `early`, and its
+        // second takes the calls in the order of what they save. One on a path the body rarely
+        // takes comes after the call to the body, which goes in first, and comes into the caller
+        // with it. One on the path the body always takes goes in first.
+        let mut left = None;
+        if kind == Kind::Hinted
+            && rare.get_or_insert_with(|| rare_calls(&module[id])).contains(&call)
+        {
+            let cost = 1
+                + module[id][module[id][call].args].len()
+                + usize::from(module[id][call].results > 0);
+            let calls = module[callee]
+                .blocks()
+                .flat_map(|block| module[callee].insts(block))
+                .filter(|&inst| {
+                    let opcode = module[callee][inst].opcode;
+                    matches!(opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
+                })
+                .count();
+            let growth = whole.saturating_sub(cost);
+            left = (growth * (calls + 1) > how.early as usize).then_some(growth);
+        }
         match splice(module, id, call, callee, how.convention, kind, &mut pool) {
             Ok(()) => {
                 spliced = true;
+                let added = left.unwrap_or(late);
+                if added > 0 {
+                    *how.late.borrow_mut().entry(id).or_default() += added;
+                }
                 grown += made(&module[id], mark);
                 // A pointer to an `always_inline` function handed to a body that calls through it
                 // is a direct call once the body is in, and gcc inlines that one as well. The
