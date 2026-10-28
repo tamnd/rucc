@@ -86,6 +86,8 @@ pub struct Outside {
     /// The functions a call to can come back twice, or nothing when this was built without the
     /// names. See [`Self::knowing_twice`].
     twice: Option<Set<Symbol>>,
+    /// The globals declared `const`. See [`Outside::constant`].
+    constant: Set<Symbol>,
 }
 
 impl Outside {
@@ -96,8 +98,12 @@ impl Outside {
         for id in module.funcs() {
             names.insert(module[id].name, Named::Func(module[id].attrs));
         }
+        let mut constant = Set::default();
         for id in module.globals() {
             let global = &module[id];
+            if global.constant {
+                constant.insert(global.name);
+            }
             // A weak or common definition, or a linkonce one, may not be the object the linker
             // keeps, and the one it keeps elsewhere need only be as aligned as its type, which is
             // less than what this module may have given its own copy.
@@ -118,6 +124,7 @@ impl Outside {
             simd128: false,
             neon: false,
             twice: None,
+            constant,
         }
     }
 
@@ -220,6 +227,17 @@ impl Outside {
             Named::Global(align) => *align,
             Named::Func(_) | Named::Second => None,
         }
+    }
+
+    /// Whether that name is a global declared `const`, which no store in the program may write.
+    ///
+    /// Declared and not defined counts. Writing one is undefined however it is reached, which is
+    /// what lets gcc keep a load of one in a register across a call to anything, and the kernel
+    /// leans on that: `current` is a load of `const_current_task` through `%gs`, and reading it
+    /// again after every call was 650 loads more than gcc over the bench objects.
+    #[must_use]
+    pub fn constant(&self, name: Symbol) -> bool {
+        self.constant.contains(&name)
     }
 
     /// The type node one level up from this one, or nothing at the root.
