@@ -66,6 +66,10 @@ jobs:
       # binary that will not start on somebody else's machine.
       - name: recorded link lines
         run: cargo xtask link-lines --check
+      # The tag check runs this too, and a row added to features.toml without the table written
+      # again stopped the v0.30.14 release after an hour and a half of other checks.
+      - name: feature table
+        run: cargo xtask features --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --all-features
 
