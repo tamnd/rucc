@@ -166,7 +166,7 @@ use rucc_ir::{Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, 
 
 use crate::header_copy::{clone_into, repeatable};
 use crate::loops::{LoopId, Spare};
-use crate::simplify_cfg::{Bindings, Edges, incoming, sweep, taken};
+use crate::simplify_cfg::{Bindings, Edges, bits_taken, incoming, sweep, taken};
 use crate::{Analyses, Cfg, Dominators, Fuel, Loops, Pass, Phase, Preserved, Stats, uses};
 
 /// Recorded once for each edge that was pointed past a branch it decides.
@@ -305,7 +305,11 @@ impl Pass for Thread {
                     continue;
                 }
                 let subst = bind(func, block, at);
-                let Some(call) = taken(func, term, &subst) else { continue };
+                let Some(call) =
+                    taken(func, term, &subst).or_else(|| bits_taken(func, term, &subst))
+                else {
+                    continue;
+                };
                 if call.block == block {
                     continue;
                 }

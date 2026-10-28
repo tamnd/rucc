@@ -1509,23 +1509,47 @@ fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
     }
     let Extra::IntPred(pred) = data.extra else { return None };
     let args = &func[data.args];
-    let (lhs, rhs) = (resolve(subst, *args.first()?), resolve(subst, *args.get(1)?));
-    if let (Some((lhs, ty)), Some((rhs, _))) = (numbered(func, lhs), numbered(func, rhs)) {
-        return Some(crate::fold::compare(pred, lhs, rhs, ty));
-    }
-    // Not two constants, but the bits the edge leaves known can still settle it. An inlined
-    // `mte_parent_slot_mask` hands its caller 0xf8 or 0xfc as a block parameter, and the caller
-    // tests `(parent & 0xff & ~mask) == 6`. Along the edge that carries 0xfc the left side is at
-    // most 3, so the test is false there, which is the edge gcc threads in `mas_ascend`.
-    let (lhs, rhs) = (ranged(func, lhs, subst, RANGE_DEPTH), ranged(func, rhs, subst, RANGE_DEPTH));
-    if lhs.width() != rhs.width() {
+    let (lhs, ty) = numbered(func, resolve(subst, *args.first()?))?;
+    let (rhs, _) = numbered(func, resolve(subst, *args.get(1)?))?;
+    Some(crate::fold::compare(pred, lhs, rhs, ty))
+}
+
+/// Where a two way branch goes along an edge, from the bits that edge leaves known in its test.
+///
+/// This is one more way to decide than [`taken`] has, and only [`crate::thread`] asks it. In
+/// [`taken`] it also decided tests in the copies the inliner weighs, so callees looked smaller,
+/// more of them went in, and `mm/memory.c` took 14% longer to compile for no gain there.
+///
+/// An inlined `mte_parent_slot_mask` hands its caller 0xf8 or 0xfc as a block parameter, and the
+/// caller tests `(parent & 0xff & ~mask) == 6`. Along the edge that carries 0xfc the left side is
+/// at most 3, so the test is false there, which is the edge gcc threads in `mas_ascend`.
+pub(crate) fn bits_taken(func: &Func, term: Inst, subst: &Bindings) -> Option<BlockCall> {
+    let data = &func[term];
+    if data.opcode != Opcode::BrIf {
         return None;
     }
-    match ops::compare(pred, lhs, rhs) {
-        Truth::Always => Some(true),
-        Truth::Never => Some(false),
-        Truth::Either => None,
+    let Extra::Targets(targets) = data.extra else { return None };
+    let Def::Result { inst, .. } = func[*func[data.args].first()?].def else { return None };
+    let test = &func[inst];
+    if test.opcode != Opcode::ICmp {
+        return None;
     }
+    let Extra::IntPred(pred) = test.extra else { return None };
+    let args = &func[test.args];
+    // Only when the edge binds a value the test reads. A test that no binding reaches is the same
+    // on every edge, and the passes that work on the whole function decide it there or not at all.
+    let mut bound = false;
+    let lhs = ranged(func, *args.first()?, subst, RANGE_DEPTH, &mut bound);
+    let rhs = ranged(func, *args.get(1)?, subst, RANGE_DEPTH, &mut bound);
+    if !bound || lhs.width() != rhs.width() {
+        return None;
+    }
+    let bit = match ops::compare(pred, lhs, rhs) {
+        Truth::Always => true,
+        Truth::Never => false,
+        Truth::Either => return None,
+    };
+    func[targets].get(usize::from(!bit)).copied()
 }
 
 /// How many instructions [`ranged`] looks back through.
@@ -1536,9 +1560,11 @@ const RANGE_DEPTH: u32 = 4;
 ///
 /// Only the operations whose range is worked out from the ranges of their operands alone, and only
 /// `depth` of them deep, so this stays a few steps per question. Anything else is every value of
-/// its type, which is always true.
-fn ranged(func: &Func, value: Value, subst: &Bindings, depth: u32) -> Range {
-    let value = resolve(subst, value);
+/// its type, which is always true. `bound` is set when `subst` binds a value on the way.
+fn ranged(func: &Func, value: Value, subst: &Bindings, depth: u32, bound: &mut bool) -> Range {
+    let resolved = resolve(subst, value);
+    *bound |= resolved != value;
+    let value = resolved;
     let ty = func[value].ty;
     if !ty.is_int() || !ty.is_scalar() {
         return Range::of(ty);
@@ -1553,8 +1579,8 @@ fn ranged(func: &Func, value: Value, subst: &Bindings, depth: u32) -> Range {
     }
     let data = &func[inst];
     let args = &func[data.args];
-    let operand = |index: usize| match args.get(index) {
-        Some(&arg) => ranged(func, arg, subst, depth - 1),
+    let mut operand = |index: usize| match args.get(index) {
+        Some(&arg) => ranged(func, arg, subst, depth - 1, bound),
         None => Range::of(ty),
     };
     match data.opcode {
