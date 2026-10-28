@@ -62,7 +62,8 @@ fn a_field_is_one_instruction() {
         ("hasl", "ubfx x0, x0, #8, #1"),
         ("field", "ubfx w0, w0, #5, #3"),
         ("fieldl", "ubfx x0, x0, #12, #8"),
-        ("top", "ubfx x0, x0, #60, #4"),
+        // The mask keeps every bit a shift by 60 leaves, so it goes and the shift is all of it.
+        ("top", "lsr x0, x0, #60"),
     ] {
         assert_eq!(body(&text, name), [line, "ret"], "{name}:\n{text}");
     }
