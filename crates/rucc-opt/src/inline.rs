@@ -556,8 +556,12 @@ pub fn run(
     // gcc's second inliner comes after its early one and before the called once rule, and weighs
     // what the early one found too large again, so this round writes those down rather than
     // refusing them.
-    let later = RefCell::new(heap::Later::default());
     let second_pass = second_pass.filter(|_| limit.is_some());
+    let cyclic = match second_pass {
+        Some(_) => heap::cyclic(&crate::callgraph::CallGraph::of(module, pic)),
+        None => Set::default(),
+    };
+    let later = RefCell::new(heap::Later { cyclic, ..heap::Later::default() });
     round(module, &wanted, &mut done, second_pass.and(Some(&later)));
     if let Some(second) = second_pass {
         let later = later.into_inner();
@@ -1325,7 +1329,18 @@ fn settle(
         if kind == Kind::Hinted {
             large = large.saturating_sub(late);
         }
-        if large > most {
+        // gcc's early inliner takes only what grows the caller by `early` or less and leaves the
+        // rest to its second, which takes the calls in the order of what they save. Taken here up
+        // to the limit, a body went into its callers before the second pass weighed it whole:
+        // `post_alloc_hook` in mm/page_alloc.c went into `prep_new_page` first, and that was then
+        // too large for `get_page_from_freelist`, where gcc has all three in one body.
+        // Not a call to a function that reaches itself, which the second pass never weighs.
+        let second = how.later.is_some_and(|it| !it.borrow().cyclic.contains(&module[callee].name))
+            && matches!(kind, Kind::Hinted | Kind::Auto);
+        // The call it replaces is counted without its result here. With it, mm/memory.c kept 22
+        // calls more than gcc does, and 9 more without it.
+        let growth = large.saturating_sub(1 + module[id][module[id][call].args].len());
+        if large > most || second && !early(&module[callee], growth, how) {
             // Left for the second pass to weigh with its hints, which says why if it refuses too.
             if let (Some(later), Kind::Hinted | Kind::Auto) = (how.later, kind) {
                 later.borrow_mut().deferred.insert((id, call));
@@ -1352,7 +1367,7 @@ fn settle(
             grown
         });
         if kind != Kind::Always {
-            let body = pool.growth(&module[callee], module.datalayout);
+            let body = pool.growth(&module[callee], call, module.datalayout);
             if !fits(own, grown, body, how.growth) {
                 grown = frame(&module[id], module.datalayout);
                 if !fits(own, grown, body, how.growth) {
@@ -1675,6 +1690,54 @@ fn specialized_size(
     let Some(first) = copy.insts(entry).next() else {
         return size(callee);
     };
+    // gcc's summary has `__builtin_expect` as a call, so a branch on what it gives back is not one
+    // the constants a call passes can settle, and both arms of `likely(nr_pages == 1)` in
+    // `__tlb_remove_folio_pages_size` count in a copy passing 1. Settled here, that copy into
+    // `__tlb_remove_page_size` was half of what gcc weighs and went in first, which left two calls
+    // to `tlb_next_batch` in mm/mmu_gather.c where gcc has one. A hint on what is a constant
+    // without the call is gone after gcc's early passes, and is taken out here too.
+    let mut held: Set<Value> = values.keys().copied().collect();
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for block in copy.blocks() {
+            for inst in copy.insts(block) {
+                let data = &copy[inst];
+                if copy[data.args].iter().any(|arg| held.contains(arg)) {
+                    for result in data.results() {
+                        grew |= held.insert(result);
+                    }
+                }
+                for to in copy.successors(inst) {
+                    let passed = copy[to.block].params.iter().zip(copy[to.args].iter());
+                    for (&param, arg) in passed {
+                        if held.contains(arg) {
+                            grew |= held.insert(param);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut hints = Vec::new();
+    let mut through = Map::default();
+    for block in copy.blocks() {
+        for inst in copy.insts(block) {
+            let data = &copy[inst];
+            let (Some(result), Some(&arg)) = (data.results().next(), copy[data.args].first())
+            else {
+                continue;
+            };
+            if data.opcode == Opcode::Expect && !held.contains(&arg) {
+                through.insert(result, arg);
+                hints.push(inst);
+            }
+        }
+    }
+    crate::uses::substitute(&mut copy, &through);
+    for inst in hints {
+        copy.remove_inst(inst);
+    }
     let mut forward = Map::default();
     for (&param, &(value, ty)) in values {
         let imm = copy.add_imm(value);
@@ -1698,8 +1761,7 @@ fn specialized_size(
     // in crypto/mldsa.c is a switch of three lengths and a `WARN_ON_ONCE` in the default, which is
     // seventeen to gcc. It was twenty one here as a switch of four labels, and nineteen with the
     // branch on the `unlikely(1)` the warning tests.
-    let passes: [&dyn Pass; 9] = [
-        &crate::expect::Expect,
+    let passes: [&dyn Pass; 8] = [
         &crate::fold::Fold,
         &crate::simplify::Simplify,
         &crate::reassoc::Reassoc,
@@ -2179,6 +2241,12 @@ fn calls_twice(module: &Module, func: &Func, names: &Interner) -> bool {
 /// may be wanted across every call it makes, and a body inside a body already spliced came in with
 /// that body and was pooled or not there, in the callee.
 ///
+/// The heap does copy calls that a copy brought, though, and such a call is made while the locals
+/// of every body it sits in are still wanted. So a slot is never taken by a splice inside a body
+/// that holds it. In kernel/time/timer.c the heap copied `__mod_timer` into `add_timer` and then a
+/// call inside that copy, and the local the call zeroed was the `flags` slot that
+/// `lock_timer_base` had filled. The unlock restored flags of zero and left interrupts off.
+///
 /// Only slots of the same size are shared, for the reason the lowering gives for its own sharing:
 /// the size of an `alloca` is the size every later pass reads as the object's, and
 /// `__builtin_object_size` would answer for the smaller with the larger. One slot is taken at most
@@ -2197,8 +2265,14 @@ struct Pool {
     on: bool,
     /// Which splice this is, counting from one.
     site: u32,
-    /// The slots so far, each with its size and the last splice that took it.
-    slots: Vec<(Inst, u64, u32)>,
+    /// The slots so far, each with its size and every splice that has a local in it.
+    slots: Vec<(Inst, u64, Vec<u32>)>,
+    /// The splice that brought each call it copied in, for a call the heap copies later.
+    brought: Map<Inst, u32>,
+    /// The splice whose body each splice was inside, for one that was inside one.
+    inside: Map<u32, u32>,
+    /// This splice and the ones whose bodies it is inside, none of whose slots it can take.
+    live: Vec<u32>,
     /// The largest clique the caller's accesses name, worked out at the first splice and kept up
     /// to date by each one after it, which only adds accesses. Working it out again for each splice
     /// walked the whole caller each time, and blake2b.c at `-O2` inlines `rotr64` into one body
@@ -2287,12 +2361,11 @@ impl Pool {
             return None;
         }
         let wanted = callee[mem];
-        let site = self.site;
-        let (inst, _, taken) = self
-            .slots
-            .iter_mut()
-            .find(|&&mut (_, size, taken)| size == wanted.size && taken != site)?;
-        *taken = site;
+        let live = &self.live;
+        let (inst, _, users) = self.slots.iter_mut().find(|(_, size, users)| {
+            *size == wanted.size && !users.iter().any(|user| live.contains(user))
+        })?;
+        users.push(self.site);
         let Extra::Mem(held) = func[*inst].extra else { return None };
         func.align_mem(held, wanted.align);
         // A slot that holds a local wanting a canary wants one whichever local is in it.
@@ -2300,11 +2373,38 @@ impl Pool {
         func[*inst].first_result
     }
 
-    /// How many bytes splicing `callee` in would add to the caller's frame, which is its [`frame`]
-    /// less the slots it would take over.
-    fn growth(&self, callee: &Func, layout: DataLayout) -> u64 {
+    /// The splices whose bodies `call` is inside, the innermost first, which is none for a call
+    /// the caller was written with.
+    fn around(&self, call: Inst) -> Vec<u32> {
+        let mut sites = Vec::new();
+        let mut at = self.brought.get(&call).copied();
+        while let Some(site) = at {
+            sites.push(site);
+            at = self.inside.get(&site).copied();
+        }
+        sites
+    }
+
+    /// Starts the splice that copies a body in place of `call`.
+    fn enter(&mut self, call: Inst) {
+        self.site += 1;
+        self.live = self.around(call);
+        if let Some(&outer) = self.live.first() {
+            self.inside.insert(self.site, outer);
+        }
+        self.live.push(self.site);
+    }
+
+    /// How many bytes splicing `callee` in place of `call` would add to the caller's frame, which
+    /// is its [`frame`] less the slots it would take over.
+    fn growth(&self, callee: &Func, call: Inst, layout: DataLayout) -> u64 {
+        let around = self.around(call);
         let mut free: Vec<u64> = if self.on {
-            self.slots.iter().map(|&(_, size, _)| size).collect()
+            self.slots
+                .iter()
+                .filter(|(_, _, users)| !users.iter().any(|user| around.contains(user)))
+                .map(|&(_, size, _)| size)
+                .collect()
         } else {
             Vec::new()
         };
@@ -2333,9 +2433,23 @@ impl Pool {
     fn add(&mut self, func: &Func, inst: Inst, callee: &Func, extra: Extra) {
         let Extra::Mem(mem) = extra else { return };
         if self.on && func[inst].first_result.is_some() {
-            self.slots.push((inst, callee[mem].size, self.site));
+            self.slots.push((inst, callee[mem].size, vec![self.site]));
         }
     }
+}
+
+/// Whether gcc's early inliner would copy `callee` where the copy grows its caller by `growth`,
+/// which it does when that is no more than `early`, a body that makes calls of its own held to
+/// that for each of them and itself together.
+fn early(callee: &Func, growth: usize, how: &How<'_>) -> bool {
+    let calls = callee
+        .blocks()
+        .flat_map(|block| callee.insts(block))
+        .filter(|&inst| {
+            matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
+        })
+        .count();
+    growth * (calls + 1) <= how.early as usize
 }
 
 /// Whether copying a body of `size` instructions in place of `call` makes the program larger by
@@ -2351,14 +2465,7 @@ impl Pool {
 fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> bool {
     let cost = 1 + func[func[call].args].len() + usize::from(func[call].results > 0);
     let growth = size.saturating_sub(cost);
-    let calls = callee
-        .blocks()
-        .flat_map(|block| callee.insts(block))
-        .filter(|&inst| {
-            matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
-        })
-        .count();
-    if growth * (calls + 1) <= how.early as usize {
+    if early(callee, growth, how) {
         return false;
     }
     let removable = callee.linkage == Linkage::Internal
@@ -3139,7 +3246,7 @@ fn copy(
     }
     let mut exits = Vec::new();
     let mut made = Vec::new();
-    pool.site += 1;
+    pool.enter(call);
     for from in callee.blocks() {
         if !live[from.index()] {
             continue;
@@ -3189,6 +3296,9 @@ fn copy(
             }
             if data.opcode == Opcode::Return {
                 exits.push(new);
+            }
+            if matches!(opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall) {
+                pool.brought.insert(new, pool.site);
             }
             made.push((inst, new));
         }
@@ -4109,6 +4219,75 @@ block0(%0: i32):
         };
         assert_eq!(slots(true), [64, 640, 640]);
         assert_eq!(slots(false), [64, 640, 640, 640]);
+    }
+
+    /// A body the copy of another brought in is spliced while the locals of the outer body are
+    /// still wanted, so it takes none of their slots. Here `hold` keeps its local across the call
+    /// through the pointer it is given, which turns into a call to `zero` once `hold` is in `g`,
+    /// and the local `zero` clears must not be the one `hold` reads back after it.
+    #[test]
+    fn a_body_inside_a_spliced_body_takes_none_of_its_slots() {
+        let body = r#"
+func @use(ptr), linkage(external);
+func @take(i64), linkage(external);
+
+func @zero(), linkage(internal), attrs(always_inline) {
+block0:
+    %0 = alloca, size 8, align 8
+    %1 = iconst.i64 0
+    store %1 -> %0, align 8
+    call @use(%0) : (ptr)
+    return
+}
+
+func @hold(ptr), linkage(internal), attrs(always_inline) {
+block0(%0: ptr):
+    %1 = alloca, size 8, align 8
+    call @use(%1) : (ptr)
+    call_indirect %0() : ()
+    %2 = load.i64 %1, align 8
+    call @take(%2) : (i64)
+    return
+}
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @zero
+    call @hold(%0) : (ptr)
+    return
+}
+"#;
+        let mut names = Interner::new();
+        let text = format!("{HEAD}{body}");
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        run(
+            &mut module,
+            &names,
+            None,
+            false,
+            Isa::baseline(),
+            Growth::DEFAULT,
+            true,
+            Pic::Executable,
+            false,
+            None,
+        );
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the inliner left invalid IR, {errors:?}");
+        }
+        let g = module.funcs().find(|&id| names.resolve(module[id].name) == "g").expect("g");
+        let func = &module[g];
+        let out = rucc_ir::print(&module, &names);
+        let calls = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| matches!(func[inst].opcode, Opcode::Call | Opcode::CallIndirect));
+        assert_eq!(calls.count(), 3, "both bodies are in g\n{out}");
+        let slots = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Alloca);
+        assert_eq!(slots.count(), 2, "{out}");
     }
 
     /// A local that scalar replacement makes a value of keeps a slot of its own, and only the
@@ -5745,5 +5924,52 @@ block0(%0: i32):
         let plain = inlined(&body.replace("    meta_begin %1, %2, class automatic\n", ""));
         let f = &plain[plain.find("func @f").expect("f is there")..];
         assert!(!f.contains("lifetime_end"), "{plain}");
+    }
+
+    /// `likely(n == 1)` with the work in the other arm, the test read through `expect` or not.
+    fn hinted(hint: bool) -> String {
+        let (test, m) = if hint {
+            (
+                "    %4 = zext.i32 %3\n    %5 = sext.i64 %4\n    %6 = iconst.i64 1\n    \
+                 %7 = expect %5, %6\n    %8 = iconst.i64 0\n    %9 = icmp ne %7, %8\n    \
+                 br_if %9, block1, block2\n",
+                "%10",
+            )
+        } else {
+            ("    br_if %3, block1, block2\n", "%4")
+        };
+        format!(
+            "func @use(ptr), linkage(external);\n\n\
+             func @f(ptr, i32), linkage(internal) {{\n\
+             block0(%0: ptr, %1: i32):\n    %2 = iconst.i32 1\n    %3 = icmp eq %1, %2\n\
+             {test}\
+             block1:\n    store %2 -> %0, align 4\n    jump block3\n\
+             block2:\n    {m} = mul.i32 %1, %1\n    store {m} -> %0, align 4\n    \
+             call @use(%0) : (ptr)\n    call @use(%0) : (ptr)\n    call @use(%0) : (ptr)\n    \
+             jump block3\n\
+             block3:\n    return\n}}\n"
+        )
+    }
+
+    /// gcc's summary has `__builtin_expect` as a call, so a constant a call passes does not take
+    /// out the arm a hinted test leaves, where it does with the same test unhinted.
+    #[test]
+    fn a_constant_passed_leaves_both_arms_of_a_hinted_test() {
+        let weigh = |hint: bool, known: bool| {
+            let mut names = Interner::new();
+            let text = format!("{HEAD}{}", hinted(hint));
+            let module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+            let f = module.funcs().find(|&id| names.resolve(module[id].name) == "f").expect("f");
+            let func = &module[f];
+            let n = func[func.entry().expect("a body")].params[1];
+            let values = if known {
+                Map::from_iter([(n, (Imm::int(1, func[n].ty), func[n].ty))])
+            } else {
+                Map::default()
+            };
+            specialized_size(func, module.datalayout, &values, None)
+        };
+        assert!(weigh(false, true) < weigh(false, false));
+        assert!(weigh(true, true) > weigh(false, true));
     }
 }

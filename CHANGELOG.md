@@ -4,6 +4,30 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.15
+
+This patch release has the changes of 0.30.14, which was tagged but not published because its tag check found the feature table in `docs/FEATURES.md` out of date. It also fixes a stack slot that the inliner gave to two bodies, lets jump threading decide more branches in inlined kernel code, reads the kernel's `current` once per function, asks for huge pages only when the kernel has free blocks of 2 MiB, and makes `-E` faster on large files.
+
+### Fixed
+
+- A body the inliner copies into a caller no longer takes the stack slot of a body it sits inside, which in kernel/time/timer.c let a local zeroed in `add_timer` overwrite the saved `flags` and left interrupts off after the unlock (#3951)
+- Jump threading now decides a branch that compares a widened one bit value, which is how an inlined function returning `_Bool` reaches its caller, so `if (!valid_section(ms))` after `ms &&` jumps straight to where it goes instead of testing a zero again (#3954)
+- Jump threading now decides a branch on a condition that a branch further up already tested, looking back through blocks with one way in, and runs once more after the late value numbering at `-O2` and `-O3`, so `is_swap_pte(x)` followed by `pte_none(x)` tests `x` once (#3955)
+- A load of a global declared `const` is no longer read again after a store, a call or an `asm`, including one through `%gs`, so the kernel's `current` is read once per function the way gcc reads it (#3956)
+- rucc now asks for huge pages only when `/proc/buddyinfo` shows at least 512 free blocks of 2 MiB. On a busy host the huge page faults stopped to compact memory, and a Linux 7.3 X64 `defconfig` build spent 1630 s of system time in the compiles, where it now spends 807 s (#3884)
+- The `-E` printer keeps the span of the last source line and finds the file and line of a token on that line without a search, so `rucc -E` on the kallsyms file of a Linux 7.3 `defconfig` takes 1.15 to 1.41 s of user time where it took 1.76 to 1.97 s (#3889)
+- `docs/FEATURES.md` is written again from `features.toml`, and each PR now runs `cargo xtask features --check`, so a new row with a stale table fails on the PR and not on the tag check (#3952)
+
+## 0.30.14
+
+This patch release adds the rest of the KASAN work that Linux 7.3 asks gcc for: the redzones after the globals, the redzones around `alloca` and variable length arrays, and the checks before the atomic accesses. It also makes kernel code smaller and faster: stores of zero into bytes that already hold zero go, `||` and `&&` chains over one-bit fields are one test, constants written to neighbouring bit-fields are one store, and the inliner reads `__builtin_expect` and weighs a callee as gcc does after its early scalar replacement. The inliner also splits its work between two passes as gcc's early and late inliners do, and counts the size of a function out of line as gcc does. The asm constant test no longer fails when two of its calls run at the same time, which is what stopped the 0.30.13 tag check.
+
+### Added
+
+- `--param asan-globals=1`, which is gcc's default and which Linux 7.3 gives for `CONFIG_KASAN_GENERIC`, now puts a redzone after each global under `-fsanitize=kernel-address`. A global that gets one is a definition that is not thread-local, is not weak or common, is not in a section that the program names, and has an alignment of 64 or less. Its alignment is raised to 32, and the redzone takes it to a multiple of 32 bytes with at least 32 bytes after it, as gcc does. The symbol size stays the size of the global. A constructor in `.init_array` gives a table of eight words for each global to `__asan_register_globals`, and the kernel then poisons the shadow of each redzone. A string literal that gets a redzone goes in `.rodata`, because a section that merges strings would take the redzone away. On x86-64 and AArch64 a test program that registers the table gets the report for a read past the end of a global array. (#3854)
+- Under `-fsanitize=kernel-address`, an atomic access is now checked, as gcc does. An atomic load calls `__asan_load4_noabort` or the routine of its size, and an atomic store, read-modify-write, exchange or compare and exchange calls `__asan_store4_noabort` or the routine of its size. This is a call in inline mode too, which is what gcc 16 gives for the `__atomic` and `__sync` builtins. (#3854)
+- `--param asan-instrument-allocas=1` is now taken, and the memory of `__builtin_alloca` and of a variable length array gets redzones, as gcc does. The memory of `n` bytes is made `n - n % 32 + 96` bytes long, aligned to 32, and the program gets the address 32 bytes in. `__asan_alloca_poison` is called with that address and `n`, and `__asan_allocas_unpoison` clears the shadow before each `stackrestore` and each return. Linux 7.3's KASAN tests `kasan_alloca_oob_left` and `kasan_alloca_oob_right` read one byte before and one byte after such an array, and with rucc they got no report. On x86-64 and AArch64 a test program gets a report for each of those reads.
+
 ### Fixed
 
 - A store of zero into bytes that already hold zero on every path to it is now removed, as gcc's dead store pass does it. Under `-ftrivial-auto-var-init=zero` the kernel fills each local with zeros and then sets many fields to zero again. In Linux 7.2.8 this takes 708 bytes out of `lib/maple_tree.o`, 192 out of `kernel/signal.o`, 176 out of `fs/read_write.o` and 176 out of `mm/vma.o` (#3938).
@@ -11,10 +35,13 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Constants written one after another to bit-fields of the same object are now one read and one write of the bytes they share, so `__tlb_reset_range` is six instructions as with gcc and `tlb_flush_mmu_tlbonly` is inlined into its callers again (#3943)
 - The inliner now reads `__builtin_expect` when it guesses how often a call runs, and a large copy on an unlikely path is not counted against the body it went into, so `vma_start_read` is inlined into `lock_vma_under_rcu` and `lock_next_vma` as with gcc (#3944)
 - The inliner counts nothing for a load or a store through a local that scalar replacement would turn into a value, the way gcc weighs a body after its early SRA, so `start_dir_add` in fs/dcache.c is measured at gcc's size (#3945)
+- The inliner's first pass takes only what grows the caller by six or less, the way gcc's early inliner does, and leaves the rest to the second pass, which now refuses a growing call on a path run less than once in a thousand calls and takes the body of a static function off the unit size once its last call is copied (#3948)
+- The inliner's second pass counts a function out of line 3 larger than its body, for the overhead and the return gcc counts in it, so a static function whose calls are all copied saves what it does in gcc and `lib/maple_tree.c` no longer hits the unit growth limit early (#3949)
+- The inliner no longer lets a constant a call passes settle a branch read through `__builtin_expect` when it weighs the copy, since gcc's summary keeps the hint as a call, so `__tlb_remove_folio_pages_size` in mm/mmu_gather.c weighs what it does in gcc (#3950)
 
 ## 0.30.13
 
-This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow checks, the stack, global and alloca redzones, and the atomic checks. It also adds four UBSAN checks, `-finline-stringops`, more object size answers that agree with gcc, and faster NEON helpers on arm64.
+This patch release adds the KASAN shadow checks and the stack redzones that Linux 7.3 asks gcc for. It also adds four UBSAN checks, `-finline-stringops`, more object size answers that agree with gcc, and faster NEON helpers on arm64.
 
 ### Added
 
@@ -50,10 +77,7 @@ This patch release adds the KASAN checks that Linux 7.3 asks gcc for: the shadow
 - The riscv64 assembler takes the vector crypto extensions the kernel's crypto code is written with (Zvkned, Zvknha, Zvknhb, Zvkg, Zvksed, Zvksh, Zvkb and Zvbb), along with the strided, segment and indexed loads and stores, slides, merges and widening moves that code uses, and a constant operand of a vector instruction can be an expression (#3919).
 - The riscv64 assembler takes `.reloc` with `R_RISCV_SET_ULEB128` and `R_RISCV_SUB_ULEB128` and writes them as they were asked for, so the kernel's `AS_HAS_ULEB128` probe passes and its module loader test for the pair is built (#3920).
 - `-fzero-call-used-regs=` is taken on riscv64 and clears the registers gcc clears, the integer ones with `li` and the float ones with `fmv.d.x`, so the kernel's `CC_HAS_ZERO_CALL_USED_REGS` probe passes there as it does on x86-64 and arm64 (#3921).
-- `--param asan-globals=1`, which is gcc's default and which Linux 7.3 gives for `CONFIG_KASAN_GENERIC`, now puts a redzone after each global under `-fsanitize=kernel-address`. A global that gets one is a definition that is not thread-local, is not weak or common, is not in a section that the program names, and has an alignment of 64 or less. Its alignment is raised to 32, and the redzone takes it to a multiple of 32 bytes with at least 32 bytes after it, as gcc does. The symbol size stays the size of the global. A constructor in `.init_array` gives a table of eight words for each global to `__asan_register_globals`, and the kernel then poisons the shadow of each redzone. A string literal that gets a redzone goes in `.rodata`, because a section that merges strings would take the redzone away. On x86-64 and AArch64 a test program that registers the table gets the report for a read past the end of a global array. (#3854)
-- Under `-fsanitize=kernel-address`, an atomic access is now checked, as gcc does. An atomic load calls `__asan_load4_noabort` or the routine of its size, and an atomic store, read-modify-write, exchange or compare and exchange calls `__asan_store4_noabort` or the routine of its size. This is a call in inline mode too, which is what gcc 16 gives for the `__atomic` and `__sync` builtins. (#3854)
 - RISC-V atomics: fences at every ordering, acquiring loads and releasing stores with the psABI fences around them, `amoswap` and `amoadd` for an exchange or an add of a word or a doubleword, and `lr` and `sc` loops for a compare and exchange, with a masked loop on the word for a byte or a half. Before this an acquire fence wrote nothing and the rest was refused. `-Wa,-mno-relax` is now taken on RISC-V (#3923).
-- `--param asan-instrument-allocas=1` is now taken, and the memory of `__builtin_alloca` and of a variable length array gets redzones, as gcc does. The memory of `n` bytes is made `n - n % 32 + 96` bytes long, aligned to 32, and the program gets the address 32 bytes in. `__asan_alloca_poison` is called with that address and `n`, and `__asan_allocas_unpoison` clears the shadow before each `stackrestore` and each return. Linux 7.3's KASAN tests `kasan_alloca_oob_left` and `kasan_alloca_oob_right` read one byte before and one byte after such an array, and with rucc they got no report. On x86-64 and AArch64 a test program gets a report for each of those reads.
 
 ### Fixed
 

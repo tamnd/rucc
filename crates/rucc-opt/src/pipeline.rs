@@ -199,6 +199,14 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// the test, constant or not. It is the instance that copies nothing, so it costs one walk over the
 /// blocks and cannot grow the function.
 ///
+/// It runs a third time after the late `number` and `simplify`, still ahead of `phiopt`. An inline
+/// helper tested twice, like `is_swap_pte` and then `pte_none` on the same entry, leaves two
+/// copies of the same comparison that only `number` makes one value. Until it has, the second
+/// test reads a different value from the one the first branched on, and nothing above knows how
+/// it goes. After it the test is decided on every edge in from below the first, and the kernel's
+/// mm code is where most of those are: across the bench objects it is 2.4K of text that kept a
+/// flag in a saved register to test it again.
+///
 /// `prune` is between `phiopt` and `simplify-cfg` and both sides of that are load bearing. It reads
 /// document 10's ranges off the graph to find a branch that can only go one way and a switch case
 /// nothing can reach, so it has to run after the two passes that change the graph most. What it
@@ -476,6 +484,7 @@ const O2: &[&str] = &[
     "fold",
     "number",
     "simplify",
+    "thread",
     "phiopt",
     "prune",
     "redundant-load",
@@ -547,6 +556,7 @@ const O3: &[&str] = &[
     "fold",
     "number",
     "simplify",
+    "thread",
     "phiopt",
     "prune",
     "redundant-load",

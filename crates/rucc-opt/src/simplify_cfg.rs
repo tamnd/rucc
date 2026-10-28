@@ -1172,7 +1172,7 @@ fn redundant(
                 continue;
             }
             if numbers {
-                let this = numbered(func, arg);
+                let this = numbered(func, arg, &Bindings::default());
                 numbers = this.is_some() && (number.is_none() || number == this);
                 number = this;
             }
@@ -1507,8 +1507,8 @@ fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
     }
     let Extra::IntPred(pred) = data.extra else { return None };
     let args = &func[data.args];
-    let (lhs, ty) = numbered(func, resolve(subst, *args.first()?))?;
-    let (rhs, _) = numbered(func, resolve(subst, *args.get(1)?))?;
+    let (lhs, ty) = numbered(func, *args.first()?, subst)?;
+    let (rhs, _) = numbered(func, *args.get(1)?, subst)?;
     Some(crate::fold::compare(pred, lhs, rhs, ty))
 }
 
@@ -1516,15 +1516,29 @@ fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
 /// pointer is written. An inlined function returning `NULL` on some paths hands the caller a
 /// block parameter that is that pointer along those edges, and `if (p)` in the caller is decided
 /// on each of them. `__schedstats_from_dl_se` in kernel/sched/deadline.c is that shape.
-fn numbered(func: &Func, value: Value) -> Option<(Imm, Type)> {
+///
+/// Or the constant a widening or a narrowing of one comes to. An inlined function that returns a
+/// `_Bool` hands the caller a parameter of one bit, and the caller compares it widened to an `int`,
+/// so `if (!valid_section(ms))` tests `icmp eq (zext %b), 0`. Without this the edge on which `%b`
+/// is a zero decided nothing, and the `ms &&` in front of `valid_section` in mm/memory.c's
+/// `pfn_valid` left a zero in a register to test again rather than a jump to where it goes.
+fn numbered(func: &Func, value: Value, subst: &Bindings) -> Option<(Imm, Type)> {
+    let value = resolve(subst, value);
     if let Some(found) = constant(func, value) {
         return Some(found);
     }
     let Def::Result { inst, .. } = func[value].def else { return None };
-    if func[inst].opcode != Opcode::IntToPtr {
-        return None;
+    let data = &func[inst];
+    let arg = *func[data.args].first()?;
+    match data.opcode {
+        Opcode::IntToPtr => constant(func, arg),
+        Opcode::ZExt | Opcode::SExt | Opcode::Trunc => {
+            let ty = func[value].ty;
+            let (imm, from) = constant(func, resolve(subst, arg))?;
+            Some((crate::fold::convert(data.opcode, imm, from, ty), ty))
+        }
+        _ => None,
     }
-    constant(func, *func[func[inst].args].first()?)
 }
 
 #[cfg(test)]
@@ -2697,7 +2711,8 @@ block2:
         assert!(func[join].params.is_empty());
         let term = func.terminator(join).expect("the join has one");
         let returned = func[func[term].args][0];
-        assert_eq!(super::numbered(&func, returned).map(|(imm, _)| imm.bits()), Some(0));
+        let none = super::Bindings::default();
+        assert_eq!(super::numbered(&func, returned, &none).map(|(imm, _)| imm.bits()), Some(0));
         assert_eq!(lives_in(&func, returned), Some(3));
     }
 
