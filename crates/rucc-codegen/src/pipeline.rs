@@ -360,7 +360,7 @@ impl Machine {
             flags: &x86_64::FLAGS,
             shapes: &x86::MACHINE,
             timing: &x86_64::TIMING,
-            short: &x86_64::SHORT,
+            short: &x86::SHORT,
             selector: &select::x86::SELECTOR,
             env: env(&order, &X86_SCRATCH),
             // Not on this machine. The kernel keeps `ebp` for its frame, and it has no byte form.

@@ -5,7 +5,7 @@
 //! about the back end never learning what it is compiling for, and names three of these as free
 //! before any of that is settled and one as waiting for it.
 //!
-//! Six rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! Seven rewrites. A move of zero into a register becomes an exclusive or of the register with
 //! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
 //! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
 //! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
@@ -52,6 +52,12 @@
 //! core of libsodium had 48 of these pairs in one function where gcc had 31 address computations.
 //! The address computation writes no condition state, so this waits on the state being dead the way
 //! the exclusive or does. tamnd/rucc#2789 is the issue.
+//!
+//! And a test of a register against a constant whose bits are all in the low byte becomes a test
+//! of that byte. `testq $4, %rax` is six bytes and `testb $4, %al` is two, and the kernel tests
+//! its flag words this way all the time: rucc wrote 1923 tests of a sixty four bit register over
+//! the bench objects where gcc wrote 321. The table says which constants leave the same state at
+//! both widths, so this is free the way the comparison against zero is.
 //!
 //! That fourth one is the only one here that is not free, and it is the only one that reads the
 //! goal. An addition writes the carry and an increment leaves the carry as it found it, so the
@@ -175,7 +181,7 @@ use rucc_base::Interner;
 use rucc_base::hash::Map;
 use rucc_cost::Goal;
 use rucc_mir::{self as mir, Role};
-use rucc_target::{FlagInsts, MachineInsts, Reads, ShortInsts};
+use rucc_target::{FlagInsts, MachineInsts, Narrowed, Reads, ShortInsts};
 
 use crate::changes::{self, Changes, Plan};
 
@@ -200,6 +206,7 @@ pub fn shorter(
     // there would be the same interner borrowed twice. The same reason [`crate::compare`] has.
     let wanted = short.zeroing.iter().map(|entry| entry.into);
     let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
+    let wanted = wanted.chain(short.byte_testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.stepping.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.copying.iter().map(|entry| entry.into));
@@ -258,6 +265,19 @@ pub fn shorter(
                 known = Known::of(&mut seen, func, short, flags, names, inst);
                 // What stands there now is the same instruction at half the width, which is a
                 // move either way, so what it does to the state is what it did before: nothing.
+            }
+            // Bits of a register asked about in its low byte. The table only has the constants
+            // for which the byte test leaves the state the wide one left, so this is asked of
+            // every instruction whatever the walk has seen, the way the comparison below is.
+            let into = if known.byte_testing {
+                let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix);
+                held(func, &opcodes, inst, name.and_then(|name| short.byte_tested(name)))
+            } else {
+                None
+            };
+            if into.is_some_and(|op| narrowed(func, &mut counts, machine, names, inst, op)) {
+                took += 1;
+                known = Known::of(&mut seen, func, short, flags, names, inst);
             }
             // A comparison against zero asked of the register alone. Nothing about where the state
             // is live comes into it, because the shorter instruction writes the same five bits of
@@ -411,6 +431,8 @@ struct Known {
     zeroing: bool,
     /// Whether it has a narrower instruction.
     narrowing: bool,
+    /// Whether it has a test of the low byte.
+    byte_testing: bool,
     /// Whether it has a shorter way of comparing against zero.
     testing: bool,
     /// Whether it has a move that says the same thing.
@@ -446,6 +468,7 @@ impl Known {
             Self {
                 zeroing: has(|short, bare| short.zeroed(bare).is_some()),
                 narrowing: has(|short, bare| short.narrowed(bare).is_some()),
+                byte_testing: has(|short, bare| short.byte_tested(bare).is_some()),
                 testing: has(|short, bare| short.tested(bare).is_some()),
                 copying: has(|short, bare| short.copied(bare).is_some()),
                 stepping: has(|short, bare| short.stepping.iter().any(|entry| entry.name == bare)),
@@ -497,7 +520,17 @@ fn narrower_form(
     inst: mir::Inst,
 ) -> Option<mir::Opcode> {
     let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
-    let narrow = short.narrowed(name)?;
+    held(func, opcodes, inst, short.narrowed(name))
+}
+
+/// The opcode of that narrower instruction, when the number this one carries is one it holds.
+fn held(
+    func: &mir::Func,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+    narrow: Option<Narrowed>,
+) -> Option<mir::Opcode> {
+    let narrow = narrow?;
     let held = u64::try_from(func[func[inst].imm?].0).ok()?;
     if narrow.writes >= u64::BITS || held >= 1u64 << narrow.writes {
         return None;
@@ -1201,6 +1234,60 @@ mod tests {
             assert_eq!(takes(&mut func, &mut names), 0, "{value}");
             assert_eq!(shape(&func, &names, block), ["cmp_ri_32", "set_e"], "{value}");
             assert_eq!(imm(&func, inst), Some(value), "{value}");
+        }
+    }
+
+    /// The seventh rewrite. Bits that are all in the low byte are asked about in that byte, and
+    /// the number on the instruction stays what it was.
+    #[test]
+    fn a_test_of_bits_in_the_low_byte_tests_the_byte() {
+        for (wide, value) in [("test_ri_64", 4), ("test_ri_32", 0x7f), ("test_ri_16", 1)] {
+            let (mut names, mut func, block) = empty();
+            let held = func.new_vreg(GPR);
+            let byte = func.new_vreg(GPR);
+            let test = op(&mut names, wide);
+            let set = op(&mut names, "set_ne");
+            let inst = func.build(block, test).uses(held, GPR).imm(value).finish();
+            func.build(block, set).def(byte, GPR).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{wide}");
+            assert_eq!(shape(&func, &names, block), ["test_ri_8", "set_ne"], "{wide}");
+            assert_eq!(regs(&func, inst), [held], "{wide}");
+            assert_eq!(imm(&func, inst), Some(value), "{wide}");
+        }
+    }
+
+    /// A bit at the top of the byte is the sign of the byte test and never the sign of the wide
+    /// one, and a bit above the byte is not in it at all.
+    #[test]
+    fn a_test_that_reaches_the_sign_of_the_byte_stays_wide() {
+        for value in [0x80, 0x100, 0x180, -1] {
+            let (mut names, mut func, block) = empty();
+            let held = func.new_vreg(GPR);
+            let byte = func.new_vreg(GPR);
+            let test = op(&mut names, "test_ri_64");
+            let set = op(&mut names, "set_l");
+            func.build(block, test).uses(held, GPR).imm(value).finish();
+            func.build(block, set).def(byte, GPR).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 0, "{value}");
+            assert_eq!(shape(&func, &names, block), ["test_ri_64", "set_l"], "{value}");
+        }
+    }
+
+    /// A test that keeps whether the bits were zero reads nothing but the zero, so the top bit of
+    /// the byte is in reach for it.
+    #[test]
+    fn a_test_that_keeps_zero_or_not_has_the_whole_byte() {
+        for (value, wanted) in [(0x80, "test_set_ne_ri_8"), (0x100, "test_set_ne_ri_64")] {
+            let (mut names, mut func, block) = empty();
+            let held = func.new_vreg(GPR);
+            let byte = func.new_vreg(GPR);
+            let test = op(&mut names, "test_set_ne_ri_64");
+            func.build(block, test).def(byte, GPR).uses(held, GPR).imm(value).finish();
+
+            takes(&mut func, &mut names);
+            assert_eq!(shape(&func, &names, block), [wanted], "{value}");
         }
     }
 
