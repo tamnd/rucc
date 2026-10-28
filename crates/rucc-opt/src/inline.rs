@@ -556,8 +556,12 @@ pub fn run(
     // gcc's second inliner comes after its early one and before the called once rule, and weighs
     // what the early one found too large again, so this round writes those down rather than
     // refusing them.
-    let later = RefCell::new(heap::Later::default());
     let second_pass = second_pass.filter(|_| limit.is_some());
+    let cyclic = match second_pass {
+        Some(_) => heap::cyclic(&crate::callgraph::CallGraph::of(module, pic)),
+        None => Set::default(),
+    };
+    let later = RefCell::new(heap::Later { cyclic, ..heap::Later::default() });
     round(module, &wanted, &mut done, second_pass.and(Some(&later)));
     if let Some(second) = second_pass {
         let later = later.into_inner();
@@ -1325,7 +1329,18 @@ fn settle(
         if kind == Kind::Hinted {
             large = large.saturating_sub(late);
         }
-        if large > most {
+        // gcc's early inliner takes only what grows the caller by `early` or less and leaves the
+        // rest to its second, which takes the calls in the order of what they save. Taken here up
+        // to the limit, a body went into its callers before the second pass weighed it whole:
+        // `post_alloc_hook` in mm/page_alloc.c went into `prep_new_page` first, and that was then
+        // too large for `get_page_from_freelist`, where gcc has all three in one body.
+        // Not a call to a function that reaches itself, which the second pass never weighs.
+        let second = how.later.is_some_and(|it| !it.borrow().cyclic.contains(&module[callee].name))
+            && matches!(kind, Kind::Hinted | Kind::Auto);
+        // The call it replaces is counted without its result here. With it, mm/memory.c kept 22
+        // calls more than gcc does, and 9 more without it.
+        let growth = large.saturating_sub(1 + module[id][module[id][call].args].len());
+        if large > most || second && !early(&module[callee], growth, how) {
             // Left for the second pass to weigh with its hints, which says why if it refuses too.
             if let (Some(later), Kind::Hinted | Kind::Auto) = (how.later, kind) {
                 later.borrow_mut().deferred.insert((id, call));
@@ -1675,6 +1690,54 @@ fn specialized_size(
     let Some(first) = copy.insts(entry).next() else {
         return size(callee);
     };
+    // gcc's summary has `__builtin_expect` as a call, so a branch on what it gives back is not one
+    // the constants a call passes can settle, and both arms of `likely(nr_pages == 1)` in
+    // `__tlb_remove_folio_pages_size` count in a copy passing 1. Settled here, that copy into
+    // `__tlb_remove_page_size` was half of what gcc weighs and went in first, which left two calls
+    // to `tlb_next_batch` in mm/mmu_gather.c where gcc has one. A hint on what is a constant
+    // without the call is gone after gcc's early passes, and is taken out here too.
+    let mut held: Set<Value> = values.keys().copied().collect();
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for block in copy.blocks() {
+            for inst in copy.insts(block) {
+                let data = &copy[inst];
+                if copy[data.args].iter().any(|arg| held.contains(arg)) {
+                    for result in data.results() {
+                        grew |= held.insert(result);
+                    }
+                }
+                for to in copy.successors(inst) {
+                    let passed = copy[to.block].params.iter().zip(copy[to.args].iter());
+                    for (&param, arg) in passed {
+                        if held.contains(arg) {
+                            grew |= held.insert(param);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut hints = Vec::new();
+    let mut through = Map::default();
+    for block in copy.blocks() {
+        for inst in copy.insts(block) {
+            let data = &copy[inst];
+            let (Some(result), Some(&arg)) = (data.results().next(), copy[data.args].first())
+            else {
+                continue;
+            };
+            if data.opcode == Opcode::Expect && !held.contains(&arg) {
+                through.insert(result, arg);
+                hints.push(inst);
+            }
+        }
+    }
+    crate::uses::substitute(&mut copy, &through);
+    for inst in hints {
+        copy.remove_inst(inst);
+    }
     let mut forward = Map::default();
     for (&param, &(value, ty)) in values {
         let imm = copy.add_imm(value);
@@ -1698,8 +1761,7 @@ fn specialized_size(
     // in crypto/mldsa.c is a switch of three lengths and a `WARN_ON_ONCE` in the default, which is
     // seventeen to gcc. It was twenty one here as a switch of four labels, and nineteen with the
     // branch on the `unlikely(1)` the warning tests.
-    let passes: [&dyn Pass; 9] = [
-        &crate::expect::Expect,
+    let passes: [&dyn Pass; 8] = [
         &crate::fold::Fold,
         &crate::simplify::Simplify,
         &crate::reassoc::Reassoc,
@@ -2338,6 +2400,20 @@ impl Pool {
     }
 }
 
+/// Whether gcc's early inliner would copy `callee` where the copy grows its caller by `growth`,
+/// which it does when that is no more than `early`, a body that makes calls of its own held to
+/// that for each of them and itself together.
+fn early(callee: &Func, growth: usize, how: &How<'_>) -> bool {
+    let calls = callee
+        .blocks()
+        .flat_map(|block| callee.insts(block))
+        .filter(|&inst| {
+            matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
+        })
+        .count();
+    growth * (calls + 1) <= how.early as usize
+}
+
 /// Whether copying a body of `size` instructions in place of `call` makes the program larger by
 /// more than gcc lets a call that is not hot grow it.
 ///
@@ -2351,14 +2427,7 @@ impl Pool {
 fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> bool {
     let cost = 1 + func[func[call].args].len() + usize::from(func[call].results > 0);
     let growth = size.saturating_sub(cost);
-    let calls = callee
-        .blocks()
-        .flat_map(|block| callee.insts(block))
-        .filter(|&inst| {
-            matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
-        })
-        .count();
-    if growth * (calls + 1) <= how.early as usize {
+    if early(callee, growth, how) {
         return false;
     }
     let removable = callee.linkage == Linkage::Internal
@@ -5745,5 +5814,52 @@ block0(%0: i32):
         let plain = inlined(&body.replace("    meta_begin %1, %2, class automatic\n", ""));
         let f = &plain[plain.find("func @f").expect("f is there")..];
         assert!(!f.contains("lifetime_end"), "{plain}");
+    }
+
+    /// `likely(n == 1)` with the work in the other arm, the test read through `expect` or not.
+    fn hinted(hint: bool) -> String {
+        let (test, m) = if hint {
+            (
+                "    %4 = zext.i32 %3\n    %5 = sext.i64 %4\n    %6 = iconst.i64 1\n    \
+                 %7 = expect %5, %6\n    %8 = iconst.i64 0\n    %9 = icmp ne %7, %8\n    \
+                 br_if %9, block1, block2\n",
+                "%10",
+            )
+        } else {
+            ("    br_if %3, block1, block2\n", "%4")
+        };
+        format!(
+            "func @use(ptr), linkage(external);\n\n\
+             func @f(ptr, i32), linkage(internal) {{\n\
+             block0(%0: ptr, %1: i32):\n    %2 = iconst.i32 1\n    %3 = icmp eq %1, %2\n\
+             {test}\
+             block1:\n    store %2 -> %0, align 4\n    jump block3\n\
+             block2:\n    {m} = mul.i32 %1, %1\n    store {m} -> %0, align 4\n    \
+             call @use(%0) : (ptr)\n    call @use(%0) : (ptr)\n    call @use(%0) : (ptr)\n    \
+             jump block3\n\
+             block3:\n    return\n}}\n"
+        )
+    }
+
+    /// gcc's summary has `__builtin_expect` as a call, so a constant a call passes does not take
+    /// out the arm a hinted test leaves, where it does with the same test unhinted.
+    #[test]
+    fn a_constant_passed_leaves_both_arms_of_a_hinted_test() {
+        let weigh = |hint: bool, known: bool| {
+            let mut names = Interner::new();
+            let text = format!("{HEAD}{}", hinted(hint));
+            let module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+            let f = module.funcs().find(|&id| names.resolve(module[id].name) == "f").expect("f");
+            let func = &module[f];
+            let n = func[func.entry().expect("a body")].params[1];
+            let values = if known {
+                Map::from_iter([(n, (Imm::int(1, func[n].ty), func[n].ty))])
+            } else {
+                Map::default()
+            };
+            specialized_size(func, module.datalayout, &values, None)
+        };
+        assert!(weigh(false, true) < weigh(false, false));
+        assert!(weigh(true, true) > weigh(false, true));
     }
 }
