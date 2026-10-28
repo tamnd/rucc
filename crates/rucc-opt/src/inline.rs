@@ -556,8 +556,12 @@ pub fn run(
     // gcc's second inliner comes after its early one and before the called once rule, and weighs
     // what the early one found too large again, so this round writes those down rather than
     // refusing them.
-    let later = RefCell::new(heap::Later::default());
     let second_pass = second_pass.filter(|_| limit.is_some());
+    let cyclic = match second_pass {
+        Some(_) => heap::cyclic(&crate::callgraph::CallGraph::of(module, pic)),
+        None => Set::default(),
+    };
+    let later = RefCell::new(heap::Later { cyclic, ..heap::Later::default() });
     round(module, &wanted, &mut done, second_pass.and(Some(&later)));
     if let Some(second) = second_pass {
         let later = later.into_inner();
@@ -1325,7 +1329,18 @@ fn settle(
         if kind == Kind::Hinted {
             large = large.saturating_sub(late);
         }
-        if large > most {
+        // gcc's early inliner takes only what grows the caller by `early` or less and leaves the
+        // rest to its second, which takes the calls in the order of what they save. Taken here up
+        // to the limit, a body went into its callers before the second pass weighed it whole:
+        // `post_alloc_hook` in mm/page_alloc.c went into `prep_new_page` first, and that was then
+        // too large for `get_page_from_freelist`, where gcc has all three in one body.
+        // Not a call to a function that reaches itself, which the second pass never weighs.
+        let second = how.later.is_some_and(|it| !it.borrow().cyclic.contains(&module[callee].name))
+            && matches!(kind, Kind::Hinted | Kind::Auto);
+        // The call it replaces is counted without its result here. With it, mm/memory.c kept 22
+        // calls more than gcc does, and 9 more without it.
+        let growth = large.saturating_sub(1 + module[id][module[id][call].args].len());
+        if large > most || second && !early(&module[callee], growth, how) {
             // Left for the second pass to weigh with its hints, which says why if it refuses too.
             if let (Some(later), Kind::Hinted | Kind::Auto) = (how.later, kind) {
                 later.borrow_mut().deferred.insert((id, call));
@@ -2338,6 +2353,20 @@ impl Pool {
     }
 }
 
+/// Whether gcc's early inliner would copy `callee` where the copy grows its caller by `growth`,
+/// which it does when that is no more than `early`, a body that makes calls of its own held to
+/// that for each of them and itself together.
+fn early(callee: &Func, growth: usize, how: &How<'_>) -> bool {
+    let calls = callee
+        .blocks()
+        .flat_map(|block| callee.insts(block))
+        .filter(|&inst| {
+            matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
+        })
+        .count();
+    growth * (calls + 1) <= how.early as usize
+}
+
 /// Whether copying a body of `size` instructions in place of `call` makes the program larger by
 /// more than gcc lets a call that is not hot grow it.
 ///
@@ -2351,14 +2380,7 @@ impl Pool {
 fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> bool {
     let cost = 1 + func[func[call].args].len() + usize::from(func[call].results > 0);
     let growth = size.saturating_sub(cost);
-    let calls = callee
-        .blocks()
-        .flat_map(|block| callee.insts(block))
-        .filter(|&inst| {
-            matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
-        })
-        .count();
-    if growth * (calls + 1) <= how.early as usize {
+    if early(callee, growth, how) {
         return false;
     }
     let removable = callee.linkage == Linkage::Internal
