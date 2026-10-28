@@ -306,7 +306,7 @@ impl Pass for Thread {
                 }
                 let subst = bind(func, block, at);
                 let Some(call) = taken(func, term, &subst)
-                    .or_else(|| above(func, &edges, term, &subst, from, at, 4))
+                    .or_else(|| above(func, &edges, term, &subst, from, at, &mut vec![block], 4))
                 else {
                     continue;
                 };
@@ -1385,7 +1385,9 @@ fn implied(
 /// That branch is the one at the end of `from`, or one further up a line of blocks that each have
 /// one way in. The line is what inlining leaves when a `WARN_ON (cond)` is put in front of a
 /// later `if (cond)`: the warning is a block of its own on the true arm, and it jumps to the block
-/// that tests the condition again. Up to `depth` blocks of the line are looked at.
+/// that tests the condition again. Up to `depth` blocks of the line are looked at. `path` is the
+/// blocks between that branch and `term`, starting with the block `term` ends.
+#[allow(clippy::too_many_arguments)]
 fn above(
     func: &Func,
     edges: &Edges,
@@ -1393,19 +1395,45 @@ fn above(
     subst: &Bindings,
     from: Block,
     at: Idx<BlockCall>,
+    path: &mut Vec<Block>,
     depth: u32,
 ) -> Option<BlockCall> {
-    if let Some(call) = implied(func, term, subst, from, at) {
+    if !redone(func, from, path)
+        && let Some(call) = implied(func, term, subst, from, at)
+    {
         return Some(call);
     }
     if depth == 0 {
         return None;
     }
     let &[(before, at)] = edges.get(&from)?.as_slice() else { return None };
-    if before == from {
+    if before == from || path.contains(&before) {
         return None;
     }
-    above(func, edges, term, subst, before, at, depth - 1)
+    path.push(from);
+    above(func, edges, term, subst, before, at, path, depth - 1)
+}
+
+/// Whether the condition the `br_if` at the end of `from` tests, or a value it compares, is worked
+/// out again in a block of `path`.
+///
+/// Such a value is a new one each time control goes through that block, as a test at the top of a
+/// loop is each time round, so what the branch knew about it says nothing about the value `term`
+/// tests. Anything other than a `br_if` at the end of `from` is redone as well, since it knows
+/// nothing.
+fn redone(func: &Func, from: Block, path: &[Block]) -> bool {
+    let Some(before) = func.terminator(from) else { return true };
+    if func[before].opcode != Opcode::BrIf {
+        return true;
+    }
+    let Some(&known) = func[func[before].args].first() else { return true };
+    let mut read = vec![known];
+    if let Def::Result { inst, .. } = func[known].def
+        && func[inst].opcode == Opcode::ICmp
+    {
+        read.extend_from_slice(&func[func[inst].args]);
+    }
+    read.iter().any(|&value| defined_in(func, value).is_some_and(|block| path.contains(&block)))
 }
 
 /// Whether two conditions are one, either the same value or the same comparison of the same two
@@ -1809,7 +1837,8 @@ mod tests {
         // `WARN_ON (c); if (c) ...` once inlined: the warning is the true arm of the first test and
         // jumps to the block that tests `c` again, which has no parameter to bind.
         let mut names = Interner::new();
-        let mut func = Func::new(names.intern("f"), Signature::new());
+        let signature = Signature::new().with_params(&[Type::int(1)]);
+        let mut func = Func::new(names.intern("f"), signature);
         let entry = func.create_block();
         let c = func.append_param(entry, Type::int(1));
         let warn = func.create_block();
