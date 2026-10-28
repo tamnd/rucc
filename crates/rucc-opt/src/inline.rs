@@ -1690,6 +1690,54 @@ fn specialized_size(
     let Some(first) = copy.insts(entry).next() else {
         return size(callee);
     };
+    // gcc's summary has `__builtin_expect` as a call, so a branch on what it gives back is not one
+    // the constants a call passes can settle, and both arms of `likely(nr_pages == 1)` in
+    // `__tlb_remove_folio_pages_size` count in a copy passing 1. Settled here, that copy into
+    // `__tlb_remove_page_size` was half of what gcc weighs and went in first, which left two calls
+    // to `tlb_next_batch` in mm/mmu_gather.c where gcc has one. A hint on what is a constant
+    // without the call is gone after gcc's early passes, and is taken out here too.
+    let mut held: Set<Value> = values.keys().copied().collect();
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for block in copy.blocks() {
+            for inst in copy.insts(block) {
+                let data = &copy[inst];
+                if copy[data.args].iter().any(|arg| held.contains(arg)) {
+                    for result in data.results() {
+                        grew |= held.insert(result);
+                    }
+                }
+                for to in copy.successors(inst) {
+                    let passed = copy[to.block].params.iter().zip(copy[to.args].iter());
+                    for (&param, arg) in passed {
+                        if held.contains(arg) {
+                            grew |= held.insert(param);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut hints = Vec::new();
+    let mut through = Map::default();
+    for block in copy.blocks() {
+        for inst in copy.insts(block) {
+            let data = &copy[inst];
+            let (Some(result), Some(&arg)) = (data.results().next(), copy[data.args].first())
+            else {
+                continue;
+            };
+            if data.opcode == Opcode::Expect && !held.contains(&arg) {
+                through.insert(result, arg);
+                hints.push(inst);
+            }
+        }
+    }
+    crate::uses::substitute(&mut copy, &through);
+    for inst in hints {
+        copy.remove_inst(inst);
+    }
     let mut forward = Map::default();
     for (&param, &(value, ty)) in values {
         let imm = copy.add_imm(value);
@@ -1713,8 +1761,7 @@ fn specialized_size(
     // in crypto/mldsa.c is a switch of three lengths and a `WARN_ON_ONCE` in the default, which is
     // seventeen to gcc. It was twenty one here as a switch of four labels, and nineteen with the
     // branch on the `unlikely(1)` the warning tests.
-    let passes: [&dyn Pass; 9] = [
-        &crate::expect::Expect,
+    let passes: [&dyn Pass; 8] = [
         &crate::fold::Fold,
         &crate::simplify::Simplify,
         &crate::reassoc::Reassoc,
@@ -5767,5 +5814,52 @@ block0(%0: i32):
         let plain = inlined(&body.replace("    meta_begin %1, %2, class automatic\n", ""));
         let f = &plain[plain.find("func @f").expect("f is there")..];
         assert!(!f.contains("lifetime_end"), "{plain}");
+    }
+
+    /// `likely(n == 1)` with the work in the other arm, the test read through `expect` or not.
+    fn hinted(hint: bool) -> String {
+        let (test, m) = if hint {
+            (
+                "    %4 = zext.i32 %3\n    %5 = sext.i64 %4\n    %6 = iconst.i64 1\n    \
+                 %7 = expect %5, %6\n    %8 = iconst.i64 0\n    %9 = icmp ne %7, %8\n    \
+                 br_if %9, block1, block2\n",
+                "%10",
+            )
+        } else {
+            ("    br_if %3, block1, block2\n", "%4")
+        };
+        format!(
+            "func @use(ptr), linkage(external);\n\n\
+             func @f(ptr, i32), linkage(internal) {{\n\
+             block0(%0: ptr, %1: i32):\n    %2 = iconst.i32 1\n    %3 = icmp eq %1, %2\n\
+             {test}\
+             block1:\n    store %2 -> %0, align 4\n    jump block3\n\
+             block2:\n    {m} = mul.i32 %1, %1\n    store {m} -> %0, align 4\n    \
+             call @use(%0) : (ptr)\n    call @use(%0) : (ptr)\n    call @use(%0) : (ptr)\n    \
+             jump block3\n\
+             block3:\n    return\n}}\n"
+        )
+    }
+
+    /// gcc's summary has `__builtin_expect` as a call, so a constant a call passes does not take
+    /// out the arm a hinted test leaves, where it does with the same test unhinted.
+    #[test]
+    fn a_constant_passed_leaves_both_arms_of_a_hinted_test() {
+        let weigh = |hint: bool, known: bool| {
+            let mut names = Interner::new();
+            let text = format!("{HEAD}{}", hinted(hint));
+            let module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+            let f = module.funcs().find(|&id| names.resolve(module[id].name) == "f").expect("f");
+            let func = &module[f];
+            let n = func[func.entry().expect("a body")].params[1];
+            let values = if known {
+                Map::from_iter([(n, (Imm::int(1, func[n].ty), func[n].ty))])
+            } else {
+                Map::default()
+            };
+            specialized_size(func, module.datalayout, &values, None)
+        };
+        assert!(weigh(false, true) < weigh(false, false));
+        assert!(weigh(true, true) > weigh(false, true));
     }
 }
