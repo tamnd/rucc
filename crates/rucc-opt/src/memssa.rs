@@ -834,6 +834,11 @@ impl<'a> Walk<'a> {
         // An `asm` with nothing in memory and no `memory` clobber is not a write at all, which is
         // gcc's reading and the reason a load is still good on the far side of a `WARN_ON`.
         let data = self.func[inst];
+        // Nothing writes a `const` global, a fence and an `asm` with a `memory` clobber included,
+        // which is gcc's reading too: a declaration that says so is the whole of the argument.
+        if self.alias.invariant(reference) {
+            return None;
+        }
         if data.opcode == Opcode::InlineAsm
             && data.flags.contains(Flags::NOMEM)
             && !reference.volatile

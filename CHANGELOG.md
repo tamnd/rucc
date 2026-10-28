@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Jump threading now decides a branch that compares a widened one bit value, which is how an inlined function returning `_Bool` reaches its caller, so `if (!valid_section(ms))` after `ms &&` jumps straight to where it goes instead of testing a zero again (#3954)
 - Jump threading now decides a branch on a condition that a branch further up already tested, looking back through blocks with one way in, and runs once more after the late value numbering at `-O2` and `-O3`, so `is_swap_pte(x)` followed by `pte_none(x)` tests `x` once (#3955)
+- A load of a global declared `const` is no longer read again after a store, a call or an `asm`, including one through `%gs`, so the kernel's `current` is read once per function the way gcc reads it (#3956)
 
 ## 0.30.14
 

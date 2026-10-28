@@ -128,11 +128,13 @@ pub enum Reason {
     Summary,
     /// One of them touches only the safety planes, which nothing the program can name reaches.
     Plane,
+    /// One of them reads a global declared `const`, which nothing may write.
+    Constant,
 }
 
 impl Reason {
     /// Every reason, which is what a report walks.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Distinct,
         Self::Escape,
         Self::Offset,
@@ -141,6 +143,7 @@ impl Reason {
         Self::Attribute,
         Self::Summary,
         Self::Plane,
+        Self::Constant,
     ];
 
     /// How many there are, which is the width of a [`Counts`].
@@ -158,6 +161,7 @@ impl Reason {
             Self::Attribute => 5,
             Self::Summary => 6,
             Self::Plane => 7,
+            Self::Constant => 8,
         }
     }
 
@@ -173,6 +177,7 @@ impl Reason {
             Self::Attribute => "attribute",
             Self::Summary => "summary",
             Self::Plane => "plane",
+            Self::Constant => "constant",
         }
     }
 
@@ -188,6 +193,7 @@ impl Reason {
             Self::Attribute => "the callee is declared not to touch memory that way",
             Self::Summary => "what that callee does to memory was worked out, and it does not",
             Self::Plane => "that one touches only the planes, which the program cannot name",
+            Self::Constant => "that object is declared const, so nothing may write it",
         }
     }
 }
@@ -693,9 +699,23 @@ impl<'a> Alias<'a> {
         self.touched_by(reference, call, false)
     }
 
+    /// Whether this reads bytes of a global declared `const`, which nothing in the program may
+    /// write, so that nothing between two reads of it changes what they read.
+    #[must_use]
+    pub fn invariant(&self, access: &Access) -> bool {
+        !access.volatile
+            && matches!(access.origin, Origin::Global(name) if self.outside.constant(name))
+    }
+
     // The layers.
 
     fn decide(&self, a: &Access, b: &Access) -> Answer {
+        // Not a layer of section 8 and first for the reason the planes are first below. A write
+        // to a `const` object is undefined, so a reference to one is not touched by any write,
+        // and two reads never conflict anyway.
+        if self.invariant(a) || self.invariant(b) {
+            return Answer::No(Reason::Constant);
+        }
         // Section 8.1, and it is first because every layer below would be glad to say no.
         // Treating two volatile accesses as conflicting is what stops either being moved across
         // the other, which is the whole of what `volatile` promises.
@@ -854,6 +874,11 @@ impl<'a> Alias<'a> {
         if self.func[call].opcode.touches_only_planes() {
             return Answer::No(Reason::Plane);
         }
+        // What `Alias::decide` says first, for a call. Only for a write, since a call may well
+        // read the object.
+        if writing && self.invariant(reference) {
+            return Answer::No(Reason::Constant);
+        }
 
         // A `setjmp` marker is not a call and the escape argument under this one does not reach it,
         // so it has to be turned away before that argument is made. See
@@ -989,15 +1014,19 @@ impl<'a> Alias<'a> {
         // An access through `%fs` or `%gs` is at the segment base plus the address, and the base
         // is nothing this function can see, so the only thing left to say about where it lands is
         // that it is not in a frame slot nobody took the address of. The offset goes and so does
-        // the type, which is what gcc does with two pointers in different address spaces.
+        // the type, which is what gcc does with two pointers in different address spaces. It is
+        // volatile unless it is a `const` global, which is `current` in the kernel: gcc reads that
+        // once, since the declaration says nothing writes it, whatever segment it is read in.
         if flags.intersects(Flags::SEG_FS.union(Flags::SEG_GS)) {
+            let constant = !flags.contains(Flags::VOLATILE)
+                && matches!(origin, Origin::Global(name) if self.outside.constant(name));
             return Access {
                 origin,
                 offset: None,
                 size: None,
                 tbaa: None,
                 restrict: Restrict::NONE,
-                volatile: true,
+                volatile: !constant,
             };
         }
         Access {

@@ -122,7 +122,7 @@
 use rucc_base::hash::Map;
 use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
 
-use crate::alias::{Access, Origin, origin};
+use crate::alias::{Access, Alias, Origin, origin};
 use crate::dom::Dominators;
 use crate::loops::Loops;
 use crate::memssa::{Clobber, Step, Walk};
@@ -230,12 +230,13 @@ impl Pass for RedundantLoad {
                         }
                         continue;
                     }
-                    let Some((result, ty)) = reads(func, inst) else {
+                    let Some((result, ty)) = reads(func, walk.alias(), inst) else {
                         continue;
                     };
+                    let segment = func[inst].flags.intersection(Flags::SEG_FS.union(Flags::SEG_GS));
                     let key = walk
                         .settled(inst)
-                        .map(|mem| (mem, Place::of(func, func[func[inst].args][0]), ty));
+                        .map(|mem| (mem, Place::of(func, func[func[inst].args][0]), ty, segment));
                     let found = match walk.clobber_with(inst, &mut |reference, def| {
                         through(body, reference, def).map_or(Step::Stop, Step::Retry)
                     }) {
@@ -502,7 +503,10 @@ enum Found {
 }
 
 /// Each address read at a version of memory, with the blocks loads of it were in and their values.
-type Seen = Map<(Value, Place, Type), Vec<(Block, Value)>>;
+/// A load's version of memory, its address, its type and the segment it reads through.
+type Key = (Value, Place, Type, Flags);
+
+type Seen = Map<Key, Vec<(Block, Value)>>;
 
 /// Records what a load of this address at this version of memory is equal to.
 ///
@@ -513,7 +517,7 @@ type Seen = Map<(Value, Place, Type), Vec<(Block, Value)>>;
 /// the one above the loop does not.
 fn remember(
     seen: &mut Seen,
-    key: Option<(Value, Place, Type)>,
+    key: Option<Key>,
     shape: (&Dominators, &Loops),
     block: Block,
     value: Value,
@@ -530,7 +534,7 @@ fn remember(
 /// reaches this one.
 fn earlier(
     seen: &Seen,
-    key: Option<(Value, Place, Type)>,
+    key: Option<Key>,
     shape: (&Dominators, &Loops),
     block: Block,
 ) -> Option<Value> {
@@ -589,9 +593,18 @@ fn count(of: u64) -> u32 {
 /// Narrow on purpose, and the same shape [`crate::load`] uses. A plain non-volatile `Load` with one
 /// address and one result. `AtomicLoad` is a separate opcode in this IR and is not this one, so an
 /// ordering never reaches here as something to forward.
-fn reads(func: &Func, inst: Inst) -> Option<(Value, Type)> {
+///
+/// A load through `%fs` or `%gs` of a global declared `const` is the one exception to the flags,
+/// since nothing writes it and so two of them read the same thing. That is `current` in the kernel.
+fn reads(func: &Func, alias: &Alias<'_>, inst: Inst) -> Option<(Value, Type)> {
     let data = &func[inst];
-    if data.opcode != Opcode::Load || data.flags.intersects(Flags::KEEP) {
+    if data.opcode != Opcode::Load {
+        return None;
+    }
+    if data.flags.intersects(Flags::KEEP)
+        && (data.flags.contains(Flags::VOLATILE)
+            || !alias.reads(inst).is_some_and(|read| alias.invariant(&read)))
+    {
         return None;
     }
     let mut results = data.results();
@@ -1442,6 +1455,50 @@ block2:
         let (module, stats) = run(&text);
         assert!(!stats.changed());
         assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    /// The kernel's `current`: a load of a `const` global through `%gs`, a store and a call, and
+    /// the same load again, with `constant` on the global or not and the second load through the
+    /// segment or not.
+    fn current(constant: &str, second: &str) -> String {
+        format!(
+            "{HEADER}
+global @task : bytes 8, align 8, linkage(external){constant}
+
+func @f(ptr) -> ptr, linkage(external) {{
+block0(%0: ptr):
+    %1 = global_addr @task
+    %2 = load.seg_gs %1, align 8
+    store %2 -> %0, align 8
+    call @g() : ()
+    %3 = load{second} %1, align 8
+    return %3
+}}
+
+func @g(), linkage(external);
+"
+        )
+    }
+
+    #[test]
+    fn a_const_global_read_through_gs_is_read_once_across_a_store_and_a_call() {
+        let (module, stats) = run(&current(", constant", ".seg_gs"));
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_global_that_is_not_const_is_read_again_after_the_call() {
+        let (module, stats) = run(&current("", ".seg_gs"));
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn the_same_address_read_without_the_segment_is_other_bytes() {
+        let (module, stats) = run(&current(", constant", ".ptr"));
+        assert!(!stats.changed());
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
     }
 
     #[test]
