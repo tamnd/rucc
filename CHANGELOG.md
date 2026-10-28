@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64 a run of two or more stores of a zero in one block now stores it from a register, so a structure cleared a field at a time is `movq %rax, 8(%rsp)` at five bytes rather than `movq $0, 8(%rsp)` at nine (#3957)
 - Loop invariant motion now takes a read of a `const` global through `%fs` or `%gs` out of a loop that writes memory, which is `current` in the kernel, when the loop has a register to spare for it (#3958)
 - On x86-64 a test of a register against a constant whose bits all sit in the low byte now tests the byte, so `testq $4, %rax` at six bytes is `testb $4, %al` at two, which is what gcc writes (#3960)
+- On x86-64 a branch on a comparison whose answer something else also reads now jumps on the flags the comparison left, so `setne %dl; testb %dl, %dl; jne` is `setne %dl; jne` and the byte stays for the other reader (#3961)
 
 ## 0.30.15
 

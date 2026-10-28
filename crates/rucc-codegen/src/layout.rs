@@ -859,10 +859,15 @@ fn along(
 /// The second map is the target's [`BranchInsts::readings`], the bytes written from what some
 /// instruction in front of them left. [`fusable`], [`blocks`] and the selects take those too, and
 /// [`sink`] does not, since there is no comparison in one to move.
+///
+/// The third is the comparisons of the first map that leave the condition state they found, which
+/// [`blocks`] jumps on without a test when the byte is kept for some other reader. See
+/// [`Fused::keeping`].
 #[derive(Debug)]
 pub struct Fused(
     pub(crate) Map<mir::Opcode, &'static Fusion>,
     pub(crate) Map<mir::Opcode, &'static Reading>,
+    pub(crate) Map<mir::Opcode, &'static Fusion>,
 );
 
 impl Fused {
@@ -879,7 +884,26 @@ impl Fused {
             .iter()
             .map(|reading| (mir::Opcode::new(names.join(insts.prefix, reading.set)), reading))
             .collect();
-        Fused(table, readings)
+        Fused(table, readings, Map::default())
+    }
+
+    /// The same table, knowing which of its comparisons leave the condition state they found.
+    ///
+    /// A comparison whose byte something besides the branch reads keeps the byte, and the branch
+    /// then tests a register the instruction in front of it has just written from the flags that
+    /// are still there. That is `setne`, `testb` and `jne` where `setne` and `jne` would do, and it
+    /// is 279 places in the kernel objects the bench builds, against 13 for gcc. Not every
+    /// entry in the table leaves the state, since on AArch64 the one bit at a place is `ubfx`, so
+    /// the ones that do are the ones `flags` says ask what they read.
+    #[must_use]
+    pub fn keeping(mut self, flags: &FlagInsts) -> Self {
+        self.2 = self
+            .0
+            .iter()
+            .filter(|(_, fusion)| flags.asks_what_it_reads(fusion.set))
+            .map(|(&opcode, &fusion)| (opcode, fusion))
+            .collect();
+        self
     }
 }
 
@@ -1239,6 +1263,7 @@ impl Writer<'_> {
         // Asked before the branch is taken out, because what it looks at is the instruction in
         // front of the branch and taking the branch out would make that the last one.
         let fused = self.fused(block);
+        let kept = if fused.is_none() { self.kept(block) } else { None };
         let condition = self.take(block);
 
         // Whichever arm is laid out next is the one the block falls into, and the jump is then
@@ -1248,7 +1273,7 @@ impl Writer<'_> {
         let (if_true, if_false) = match fused {
             Some((_, Folded::Compare(fusion))) => (fusion.if_true, fusion.if_false),
             Some((_, Folded::Reading(reading))) => (reading.if_true, reading.if_false),
-            None => (self.insts.if_true, self.insts.if_false),
+            None => kept.unwrap_or((self.insts.if_true, self.insts.if_false)),
         };
         let arms: Vec<mir::Block> = self.func[block].succs.iter().map(|arm| arm.block).collect();
         let (name, bridge) = if next == Some(arms[1]) {
@@ -1269,6 +1294,13 @@ impl Writer<'_> {
             // nothing a jump that compares with zero could make itself.
             Some((set, Folded::Reading(_))) => {
                 self.func.remove_inst(set);
+                let opcode = self.opcode(name);
+                self.func.build(block, opcode).finish();
+                return bridge;
+            }
+            // The byte stays for whatever else reads it and the jump reads the flags the
+            // instruction that wrote it left.
+            None if kept.is_some() => {
                 let opcode = self.opcode(name);
                 self.func.build(block, opcode).finish();
                 return bridge;
@@ -1355,6 +1387,28 @@ impl Writer<'_> {
     /// The comparison the block's branch can be folded into, when there is one. See [`folded`].
     fn fused(&self, block: mir::Block) -> Option<(mir::Inst, Folded)> {
         folded(self.func, self.fused, self.fusable, block)
+    }
+
+    /// The two jumps on the flags the instruction in front of the branch left, when that is what
+    /// wrote the byte the branch reads and the flags still say what the byte does.
+    ///
+    /// For when [`Self::fused`] has nothing, which is when something else reads the byte too. The
+    /// byte is then kept and only the test of it goes. A byte written from the flags the
+    /// instruction before it left does not change them, and a comparison in [`Fused::keeping`]
+    /// leaves the ones it made. Asked after allocation, as [`folded`] is, since the two have to be
+    /// next to each other and the branch has to read the register the byte was written to.
+    fn kept(&self, block: mir::Block) -> Option<(&'static str, &'static str)> {
+        let insts: Vec<mir::Inst> = self.func.insts(block).collect();
+        let [.., set, last] = insts[..] else { return None };
+        let opcode = self.func[set].opcode;
+        let jumps = match (self.fused.2.get(&opcode), self.fused.1.get(&opcode)) {
+            (Some(fusion), _) => (fusion.if_true, fusion.if_false),
+            (None, Some(reading)) => (reading.if_true, reading.if_false),
+            (None, None) => return None,
+        };
+        let byte = self.func[self.func[set].operands].first()?;
+        let read = self.func[self.func[last].operands].first()?;
+        (byte.role != Role::Use && read.reg == byte.reg).then_some(jumps)
     }
 
     /// Turns a comparison that wrote a byte into the same comparison that writes nothing.
@@ -1454,7 +1508,7 @@ mod tests {
     fn laid_out(func: &mut mir::Func, names: &mut Interner) -> Vec<String> {
         // Both halves, in the order the pipeline runs them, so that a test which builds a
         // comparison in front of its branch sees what a compiled function would see.
-        let fused = Fused::new(&BRANCH, names);
+        let fused = Fused::new(&BRANCH, names).keeping(&FLAGS);
         let fusable = fusable(func, &BRANCH, &fused, names);
         blocks(func, &BRANCH, &fused, names, &fusable, &[], false);
         mir::print_func(func, names, &REGS)
@@ -1905,14 +1959,17 @@ mod tests {
         assert_eq!(func[func[compare].operands].len(), 1, "the base of the address on its own");
     }
 
-    /// The same comparison with something else reading its answer, which keeps everything.
+    /// The same comparison with something else reading its answer, which keeps its byte and
+    /// loses only the test.
     ///
     /// Folding the byte away when a second instruction wants it would be deleting a value the
     /// program computes. This is the whole of what [`fusable`] is asked before allocation, and the
     /// second reader here is in another block so that it is a question about the function rather
-    /// than about the block the branch is in.
+    /// than about the block the branch is in. The flags the comparison made are still there at the
+    /// branch, so the jump reads them, which is `setl` and `jge` where it was `setl`, `testb` and
+    /// `je`.
     #[test]
-    fn a_comparison_whose_answer_something_else_reads_keeps_its_byte_and_its_test() {
+    fn a_comparison_whose_answer_something_else_reads_keeps_its_byte_and_jumps_on_its_flags() {
         let (mut names, mut func, made) = blank(3);
         let byte = compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
         let opcode = Opcode::new(names.intern("x64.mov_rr_64"));
@@ -1923,8 +1980,40 @@ mod tests {
 
         let text = laid_out(&mut func, &mut names);
 
-        assert!(text.contains(&"x64.test_rr_8 %0".to_owned()), "{text:?}");
-        assert!(text.contains(&"x64.jcc_e block2, block1".to_owned()), "{text:?}");
+        assert!(text.contains(&"%0:gpr = x64.cmp_set_l_32 $rax, $rcx".to_owned()), "{text:?}");
+        assert!(!text.iter().any(|line| line.starts_with("x64.test_rr_8")), "{text:?}");
+        assert!(text.contains(&"x64.jcc_ge block2, block1".to_owned()), "{text:?}");
+    }
+
+    /// The same again with a step between the comparison and its branch, which keeps the test,
+    /// since the flags at the branch are the step's and not the comparison's.
+    #[test]
+    fn a_kept_comparison_that_is_no_longer_in_front_of_its_branch_keeps_its_test() {
+        let (mut names, mut func, made) = blank(3);
+        let byte = compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        let opcode = Opcode::new(names.intern("x64.mov_rr_64"));
+        func.build(made[1], opcode)
+            .def(Reg::physical(RAX), GPR)
+            .operand(Operand::read(byte, GPR))
+            .finish();
+        let fused = Fused::new(&BRANCH, &mut names).keeping(&FLAGS);
+        let fusable = fusable(&func, &BRANCH, &fused, &mut names);
+        assert!(fusable.is_empty(), "the byte has two readers");
+
+        let branch = func.terminator(made[0]).expect("a block with two arms has a branch");
+        let opcode = Opcode::new(names.intern("x64.add_ri_64"));
+        let step = func
+            .build_loose(opcode)
+            .def(Reg::physical(RCX), GPR)
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .imm(16)
+            .finish();
+        func.insert_before(branch, step);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
+        let text = mir::print_func(&func, &names, &REGS);
+
+        assert!(text.contains("x64.test_rr_8"), "{text}");
+        assert!(text.contains("x64.jcc_e"), "{text}");
     }
 
     /// A comparison allocation moved away from its branch, which keeps its test.
