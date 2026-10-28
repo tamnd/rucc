@@ -138,7 +138,7 @@ impl Pass for Expect {
 }
 
 /// What the hint behind this terminator says about each of its arms, in the order the arms are in.
-fn claims(func: &Func, term: Inst) -> Option<Vec<Hint>> {
+pub(crate) fn claims(func: &Func, term: Inst) -> Option<Vec<Hint>> {
     let &value = func[func[term].args].first()?;
     match func[term].opcode {
         Opcode::BrIf => {

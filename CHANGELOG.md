@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A store of zero into bytes that already hold zero on every path to it is now removed, as gcc's dead store pass does it. Under `-ftrivial-auto-var-init=zero` the kernel fills each local with zeros and then sets many fields to zero again. In Linux 7.2.8 this takes 708 bytes out of `lib/maple_tree.o`, 192 out of `kernel/signal.o`, 176 out of `fs/read_write.o` and 176 out of `mm/vma.o` (#3938).
 - `||` and `&&` chains that test several one-bit fields of the same object now load the word once and do a single masked test, the same fold gcc does, so small helpers like `tlb_flush_mmu_tlbonly` fit under the inline limit again (#3942)
 - Constants written one after another to bit-fields of the same object are now one read and one write of the bytes they share, so `__tlb_reset_range` is six instructions as with gcc and `tlb_flush_mmu_tlbonly` is inlined into its callers again (#3943)
+- The inliner now reads `__builtin_expect` when it guesses how often a call runs, and a large copy on an unlikely path is not counted against the body it went into, so `vma_start_read` is inlined into `lock_vma_under_rcu` and `lock_next_vma` as with gcc (#3944)
 
 ## 0.30.13
 
