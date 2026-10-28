@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64 a test of a register against a constant whose bits all sit in the low byte now tests the byte, so `testq $4, %rax` at six bytes is `testb $4, %al` at two, which is what gcc writes (#3960)
 - On x86-64 a branch on a comparison whose answer something else also reads now jumps on the flags the comparison left, so `setne %dl; testb %dl, %dl; jne` is `setne %dl; jne` and the byte stays for the other reader (#3961)
 - On x86-64 a branch on an `asm` flag output, such as the kernel's `test_bit` or an atomic that answers whether it reached zero, now jumps on the flags the template left, so `lock decl (%rdi); sete %al; testb %al, %al; jne` is `lock decl (%rdi); je` as gcc writes it (#3962)
+- A function built with `-mno-sse` on a stack aligned to eight bytes, which is every kernel function, no longer keeps a frame pointer for a vector spill slot it can never have, so `rbp` is handed to the allocator again and the bench objects are 4793 bytes smaller (#3965)
 
 ## 0.30.15
 
