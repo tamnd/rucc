@@ -117,7 +117,7 @@ use rucc_base::hash::Set;
 use rucc_cost::heuristics;
 use rucc_ir::{Block, Def, Flags, Func, Inst, Opcode, Value};
 
-use crate::alias::{Access, Alias, Escapes};
+use crate::alias::{Access, Alias, Escapes, Origin, origin};
 use crate::cfg::Cfg;
 use crate::dom::{Dominators, PostDominators};
 use crate::live::Liveness;
@@ -332,6 +332,12 @@ fn untouched(
     let Some(it) = oracle.reads(inst) else {
         return Clear::No;
     };
+    // A `const` global lives for the whole run and nothing may write it, so neither a write nor a
+    // lifetime boundary in the loop is about it, and assembly with a memory clobber is no
+    // exception. That is `current` in the kernel, read in a loop that enables interrupts.
+    if oracle.invariant(&it) {
+        return Clear::Yes;
+    }
     for &other in boundaries {
         if *asked >= ALIAS_STEPS {
             return Clear::OutOfSteps;
@@ -530,6 +536,25 @@ fn writes_named_memory(func: &Func, inst: Inst) -> bool {
     opcode.writes_memory() && !opcode.touches_only_planes()
 }
 
+/// Whether this reads a `const` global through `%fs` or `%gs`, which is `current` in the kernel.
+///
+/// A segment access carries [`Flags::KEEP`], so `speculate` calls it volatile and it never moves.
+/// gcc reads `current` once in front of the loop instead, since the declaration says nothing
+/// writes it, and the read of a global that exists cannot fault wherever it is made.
+fn reads_constant_segment(func: &Func, outside: &Outside, inst: Inst) -> bool {
+    let data = func[inst];
+    if data.opcode != Opcode::Load || data.flags.contains(Flags::VOLATILE) {
+        return false;
+    }
+    if !data.flags.intersects(Flags::SEG_FS.union(Flags::SEG_GS)) {
+        return false;
+    }
+    let Some(&pointer) = func[data.args].first() else {
+        return false;
+    };
+    matches!(origin(func, pointer).0, Origin::Global(name) if outside.constant(name))
+}
+
 impl Job<'_> {
     /// Hoists what this loop will let go of, and says whether anything moved.
     fn run(
@@ -724,8 +749,21 @@ impl Job<'_> {
                         }
                     }
                 }
-                let cost = if self.folded.contains(&inst) { 0 } else { cost(func, inst) };
-                let why = speculate::why_not(func, self.modref, inst, &mut ranges, preheader);
+                // A read of `current` is one instruction that is as cheap to make again in the loop
+                // as it is to load back from the stack, so it only moves when there is room for it.
+                let constant = reads_constant_segment(func, self.outside, inst);
+                let cost = if self.folded.contains(&inst) {
+                    0
+                } else if constant {
+                    1
+                } else {
+                    cost(func, inst)
+                };
+                let why = if constant {
+                    None
+                } else {
+                    speculate::why_not(func, self.modref, inst, &mut ranges, preheader)
+                };
                 match movement(why) {
                     Move::Anywhere => (),
                     Move::IfItWasGoingToRun if runs => (),
@@ -2263,5 +2301,84 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
         assert_eq!(lives_in(&it.func, read), it.entry, "four bytes of four are always there");
         sound(&it.func, &mut it.names);
+    }
+
+    /// `current` in the kernel: a `const` global read through `%gs` on one arm of a loop that
+    /// stores and calls. `constant` is what the declaration says.
+    fn current(constant: &str) -> String {
+        format!(
+            "; ModuleID = 'task.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+
+global @task : bytes 8, align 8, linkage(external){constant}
+
+func @f(ptr, i32) -> i32, linkage(external) {{
+block0(%0: ptr, %1: i32):
+    %2 = global_addr @task
+    %3 = iconst.i32 0
+    jump block1(%3)
+
+block1(%4: i32):
+    %5 = icmp slt %4, %1
+    br_if %5, block2, block5
+
+block2:
+    %6 = icmp eq %4, %3
+    br_if %6, block3, block4
+
+block3:
+    %7 = load.seg_gs %2, align 8
+    store %7 -> %0, align 8
+    call @g() : ()
+    jump block4
+
+block4:
+    %8 = iconst.i32 1
+    %9 = add %4, %8
+    jump block1(%9)
+
+block5:
+    return %4
+}}
+
+func @g(), linkage(external);
+"
+        )
+    }
+
+    /// Runs the pass over the one function in the text and says which block the load ended in.
+    fn read_in(text: &str) -> (Stats, usize) {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the text parses");
+        let id = module.funcs().next().expect("one function");
+        let outside = Arc::new(Outside::of(&module));
+        let mut an = crate::machine::fixtures::analyses().about(outside);
+        let stats = LICM.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("{errors:?}");
+        }
+        let func = &module[id];
+        let load = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::Load)
+            .expect("the load is still there");
+        (stats, func.block_of(load).expect("it is in a block").index())
+    }
+
+    #[test]
+    fn a_const_global_read_through_gs_comes_out_of_a_loop_that_stores_and_calls() {
+        let (stats, block) = read_in(&current(", constant"));
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        assert_eq!(block, 0);
+    }
+
+    #[test]
+    fn the_same_read_of_a_global_that_is_not_const_stays_on_its_arm() {
+        let (stats, block) = read_in(&current(""));
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(block, 3);
     }
 }

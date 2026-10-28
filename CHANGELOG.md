@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - On x86-64 a run of two or more stores of a zero in one block now stores it from a register, so a structure cleared a field at a time is `movq %rax, 8(%rsp)` at five bytes rather than `movq $0, 8(%rsp)` at nine (#3957)
+- Loop invariant motion now takes a read of a `const` global through `%fs` or `%gs` out of a loop that writes memory, which is `current` in the kernel, when the loop has a register to spare for it (#3958)
 
 ## 0.30.15
 
