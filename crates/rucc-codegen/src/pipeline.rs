@@ -1251,7 +1251,7 @@ pub fn compile_recording(
 
     // The comparisons a branch may be folded into, which the passes on branches and selects
     // below each ask about.
-    let fused = layout::Fused::new(machine.branch, names);
+    let fused = layout::Fused::new(machine.branch, names).keeping(machine.flags);
 
     // In front of the question below, which only takes a comparison that is the instruction in
     // front of its branch, and before allocation, for the same reason that question is. Not at
