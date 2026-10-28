@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::{INLINE_CALL_TIME, INLINE_SUMMARY_CLAUSES};
-use rucc_ir::{Block, Def, Func, Imm, Inst, Opcode, Type, Value};
+use rucc_ir::{Block, DataLayout, Def, Func, Imm, Inst, Opcode, Type, Value};
 
 use super::{Readers, computed, goes_to, weight};
 use crate::cfg::Cfg;
@@ -96,6 +96,8 @@ pub(super) struct Summary {
     walked: RefCell<Map<(Walk, bool), usize>>,
     /// What [`Summary::timed`] has worked out.
     timed: RefCell<Map<Walk, f64>>,
+    /// The machine the body was summed up for, which says which of its locals are values.
+    layout: DataLayout,
 }
 
 /// What a walk of a body is kept under: how many values, instructions and blocks the body had
@@ -113,7 +115,7 @@ fn walk(func: &Func, values: &Map<Value, (Imm, Type)>) -> Walk {
 
 impl Summary {
     /// A summary that answers nothing.
-    fn inexact() -> Self {
+    fn inexact(layout: DataLayout) -> Self {
         Self {
             params: Vec::new(),
             masks: Map::default(),
@@ -124,7 +126,13 @@ impl Summary {
             exact: false,
             walked: RefCell::default(),
             timed: RefCell::default(),
+            layout,
         }
+    }
+
+    /// The machine the body was summed up for.
+    pub(super) fn layout(&self) -> DataLayout {
+        self.layout
     }
 
     /// [`super::folded_size`] for a body this has no exact answer for, walked once for each set of
@@ -145,7 +153,7 @@ impl Summary {
         if let Some(&size) = self.walked.borrow().get(&key) {
             return size;
         }
-        let size = super::folded_size(func, Set::default(), values, weighed);
+        let size = super::folded_size(func, self.layout, Set::default(), values, weighed);
         self.walked.borrow_mut().insert(key, size);
         size
     }
@@ -164,25 +172,33 @@ impl Summary {
         if let Some(&time) = self.timed.borrow().get(&key) {
             return time;
         }
-        let time = super::folded(func, Set::default(), values, Some(names), Some(frequency)).1;
+        let layout = self.layout;
+        let time =
+            super::folded(func, layout, Set::default(), values, Some(names), Some(frequency)).1;
         self.timed.borrow_mut().insert(key, time);
         time
     }
 
     /// The summary of a body, with the time each block takes weighed by how often `frequency`
     /// says it runs, or once each without it.
-    pub(super) fn of(func: &Func, names: &Interner, frequency: Option<&Map<Block, f64>>) -> Self {
-        let Some(entry) = func.entry() else { return Self::inexact() };
+    pub(super) fn of(
+        func: &Func,
+        layout: DataLayout,
+        names: &Interner,
+        frequency: Option<&Map<Block, f64>>,
+    ) -> Self {
+        let Some(entry) = func.entry() else { return Self::inexact(layout) };
         let params = func[entry].params.clone();
         let wide = params.len() > 64; // not a threshold: a mask is a u64, one bit a parameter
         if wide {
-            return Self::inexact();
+            return Self::inexact(layout);
         }
-        let mut summary = Self { params, exact: true, ..Self::inexact() };
+        let mut summary = Self { params, exact: true, ..Self::inexact(layout) };
         for (at, &param) in summary.params.iter().enumerate() {
             summary.masks.insert(param, 1 << at);
         }
         let readers = Readers::of(func);
+        let slots = super::slots(func, layout);
         let only =
             |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| readers.only(value, fits);
         let address = |opcode: Opcode, at: usize| {
@@ -262,6 +278,8 @@ impl Summary {
                     {
                         Some(0)
                     }
+                    Opcode::Load if args.first().is_some_and(|arg| slots.contains(arg)) => Some(0),
+                    Opcode::Store if args.get(1).is_some_and(|arg| slots.contains(arg)) => Some(0),
                     Opcode::Expect | Opcode::Return | Opcode::LifetimeEnd => Some(0),
                     Opcode::Alloca if args.is_empty() => Some(0),
                     _ => None,
@@ -296,7 +314,7 @@ impl Summary {
                         let into = reaching.entry(to).or_default();
                         into.extend(taken);
                         if !simplify(into) {
-                            return Self::inexact();
+                            return Self::inexact(layout);
                         }
                     }
                 }
@@ -557,12 +575,12 @@ block5(%14: i32):
 }
 "#;
 
-    fn parsed(body: &str) -> (Func, Interner) {
+    fn parsed(body: &str) -> (Func, DataLayout, Interner) {
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
         let id = module.funcs().next().expect("the fixture has a function");
-        (module[id].clone(), names)
+        (module[id].clone(), module.datalayout, names)
     }
 
     /// The numbers passed for the parameters at these places.
@@ -581,12 +599,14 @@ block5(%14: i32):
     /// The summary's size with the parameters at these places passed as these numbers, checked
     /// against the walk, and whether it says something was cut.
     fn sized(body: &str, passed: &[(usize, i128)]) -> (usize, bool) {
-        let (func, names) = parsed(body);
+        let (func, layout, names) = parsed(body);
         let values = values(&func, passed);
-        let summary = Summary::of(&func, &names, None);
+        let summary = Summary::of(&func, layout, &names, None);
         let estimate = summary.estimate(&func, &values).expect("the summary is exact");
-        assert_eq!(estimate.plain, folded_size(&func, Set::default(), values.clone(), None));
-        assert_eq!(estimate.weighed, folded_size(&func, Set::default(), values, Some(&names)));
+        let plain = folded_size(&func, layout, Set::default(), values.clone(), None);
+        assert_eq!(estimate.plain, plain);
+        let weighed = folded_size(&func, layout, Set::default(), values, Some(&names));
+        assert_eq!(estimate.weighed, weighed);
         (estimate.plain, estimate.cut)
     }
 
@@ -637,17 +657,39 @@ block2:
         assert_eq!(sized(body, &[(0, 2)]), (2, true));
     }
 
+    /// `start_dir_add` from fs/dcache.c cut down: a count read into a local, tested, and written
+    /// back one larger. The local is a value once the early passes have run, so neither the store
+    /// nor the load through it is counted, only the load of the count, the add and the store of it.
+    #[test]
+    fn a_load_or_a_store_through_a_local_that_becomes_a_value_is_not_counted() {
+        let body = r#"
+func @start(ptr) -> void, linkage(internal) {
+block0(%0: ptr):
+    %1 = alloca, size 4, align 4
+    %2 = load.i32 %0, align 4
+    store %2 -> %1, align 4
+    %3 = load.i32 %1, align 4
+    %4 = iconst.i32 1
+    %5 = add.i32 %3, %4
+    store %5 -> %0, align 4
+    return
+}
+"#;
+        assert_eq!(sized(body, &[]), (3, false));
+    }
+
     /// The time is the walk's, each block weighed by how often it runs.
     #[test]
     fn the_time_is_the_walks() {
-        let (func, names) = parsed(NEST);
+        let (func, layout, names) = parsed(NEST);
         let frequency: Map<Block, f64> =
             func.blocks().enumerate().map(|(at, block)| (block, 0.5 + at as f64 * 0.75)).collect();
-        let summary = Summary::of(&func, &names, Some(&frequency));
+        let summary = Summary::of(&func, layout, &names, Some(&frequency));
         for passed in [&[][..], &[(0, 20)], &[(0, 7), (1, 5)], &[(1, 5)]] {
             let values = values(&func, passed);
             let estimate = summary.estimate(&func, &values).expect("the summary is exact");
-            let walked = folded(&func, Set::default(), values, Some(&names), Some(&frequency)).1;
+            let frequency = Some(&frequency);
+            let walked = folded(&func, layout, Set::default(), values, Some(&names), frequency).1;
             assert!((estimate.time - walked).abs() < 1e-9, "{} {walked}", estimate.time);
         }
     }

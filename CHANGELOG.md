@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `||` and `&&` chains that test several one-bit fields of the same object now load the word once and do a single masked test, the same fold gcc does, so small helpers like `tlb_flush_mmu_tlbonly` fit under the inline limit again (#3942)
 - Constants written one after another to bit-fields of the same object are now one read and one write of the bytes they share, so `__tlb_reset_range` is six instructions as with gcc and `tlb_flush_mmu_tlbonly` is inlined into its callers again (#3943)
 - The inliner now reads `__builtin_expect` when it guesses how often a call runs, and a large copy on an unlikely path is not counted against the body it went into, so `vma_start_read` is inlined into `lock_vma_under_rcu` and `lock_next_vma` as with gcc (#3944)
+- The inliner counts nothing for a load or a store through a local that scalar replacement would turn into a value, the way gcc weighs a body after its early SRA, so `start_dir_add` in fs/dcache.c is measured at gcc's size (#3945)
 
 ## 0.30.13
 
