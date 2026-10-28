@@ -38,9 +38,9 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::badness::{self, Call, Hints};
 use rucc_cost::heuristics::{
-    INLINE_CALL_TIME, INLINE_HINT_PERCENT, INLINE_HINT_PERCENT_O3, INLINE_MIN_SPEEDUP,
-    INLINE_MIN_SPEEDUP_O3, INLINE_UNIT_GROWTH, LARGE_FUNCTION_GROWTH, LARGE_FUNCTION_INSNS,
-    LARGE_UNIT_INSNS,
+    HOT_BLOCK_FRACTION, INLINE_CALL_TIME, INLINE_HINT_PERCENT, INLINE_HINT_PERCENT_O3,
+    INLINE_MIN_SPEEDUP, INLINE_MIN_SPEEDUP_O3, INLINE_UNIT_GROWTH, LARGE_FUNCTION_GROWTH,
+    LARGE_FUNCTION_INSNS, LARGE_UNIT_INSNS,
 };
 use rucc_ir::{
     AttrSet, Block, DataLayout, Def, Extra, Func, FuncId, Imm, Inst, Linkage, Module, Opcode, Pic,
@@ -108,6 +108,21 @@ pub(super) struct Later {
     pub(super) examined: Set<(FuncId, Inst)>,
     /// The ones it found too large and left for this pass to weigh again.
     pub(super) deferred: Set<(FuncId, Inst)>,
+    /// The functions this pass never weighs a call to, which the first pass does not leave it.
+    pub(super) cyclic: Set<Symbol>,
+}
+
+/// The functions that reach themselves through calls.
+pub(super) fn cyclic(graph: &CallGraph) -> Set<Symbol> {
+    let mut cyclic = Set::default();
+    for component in graph.components() {
+        for &node in component {
+            if component.len() > 1 || graph.calls(node).contains(&node) {
+                cyclic.insert(graph.name(node));
+            }
+        }
+    }
+    cyclic
 }
 
 /// What a call was weighed on: how many times its caller and its callee had changed, and how many
@@ -253,14 +268,7 @@ pub(super) fn run(
     pic: Pic,
 ) -> Vec<(FuncId, Stats)> {
     let graph = CallGraph::of(module, pic);
-    let mut cyclic = Set::default();
-    for component in graph.components() {
-        for &node in component {
-            if component.len() > 1 || graph.calls(node).contains(&node) {
-                cyclic.insert(graph.name(node));
-            }
-        }
-    }
+    let cyclic = cyclic(&graph);
     let settled = if second.constants { settled(module, &graph) } else { Map::default() };
     let defined: Vec<FuncId> = module.funcs().filter(|&id| !module[id].is_declaration()).collect();
     let layout = module.datalayout;
@@ -438,13 +446,18 @@ impl Heap<'_> {
     }
 
     /// Whether a call may be hot, which is gcc's `cgraph_edge::maybe_hot_p` with no profile as far
-    /// as it decides anything here: a call to a function that runs once is not.
+    /// as it decides anything here: a call to a function that runs once is not, and neither is one
+    /// that runs less than one time in [`HOT_BLOCK_FRACTION`] that its caller does. `mmput` is
+    /// called on the error paths of `copy_process` in kernel/fork.c, and gcc leaves those calls
+    /// alone where copying them took `__mmput` into it twice.
     ///
     /// `maybe_hot_p` also holds a call that runs less than half again as often as a caller that
     /// runs once to be cold, but gcc 16 at `-O2` copies a call `main` makes once into `main` when
     /// the callee is called from a loop somewhere else, so that test is not followed.
-    fn hot(&self, callee: FuncId) -> bool {
-        !self.once.contains(&callee)
+    fn hot(&self, caller: FuncId, call: Inst, callee: FuncId) -> bool {
+        let often = self.at.get(&(caller, call)).map_or(1.0, |&(frequency, _)| frequency);
+        let fraction = f64::from(rucc_cost::param!(HOT_BLOCK_FRACTION).max(1));
+        !self.once.contains(&callee) && often * fraction >= 1.0
     }
 
     /// Fills in [`Heap::at`] and [`Heap::spent`] for a function the first time they are asked
@@ -693,7 +706,7 @@ impl Heap<'_> {
         // have copied it at each.
         if weighed.growth > 0
             && (weighed.growth >= as_i64(self.how.limit) || weighed.overall > 0)
-            && !self.hot(weighed.callee)
+            && !self.hot(caller, call, weighed.callee)
         {
             return Err(InlineFailure::Unlikely);
         }
@@ -848,6 +861,17 @@ impl Heap<'_> {
                 }
                 if let Some(total) = self.calls.get_mut(&module[weighed.callee].name) {
                     *total = total.saturating_sub(1);
+                    // The last call copied takes the body out of line with it, which gcc takes
+                    // off the size of the unit. Left on, `lib/maple_tree.c` reached the limit on
+                    // the unit's growth with calls gcc still copies.
+                    let target = &module[weighed.callee];
+                    let removable = target.linkage == Linkage::Internal
+                        && !target.attrs.set.contains(AttrSet::USED)
+                        && !self.how.elsewhere.contains(&target.name);
+                    if *total == 0 && removable {
+                        let gone = self.sizes.get(&weighed.callee).copied().unwrap_or(0);
+                        self.unit = self.unit.saturating_sub(gone);
+                    }
                 }
                 for &(inst, name) in &calls {
                     let (often, deep) = brought.get(&name).copied().unwrap_or((1.0, 0));
