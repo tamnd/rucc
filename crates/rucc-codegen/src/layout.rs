@@ -1036,7 +1036,7 @@ fn along(
 /// The third is the comparisons of the first map that leave the condition state they found, which
 /// [`blocks`] jumps on without a test when the byte is kept for some other reader. See
 /// [`Fused::keeping`]. The last two are the opcode of a kept `asm` template and how to read the
-/// line a flag output puts at the end of one. See [`flagged`].
+/// line a flag output puts at the end of one. See `flagged`.
 #[derive(Debug)]
 pub struct Fused(
     pub(crate) Map<mir::Opcode, &'static Fusion>,
