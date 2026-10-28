@@ -327,6 +327,7 @@ pub static LP64D: CallRegs = CallRegs {
     // The base ISA lets an implementation trap a misaligned access, and Linux then emulates it a
     // thousand times slower, so a copy keeps to the alignment it was given.
     unaligned: false,
+    rolled: 0,
     // A byte reversal is one instruction only with Zbb, which RV64GC does not have.
     byte_swaps: &[],
     // There is no push. The frame code stores pairs into a frame it took all at once, and sixteen
