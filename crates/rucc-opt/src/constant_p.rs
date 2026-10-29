@@ -42,7 +42,7 @@
 //! have run, where the pass list did not have this one in it, because nothing below the optimizer
 //! lowers the instruction.
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::CONSTANT_P_LOAD_DEPTH;
 use rucc_ir::{
     AttrSet, Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Value,
@@ -147,6 +147,85 @@ impl Pass for ConstantYes {
         }
         stats
     }
+}
+
+/// No for a question about a value none of the parameters reach, for the copy the inliner weighs
+/// once [`ConstantYes`] has given its answers. gcc's summary puts what such a question guards
+/// under "not inlined", since nothing a caller passes makes the value a constant, and a value read
+/// through a parameter counts as not reached. The kernel's `test_bit` asks about `*addr` before
+/// it reads the bit, and gcc weighs `ptdesc_test_kernel` in mm/memory.c at six, so it goes in
+/// early. Leaving those arms in weighed it at twelve, kept it for the second pass, and let
+/// `get_locked_pte` take `__pte_alloc` first.
+#[derive(Debug)]
+pub struct ConstantInlined;
+
+impl Pass for ConstantInlined {
+    fn name(&self) -> &'static str {
+        "constant-inlined"
+    }
+
+    fn describe(&self) -> &'static str {
+        "__builtin_constant_p is zero about a value no parameter reaches, as in an inlined copy"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
+    }
+
+    fn preserves(&self) -> Preserved {
+        Preserved::NONE
+    }
+
+    fn run(&self, func: &mut Func, _an: &mut Analyses, _fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
+        let questions = asked(func);
+        if questions.is_empty() {
+            return stats;
+        }
+        let reached = from_params(func);
+        let mut operands = Vec::new();
+        for inst in questions {
+            let Some(&value) = func[func[inst].args].first() else { continue };
+            if !reached.contains(&value) {
+                operands.extend(write(func, inst, i128::from(is_constant(func, value))));
+                stats.record(Kind::Optimized, ANSWERED, 1);
+            }
+        }
+        bury(func, operands);
+        stats
+    }
+}
+
+/// The values worked out from the parameters of the entry block without a load or an effect on
+/// the way, through the parameters of the blocks they are passed to as well.
+fn from_params(func: &Func) -> Set<Value> {
+    let mut reached: Set<Value> = Set::default();
+    let Some(entry) = func.entry() else { return reached };
+    reached.extend(func[entry].params.iter().copied());
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let data = &func[inst];
+                let computed = data.opcode != Opcode::Load && !data.opcode.has_effects();
+                if computed && func[data.args].iter().any(|arg| reached.contains(arg)) {
+                    for result in data.results() {
+                        grew |= reached.insert(result);
+                    }
+                }
+                for to in func.successors(inst) {
+                    let passed = func[to.block].params.iter().zip(func[to.args].iter());
+                    for (&param, arg) in passed {
+                        if reached.contains(arg) {
+                            grew |= reached.insert(param);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    reached
 }
 
 /// Answers the questions and follows the answers to the branches they decide, taking out what
@@ -529,5 +608,37 @@ block0(%0: i32):
         assert!(!out.contains("is_constant"), "{out}");
         assert!(!out.contains("iconst.i32 1"), "{out}");
         assert_eq!(out.matches("iconst.i32 0").count(), 3, "{out}");
+    }
+    /// A copy weighed for inlining answers zero about what a load gives, since no caller can make
+    /// that a constant, and leaves the question about a sum of a parameter for the caller.
+    #[test]
+    fn a_copy_leaves_open_only_what_a_parameter_reaches() {
+        const COPY: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @use(i32, i32), linkage(external);
+
+func @g(i32, ptr), linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = add.i32 %0, %0
+    %3 = is_constant.i32 %2
+    %4 = load.i32 %1, align 4
+    %5 = is_constant.i32 %4
+    call @use(%3, %5) : (i32, i32)
+    return
+}
+"#;
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(COPY, &mut names).expect("the fixture parses");
+        let id = module.funcs().find(|&id| !module[id].is_declaration()).expect("one body");
+        let mut an = Analyses::new(crate::machine::Machine::unknown());
+        let stats = ConstantInlined.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        assert!(stats.changed());
+        let out = rucc_ir::print(&module, &names);
+        assert_eq!(out.matches("is_constant").count(), 1, "{out}");
+        assert!(!out.contains("load"), "{out}");
+        assert_eq!(out.matches("iconst.i32 0").count(), 1, "{out}");
     }
 }
