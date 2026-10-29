@@ -1066,9 +1066,25 @@ impl How<'_> {
         if let Some(&size) = self.sizes.borrow().get(&key) {
             return size;
         }
-        let size = specialized_size(&module[callee], module.datalayout, values, weighed, threads);
-        self.sizes.borrow_mut().insert(key, size);
-        size
+        // Whether the copy weighs changes how it is counted and not how it is cleaned up, so one
+        // copy gives both answers. On mm/memory.c a quarter of the copies cleaned up were a body
+        // already cleaned up for the other answer.
+        let func = &module[callee];
+        let (plain, weighs) = match cleaned(func, values, threads) {
+            Some(copy) => {
+                let names = weighed.unwrap_or(self.names);
+                let layout = module.datalayout;
+                (
+                    folded_size(&copy, layout, Set::default(), Map::default(), None),
+                    folded_size(&copy, layout, Set::default(), Map::default(), Some(names)),
+                )
+            }
+            None => (size(func), size(func)),
+        };
+        let mut sizes = self.sizes.borrow_mut();
+        sizes.insert((callee, shape, key.2.clone(), false, threads), plain);
+        sizes.insert((callee, shape, key.2, true, threads), weighs);
+        if weighed.is_some() { weighs } else { plain }
     }
 
     /// [`folded_size`] for a call passing `values`, read off the callee's summary, and whether the
@@ -1695,9 +1711,19 @@ fn specialized_size(
     weighed: Option<&Interner>,
     threads: bool,
 ) -> usize {
+    match cleaned(callee, values, threads) {
+        Some(copy) => folded_size(&copy, layout, Set::default(), Map::default(), weighed),
+        None => size(callee),
+    }
+}
+
+/// The copy [`specialized_size`] measures: the body with the constants a call passes in it and
+/// cleaned up by the passes that run right after inlining, or nothing for a body with no
+/// instructions to put the constants before.
+fn cleaned(callee: &Func, values: &Map<Value, (Imm, Type)>, threads: bool) -> Option<Func> {
     use crate::Pass;
     let mut copy = callee.clone();
-    let Some(entry) = copy.entry() else { return size(callee) };
+    let entry = copy.entry()?;
     // Only the blocks the constants leave, the way a copy into the caller has them (see
     // [`reached`]), so the cleanup below is not run over arms it would only take out again. On
     // zstd_compress.c at `-O2` the switch of three thousand instructions in
@@ -1715,9 +1741,7 @@ fn specialized_size(
             copy.remove_block(block);
         }
     }
-    let Some(first) = copy.insts(entry).next() else {
-        return size(callee);
-    };
+    let first = copy.insts(entry).next()?;
     // gcc's summary has `__builtin_expect` as a call, so a branch on what it gives back is not one
     // the constants a call passes can settle, and both arms of `likely(nr_pages == 1)` in
     // `__tlb_remove_folio_pages_size` count in a copy passing 1. Settled here, that copy into
@@ -1814,7 +1838,7 @@ fn specialized_size(
             }
         }
     }
-    folded_size(&copy, layout, Set::default(), Map::default(), weighed)
+    Some(copy)
 }
 
 /// How many instructions a body has that are still work once what only depends on constants and
