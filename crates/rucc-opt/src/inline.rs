@@ -5406,6 +5406,68 @@ block0(%0: i32, %1: i1):
         assert_eq!(out.matches("call @pick").count(), 3, "{out}");
     }
 
+    /// A `static` function whose cheap arm is still over the limit for one nobody declared
+    /// `inline`, called from `f` with the flag for that arm and from `k` with the flag unknown.
+    /// Copying it into `f` and `k` together comes to more than the body, and `k` is over every
+    /// limit, so the second pass leaves both calls. Taking the copy for `f` as what each call
+    /// costs, it put the cheap arm into `f` and kept the body for `k` as well.
+    #[test]
+    fn a_cheap_copy_is_not_what_every_other_call_costs() {
+        let chain = |from: usize, count: usize| -> String {
+            (from..from + count)
+                .map(|at| format!("    %{} = mul.i32 %{}, %1\n", at + 1, at))
+                .collect()
+        };
+        let (cheap, long) = (36, 60);
+        let text = format!(
+            "{HEAD}
+func @pick(i1, i32) -> i32, linkage(internal) {{
+block0(%0: i1, %1: i32):
+    br_if %0, block1, block2(%1)
+block1:
+    %2 = add.i32 %1, %1
+{}    return %{}
+block2(%{}: i32):
+{}    return %{}
+}}
+
+func @f(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+    %1 = iconst.i1 -1
+    %2 = call @pick(%1, %0) : (i1, i32) -> i32
+    return %2
+}}
+
+func @k(i32, i1) -> i32, linkage(external) {{
+block0(%0: i32, %1: i1):
+    %2 = call @pick(%1, %0) : (i1, i32) -> i32
+    return %2
+}}
+",
+            chain(2, cheap),
+            2 + cheap,
+            3 + cheap,
+            chain(3 + cheap, long),
+            3 + cheap + long,
+        );
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        run(
+            &mut module,
+            &names,
+            Some(Limits::o2()),
+            true,
+            Isa::baseline(),
+            Growth::DEFAULT,
+            false,
+            Pic::Executable,
+            true,
+            Some(Second::o2()),
+        );
+        let out = rucc_ir::print(&module, &names);
+        assert_eq!(out.matches("call @pick").count(), 2, "{out}");
+    }
+
     /// A body that only passes its argument on with five more is eight to gcc, a call and six
     /// arguments and the result, where each call of it is three, so three copies come to more
     /// than the body and gcc 16 keeps the three calls at `-O1`. Counted one to an instruction the

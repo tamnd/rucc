@@ -24,6 +24,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The first inliner now threads jumps in the cleaned up copy it measures against gcc's early limit, so `ksize` in mm/slub.c goes into its callers early and stays a tail call to `__ksize` as with gcc (#3970)
 - The inliner weighs a body for its early limit with `__builtin_constant_p` answered zero about any value no parameter reaches, as gcc's summary has it, so the kernel's `test_bit` wrappers are small enough to go in early and mm/memory.c keeps `__pte_alloc` a call as gcc does (#3973)
 - The C library functions the purity table knows are declared `pure` and argument memory only for the alias oracle, as gcc's builtins are, so a load is not taken again after a `strlen` of another string (#3974)
+- The second inliner pass counts what the body comes to at the other calls of a static function when it asks whether inlining it everywhere grows the program, so a call that passes a constant folding most of the body away no longer stands for every call, as with `insert_pfn` in mm/memory.c (#3975)
 
 ## 0.30.15
 
