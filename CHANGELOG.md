@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A function built with `-mno-sse` on a stack aligned to eight bytes, which is every kernel function, no longer keeps a frame pointer for a vector spill slot it can never have, so `rbp` is handed to the allocator again and the bench objects are 4793 bytes smaller (#3965)
 - An `and` with a constant that only clears bits already known to be zero is dropped, and `sccp` runs again after `unroll` so it sees an inlined function's truncation and extension once their blocks are merged, which takes the `and` and the `movslq` out of the kernel's `page_to_nid` and makes the bench objects 1840 bytes smaller (#3966)
 - At `-O2` a loop with a call in it is unrolled completely only when the copies are no more code than the loop, which is the rule gcc keeps at `-O2`, so the kernel's loops of four over a call stay loops and the bench objects are 320 bytes smaller. `-O3` and `-funroll-loops` still grow the code (#3967)
+- On x86 and RISC-V a branch on `a & b` or `a | b` of two comparisons is now written as two compares and two jumps, the way gcc's expander takes `ifcombine` back apart when there is no conditional compare. Before it was two `setcc`, an `and` and a `test`, and the bench objects are 1222 bytes smaller (#3968)
 
 ## 0.30.15
 

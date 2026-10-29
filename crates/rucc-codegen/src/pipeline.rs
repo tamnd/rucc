@@ -59,6 +59,7 @@ use crate::fold;
 use crate::frame::{self, Frame, Layout};
 use crate::fresh;
 use crate::held;
+use crate::jumps;
 use crate::kept;
 use crate::layout;
 use crate::lifetimes;
@@ -604,6 +605,10 @@ pub struct Flags {
     /// in front of the loop and held in a register, which every level above `-O0` asks for. See
     /// [`crate::hoist`].
     pub hold: bool,
+    /// Whether a branch on an and or an or of two bits is written as two branches, which gcc's
+    /// expander does at every level above `-O0` on a machine with no conditional compare. See
+    /// [`crate::jumps`].
+    pub jumps: bool,
     /// Whether the instructions of a block are put in the order the machine finishes soonest,
     /// which `-fschedule-insns2` asks for and every level from `-O2` turns on. See
     /// [`crate::schedule`].
@@ -702,6 +707,7 @@ impl Default for Flags {
             reuse: false,
             reloads: false,
             hold: false,
+            jumps: false,
             schedule: false,
             align_loops: false,
             accurate: None,
@@ -924,6 +930,10 @@ pub fn compile_recording(
         machine.conv
     };
     let ran = lowering::group(source, names, conv, switching, &counts, fused, counting);
+    // AArch64 has the conditional compare, which is what gcc keeps the and for. See [`jumps`].
+    if flags.jumps && !std::ptr::eq(machine.shapes, &aarch64::MACHINE) {
+        jumps::branches(source);
+    }
     // An `asm` input that may go in memory goes there when the statement has taken every register
     // it could go in. Only on x86, the one machine here that names an operand in the frame without a
     // register for its address. See [`expand::crowded`].
