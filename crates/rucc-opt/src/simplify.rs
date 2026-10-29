@@ -242,6 +242,18 @@
 //! else reads either shift, because otherwise both stay and the rewrite adds an instruction. It
 //! is written by hand because the rule tables cannot say that two operands are the same value.
 //!
+//! ### A bit tested after a shift
+//!
+//! `((x >> s) & c) != 0` is `(x & (c << s)) != 0`, and the same for `==`. The shift only moves the
+//! bits the mask picks out, and the bits of `c` it would move past the top stand for bits of the
+//! shifted value that are zero anyway, so they go. A bitfield read is a shift and a mask, so every
+//! `if (p->flag)` arrives as the first, and to the back end that is a copy, a shift and a test
+//! where gcc tests the byte with one immediate. `tlb_get_unmap_shift` in the kernel is four of
+//! them in a row. It only fires when nothing else reads the mask, as otherwise the shift and the
+//! mask stay and the rewrite adds an instruction, though a reader that is itself dead does not
+//! count. It is written by hand because the mask it builds is the two constants worked out
+//! together, which no pattern in the rule tables can name.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -340,6 +352,12 @@ const DISTRIBUTED: &str = "operation on two shifts by the same amount done befor
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_DISTRIBUTED: &str =
     "pair of shifts by one amount left alone, the pass ran out of fuel";
+
+/// Recorded once for each bit tested after a shift that is tested where it is instead.
+const TESTED: &str = "bit tested after a shift tested in place";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_TESTED: &str = "bit tested after a shift left alone, the pass ran out of fuel";
 
 /// Recorded once for each floating point comparison a constant or a repeated operand settles.
 const BOUNDED: &str = "floating point comparison settled by a constant or by one operand twice";
@@ -825,6 +843,9 @@ impl<'a> Finder<'a> {
         }
         if let Some(rewrite) = distributed_shift(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), DISTRIBUTED, NO_FUEL_DISTRIBUTED));
+        }
+        if let Some(rewrite) = tested_bits(func, inst, &self.uses) {
+            return Some((Found::Rule(rewrite), TESTED, NO_FUEL_TESTED));
         }
         let (rewrite, pattern) = identity(func, inst, self.address, &mut self.stacks)?;
         Some((Found::Rule(rewrite), pattern, NO_FUEL_RULE))
@@ -1735,6 +1756,60 @@ fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
         pred: None,
         lhs: Operand::Built(Box::new(inner)),
         rhs: Operand::Value(s),
+    })
+}
+
+/// `((x >> s) & c) != 0` as `(x & (c << s)) != 0`, and the same for `==`, for a mask nothing else
+/// reads. A mask that keeps no bit of `x` is left for the comparison to be settled elsewhere.
+fn tested_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
+    let data = &func[inst];
+    let Extra::IntPred(pred @ (IntPred::Eq | IntPred::Ne)) = data.extra else { return None };
+    let [masked, zero] = func[data.args] else { return None };
+    if data.opcode != Opcode::ICmp || constant(func, zero) != Some(0) {
+        return None;
+    }
+    if uses.get(masked.index()) != Some(&1) && read_elsewhere(func, masked, inst, uses) {
+        return None;
+    }
+    let (Opcode::And, [shifted, c]) = producer(func, masked)? else { return None };
+    let (Opcode::LShr, [x, s]) = producer(func, shifted)? else { return None };
+    let ty = func[x].ty;
+    let bits = ty.bits();
+    if !ty.is_int() || !ty.is_scalar() || bits > 64 {
+        return None;
+    }
+    let s = u32::try_from(constant(func, s)?).ok().filter(|&s| s < bits)?;
+    let all = u64::MAX >> (64 - bits);
+    let c = u64::try_from(constant(func, c)? & i128::from(all)).ok()?;
+    let mask = (c << s) & all;
+    if mask == 0 {
+        return None;
+    }
+    let inner = Nested {
+        opcode: Opcode::And,
+        pred: None,
+        bits,
+        args: vec![Operand::Value(x), Operand::Constant { number: i128::from(mask), bits }],
+    };
+    Some(Rewrite::Built {
+        opcode: Opcode::ICmp,
+        pred: Some(pred),
+        lhs: Operand::Built(Box::new(inner)),
+        rhs: Operand::Value(zero),
+    })
+}
+
+/// Whether anything other than `inst` reads `value` and is not itself dead. A rewrite earlier in
+/// the pass can leave a reader behind that nothing reads and that dead code elimination has not
+/// got to yet, and that reader is no reason to keep the mask. It walks the function, so it is only
+/// asked once everything cheaper has said yes.
+fn read_elsewhere(func: &Func, value: Value, inst: Inst, uses: &[u32]) -> bool {
+    func.blocks().flat_map(|block| func.insts(block)).any(|other| {
+        let data = &func[other];
+        other != inst
+            && func[data.args].contains(&value)
+            && (data.opcode.has_effects()
+                || data.results().any(|result| uses.get(result.index()) != Some(&0)))
     })
 }
 
@@ -3453,6 +3528,38 @@ mod tests {
                 result = operands(&func, result)[0];
             }
             assert_eq!(came_from(&func, result).0, op, "{op:?} of two {shift:?}");
+        }
+    }
+
+    /// `((x >> s) & c) != 0` returned from a function of `x`, at the width of `ty`.
+    fn tested(ty: Type, s: i128, c: i128) -> (Func, Block, Value) {
+        let (_, mut func, block) = one_block(Type::int(1));
+        let x = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let amount = build.iconst(ty, s);
+        let shifted = build.binary(Opcode::LShr, x, amount, Flags::NONE);
+        let c = build.iconst(ty, c);
+        let masked = build.binary(Opcode::And, shifted, c, Flags::NONE);
+        let zero = build.iconst(ty, 0);
+        let tested = build.icmp(IntPred::Ne, masked, zero);
+        build.ret(&[tested]);
+        (func, block, x)
+    }
+
+    /// A bitfield read and tested is the bit tested where it is, and the bits of the mask the
+    /// shift would move past the top go.
+    #[test]
+    fn a_bit_tested_after_a_shift_is_tested_in_place() {
+        for (bits, s, c, mask) in [(8, 4, 1, 0x10), (8, 6, 7, -0x40), (64, 60, 0xff, -1 << 60)] {
+            let (mut func, block, x) = tested(Type::int(bits), s, c);
+            assert!(simplify(&mut func), "i{bits} >> {s} & {c}");
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, Opcode::ICmp);
+            let masked = operands(&func, result)[0];
+            assert_eq!(came_from(&func, masked).0, Opcode::And);
+            let args = operands(&func, masked);
+            assert_eq!(args[0], x);
+            assert_eq!(number(&func, args[1]), mask, "i{bits} >> {s} & {c}");
         }
     }
 

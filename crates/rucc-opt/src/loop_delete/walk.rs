@@ -90,6 +90,9 @@ enum Holds {
     BottomClear,
     /// Its top bit is clear.
     TopClear,
+    /// The bit above the bottom one is clear, which is the bottom bit of the value one logical
+    /// shift right on.
+    SecondClear,
 }
 
 /// A loop that walks the bits of one value, and what is needed to say how many times it goes round.
@@ -163,7 +166,7 @@ pub(super) fn walk(
     } else {
         return None;
     };
-    let (tested, holds) = test(func, cond, stays)?;
+    let (mut tested, mut holds) = test(func, cond, stays)?;
 
     // The value walked is a parameter of the header, and the back edge hands it one step of
     // itself. The test reads either the parameter or that step.
@@ -171,6 +174,13 @@ pub(super) fn walk(
     let back = func.successors(back).find(|call| call.block == header)?;
     let back = func[back.args].to_vec();
     let params = func[header].params.to_vec();
+    // `(x >> 1) & 1` reaches here as `x & 2` once the peephole has moved the mask past the shift,
+    // and that is the test after the step read off the value before it.
+    if holds == Holds::SecondClear {
+        let at = params.iter().position(|&param| param == tested)?;
+        tested = *back.get(at)?;
+        holds = Holds::BottomClear;
+    }
     let (at, after) = match params.iter().position(|&param| param == tested) {
         Some(at) => (at, false),
         None => {
@@ -262,7 +272,7 @@ fn test(func: &Func, cond: Value, taken: bool) -> Option<(Value, Holds)> {
     }
 }
 
-/// Which bit `x & mask` being zero says is clear, when it is the bottom one or the top one.
+/// Which bit `x & mask` being zero says is clear, when it is one of the bottom two or the top one.
 fn masked(func: &Func, value: Value) -> Option<(Value, Holds)> {
     let Def::Result { inst, .. } = func[value].def else { return None };
     if func[inst].opcode != Opcode::And {
@@ -272,6 +282,7 @@ fn masked(func: &Func, value: Value) -> Option<(Value, Holds)> {
     let top = -(1i128 << (func[value].ty.bits() - 1));
     match number(func, right)? {
         1 => Some((left, Holds::BottomClear)),
+        2 => Some((left, Holds::SecondClear)),
         mask if mask == top => Some((left, Holds::TopClear)),
         _ => None,
     }
