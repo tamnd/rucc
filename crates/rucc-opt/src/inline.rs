@@ -1020,8 +1020,8 @@ struct How<'a> {
     elsewhere: &'a Set<Symbol>,
     /// Where the calls left for the second pass are written down, when there is one.
     later: Option<&'a RefCell<heap::Later>>,
-    /// What [`specialized_size`] said, by callee, how large its tables were, the constants it was
-    /// given and whether it weighed, so a body called from four hundred places with the same
+    /// What [`How::specialized_size`] said, by callee, how large its tables were, the constants it
+    /// was given and whether it weighed, so a body called from four hundred places with the same
     /// constants is copied and folded once.
     ///
     /// Kept across the rounds rather than for one, since a callee the first round settled and the
@@ -1048,7 +1048,19 @@ struct How<'a> {
 type SizeKey = (FuncId, (usize, usize, usize), Vec<(Value, Imm, Type)>, bool, bool);
 
 impl How<'_> {
-    /// [`specialized_size`], worked out once for each body and set of constants.
+    /// How many instructions a copy of a body has that are still work once the constants the call
+    /// passes are in it and the passes that run right after inlining have folded it.
+    ///
+    /// What gcc weighs a call by is the body as the early passes left it, with what the call site
+    /// knows applied on top. `efi_enabled` asks `__builtin_constant_p` about a bit number and then
+    /// about the address of a field, and only a real fold sees the second one come out true. A
+    /// question about a value that is not a constant by then stays open, both arms of it counted,
+    /// since gcc only answers no once it has inlined. The kernel's `test_bit` asks about the word
+    /// it loads, and gcc counts the arm for a constant word as well as the one that tests it, which
+    /// is why `export_rdev` in drivers/md/md.c is over the limit to gcc and stays a call at each of
+    /// its twelve callers.
+    ///
+    /// Worked out once for each body and set of constants.
     fn specialized_size(
         &self,
         module: &Module,
@@ -1693,32 +1705,8 @@ fn passed(func: &Func, call: Inst, callee: &Func) -> Map<Value, (Imm, Type)> {
         .collect()
 }
 
-/// How many instructions a copy of a body has that are still work once the constants the call
-/// passes are in it and the passes that run right after inlining have folded it.
-///
-/// What gcc weighs a call by is the body as the early passes left it, with what the call site
-/// knows applied on top. `efi_enabled` asks `__builtin_constant_p` about a bit number and then
-/// about the address of a field, and only a real fold sees the second one come out true. A
-/// question about a value that is not a constant by then stays open, both arms of it counted,
-/// since gcc only answers no once it has inlined. The kernel's `test_bit` asks about the word it
-/// loads, and gcc counts the arm for a constant word as well as the one that tests it, which is
-/// why `export_rdev` in drivers/md/md.c is over the limit to gcc and stays a call at each of its
-/// twelve callers.
-fn specialized_size(
-    callee: &Func,
-    layout: DataLayout,
-    values: &Map<Value, (Imm, Type)>,
-    weighed: Option<&Interner>,
-    threads: bool,
-) -> usize {
-    match cleaned(callee, values, threads) {
-        Some(copy) => folded_size(&copy, layout, Set::default(), Map::default(), weighed),
-        None => size(callee),
-    }
-}
-
-/// The copy [`specialized_size`] measures: the body with the constants a call passes in it and
-/// cleaned up by the passes that run right after inlining, or nothing for a body with no
+/// The copy [`How::specialized_size`] measures: the body with the constants a call passes in it
+/// and cleaned up by the passes that run right after inlining, or nothing for a body with no
 /// instructions to put the constants before.
 fn cleaned(callee: &Func, values: &Map<Value, (Imm, Type)>, threads: bool) -> Option<Func> {
     use crate::Pass;
@@ -6023,7 +6011,10 @@ block0(%0: i32):
             } else {
                 Map::default()
             };
-            specialized_size(func, module.datalayout, &values, None, false)
+            cleaned(func, &values, false).map_or_else(
+                || size(func),
+                |copy| folded_size(&copy, module.datalayout, Set::default(), Map::default(), None),
+            )
         };
         assert!(weigh(false, true) < weigh(false, false));
         assert!(weigh(true, true) > weigh(false, true));
