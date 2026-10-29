@@ -584,7 +584,7 @@ impl Heap<'_> {
         // one have cleaned it up, which is the same measure the copies are held to. The size as it
         // stands is the body before any of that, and a static function called a few times would
         // otherwise look as if inlining it at every call made the program smaller.
-        let offline = if removable {
+        let alone = if removable {
             let raw = size(callee);
             let body = if raw >= growth * as_i64(count)
                 && raw <= as_i64(self.reach(kind, hints, args).saturating_mul(super::TRIED))
@@ -594,11 +594,18 @@ impl Heap<'_> {
             } else {
                 raw
             };
-            body + as_i64(OUT_OF_LINE)
+            Some(body)
         } else {
-            0
+            None
         };
-        let overall = growth * as_i64(count) - offline;
+        let offline = alone.map_or(0, |body| body + as_i64(OUT_OF_LINE));
+        // Each of the other calls grows its caller by what the body comes to there, which is not
+        // what the constants this one passes fold it down to. gcc's `do_estimate_growth_1` adds up
+        // each call's own growth. Counting this one's for all of them, `insert_pfn` in mm/memory.c
+        // came to 26 for the call passing `false` for `mkwrite`, the unit looked smaller with it
+        // inlined at both calls, and the other copy was 98.
+        let others = alone.map_or(growth, |body| growth.max(body - as_i64(1 + args + reads)));
+        let overall = growth + others * (as_i64(count) - 1) - offline;
         // A call in a loop whose callee goes away with it, on a target that asks for that. The
         // count is of this caller's calls, so a callee called from anywhere else is not hinted.
         let hints = if self.loop_hint
