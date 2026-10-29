@@ -1043,9 +1043,9 @@ struct How<'a> {
 }
 
 /// What [`How::specialized_size`] keeps an answer under: the callee, how many values, instructions
-/// and blocks it had made, the constants it was given in the order of their parameters, and
-/// whether it weighed.
-type SizeKey = (FuncId, (usize, usize, usize), Vec<(Value, Imm, Type)>, bool);
+/// and blocks it had made, the constants it was given in the order of their parameters, whether
+/// it weighed and whether it threaded.
+type SizeKey = (FuncId, (usize, usize, usize), Vec<(Value, Imm, Type)>, bool, bool);
 
 impl How<'_> {
     /// [`specialized_size`], worked out once for each body and set of constants.
@@ -1055,16 +1055,18 @@ impl How<'_> {
         callee: FuncId,
         values: &Map<Value, (Imm, Type)>,
         weighed: Option<&Interner>,
+        threads: bool,
     ) -> usize {
         let mut passed: Vec<(Value, Imm, Type)> =
             values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
         passed.sort_unstable_by_key(|&(param, ..)| param);
         let counts = module[callee].counts();
-        let key = (callee, (counts.values, counts.insts, counts.blocks), passed, weighed.is_some());
+        let shape = (counts.values, counts.insts, counts.blocks);
+        let key = (callee, shape, passed, weighed.is_some(), threads);
         if let Some(&size) = self.sizes.borrow().get(&key) {
             return size;
         }
-        let size = specialized_size(&module[callee], module.datalayout, values, weighed);
+        let size = specialized_size(&module[callee], module.datalayout, values, weighed, threads);
         self.sizes.borrow_mut().insert(key, size);
         size
     }
@@ -1337,7 +1339,7 @@ fn settle(
         {
             let values = passed(&module[id], call, &module[callee]);
             let weighed = (kind == Kind::Auto).then_some(how.names);
-            large = large.min(how.specialized_size(module, callee, &values, weighed));
+            large = large.min(how.specialized_size(module, callee, &values, weighed, false));
         }
         // `vma_start_read` in mm/mmap_lock.c is 57 to gcc when it weighs it for
         // `lock_vma_under_rcu` on every page fault, with the two puts on its unlikely paths still
@@ -1345,7 +1347,26 @@ fn settle(
         if kind == Kind::Hinted {
             large = large.saturating_sub(late);
         }
-        let growth = large.saturating_sub(cost);
+        let mut growth = large.saturating_sub(cost);
+        // gcc's early passes thread jumps before its early inliner weighs a body, and an `a || b`
+        // whose `b` a helper has made false is a branch on a block parameter of a true and a
+        // false until then. `ksize` in mm/slub.c was six here and five to gcc, one too many to go
+        // into `kvrealloc_node_align_noprof` early, and the second pass then copied all of
+        // `__ksize` into it. Only for the early limit: gcc weighs a body for its second pass with
+        // its own early inlines in it, and threaded for that too `__do_sys_pkey_alloc` came in
+        // under 70 and went into all three of its wrappers in mm/mprotect.c, where gcc has 102.
+        if large <= most && second && !early(&module[callee], growth, how) {
+            let values = passed(&module[id], call, &module[callee]);
+            let weighed = (kind == Kind::Auto).then_some(how.names);
+            let mut threaded = how.specialized_size(module, callee, &values, weighed, true);
+            if kind == Kind::Hinted {
+                threaded = threaded.saturating_sub(late);
+            }
+            if threaded < large && early(&module[callee], threaded.saturating_sub(cost), how) {
+                large = threaded;
+                growth = large.saturating_sub(cost);
+            }
+        }
         if large > most || second && !early(&module[callee], growth, how) {
             // Left for the second pass to weigh with its hints, which says why if it refuses too.
             if let (Some(later), Kind::Hinted | Kind::Auto) = (how.later, kind) {
@@ -1672,6 +1693,7 @@ fn specialized_size(
     layout: DataLayout,
     values: &Map<Value, (Imm, Type)>,
     weighed: Option<&Interner>,
+    threads: bool,
 ) -> usize {
     use crate::Pass;
     let mut copy = callee.clone();
@@ -1766,8 +1788,9 @@ fn specialized_size(
     // gcc has no `expect` instruction for a constant to get stuck behind. `crypto_mldsa_key_size`
     // in crypto/mldsa.c is a switch of three lengths and a `WARN_ON_ONCE` in the default, which is
     // seventeen to gcc. It was twenty one here as a switch of four labels, and nineteen with the
-    // branch on the `unlikely(1)` the warning tests.
-    let passes: [&dyn Pass; 8] = [
+    // branch on the `unlikely(1)` the warning tests. With `threads` the jumps are threaded too,
+    // only the threading that copies nothing, so the copy is not made larger. See [`settle`].
+    let mut passes: Vec<&dyn Pass> = vec![
         &crate::fold::Fold,
         &crate::simplify::Simplify,
         &crate::reassoc::Reassoc,
@@ -1777,8 +1800,11 @@ fn specialized_size(
         &crate::simplify_cfg::SimplifyCfg,
         &crate::dce::Dce,
     ];
+    if threads {
+        passes.insert(6, &crate::thread::FREE);
+    }
     for _ in 0..2 {
-        for pass in passes {
+        for &pass in &passes {
             // The manager's rule, so a pass that changed nothing leaves the next one the graph
             // it was given rather than one to build again, and one that changed something keeps
             // what it says it kept and what the graph read again says it did not move.
@@ -5973,7 +5999,7 @@ block0(%0: i32):
             } else {
                 Map::default()
             };
-            specialized_size(func, module.datalayout, &values, None)
+            specialized_size(func, module.datalayout, &values, None, false)
         };
         assert!(weigh(false, true) < weigh(false, false));
         assert!(weigh(true, true) > weigh(false, true));
