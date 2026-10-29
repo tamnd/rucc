@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - Blocks that hold the same instructions and go to the same place are now merged before the layout, the cross jumping gcc does, so the hundred or so `jmp __x64_sys_ni_syscall` cases in the kernel's system call switch are written once and the bench objects are 6215 bytes smaller (#3963)
+- The peephole tests a bit read after a shift where it is, so `((x >> s) & c) != 0` is `(x & (c << s)) != 0` and a bitfield flag test is one `test` with an immediate as with gcc, and the trailing zero loop is still found when its test is the `x & 2` this leaves (#3972)
 
 ### Fixed
 
