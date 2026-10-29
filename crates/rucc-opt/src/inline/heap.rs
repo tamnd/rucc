@@ -542,7 +542,9 @@ impl Heap<'_> {
                         // Not for a body so far past what the call could take that no cleanup
                         // brings it under. See [`super::TRIED`].
                         if body > plain && body <= reach.saturating_mul(super::TRIED) {
-                            body = body.min(how.specialized_size(module, callee, &values, weighed));
+                            let cleaned =
+                                how.specialized_size(module, callee, &values, weighed, false);
+                            body = body.min(cleaned);
                         }
                         let copied = summed_time(
                             &profile.summary,
@@ -587,7 +589,8 @@ impl Heap<'_> {
             let body = if raw >= growth * as_i64(count)
                 && raw <= as_i64(self.reach(kind, hints, args).saturating_mul(super::TRIED))
             {
-                raw.min(as_i64(how.specialized_size(module, callee, &Map::default(), Some(names))))
+                let none = Map::default();
+                raw.min(as_i64(how.specialized_size(module, callee, &none, Some(names), false)))
             } else {
                 raw
             };

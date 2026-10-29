@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - At `-O2` a loop with a call in it is unrolled completely only when the copies are no more code than the loop, which is the rule gcc keeps at `-O2`, so the kernel's loops of four over a call stay loops and the bench objects are 320 bytes smaller. `-O3` and `-funroll-loops` still grow the code (#3967)
 - On x86 and RISC-V a branch on `a & b` or `a | b` of two comparisons is now written as two compares and two jumps, the way gcc's expander takes `ifcombine` back apart when there is no conditional compare. Before it was two `setcc`, an `and` and a `test`, and the bench objects are 1222 bytes smaller (#3968)
 - The first inliner now measures a cleaned up copy of a small body before it leaves the call to the second pass for growing the caller past the early limit, as gcc weighs a body after its early passes. kernel/sched/core.o is 336 bytes smaller (#3969)
+- The first inliner now threads jumps in the cleaned up copy it measures against gcc's early limit, so `ksize` in mm/slub.c goes into its callers early and stays a tail call to `__ksize` as with gcc (#3970)
 
 ## 0.30.15
 
