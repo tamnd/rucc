@@ -50,9 +50,9 @@ use rucc_target::TargetInfo;
 
 use super::summary::Summary;
 use super::{
-    ASKED_DEPTH, CUT, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits, folded_size,
-    frame, grows, made_of_params, passed, passes_asked, resolved, runs_once, splice, summed_size,
-    summed_time,
+    ASKED_DEPTH, CUT, Count, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits,
+    folded_size, frame, grows, made_of_params, passed, passes_asked, resolved, runs_once, splice,
+    summed_size, summed_time,
 };
 use crate::Stats;
 use crate::callgraph::CallGraph;
@@ -506,7 +506,7 @@ impl Heap<'_> {
                 (body, copied, hints, cut)
             }
             _ => {
-                let weighed = (kind == Kind::Auto).then_some(names);
+                let count = Count::of(kind, names);
                 // What the first pass would have let through, past which it measured a cleaned up
                 // copy as well.
                 let plain = match kind {
@@ -532,18 +532,18 @@ impl Heap<'_> {
                 let mut passed: Vec<(Value, Imm, Type)> =
                     values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
                 passed.sort_unstable_by_key(|&(param, ..)| param);
-                let key = (callee, version, passed, weighed.is_some(), plain, reach);
+                let key = (callee, version, passed, count.weighs(), plain, reach);
                 let (body, copied, cut) = match self.measured.get(&key) {
                     Some(&measured) => measured,
                     None => {
                         let profile = self.profile(module, callee);
                         let (mut body, cut) =
-                            summed_size(&profile.summary, target, values.clone(), weighed);
+                            summed_size(&profile.summary, target, values.clone(), count);
                         // Not for a body so far past what the call could take that no cleanup
                         // brings it under. See [`super::TRIED`].
                         if body > plain && body <= reach.saturating_mul(super::TRIED) {
                             let cleaned =
-                                how.specialized_size(module, callee, &values, weighed, false);
+                                how.specialized_size(module, callee, &values, count, false);
                             body = body.min(cleaned);
                         }
                         let copied = summed_time(
@@ -590,7 +590,8 @@ impl Heap<'_> {
                 && raw <= as_i64(self.reach(kind, hints, args).saturating_mul(super::TRIED))
             {
                 let none = Map::default();
-                raw.min(as_i64(how.specialized_size(module, callee, &none, Some(names), false)))
+                let count = Count::Weighed(names);
+                raw.min(as_i64(how.specialized_size(module, callee, &none, count, false)))
             } else {
                 raw
             };
@@ -980,7 +981,7 @@ fn calls_to(func: &Func, name: Symbol) -> usize {
 
 /// How large a function is, the way the second pass counts the unit and a caller.
 fn measure(func: &Func, layout: DataLayout, names: &Interner) -> usize {
-    folded_size(func, layout, Set::default(), Map::default(), Some(names))
+    folded_size(func, layout, Set::default(), Map::default(), Count::Weighed(names))
 }
 
 /// What [`Profile`] says about a function.

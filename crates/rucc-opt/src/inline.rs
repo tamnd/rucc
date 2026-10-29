@@ -856,16 +856,17 @@ fn to_all_callers(module: &Module, names: &Interner, isa: Isa) -> Set<Symbol> {
             continue;
         }
         let summary = summary::Summary::of(callee, module.datalayout, names, None);
+        let count = Count::Weighed(names);
         let mut growth = 0_i64;
         for &(caller, _, call) in &calls {
             let func = &module[caller];
-            let (copy, _) = summed_size(&summary, callee, passed(func, call, callee), Some(names));
+            let (copy, _) = summed_size(&summary, callee, passed(func, call, callee), count);
             // gcc counts the result of a call it has a place for, which is one that has a result.
             let cost = weight(func, call, names, func[call].results().next().is_some());
             growth += i64::try_from(copy).unwrap_or(i64::MAX) - i64::try_from(cost).unwrap_or(0);
         }
         // The body is weighed the way its copies are, as a copy no constant cuts down.
-        let (whole, _) = summed_size(&summary, callee, Map::default(), Some(names));
+        let (whole, _) = summed_size(&summary, callee, Map::default(), count);
         if growth > i64::try_from(whole).unwrap_or(i64::MAX) {
             continue;
         }
@@ -1066,7 +1067,7 @@ impl How<'_> {
         module: &Module,
         callee: FuncId,
         values: &Map<Value, (Imm, Type)>,
-        weighed: Option<&Interner>,
+        count: Count<'_>,
         threads: bool,
     ) -> usize {
         let mut passed: Vec<(Value, Imm, Type)> =
@@ -1074,7 +1075,7 @@ impl How<'_> {
         passed.sort_unstable_by_key(|&(param, ..)| param);
         let counts = module[callee].counts();
         let shape = (counts.values, counts.insts, counts.blocks);
-        let key = (callee, shape, passed, weighed.is_some(), threads);
+        let key = (callee, shape, passed, count.weighs(), threads);
         if let Some(&size) = self.sizes.borrow().get(&key) {
             return size;
         }
@@ -1084,19 +1085,17 @@ impl How<'_> {
         let func = &module[callee];
         let (plain, weighs) = match cleaned(func, values, threads) {
             Some(copy) => {
-                let names = weighed.unwrap_or(self.names);
-                let layout = module.datalayout;
-                (
-                    folded_size(&copy, layout, Set::default(), Map::default(), None),
-                    folded_size(&copy, layout, Set::default(), Map::default(), Some(names)),
-                )
+                let (names, layout) = (self.names, module.datalayout);
+                let sized =
+                    |count| folded_size(&copy, layout, Set::default(), Map::default(), count);
+                (sized(Count::Plain(names)), sized(Count::Weighed(names)))
             }
             None => (size(func), size(func)),
         };
         let mut sizes = self.sizes.borrow_mut();
         sizes.insert((callee, shape, key.2.clone(), false, threads), plain);
         sizes.insert((callee, shape, key.2, true, threads), weighs);
-        if weighed.is_some() { weighs } else { plain }
+        if count.weighs() { weighs } else { plain }
     }
 
     /// [`folded_size`] for a call passing `values`, read off the callee's summary, and whether the
@@ -1106,13 +1105,13 @@ impl How<'_> {
         module: &Module,
         callee: FuncId,
         values: Map<Value, (Imm, Type)>,
-        weighed: Option<&Interner>,
+        count: Count<'_>,
     ) -> (usize, bool) {
         let mut summaries = self.summaries.borrow_mut();
         let summary = summaries.entry(callee).or_insert_with(|| {
             summary::Summary::of(&module[callee], module.datalayout, self.names, None)
         });
-        summed_size(summary, &module[callee], values, weighed)
+        summed_size(summary, &module[callee], values, count)
     }
 }
 
@@ -1314,11 +1313,14 @@ fn settle(
         let (mut large, cut) = match kind {
             Kind::Asks => {
                 let values = passed(&module[id], call, &module[callee]);
-                (answered_size(&module[callee], module.datalayout, values), false)
+                (answered_size(&module[callee], module.datalayout, values, how.names), false)
             }
-            Kind::Hinted => {
-                how.copy_size(module, callee, passed(&module[id], call, &module[callee]), None)
-            }
+            Kind::Hinted => how.copy_size(
+                module,
+                callee,
+                passed(&module[id], call, &module[callee]),
+                Count::Plain(how.names),
+            ),
             // gcc's limit on a function called once is on its estimate of the body, which weighs
             // each instruction as this does and leaves out what is free. Counted one apiece, the
             // unfolded body is three or four times that, and `change_pte_range` in mm/mprotect.c
@@ -1327,7 +1329,7 @@ fn settle(
                 module,
                 callee,
                 passed(&module[id], call, &module[callee]),
-                Some(how.names),
+                Count::Weighed(how.names),
             ),
             Kind::Always | Kind::Small => (size(&module[callee]), false),
         };
@@ -1366,8 +1368,8 @@ fn settle(
                 || second && !early(&module[callee], large.saturating_sub(cost), how))
         {
             let values = passed(&module[id], call, &module[callee]);
-            let weighed = (kind == Kind::Auto).then_some(how.names);
-            large = large.min(how.specialized_size(module, callee, &values, weighed, false));
+            let count = Count::of(kind, how.names);
+            large = large.min(how.specialized_size(module, callee, &values, count, false));
         }
         // `vma_start_read` in mm/mmap_lock.c is 57 to gcc when it weighs it for
         // `lock_vma_under_rcu` on every page fault, with the two puts on its unlikely paths still
@@ -1385,8 +1387,8 @@ fn settle(
         // under 70 and went into all three of its wrappers in mm/mprotect.c, where gcc has 102.
         if large <= most && second && !early(&module[callee], growth, how) {
             let values = passed(&module[id], call, &module[callee]);
-            let weighed = (kind == Kind::Auto).then_some(how.names);
-            let mut threaded = how.specialized_size(module, callee, &values, weighed, true);
+            let count = Count::of(kind, how.names);
+            let mut threaded = how.specialized_size(module, callee, &values, count, true);
             if kind == Kind::Hinted {
                 threaded = threaded.saturating_sub(late);
             }
@@ -1674,7 +1676,12 @@ fn made_of_params(
 /// such a call by. Without it the arithmetic a `BUILD_BUG_ON` checks the constant with counts
 /// against the body, and in the kernel that is most of a body that asks, so a function the size
 /// of a hinted one looks two or three times larger than it is.
-fn answered_size(func: &Func, layout: DataLayout, values: Map<Value, (Imm, Type)>) -> usize {
+fn answered_size(
+    func: &Func,
+    layout: DataLayout,
+    values: Map<Value, (Imm, Type)>,
+    names: &Interner,
+) -> usize {
     let Some(entry) = func.entry() else { return size(func) };
     let asked = asked(func);
     let known = func[entry]
@@ -1684,7 +1691,7 @@ fn answered_size(func: &Func, layout: DataLayout, values: Map<Value, (Imm, Type)
         .filter(|(at, _)| asked.contains(at))
         .map(|(_, &value)| value)
         .collect();
-    folded_size(func, layout, known, values, None)
+    folded_size(func, layout, known, values, Count::Plain(names))
 }
 
 /// The callee's parameters this call passes a constant for, with the constant, which is what
@@ -1854,9 +1861,46 @@ fn folded_size(
     layout: DataLayout,
     known: Set<Value>,
     values: Map<Value, (Imm, Type)>,
-    weighed: Option<&Interner>,
+    count: Count<'_>,
 ) -> usize {
-    folded(func, layout, known, values, weighed, None).0
+    folded(func, layout, known, values, count, None).0
+}
+
+/// How [`folded`] counts an instruction that is still work.
+#[derive(Clone, Copy)]
+enum Count<'a> {
+    /// One apiece, but for an `asm`, which is what it is to gcc, one for each line of its template.
+    /// gcc counts the lines in every body it weighs, and `mm_pkey_alloc` in the kernel is two
+    /// `static_cpu_has` of twenty lines each, which is 75 to gcc and too large to be copied when
+    /// it has another caller. Counted one apiece it was 21, and `__do_sys_pkey_alloc` with it in
+    /// was copied into its three wrappers in mm/mprotect.c, where gcc keeps two calls.
+    Plain(&'a Interner),
+    /// As gcc's `estimate_num_insns` weighs it. See [`weight`].
+    Weighed(&'a Interner),
+}
+
+impl Count<'_> {
+    /// How a callee of this kind is counted: a function declared `inline` one apiece, as gcc
+    /// counts a body after its early passes, and one that is not with gcc's weights.
+    fn of(kind: Kind, names: &Interner) -> Count<'_> {
+        if kind == Kind::Auto { Count::Weighed(names) } else { Count::Plain(names) }
+    }
+
+    /// Whether this is gcc's weights.
+    fn weighs(self) -> bool {
+        matches!(self, Count::Weighed(_))
+    }
+
+    /// What this instruction counts for, `read` saying whether something reads its result.
+    fn cost(self, func: &Func, inst: Inst, read: bool) -> usize {
+        match self {
+            Count::Weighed(names) => weight(func, inst, names, read),
+            Count::Plain(names) if func[inst].opcode == Opcode::InlineAsm => {
+                weight(func, inst, names, read)
+            }
+            Count::Plain(_) => 1,
+        }
+    }
 }
 
 /// Who reads each value and as which operand, the argument of a jump to a block being read by a
@@ -1954,7 +1998,7 @@ fn folded(
     layout: DataLayout,
     mut known: Set<Value>,
     mut values: Map<Value, (Imm, Type)>,
-    weighed: Option<&Interner>,
+    count: Count<'_>,
     frequency: Option<&Map<Block, f64>>,
 ) -> (usize, f64) {
     known.extend(values.keys().copied());
@@ -2071,7 +2115,7 @@ fn folded(
             };
             if !costless {
                 let read = data.results().any(|result| readers.read(result));
-                let cost = weighed.map_or(1, |names| weight(func, inst, names, read));
+                let cost = count.cost(func, inst, read);
                 work += cost;
                 let often = frequency.and_then(|it| it.get(&block)).copied().unwrap_or(1.0);
                 // A call takes longer than its size says, which is gcc's `eni_time_weights`.
@@ -2132,15 +2176,15 @@ fn summed_size(
     summary: &summary::Summary,
     callee: &Func,
     values: Map<Value, (Imm, Type)>,
-    weighed: Option<&Interner>,
+    count: Count<'_>,
 ) -> (usize, bool) {
     let Some(estimate) = summary.estimate(callee, &values) else {
-        return (summary.walked(callee, values, weighed), false);
+        return (summary.walked(callee, values, count), false);
     };
-    let size = if weighed.is_some() { estimate.weighed } else { estimate.plain };
+    let size = if count.weighs() { estimate.weighed } else { estimate.plain };
     debug_assert_eq!(
         size,
-        folded_size(callee, summary.layout(), Set::default(), values, weighed),
+        folded_size(callee, summary.layout(), Set::default(), values, count),
         "the summary of {:?} is not the walk",
         callee.name
     );
@@ -2161,7 +2205,8 @@ fn summed_time(
     };
     if cfg!(debug_assertions) {
         let layout = summary.layout();
-        let walked = folded(callee, layout, Set::default(), values, Some(names), Some(frequency)).1;
+        let count = Count::Weighed(names);
+        let walked = folded(callee, layout, Set::default(), values, count, Some(frequency)).1;
         let near = (estimate.time - walked).abs() <= 1e-9 * walked.abs().max(1.0);
         assert!(
             near,
@@ -6082,9 +6127,10 @@ block0(%0: i32):
             } else {
                 Map::default()
             };
+            let count = Count::Plain(&names);
             cleaned(func, &values, false).map_or_else(
                 || size(func),
-                |copy| folded_size(&copy, module.datalayout, Set::default(), Map::default(), None),
+                |copy| folded_size(&copy, module.datalayout, Set::default(), Map::default(), count),
             )
         };
         assert!(weigh(false, true) < weigh(false, false));

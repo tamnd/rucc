@@ -36,7 +36,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::{INLINE_CALL_TIME, INLINE_SUMMARY_CLAUSES};
 use rucc_ir::{Block, DataLayout, Def, Func, Imm, Inst, Opcode, Type, Value};
 
-use super::{Readers, computed, goes_to, weight};
+use super::{Count, Readers, computed, goes_to, weight};
 use crate::cfg::Cfg;
 
 /// The parameters something needs known, one bit for each, or nothing when no set of them does.
@@ -147,13 +147,13 @@ impl Summary {
         &self,
         func: &Func,
         values: Map<Value, (Imm, Type)>,
-        weighed: Option<&Interner>,
+        count: Count<'_>,
     ) -> usize {
-        let key = (walk(func, &values), weighed.is_some());
+        let key = (walk(func, &values), count.weighs());
         if let Some(&size) = self.walked.borrow().get(&key) {
             return size;
         }
-        let size = super::folded_size(func, self.layout, Set::default(), values, weighed);
+        let size = super::folded_size(func, self.layout, Set::default(), values, count);
         self.walked.borrow_mut().insert(key, size);
         size
     }
@@ -172,9 +172,8 @@ impl Summary {
         if let Some(&time) = self.timed.borrow().get(&key) {
             return time;
         }
-        let layout = self.layout;
-        let time =
-            super::folded(func, layout, Set::default(), values, Some(names), Some(frequency)).1;
+        let (layout, count) = (self.layout, Count::Weighed(names));
+        let time = super::folded(func, layout, Set::default(), values, count, Some(frequency)).1;
         self.timed.borrow_mut().insert(key, time);
         time
     }
@@ -342,7 +341,7 @@ impl Summary {
                     });
                 }
                 let entry = &mut summary.entries[at];
-                entry.plain += 1;
+                entry.plain += Count::Plain(names).cost(func, inst, read);
                 entry.weighed += cost;
                 entry.time += (cost as f64 + waits) * often;
             }
@@ -503,7 +502,7 @@ fn holds(predicate: &Predicate, truths: &[bool]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inline::{folded, folded_size};
+    use crate::inline::{Count, folded, folded_size};
 
     const HEAD: &str = r#"; ModuleID = 't.c'
 ; format 0
@@ -603,9 +602,10 @@ block5(%14: i32):
         let values = values(&func, passed);
         let summary = Summary::of(&func, layout, &names, None);
         let estimate = summary.estimate(&func, &values).expect("the summary is exact");
-        let plain = folded_size(&func, layout, Set::default(), values.clone(), None);
+        let plain =
+            folded_size(&func, layout, Set::default(), values.clone(), Count::Plain(&names));
         assert_eq!(estimate.plain, plain);
-        let weighed = folded_size(&func, layout, Set::default(), values, Some(&names));
+        let weighed = folded_size(&func, layout, Set::default(), values, Count::Weighed(&names));
         assert_eq!(estimate.weighed, weighed);
         (estimate.plain, estimate.cut)
     }
@@ -618,6 +618,19 @@ block5(%14: i32):
         assert_eq!(sized(PICK, &[(0, 7)]), (2, true));
         assert_eq!(sized(PICK, &[(1, 5)]), (3, true));
         assert_eq!(sized(PICK, &[(0, 0), (1, 5)]), (0, true));
+    }
+
+    /// An `asm` is a line of its template apiece without weights too, as gcc counts it.
+    #[test]
+    fn an_asm_counts_the_lines_of_its_template() {
+        let body = r#"
+func @fences(), linkage(internal) {
+block0:
+    inline_asm.volatile "mfence; lfence; sfence", "", "memory"()
+    return
+}
+"#;
+        assert_eq!(sized(body, &[]), (3, false));
     }
 
     #[test]
@@ -689,7 +702,8 @@ block0(%0: ptr):
             let values = values(&func, passed);
             let estimate = summary.estimate(&func, &values).expect("the summary is exact");
             let frequency = Some(&frequency);
-            let walked = folded(&func, layout, Set::default(), values, Some(&names), frequency).1;
+            let count = Count::Weighed(&names);
+            let walked = folded(&func, layout, Set::default(), values, count, frequency).1;
             assert!((estimate.time - walked).abs() < 1e-9, "{} {walked}", estimate.time);
         }
     }
