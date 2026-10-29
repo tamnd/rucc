@@ -606,6 +606,33 @@ fn library_purity(name: &str) -> Option<Purity> {
     LIBRARY.binary_search_by_key(&name, |&(named, _)| named).ok().map(|at| LIBRARY[at].1)
 }
 
+/// Writes what the library table says onto the declarations it names, so the alias oracle, which
+/// reads only what a callee is declared to do, knows it too. gcc's builtins carry the same
+/// attributes. Each of the pure ones reads only what its pointers reach, so a load is not taken
+/// again after a `strlen` of some other string: `perf_trace_sched_prepare_exec` in
+/// kernel/sched/core.c read `p->comm` and the two other names it measures a second time each.
+///
+/// `library` is the names `-fno-builtin-<name>` took away, or nothing under `-fno-builtin` and
+/// `-ffreestanding`, which take the whole table away. A name with a body here is that body.
+pub fn annotate(module: &mut Module, names: &Interner, library: Option<&[String]>) {
+    let Some(taken) = library else { return };
+    for id in module.funcs().collect::<Vec<_>>() {
+        if !module[id].is_declaration() {
+            continue;
+        }
+        let name = names.resolve(module[id].name);
+        if taken.iter().any(|away| away == name.strip_prefix("__builtin_").unwrap_or(name)) {
+            continue;
+        }
+        let set = match library_purity(name) {
+            Some(Purity::Const) => AttrSet::READNONE,
+            Some(Purity::Pure) => AttrSet::READONLY | AttrSet::ARGMEM_ONLY,
+            _ => continue,
+        };
+        module[id].attrs.set |= set;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
@@ -615,7 +642,7 @@ mod tests {
     };
     use rucc_target::{TargetInfo, Triple};
 
-    use super::{CallGraph, Callee, Facts, LIBRARY, Purity, infer};
+    use super::{CallGraph, Callee, Facts, LIBRARY, Purity, annotate, infer};
 
     /// A module with those functions in it, declared unless they are asked to have a body.
     fn module(named: &[(&str, bool, AttrSet)]) -> (Interner, Module) {
@@ -719,6 +746,29 @@ mod tests {
     fn a_module_that_defines_strlen_means_its_own() {
         let (mut names, module) = module(&[("strlen", true, AttrSet::NONE)]);
         assert_eq!(purity(&mut names, &module, "strlen"), Purity::Opaque);
+    }
+
+    /// The table goes onto the declarations, except a name `-fno-builtin-<name>` took away, and
+    /// nothing at all under `-fno-builtin`.
+    #[test]
+    fn the_table_is_written_onto_what_the_module_declares() {
+        let declared = |library: Option<&[String]>| {
+            let named = [("strlen", false), ("abs", false), ("memchr", false), ("strcmp", true)];
+            let (names, mut module) =
+                module(&named.map(|(name, body)| (name, body, AttrSet::NONE)));
+            annotate(&mut module, &names, library);
+            let said = |name: &str| {
+                let id = module.funcs().find(|&id| names.resolve(module[id].name) == name);
+                module[id.expect("the fixture has it")].attrs.set
+            };
+            named.map(|(name, _)| said(name))
+        };
+        let pure = AttrSet::READONLY.union(AttrSet::ARGMEM_ONLY);
+        let all = declared(Some(&[]));
+        assert_eq!(all, [pure, AttrSet::READNONE, pure, AttrSet::NONE]);
+        let away = declared(Some(&["memchr".to_string()]));
+        assert_eq!(away, [pure, AttrSet::READNONE, AttrSet::NONE, AttrSet::NONE]);
+        assert_eq!(declared(None), [AttrSet::NONE; 4]);
     }
 
     #[test]

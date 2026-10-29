@@ -1231,6 +1231,11 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // at `-O0`, which answers every question as not known, the way gcc does at that level, and
     // for every function `optimize ("O0")` holds to that level whatever this one is.
     let library = opts.builtins.then_some(opts.no_builtin.as_slice());
+    // What the C library's pure functions are declared to do, before the oracle's copy of the
+    // declarations is made below. See [`purity::annotate`].
+    if opts.level != OptLevel::O0 {
+        purity::annotate(module, names, library);
+    }
     // A `static` nothing writes is read only from here on, so its loads fold to what it was
     // initialized to and the object can go once nothing reads it, as gcc's do once its IPA has
     // marked them. `fonts` in lib/fonts/fonts.c and `symtab_key_params` in
