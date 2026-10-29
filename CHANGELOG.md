@@ -23,6 +23,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The first inliner now measures a cleaned up copy of a small body before it leaves the call to the second pass for growing the caller past the early limit, as gcc weighs a body after its early passes. kernel/sched/core.o is 336 bytes smaller (#3969)
 - The first inliner now threads jumps in the cleaned up copy it measures against gcc's early limit, so `ksize` in mm/slub.c goes into its callers early and stays a tail call to `__ksize` as with gcc (#3970)
 - The inliner weighs a body for its early limit with `__builtin_constant_p` answered zero about any value no parameter reaches, as gcc's summary has it, so the kernel's `test_bit` wrappers are small enough to go in early and mm/memory.c keeps `__pte_alloc` a call as gcc does (#3973)
+- The C library functions the purity table knows are declared `pure` and argument memory only for the alias oracle, as gcc's builtins are, so a load is not taken again after a `strlen` of another string (#3974)
 
 ## 0.30.15
 
