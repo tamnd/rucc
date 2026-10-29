@@ -1311,13 +1311,29 @@ fn settle(
             || flat.contains(&call)
             || module[callee].attrs.set.contains(AttrSet::COLD)
             || module[callee].attrs.set.contains(AttrSet::NORETURN);
+        // gcc's early inliner takes only what grows the caller by `early` or less and leaves the
+        // rest to its second, which takes the calls in the order of what they save. Taken here up
+        // to the limit, a body went into its callers before the second pass weighed it whole:
+        // `post_alloc_hook` in mm/page_alloc.c went into `prep_new_page` first, and that was then
+        // too large for `get_page_from_freelist`, where gcc has all three in one body.
+        // Not a call to a function that reaches itself, which the second pass never weighs.
+        let second = how.later.is_some_and(|it| !it.borrow().cyclic.contains(&module[callee].name))
+            && matches!(kind, Kind::Hinted | Kind::Auto);
+        // The call it replaces is counted without its result here. With it, mm/memory.c kept 22
+        // calls more than gcc does, and 9 more without it.
+        let cost = 1 + module[id][module[id][call].args].len();
         // The estimate above does not follow a constant through a block parameter or answer a
         // `__builtin_constant_p` about anything but a parameter, so where it would refuse, the
         // copy is made and cleaned up the way it would be once inlined, and that is measured.
-        // Not for a body so far past the limit that no cleanup brings it under. See [`TRIED`].
+        // That is the limit, a cold call and the early limit too, since gcc weighs a body for its
+        // early inliner once the body has had its own early passes. Without it for the early
+        // limit kernel/sched/core.o was 336 bytes larger. Not for a body so far past the limit
+        // that no cleanup brings it under. See [`TRIED`].
         if matches!(kind, Kind::Hinted | Kind::Asks | Kind::Auto)
             && large <= most.saturating_mul(TRIED)
-            && (large > most || cold_call && grows(&module[id], call, &module[callee], large, how))
+            && (large > most
+                || cold_call && grows(&module[id], call, &module[callee], large, how)
+                || second && !early(&module[callee], large.saturating_sub(cost), how))
         {
             let values = passed(&module[id], call, &module[callee]);
             let weighed = (kind == Kind::Auto).then_some(how.names);
@@ -1329,17 +1345,7 @@ fn settle(
         if kind == Kind::Hinted {
             large = large.saturating_sub(late);
         }
-        // gcc's early inliner takes only what grows the caller by `early` or less and leaves the
-        // rest to its second, which takes the calls in the order of what they save. Taken here up
-        // to the limit, a body went into its callers before the second pass weighed it whole:
-        // `post_alloc_hook` in mm/page_alloc.c went into `prep_new_page` first, and that was then
-        // too large for `get_page_from_freelist`, where gcc has all three in one body.
-        // Not a call to a function that reaches itself, which the second pass never weighs.
-        let second = how.later.is_some_and(|it| !it.borrow().cyclic.contains(&module[callee].name))
-            && matches!(kind, Kind::Hinted | Kind::Auto);
-        // The call it replaces is counted without its result here. With it, mm/memory.c kept 22
-        // calls more than gcc does, and 9 more without it.
-        let growth = large.saturating_sub(1 + module[id][module[id][call].args].len());
+        let growth = large.saturating_sub(cost);
         if large > most || second && !early(&module[callee], growth, how) {
             // Left for the second pass to weigh with its hints, which says why if it refuses too.
             if let (Some(later), Kind::Hinted | Kind::Auto) = (how.later, kind) {
