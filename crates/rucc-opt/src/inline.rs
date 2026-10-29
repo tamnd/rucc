@@ -1815,7 +1815,16 @@ fn cleaned(callee: &Func, values: &Map<Value, (Imm, Type)>, threads: bool) -> Op
     if threads {
         passes.insert(6, &crate::thread::FREE);
     }
-    for _ in 0..2 {
+    for round in 0..2 {
+        // The questions no parameter reaches are answered only in the second round, so a value
+        // the first round's folding makes a constant gets its yes first, and only with `threads`,
+        // for the early limit. gcc weighs a body for its second pass with its own early inlines
+        // in it, which are often more than here, and answered there too `__do_sys_pkey_alloc`
+        // came in at the limit and went into all three of its wrappers in mm/mprotect.c, where
+        // gcc has 284 and keeps the calls.
+        if round == 1 && threads {
+            passes.insert(4, &crate::constant_p::ConstantInlined);
+        }
         for &pass in &passes {
             // The manager's rule, so a pass that changed nothing leaves the next one the graph
             // it was given rather than one to build again, and one that changed something keeps
