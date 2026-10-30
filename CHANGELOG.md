@@ -40,6 +40,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64 a comparison against zero that keeps its byte, which branch fusion could not fold into a jump, is now written as `test` and `set` instead of `cmp $0` and `set`, which is two bytes shorter for a register. (#3990)
 - The retry edge of a `try_cmpxchg` loop now passes the value the exchange read back instead of a select between it and the old one, since the edge is only taken when the exchange failed. The kernel has about 40 of these loops and each kept a `cmov` or a branch that gcc does not have. (#3991)
 - A test of whether a mask is zero, made through a helper that returns `int` like `pte_special`, is now one `test` on x86-64 instead of an `and` at the narrow width followed by a `test` of it. (#3992)
+- A `bool` bit-field tested as a truth, like `vmg->just_expand`, is now one `testb` of its bit on x86-64 instead of a load, a shift, an `and` and a test. (#3993)
 
 ## 0.30.15
 

@@ -55,6 +55,13 @@
 //! `test`. Without it x86-64 wrote the `and` at its own width and then tested the low half again,
 //! and the bench objects had a hundred of those where gcc had fifteen.
 //!
+//! A truth taken from one bit of a shifted value. A `bool` bit-field is read as a byte shifted
+//! down to its bit, masked with one and truncated to a truth, so `if (vmg->__remove_middle)` is
+//! `trunc.i1 (and (lshr byte 5) 1)`. That is whether bit five of the byte is set, which is the
+//! comparison against zero of the byte masked with thirty two, and the lowering rules fold that
+//! into one `test`. gcc writes `testb $0x20` straight against memory, and x86-64 wrote a shift,
+//! the mask, the mask again for the truncation and a `test` of the lot.
+//!
 //! # Why it always pays
 //!
 //! No shape is applied unless every leaf it reaches narrows for nothing. A leaf is what an
@@ -164,6 +171,7 @@ impl Pass for Narrow {
                     .or_else(|| extended_comparison(func, inst))
                     .or_else(|| widened_bits(func, inst, &uses))
                     .or_else(|| masked_comparison(func, inst))
+                    .or_else(|| tested_bit(func, inst))
                 else {
                     continue;
                 };
@@ -476,6 +484,60 @@ fn masked_comparison(func: &Func, inst: Inst) -> Option<Redo> {
         lhs: Plan::Already(wide),
         rhs: Some(Plan::Constant(0)),
     })
+}
+
+/// Whether this is a truth taken from one bit of a value, and the comparison it becomes.
+///
+/// A truncation to one bit keeps the bottom bit, so an `and` with a constant whose bottom bit is
+/// set changes nothing under it and is looked through. What is left is either a shift right by a
+/// constant, and then the bit is the one it shifted down, or the `and` was there and the bit is the
+/// bottom one. A truncation of anything else is left, since there is no mask to fold it into. The
+/// bit has to be below thirty one so the mask is an immediate a `test` can take at any width.
+fn tested_bit(func: &Func, inst: Inst) -> Option<Redo> {
+    let data = &func[inst];
+    let truth = func[data.results().next()?].ty;
+    if data.opcode != Opcode::Trunc || !truth.is_scalar() || truth.bits() != 1 {
+        return None;
+    }
+    let mut value = *func[data.args].first()?;
+    let masked = with_constant(func, value, Opcode::And);
+    if let Some((under, mask)) = masked {
+        if mask & 1 == 0 {
+            return None;
+        }
+        value = under;
+    }
+    let shifted = with_constant(func, value, Opcode::LShr)
+        .or_else(|| with_constant(func, value, Opcode::AShr));
+    let (value, bit) = match shifted {
+        Some((under, by)) => (under, by),
+        None if masked.is_some() => (value, 0),
+        None => return None,
+    };
+    let ty = func[value].ty;
+    if !(0..31).contains(&bit) || i128::from(ty.bits()) <= bit || !ty.is_scalar() {
+        return None;
+    }
+    let (lhs, rhs) = (Plan::Already(value), Some(Plan::Constant(1 << bit)));
+    let and = Redo { opcode: Opcode::And, extra: Extra::None, ty, lhs, rhs };
+    Some(Redo {
+        opcode: Opcode::ICmp,
+        extra: Extra::IntPred(IntPred::Ne),
+        ty,
+        lhs: Plan::Nested(Box::new(and)),
+        rhs: Some(Plan::Constant(0)),
+    })
+}
+
+/// The operand and the constant of an instruction of this opcode with a constant on the right.
+fn with_constant(func: &Func, value: Value, opcode: Opcode) -> Option<(Value, i128)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != opcode {
+        return None;
+    }
+    let &[left, right] = func[func[inst].args].first_chunk::<2>()?;
+    let (imm, _) = constant(func, right)?;
+    Some((left, i128::try_from(imm.unsigned()).ok()?))
 }
 
 /// Whether this is something asking about a bitwise operation on widened bits, and what it
@@ -1411,6 +1473,53 @@ mod tests {
             if asked {
                 assert_eq!(under(&func, answer), masked);
             }
+        }
+    }
+
+    /// `if (vmg->__remove_middle)`, a `bool` bit-field five bits up a byte, and the forms around
+    /// it: the shift without the mask, the mask without the shift, and the ones that stay.
+    #[test]
+    fn a_truth_taken_from_one_bit_is_the_comparison_of_that_bit_against_zero() {
+        // The width, the shift, the mask, and the bit asked about if it changes.
+        for (width, by, mask, bit) in [
+            (8, Some(5), Some(1), Some(5)),
+            (64, Some(3), None, Some(3)),
+            (32, None, Some(1), Some(0)),
+            (32, Some(4), Some(3), Some(4)),
+            (8, None, None, None),
+            (64, Some(40), Some(1), None),
+            (32, Some(4), Some(2), None),
+        ] {
+            let (mut func, block) = blank();
+            let x = func.append_param(block, Type::int(width));
+            let mut build = Builder::new(&mut func, block);
+            let mut value = x;
+            if let Some(by) = by {
+                let by = build.iconst(Type::int(width), by);
+                value = build.binary(Opcode::LShr, value, by, Flags::NONE);
+            }
+            if let Some(mask) = mask {
+                let mask = build.iconst(Type::int(width), mask);
+                value = build.binary(Opcode::And, value, mask, Flags::NONE);
+            }
+            let truth = build.unary(Opcode::Trunc, value, Type::int(1));
+            build.ret(&[truth]);
+            let changed = Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed();
+            assert_eq!(changed, bit.is_some(), "{width} {by:?} {mask:?}");
+            let Some(bit) = bit else { continue };
+            let wide = Type::int(width);
+            assert_eq!(shape(&func, truth), (Opcode::ICmp, vec![wide, wide]));
+            assert_eq!(predicate(&func, truth), IntPred::Ne);
+            let masked = under(&func, truth);
+            assert_eq!(shape(&func, masked), (Opcode::And, vec![wide, wide]));
+            assert_eq!(under(&func, masked), x);
+            let rucc_ir::Def::Result { inst, .. } = func[masked].def else { panic!("a result") };
+            let k = func[func[inst].args][1];
+            let rucc_ir::Def::Result { inst: k, .. } = func[k].def else { panic!("a constant") };
+            let rucc_ir::Extra::Imm(at) = func[k].extra else { panic!("an immediate") };
+            assert_eq!(func[at].unsigned(), 1 << bit, "{width} {by:?} {mask:?}");
         }
     }
 
