@@ -99,16 +99,16 @@ fn a_frame_says_where_it_moved_the_stack_pointer() {
 }
 
 /// A saved register is written as a DWARF number rather than a name, and DWARF numbers the first
-/// eight registers in an order that is not the machine's. `rbx` is 3 either way, but `r12` through
-/// `r15` are 12 through 15 in both, which is the half that agrees.
+/// eight registers in an order that is not the machine's. `rbx` is 3 either way, but `rbp` is 5 to
+/// the machine and 6 to DWARF.
 #[test]
 fn a_saved_register_says_where_it_went() {
     let text = asm("saved", &[&format!("--target={TARGET}")], SHAPES);
     let lines = body(&text, "big").join("\n");
     assert!(lines.contains(".cfi_offset 3, -16"), "{lines}");
-    assert!(lines.contains(".cfi_offset 12, -24"), "{lines}");
+    assert!(lines.contains(".cfi_offset 6, -24"), "{lines}");
     assert!(lines.contains(".cfi_restore 3"), "{lines}");
-    assert!(lines.contains(".cfi_restore 12"), "{lines}");
+    assert!(lines.contains(".cfi_restore 6"), "{lines}");
 }
 
 /// A function with two returns has two epilogues, and the second one has to start from the state

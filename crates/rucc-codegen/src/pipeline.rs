@@ -212,18 +212,26 @@ impl Machine {
                 &sse_scratch,
             )
         };
-        // The frame pointer last, so a function only reaches for it once every other register is
-        // in use, which is also the only time the push and the pop it costs are worth paying.
-        // tamnd/rucc#2777.
-        let spared: Vec<PhysReg> = order.iter().copied().chain([conv.frame_pointer]).collect();
+        // The frame pointer after the preserved registers that need no prefix and before `r12`,
+        // as gcc hands them out. It costs the same push and pop as `r12` does and is a byte
+        // shorter wherever it is named, so a function that saves two registers saves `rbx` and
+        // `rbp`. A function with nothing preserved to spare still reaches for it last.
+        let spared = |order: &[PhysReg]| -> Vec<PhysReg> {
+            let at = order
+                .iter()
+                .position(|&reg| conv.preserves_int(reg) && reg.number() >= 8)
+                .unwrap_or(order.len());
+            let mut spared = order.to_vec();
+            spared.insert(at, conv.frame_pointer);
+            spared
+        };
         // Every register the convention hands out, `r10` and `r11` where it put them, which is
         // ahead of the ones a call preserves. tamnd/rucc#1994.
         let wide = |order: &[PhysReg]| {
             Env::new().with(x86_64::GPR, order, &[]).with(x86_64::XMM, &sse_order, &sse_scratch)
         };
         let every: Vec<PhysReg> = conv.int_order.to_vec();
-        let spared_every: Vec<PhysReg> =
-            every.iter().copied().chain([conv.frame_pointer]).collect();
+        let spared_every = spared(&every);
         // `r11` handed out and `r10` held back, which is enough for a function that reads its
         // spilled values back one at a time, and that is nearly every function that spills.
         let held = &SCRATCH[..1];
@@ -232,7 +240,7 @@ impl Machine {
         };
         let some: Vec<PhysReg> =
             conv.int_order.iter().copied().filter(|reg| !held.contains(reg)).collect();
-        let spared_some: Vec<PhysReg> = some.iter().copied().chain([conv.frame_pointer]).collect();
+        let spared_some = spared(&some);
         Self {
             conv,
             file: x86_64::REGS,
@@ -245,7 +253,7 @@ impl Machine {
             short: &x86_64::SHORT,
             selector: &select::x86_64::SELECTOR,
             env: env(&order),
-            spare: Some(env(&spared)),
+            spare: Some(env(&spared(&order))),
             wide: Some([wide(&every), wide(&spared_every)]),
             middle: Some([middle(&some), middle(&spared_some)]),
             last: None,
