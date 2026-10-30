@@ -3608,7 +3608,7 @@ mod tests {
             ("ud1l (%rax), %ecx", &[0x0f, 0xb9, 0x08]),
             ("int3", &[0xcc]),
             ("int $0x80", &[0xcd, 0x80]),
-            ("int $3", &[0xcd, 0x03]),
+            ("int $3", &[0xcc]),
             ("int1", &[0xf1]),
             ("ljmp *(%rax)", &[0xff, 0x28]),
             ("ljmpq *(%rax)", &[0x48, 0xff, 0x28]),

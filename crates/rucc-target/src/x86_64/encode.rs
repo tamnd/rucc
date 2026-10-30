@@ -2253,8 +2253,8 @@ static ENCODINGS: &[Encoding] = &[
     bytes("lcall", &M, Long, &[0xFF], ext(0, 3), NO_IMM),
     bytes("lcalll", &M, Long, &[0xFF], ext(0, 3), NO_IMM),
     bytes("lcallq", &M, Quad, &[0xFF], ext(0, 3), NO_IMM),
-    // Interrupts and the flags that mask them. `int $3` is two bytes rather than the one byte
-    // `int3` further up, which is what gas writes for it and what a debugger looking for either tells apart.
+    // Interrupts and the flags that mask them. `int $3` is not written from this row but as the one
+    // byte `int3` further up, as gas does, see `encode_masked_in`.
     bytes("cli", &NO_ARGS, Long, &[0xFA], NO_MODRM, NO_IMM),
     bytes("sti", &NO_ARGS, Long, &[0xFB], NO_MODRM, NO_IMM),
     bytes("hlt", &NO_ARGS, Long, &[0xF4], NO_MODRM, NO_IMM),
@@ -5516,6 +5516,12 @@ pub fn encode_masked_in(
 ) -> Result<Holes, Error> {
     if mode == Mode::Bits32 && ONLY64.contains(&mnemonic) {
         return Err(Error::Wide { mnemonic: mnemonic.to_owned() });
+    }
+    // gas writes `int $3` as the one byte `int3`, and objtool takes only that byte as a trap. After
+    // the `jmp *%rbx` in arch/x86/hyperv/hv_trampoline.S, the two byte form is an unreachable
+    // instruction to objtool, and the gcc build has no such warning.
+    if mnemonic == "int" && matches!(values, [Value::Imm(3)]) {
+        return encode_masked_in(mode, "int3", &[], mask, out);
     }
     // On the stack, since this is asked once for every instruction written and almost none has
     // more than four arguments. A list is made only for one that does, and for the error.
