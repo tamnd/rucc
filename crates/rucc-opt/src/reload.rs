@@ -120,7 +120,7 @@
 //! values and does not, which is why this pass drops it whether or not it changed anything.
 
 use rucc_base::hash::Map;
-use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Restrict, Type, Value};
 
 use crate::alias::{Access, Alias, Origin, origin};
 use crate::dom::Dominators;
@@ -147,6 +147,9 @@ const MAYBE: &str = "load kept, something that may have written it could not be 
 
 /// Recorded for a load whose walk ran out of budget or reached a join whose paths disagreed.
 const UNKNOWN: &str = "load kept, the walk back over memory established nothing";
+
+/// Recorded for a load whose every byte a fill of one constant byte wrote.
+const SPLATTED: &str = "load replaced by the constant a fill wrote at every byte of it";
 
 /// Recorded for a load whose store covered the same bytes at a different type.
 const WIDTH: &str = "load kept, the store that covers it wrote a different type";
@@ -200,6 +203,8 @@ impl Pass for RedundantLoad {
         let mut gone: Vec<Inst> = Vec::new();
         // Each copy whose source was a fill, with the byte the fill wrote.
         let mut refills: Vec<(Inst, Value)> = Vec::new();
+        // Each load a fill wrote all of, with what it reads, which becomes a constant above it.
+        let mut splats: Vec<(Inst, Value, i128)> = Vec::new();
 
         // The walk borrows the function, so it is a scope of its own and every edit happens after
         // it. Built once, because the alias oracle inside it holds an escape analysis that is one
@@ -237,15 +242,28 @@ impl Pass for RedundantLoad {
                     let key = walk
                         .settled(inst)
                         .map(|mem| (mem, Place::of(func, func[func[inst].args][0]), ty, segment));
-                    let found = match walk.clobber_with(inst, &mut |reference, def| {
-                        through(body, reference, def).map_or(Step::Stop, Step::Retry)
-                    }) {
-                        Clobber::Exact(wrote) => match stored(func, wrote) {
-                            None => Found::Kept(Some(NOT_A_STORE)),
-                            Some(value) if func[value].ty != ty => Found::Kept(Some(WIDTH)),
-                            Some(value) => Found::Store(value),
+                    // Whether the walk went on through a copy, after which the write it names is
+                    // about the copy's source and not about the bytes the load reads.
+                    let mut moved = false;
+                    let clobber = walk.clobber_with(inst, &mut |reference, def| {
+                        let next = through(body, reference, def);
+                        moved |= next.is_some();
+                        next.map_or(Step::Stop, Step::Retry)
+                    });
+                    let fill = |wrote| {
+                        if moved { None } else { splat(body, walk.alias(), inst, wrote, ty) }
+                    };
+                    let found = match clobber {
+                        Clobber::Exact(wrote) => match (stored(func, wrote), fill(wrote)) {
+                            (_, Some(bits)) => Found::Fill(bits),
+                            (None, None) => Found::Kept(Some(NOT_A_STORE)),
+                            (Some(value), _) if func[value].ty != ty => Found::Kept(Some(WIDTH)),
+                            (Some(value), _) => Found::Store(value),
                         },
-                        Clobber::Partial(_) => Found::Kept(Some(PARTIAL)),
+                        Clobber::Partial(wrote) => match fill(wrote) {
+                            Some(bits) => Found::Fill(bits),
+                            None => Found::Kept(Some(PARTIAL)),
+                        },
                         Clobber::Maybe(_) => Found::Kept(Some(MAYBE)),
                         Clobber::Unknown => Found::Kept(Some(UNKNOWN)),
                         // Nothing in the function wrote it, so the load reads whatever was there
@@ -265,6 +283,18 @@ impl Pass for RedundantLoad {
                         taken => taken,
                     };
                     let (value, why) = match found {
+                        Found::Fill(bits) if fuel.take() => {
+                            splats.push((inst, result, bits));
+                            gone.push(inst);
+                            stats.optimized(SPLATTED);
+                            remember(&mut seen, key, (dom, loops), block, result);
+                            continue;
+                        }
+                        Found::Fill(_) => {
+                            stats.missed(NO_FUEL);
+                            remember(&mut seen, key, (dom, loops), block, result);
+                            continue;
+                        }
                         Found::Store(value) => (value, FORWARDED),
                         Found::Earlier(value) => (value, REUSED),
                         Found::Kept(reason) => {
@@ -302,6 +332,15 @@ impl Pass for RedundantLoad {
             }
         }
 
+        // Above the load, which is below the fill on every path, and before the load goes.
+        for (inst, result, bits) in splats {
+            let ty = func[result].ty;
+            let at = func.add_imm(Imm::int(bits, ty));
+            let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+            let made = func.create_inst(data, &[ty], func.span(inst));
+            func.insert_before(made, inst);
+            forward.insert(result, func[made].first_result.expect("a constant is one value"));
+        }
         for inst in gone {
             func.remove_inst(inst);
         }
@@ -498,6 +537,8 @@ enum Found {
     Store(Value),
     /// An earlier load of the same address at the same version of memory already had this.
     Earlier(Value),
+    /// A fill wrote every byte of it, and these are the bits that makes.
+    Fill(i128),
     /// The load stays, with the reason when there is one worth recording.
     Kept(Option<&'static str>),
 }
@@ -612,6 +653,42 @@ fn reads(func: &Func, alias: &Alias<'_>, inst: Inst) -> Option<(Value, Type)> {
         return None;
     };
     Some((result, func[result].ty))
+}
+
+/// What an integer load reads out of a fill of one constant byte that wrote every byte of it.
+///
+/// That byte at every place, which is what a load of a field of a structure set to zeros a few
+/// lines above reads. `kmalloc` in mm/slub.c fills a 32 byte guard with zeros, stores two of its
+/// fields and reads a third, and gcc reads none of it. The fill can be `Exact` or `Partial`,
+/// since a fill wider than the load is the usual case and the walk calls that partial. Both have
+/// to be about the same object at known places, and the fill a known length that is not one the
+/// program asked to keep. A pointer or a float is left alone, since its bits are not an integer
+/// constant the way an integer's are.
+fn splat(func: &Func, alias: &Alias<'_>, inst: Inst, wrote: Inst, ty: Type) -> Option<i128> {
+    let data = func[wrote];
+    if data.opcode != Opcode::Memset
+        || data.flags.intersects(Flags::KEEP)
+        || !ty.is_int()
+        || !ty.is_scalar()
+        || ty.bits() % 8 != 0
+    {
+        return None;
+    }
+    let fill = func.bulk(wrote)?;
+    let (read, written) = (alias.reads(inst)?, alias.writes(wrote)?);
+    if fill.length.is_some() || written.volatile || written.origin != read.origin {
+        return None;
+    }
+    let ((start, end), (low, high)) = (read.range()?, written.range()?);
+    if start < low || high < end {
+        return None;
+    }
+    let Def::Result { inst: byte, .. } = func[fill.with].def else { return None };
+    let (Opcode::IConst, Extra::Imm(at)) = (func[byte].opcode, func[byte].extra) else {
+        return None;
+    };
+    let byte = func[at].unsigned() & 0xff;
+    Some((0..ty.bits() / 8).fold(0u128, |bits, _| bits << 8 | byte) as i128)
 }
 
 /// What a store wrote, and nothing for anything else that writes memory.
@@ -1401,6 +1478,56 @@ block2:
         assert_eq!(args[0], func[func.entry().expect("an entry")].params[0]);
         let Extra::Mem(info) = func[fill].extra else { panic!("a fill says how much it writes") };
         assert_eq!((func[info].size, func[info].align), (64, 8));
+    }
+
+    #[test]
+    fn a_field_of_a_fill_is_the_byte_at_every_place() {
+        let text = wrap(
+            "() -> i32",
+            "block0:
+    %0 = alloca, size 32, align 8
+    %1 = iconst.i8 1
+    memset %0, %1, size 32, align 8
+    %2 = iconst.i32 7
+    store %2 -> %0, align 8
+    %3 = iconst.i64 16
+    %4 = ptr_add %0, %3
+    %5 = load.i32 %4, align 8
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, SPLATTED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+        let made = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::IConst)
+            .last()
+            .expect("the constant the load became");
+        let Extra::Imm(at) = func[made].extra else { panic!("a constant has an immediate") };
+        assert_eq!(func[at].unsigned(), 0x0101_0101);
+    }
+
+    #[test]
+    fn a_load_reaching_past_the_end_of_a_fill_stays() {
+        let text = wrap(
+            "() -> i64",
+            "block0:
+    %0 = alloca, size 32, align 8
+    %1 = iconst.i8 0
+    memset %0, %1, size 20, align 8
+    %2 = iconst.i64 16
+    %3 = ptr_add %0, %2
+    %4 = load.i64 %3, align 8
+    return %4
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, SPLATTED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
     }
 
     #[test]
