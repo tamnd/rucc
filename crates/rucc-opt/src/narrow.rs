@@ -45,6 +45,16 @@
 //! the one bit rewrite rules something to match, which is `tamnd/rucc#518`. Here too one side may
 //! be a constant, and here a constant is a bit when it is zero or one.
 //!
+//! A comparison against zero of a truncation that drops nothing but clear bits. This is the one
+//! shape that goes the other way, out to the wide width, and it is here because it undoes a
+//! promotion in the same sense the others do. A helper that returns `int` truncates what it
+//! computed, so `pte_special` is `trunc.i32 (and.i64 pte 0x200)` and its caller asks whether that
+//! is zero. The mask has no bit above the low thirty two, so neither does the `and`, and asking
+//! the `and` itself is the same question. The truncation is then read by nothing, and the `and` is
+//! read only by a comparison against zero, which is the term the lowering rules fold into one
+//! `test`. Without it x86-64 wrote the `and` at its own width and then tested the low half again,
+//! and the bench objects had a hundred of those where gcc had fifteen.
+//!
 //! # Why it always pays
 //!
 //! No shape is applied unless every leaf it reaches narrows for nothing. A leaf is what an
@@ -153,6 +163,7 @@ impl Pass for Narrow {
                 let Some(redo) = truncated_arithmetic(func, inst, seen)
                     .or_else(|| extended_comparison(func, inst))
                     .or_else(|| widened_bits(func, inst, &uses))
+                    .or_else(|| masked_comparison(func, inst))
                 else {
                     continue;
                 };
@@ -422,6 +433,49 @@ fn extended_comparison(func: &Func, inst: Inst) -> Option<Redo> {
     };
     let extra = Extra::IntPred(pred);
     Some(Redo { opcode: Opcode::ICmp, extra, ty, lhs: Plan::Already(narrow), rhs: Some(rhs) })
+}
+
+/// Whether this is a comparison against zero of a truncation of a mask the truncation keeps the
+/// whole of, and what it becomes.
+///
+/// Only equality, because the sign of the narrow value is a bit of the mask and the sign of the
+/// wide one is not. The truncation may have other readers: `unlikely(!!special(x))` leaves two
+/// comparisons of it until they are found to be one, and each is asked here on its own. A reader
+/// that is not a comparison keeps the `and` in a register, and a comparison of that then reads
+/// what the `and` left in the flags at its own width. And only a mask below the narrow sign bit,
+/// because `0xffffffff` is not an immediate a sixty four bit `test` can take and the narrow
+/// comparison of it is one `test` of the low half already.
+fn masked_comparison(func: &Func, inst: Inst) -> Option<Redo> {
+    let data = &func[inst];
+    let equality = matches!(data.extra, Extra::IntPred(IntPred::Eq | IntPred::Ne));
+    if data.opcode != Opcode::ICmp || !equality {
+        return None;
+    }
+    let args = &func[data.args];
+    let (&left, &right) = (args.first()?, args.get(1)?);
+    let (zero, narrow) = constant(func, right)?;
+    if zero.unsigned() != 0 {
+        return None;
+    }
+    let Def::Result { inst: cut, .. } = func[left].def else { return None };
+    if func[cut].opcode != Opcode::Trunc {
+        return None;
+    }
+    let wide = *func[func[cut].args].first()?;
+    let Def::Result { inst: masked, .. } = func[wide].def else { return None };
+    if func[masked].opcode != Opcode::And {
+        return None;
+    }
+    let (mask, _) = func[func[masked].args].iter().find_map(|&arg| constant(func, arg))?;
+    let ty = func[wide].ty;
+    let kept = mask.unsigned() >> (narrow.bits() - 1) == 0;
+    (kept && ty.is_int() && ty.is_scalar()).then_some(Redo {
+        opcode: Opcode::ICmp,
+        extra: data.extra,
+        ty,
+        lhs: Plan::Already(wide),
+        rhs: Some(Plan::Constant(0)),
+    })
 }
 
 /// Whether this is something asking about a bitwise operation on widened bits, and what it
@@ -1327,6 +1381,39 @@ mod tests {
     /// The promotions widen both bits to an `int`, the operator runs there, and the conversion of
     /// the answer back to `_Bool` is the comparison against zero. All of that is the operator on
     /// the two bits.
+    /// `pte_special(pte)` tested by its caller: the mask fits in the `int` the helper returns, so
+    /// the comparison is of the `and`, and a mask with a bit above it or an ordering stays.
+    #[test]
+    fn a_comparison_against_zero_of_a_truncated_mask_it_keeps_is_of_the_mask() {
+        for (mask, pred, asked) in [
+            (0x200, IntPred::Ne, true),
+            (0x7fff_ffff, IntPred::Eq, true),
+            (0xffff_ffff, IntPred::Ne, false),
+            (0x1_0000_0000, IntPred::Ne, false),
+            (0x200, IntPred::Slt, false),
+        ] {
+            let (mut func, block) = blank();
+            let x = func.append_param(block, Type::int(64));
+            let mut build = Builder::new(&mut func, block);
+            let k = build.iconst(Type::int(64), mask);
+            let masked = build.binary(Opcode::And, x, k, Flags::NONE);
+            let cut = build.unary(Opcode::Trunc, masked, Type::int(32));
+            let zero = build.iconst(Type::int(32), 0);
+            let answer = build.icmp(pred, cut, zero);
+            build.ret(&[answer]);
+            let changed = Narrow
+                .run(&mut func, &mut crate::machine::fixtures::analyses(), &mut Fuel::unlimited())
+                .changed();
+            assert_eq!(changed, asked, "{mask:#x} {pred:?}");
+            let wide = if asked { Type::int(64) } else { Type::int(32) };
+            assert_eq!(shape(&func, answer), (Opcode::ICmp, vec![wide, wide]), "{mask:#x}");
+            assert_eq!(predicate(&func, answer), pred);
+            if asked {
+                assert_eq!(under(&func, answer), masked);
+            }
+        }
+    }
+
     #[test]
     fn a_bitwise_operation_on_two_widened_bits_is_done_at_one_bit() {
         for opcode in [Opcode::And, Opcode::Or, Opcode::Xor] {
