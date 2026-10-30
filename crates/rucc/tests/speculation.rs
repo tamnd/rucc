@@ -18,8 +18,8 @@ use std::process::{Command, Stdio};
 const TARGET: &str = "--target=x86_64-unknown-linux-gnu";
 
 /// Three calls through three pointers, each called twice so that every pointer outlives a call
-/// and has to be kept in a register the callee saves, and none of them in tail position. Those are `%rbx`, which is below `%r8`, and
-/// `%r12` and `%r13`, which are not.
+/// and has to be kept in a register the callee saves, and none of them in tail position. Those are `%rbx` and `%rbp`, which are below `%r8`,
+/// and `%r12`, which is not.
 const CALLS: &str = "\
 int three(void (*p)(void), void (*q)(void), void (*r)(void)) { p(); q(); r(); p(); q(); r(); return 0; }
 ";
@@ -100,7 +100,7 @@ fn after<'a>(lines: &[&'a str], line: &str) -> Option<&'a str> {
 fn an_indirect_call_goes_to_the_thunk_for_its_register() {
     let text = asm(&["-mindirect-branch=thunk-extern"], CALLS);
     let lines = insts(&text);
-    for reg in ["rbx", "r12", "r13"] {
+    for reg in ["rbx", "rbp", "r12"] {
         let call = format!("call\t__x86_indirect_thunk_{reg}");
         assert_eq!(lines.iter().filter(|line| **line == call).count(), 2, "{text}");
     }
@@ -151,7 +151,7 @@ fn the_segment_override_is_put_only_before_the_thunks_for_r8_to_r15() {
             assert_eq!(padded, reg.starts_with('r') && reg[1..].starts_with(char::is_numeric));
         }
     }
-    assert_eq!(lines.iter().filter(|line| **line == "cs").count(), 4, "{text}");
+    assert_eq!(lines.iter().filter(|line| **line == "cs").count(), 2, "{text}");
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn an_inline_thunk_is_written_where_the_branch_was() {
     assert!(!lines.iter().any(|line| line.starts_with("call\t*")), "{text}");
     assert!(!text.contains("__x86_indirect_thunk") && !text.contains("__x86_return_thunk"));
     // The three registers the pointers are kept in, each written over the pushed return address.
-    for reg in ["%rbx", "%r12", "%r13"] {
+    for reg in ["%rbx", "%rbp", "%r12"] {
         assert!(lines.contains(&format!("mov {reg}, (%rsp)").as_str()), "{reg}: {text}");
     }
     // One return in each of the six calls, and every other one is the return thunk's, which takes
