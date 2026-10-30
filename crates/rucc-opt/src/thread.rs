@@ -166,6 +166,7 @@ use rucc_ir::{Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, 
 
 use crate::header_copy::{clone_into, repeatable};
 use crate::loops::{LoopId, Spare};
+use crate::number::key;
 use crate::simplify_cfg::{Bindings, Edges, incoming, sweep, taken};
 use crate::{Analyses, Cfg, Dominators, Fuel, Loops, Pass, Phase, Preserved, Stats, uses};
 
@@ -307,7 +308,14 @@ impl Pass for Thread {
                 let subst = bind(func, block, at);
                 let decided = taken(func, term, &subst)
                     .or_else(|| above(func, &edges, block, term, &subst, from, at));
-                let Some(call) = decided else { continue };
+                let Some(call) = decided else {
+                    let (spent, edge) = ((&mut stats, &mut *fuel), (block, term, from));
+                    if !effect && through(func, an, &mut edges, &mut leaks, edge, &subst, spent) {
+                        stranded.clear();
+                        threaded = true;
+                    }
+                    continue;
+                };
                 if call.block == block {
                     continue;
                 }
@@ -1391,7 +1399,9 @@ const ABOVE: usize = 8;
 ///
 /// A condition worked out in `join` itself, or from something `join` works out, is a new value
 /// each time control arrives there, so what a branch said about it on an earlier trip around a
-/// loop is not about this one. Neither is a chain that passes through `join` on its way back.
+/// loop is not about this one. Neither is a chain that passes through `join` on its way back. A
+/// pure computation in `join` of values from above it is the same on every trip, which is the
+/// second test of `x` against a zero of its own.
 fn above(
     func: &Func,
     edges: &Edges,
@@ -1403,10 +1413,7 @@ fn above(
 ) -> Option<BlockCall> {
     let asked = *func[func[term].args].first()?;
     let asked = subst.get(&asked).copied().unwrap_or(asked);
-    let fresh = |value: Value| {
-        let value = subst.get(&value).copied().unwrap_or(value);
-        defined_in(func, value) == Some(join)
-    };
+    let fresh = |value: Value| renewed(func, join, subst, value, 2);
     let made = match func[asked].def {
         Def::Result { inst, .. } => func[func[inst].args].iter().any(|&arg| fresh(arg)),
         Def::Param { .. } => false,
@@ -1431,6 +1438,85 @@ fn above(
     None
 }
 
+/// Threads the ways into `from`, a block that does nothing but jump to `block`, along which the
+/// branch `term` ends `block` in is decided, when the edge out of `from` does not decide it.
+///
+/// That is a condition decided two blocks back. `if (vmg && vmg->a) ...; if (vmg && vmg->b) ...` in
+/// `init_multi_vma_prep` leaves the test of `vmg` and the test of `vmg->a` sharing one empty block
+/// on the way to the second test of `vmg`, and the edge out of that block says nothing about it.
+/// The edge into it from the first test does, and gcc sends that one straight past the rest. Only a
+/// thread with no copy is made here, under the checks the pass makes of one, with `from` held to
+/// them as well, since the path skips it too. Whether anything moved is the answer.
+fn through(
+    func: &mut Func,
+    an: &mut Analyses,
+    edges: &mut Edges,
+    leaks: &mut Option<Set<Block>>,
+    (block, term, from): (Block, Inst, Block),
+    subst: &Bindings,
+    (stats, fuel): (&mut Stats, &mut Fuel),
+) -> bool {
+    let jumps = func.insts(from).all(|inst| func[inst].opcode == Opcode::Jump);
+    if from == block || !jumps {
+        return false;
+    }
+    let mut moved = false;
+    for (before, at) in edges.get(&from).cloned().unwrap_or_default() {
+        if before == from || before == block {
+            continue;
+        }
+        let inner = bind(func, from, at);
+        let next = subst.iter().map(|(&param, &v)| (param, inner.get(&v).copied().unwrap_or(v)));
+        let next: Bindings = next.collect();
+        let decided =
+            taken(func, term, &next).or_else(|| above(func, edges, block, term, &next, before, at));
+        let Some(call) = decided else { continue };
+        if call.block == block || call.block == from {
+            continue;
+        }
+        let leaks = leaks.get_or_insert_with(|| leaky(func));
+        if leaks.contains(&from) || (leaks.contains(&block) && !behind(func, block, call.block)) {
+            continue;
+        }
+        let Some(args) = carried(func, block, call, &next) else { continue };
+        if args.iter().any(|&arg| defined_in(func, arg) == Some(from))
+            || !allowed(an.loops(func), before, call.block, false)
+        {
+            continue;
+        }
+        if !fuel.take() {
+            stats.missed(NO_FUEL);
+            break;
+        }
+        let args = func.push_values(&args);
+        func.set_block_call(at, BlockCall { args, ..call });
+        if let Some(list) = edges.get_mut(&from) {
+            list.retain(|&(_, slot)| slot != at);
+        }
+        edges.entry(call.block).or_default().push((before, at));
+        an.clear();
+        stats.optimized(THREADED);
+        moved = true;
+    }
+    moved
+}
+
+/// Whether `value` is worked out again each time control arrives at `join`: a parameter of it, or
+/// something in it that is not a pure computation of values from outside it, `depth` levels down.
+fn renewed(func: &Func, join: Block, subst: &Bindings, value: Value, depth: u32) -> bool {
+    let value = subst.get(&value).copied().unwrap_or(value);
+    if defined_in(func, value) != Some(join) {
+        return false;
+    }
+    let Def::Result { inst, .. } = func[value].def else { return true };
+    let args = &func[func[inst].args];
+    if key(func, &Map::default(), inst).is_none() {
+        return true;
+    }
+    !args.is_empty()
+        && (depth == 0 || args.iter().any(|&arg| renewed(func, join, subst, arg, depth - 1)))
+}
+
 /// Whether two conditions are one, either the same value or the same comparison of the same two
 /// values once `subst` has said what the first one's operands stand for.
 fn same_test(func: &Func, asked: Value, known: Value, subst: &Bindings) -> bool {
@@ -1449,7 +1535,38 @@ fn same_test(func: &Func, asked: Value, known: Value, subst: &Bindings) -> bool 
         return false;
     }
     let ours = func[func[a].args].iter().map(|v| subst.get(v).copied().unwrap_or(*v));
-    ours.eq(func[func[k].args].iter().copied())
+    let theirs = &func[func[k].args];
+    ours.len() == theirs.len() && ours.zip(theirs).all(|(x, &y)| same_value(func, x, y, 2))
+}
+
+/// Whether two values are one, either the same value or the same pure computation of operands
+/// that are, `depth` levels down.
+///
+/// Each block has its own constants, and the null pointer `p != NULL` compares against is an
+/// `inttoptr` of one, so the same pointer tested in two blocks is two comparisons whose second
+/// operands are two values. [`crate::number`] keeps them apart on purpose.
+fn same_value(func: &Func, x: Value, y: Value, depth: u32) -> bool {
+    if x == y {
+        return true;
+    }
+    let (Def::Result { inst: a, .. }, Def::Result { inst: b, .. }) = (func[x].def, func[y].def)
+    else {
+        return false;
+    };
+    let none = Map::default();
+    let (Some((mut ours, _)), Some((theirs, _))) = (key(func, &none, a), key(func, &none, b))
+    else {
+        return false;
+    };
+    let (left, right) = (&func[func[a].args], &func[func[b].args]);
+    if left.len() != right.len() || (depth == 0 && !left.is_empty()) {
+        return false;
+    }
+    if !left.iter().zip(right).all(|(&l, &r)| same_value(func, l, r, depth - 1)) {
+        return false;
+    }
+    ours.args = theirs.args;
+    ours == theirs
 }
 
 /// Every block that defines a value read from somewhere other than itself.
@@ -1937,6 +2054,56 @@ mod tests {
         assert_eq!(goes_to(&func, 0), vec![1, 5]);
         assert_eq!(goes_to(&func, 2), vec![4]);
         assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn a_test_decided_two_blocks_back_past_a_shared_empty_block_is_threaded() {
+        // `if (x && y) a(); if (x) b();`, where the way out of the first test that found `x` zero
+        // shares an empty block with the way out of the test of `y`, and the second test of `x`
+        // compares it with a null pointer of its own block. The way out of the test of `y` knows `x` is
+        // not zero as well, so nothing is left reaching the empty block or the second test.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::PTR, Type::int(64)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let x = func.append_param(entry, Type::PTR);
+        let y = func.append_param(entry, Type::int(64));
+        let check = func.create_block();
+        let set = func.create_block();
+        let skip = func.create_block();
+        let join = func.create_block();
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(64), 0);
+        let null = build.unary(Opcode::IntToPtr, zero, Type::PTR);
+        let first = build.icmp(IntPred::Ne, x, null);
+        build.br_if(first, check, &[], skip, &[]);
+        let mut build = Builder::new(&mut func, check);
+        let zero = build.iconst(Type::int(64), 0);
+        let other = build.icmp(IntPred::Ne, y, zero);
+        build.br_if(other, set, &[], skip, &[]);
+        for block in [set, skip] {
+            let mut build = Builder::new(&mut func, block);
+            build.jump(join, &[]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        let zero = build.iconst(Type::int(64), 0);
+        let null = build.unary(Opcode::IntToPtr, zero, Type::PTR);
+        let again = build.icmp(IntPred::Ne, x, null);
+        build.br_if(again, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        let stats = copying_with(&FREE, &mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 3);
+        assert_eq!(goes_to(&func, 0), vec![1, 6]);
+        assert_eq!(goes_to(&func, 1), vec![2, 5]);
+        assert_eq!(goes_to(&func, 2), vec![5]);
+        assert_eq!(blocks(&func), vec![0, 1, 2, 5, 6]);
     }
 
     #[test]

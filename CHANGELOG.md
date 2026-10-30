@@ -41,6 +41,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The retry edge of a `try_cmpxchg` loop now passes the value the exchange read back instead of a select between it and the old one, since the edge is only taken when the exchange failed. The kernel has about 40 of these loops and each kept a `cmov` or a branch that gcc does not have. (#3991)
 - A test of whether a mask is zero, made through a helper that returns `int` like `pte_special`, is now one `test` on x86-64 instead of an `and` at the narrow width followed by a `test` of it. (#3992)
 - A `bool` bit-field tested as a truth, like `vmg->just_expand`, is now one `testb` of its bit on x86-64 instead of a load, a shift, an `and` and a test. (#3993)
+- A pointer tested again after an `&&` that already tested it, like `if (vmg && vmg->a) ...; if (vmg && vmg->b) ...`, is now tested once, with the null path sent straight past the later tests. (#3994)
 
 ## 0.30.15
 
