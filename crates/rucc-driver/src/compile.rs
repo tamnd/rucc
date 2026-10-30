@@ -11289,11 +11289,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         ))
     }
 
-    /// No two spills in the text go to the same slot, and there is at least one.
+    /// No two spills in the text go to the same slot, and there is at least one. An `int` is
+    /// spilled with a `movl` and anything wider with a `movq`.
     fn each_spill_slot_written_once(text: &str) {
         let mut stored = Vec::new();
         for line in text.lines().map(str::trim) {
-            let Some(operands) = line.strip_prefix("movq\t%") else { continue };
+            let spilled = line.strip_prefix("movq\t%").or_else(|| line.strip_prefix("movl\t%"));
+            let Some(operands) = spilled else { continue };
             if let Some((_, place)) = operands.split_once(", ") {
                 if place.ends_with("(%rsp)") {
                     assert!(!stored.contains(&place), "{place} is written twice:\n{text}");
