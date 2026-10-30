@@ -81,7 +81,27 @@
 //! one load, so all of them leave, the switch is a jump to the load, and the range check in front of
 //! the table goes too. That is the check gcc leaves out when it can see the default is unreachable.
 //!
-//! # Answers first, then rewrites
+//! # The select the ranges settle where it is read
+//!
+//! The same question asked of a `select` rather than a branch, and asked where each reader is
+//! rather than where the select is. A select whose condition the ranges settle at the block that
+//! reads it is the arm it settles on there, whatever it is anywhere else.
+//!
+//! ```c
+//! static inline bool try_cmpxchg(int *p, int *old, int new)
+//! {
+//!     bool ok = cmpxchg(p, *old, new, &seen);
+//!     if (!ok) *old = seen;
+//!     return ok;
+//! }
+//! ```
+//!
+//! Every atomic loop in the kernel goes round on one of these. Inlined, the `if` is a select of
+//! `seen` and the old value and the loop branches on `ok` right behind it, so the select is made
+//! on every turn and read only on the edge where `ok` is false. On that edge the ranges say `ok` is
+//! zero and the reader takes `seen` straight, and the select, the negation and the conditional move
+//! they were go with nothing left reading them. gcc goes round on the `jne` the `cmpxchg` set.
+//!
 //!
 //! [`Ranges`] borrows the function, so nothing can be changed while it is alive. The walk
 //! therefore collects every answer, drops the oracle, and then applies them all, rather than the
@@ -126,6 +146,7 @@
 use rucc_base::hash::Map;
 use rucc_ir::{Block, BlockCall, Def, Extra, Func, Imm, Inst, IntPred, Opcode, SwitchInfo, Value};
 
+use crate::cfg::Cfg;
 use crate::fold::constant;
 use crate::range::ops::Truth;
 use crate::range::query::Ranges;
@@ -154,6 +175,10 @@ const BRANCH_UNDECIDED: &str = "branch kept, the value ranges do not settle whic
 /// Recorded once for each switch the ranges ruled no case out of.
 const NO_CASE_REMOVED: &str = "switch kept whole, the value ranges rule none of its cases out";
 const NO_FUEL: &str = "branch or switch kept, the pass ran out of fuel";
+
+/// Recorded once for each read of a select the ranges settle at the reader.
+const SELECT_DECIDED: &str = "select whose condition the value ranges settle where it is read \
+     replaced there by the arm it takes";
 
 /// The pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,10 +209,24 @@ impl Pass for Prune {
             return stats;
         }
         let plan = answers(func, an, &mut stats);
-        if plan.branches.is_empty() && plan.switches.is_empty() {
+        if plan.branches.is_empty() && plan.switches.is_empty() && plan.reads.is_empty() {
             return stats;
         }
         'apply: {
+            for (inst, select, arm) in plan.reads {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    break 'apply;
+                }
+                let swap = |value| if value == select { arm } else { value };
+                let args = func[inst].args;
+                func.rewrite(args, swap);
+                let edges: Vec<_> = func.successors(inst).map(|call| call.args).collect();
+                for edge in edges {
+                    func.rewrite(edge, swap);
+                }
+                stats.optimized(SELECT_DECIDED);
+            }
             for (term, call) in plan.branches {
                 if !fuel.take() {
                     stats.missed(NO_FUEL);
@@ -232,6 +271,9 @@ struct Plan {
     branches: Vec<(Inst, BlockCall)>,
     /// The switches that lose a case or their default, and what each of them keeps.
     switches: Vec<(Inst, Keep)>,
+    /// The instructions that read a select the ranges settle where they are, with the select and
+    /// the arm they read in its place.
+    reads: Vec<(Inst, Value, Value)>,
 }
 
 /// What is left of a switch the ranges say something about.
@@ -270,7 +312,70 @@ fn answers(func: &Func, an: &mut Analyses, stats: &mut Stats) -> Plan {
             _ => (),
         }
     }
+    selects(func, cfg, &mut ranges, &mut plan);
     plan
+}
+
+/// Every read of a select whose condition the ranges settle at the block that reads it.
+///
+/// The arms are read by the select, so both are there wherever it is, and a reader is somewhere
+/// the select is. A read by a block call is a read by the branch that passes it, so it is asked
+/// at the block the branch ends.
+fn selects(func: &Func, cfg: &Cfg, ranges: &mut Ranges<'_>, plan: &mut Plan) {
+    let mut arms: Map<Value, (Value, Value, Value)> = Map::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].opcode != Opcode::Select {
+                continue;
+            }
+            let (Some(&[cond, yes, no]), Some(value)) =
+                (func[func[inst].args].first_chunk::<3>(), func[inst].results().next())
+            else {
+                continue;
+            };
+            let (cond, yes, no) = flipped(func, cond, yes, no);
+            if constant(func, cond).is_none() {
+                arms.insert(value, (cond, yes, no));
+            }
+        }
+    }
+    if arms.is_empty() {
+        return;
+    }
+    for block in func.blocks() {
+        if !cfg.reaches(block) {
+            continue;
+        }
+        for inst in func.insts(block) {
+            let passed = func.successors(inst).flat_map(|call| func[call.args].to_vec());
+            let read: Vec<Value> = func[func[inst].args].iter().copied().chain(passed).collect();
+            for value in read {
+                let Some(&(cond, yes, no)) = arms.get(&value) else { continue };
+                let arm = match settled(func, ranges, block, cond) {
+                    Some(true) => yes,
+                    Some(false) => no,
+                    None => continue,
+                };
+                if !plan.reads.contains(&(inst, value, arm)) {
+                    plan.reads.push((inst, value, arm));
+                }
+            }
+        }
+    }
+}
+
+/// The select read through the `xor` with all ones that negates its condition.
+///
+/// The branch tests the condition and the select tests its negation, and the edges of the branch
+/// only say something about the value the branch tests. Reading the negation as the condition with
+/// its arms swapped asks the ranges about that value.
+fn flipped(func: &Func, cond: Value, yes: Value, no: Value) -> (Value, Value, Value) {
+    let Def::Result { inst, .. } = func[cond].def else { return (cond, yes, no) };
+    let data = &func[inst];
+    let Some(&[inner, mask]) = func[data.args].first_chunk::<2>() else { return (cond, yes, no) };
+    // Only a single bit: an `i8` that is one or zero is nonzero both ways once it is negated.
+    let ones = constant(func, mask).is_some_and(|(imm, ty)| ty.bits() == 1 && imm.signed(ty) == -1);
+    if data.opcode == Opcode::Xor && ones { (inner, no, yes) } else { (cond, yes, no) }
 }
 
 /// What came back about a conditional branch.
@@ -738,6 +843,67 @@ mod tests {
         assert!(stats.changed());
         assert_eq!(terminator(&func, 1), Opcode::Jump);
         assert_eq!(goes_to(&func, 1), [2]);
+    }
+
+    /// The module that text is with the pass run over every function in it, printed.
+    fn pruned(body: &str) -> String {
+        let mut names = Interner::new();
+        let text = format!(
+            "; ModuleID = 't.c'\n; format 0\ntarget triple = \"x86_64-unknown-linux-gnu\"\n\
+             target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"\n{body}"
+        );
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let ids: Vec<_> = module.funcs().collect();
+        for id in ids {
+            if !module[id].is_declaration() {
+                prune(&mut module[id]);
+            }
+        }
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
+        }
+        rucc_ir::print(&module, &names)
+    }
+
+    /// A compare and exchange loop. The select is made on every turn and read only on the edge
+    /// where the exchange failed, so that edge takes what the exchange saw.
+    const EXCHANGE: &str = r#"
+func @inc(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = load.i32 %0, align 4
+    jump block1(%1)
+
+block1(%2: i32):
+    %3 = iconst.i32 1
+    %4 = add %2, %3
+    %5, %6 = inline_asm.(i1, i32).volatile "lock cmpxchgl %3,%1\0a\09setz %b0", "=q,+m,+a,r", "memory"(%0, %2, %4)
+    %7 = iconst.i1 -1
+    %8 = xor %5, %7
+    %9 = select.i32 %8, %6, %2
+    br_if %5, block2, block3
+
+block2:
+    return
+
+block3:
+    jump block1(%9)
+}
+"#;
+
+    #[test]
+    fn a_select_the_ranges_settle_where_it_is_read_is_read_as_the_arm_they_settle_on() {
+        let out = pruned(EXCHANGE);
+        assert!(out.contains("jump block1(%6)"), "{out}");
+    }
+
+    /// The same select read where the exchange may have gone either way is still the select.
+    #[test]
+    fn a_select_read_where_the_ranges_do_not_settle_it_stays() {
+        let branch = "br_if %5, block2, block3";
+        let out =
+            pruned(&EXCHANGE.replace(branch, &format!("store %9 -> %0, align 4\n    {branch}")));
+        assert!(out.contains("store %9"), "{out}");
+        assert!(out.contains("jump block1(%6)"), "{out}");
     }
 
     #[test]

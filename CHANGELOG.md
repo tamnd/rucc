@@ -38,6 +38,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64 an addition whose register is copied right after and never read again is now one `lea` into the copy, so `addq $464, %rbp; movq %rbp, %rdi` is `leaq 464(%rbp), %rdi` as gcc writes it. An `asm` template is left as written, and its instructions now carry a `template` flag so passes can tell. The kernel bench objects are about 850 bytes smaller (#3988)
 - On x86-64 without the vector registers, a copy or fill of a known size too large for a run of moves is now one `rep movsq` or `rep stosq` up to 8192 bytes, and a zero fill is one from six words on, which is what gcc writes under `-mno-sse`. Before it was a loop of four words up to 256 bytes and a call above. The kernel bench objects are 6992 bytes smaller (#3989)
 - On x86-64 a comparison against zero that keeps its byte, which branch fusion could not fold into a jump, is now written as `test` and `set` instead of `cmp $0` and `set`, which is two bytes shorter for a register. (#3990)
+- The retry edge of a `try_cmpxchg` loop now passes the value the exchange read back instead of a select between it and the old one, since the edge is only taken when the exchange failed. The kernel has about 40 of these loops and each kept a `cmov` or a branch that gcc does not have. (#3991)
 
 ## 0.30.15
 
