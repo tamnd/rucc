@@ -194,9 +194,15 @@ pub const DWARF_RETURN_ADDRESS: u16 = 16;
 // one that says so out loud if the frame layout ever stops being true.
 //
 // A `float` or a `double` in one is spilled with `movss` or `movsd` instead, into a slot of four
-// or eight bytes, which is what gcc does with them.
+// or eight bytes, which is what gcc does with them. An integer nothing reads above its low four
+// bytes is spilled with a `movl` into a slot of four, which is what gcc does with an `int`.
 static X86_64_MOVES: [ClassMoves; 2] = [
-    ClassMoves { mov: "mov_rr_64", load: "mov_rm_64", store: "mov_mr_64", narrow: &[] },
+    ClassMoves {
+        mov: "mov_rr_64",
+        load: "mov_rm_64",
+        store: "mov_mr_64",
+        narrow: &[SpillMove { bytes: 4, load: "mov_rm_32", store: "mov_mr_32" }],
+    },
     ClassMoves {
         mov: "movaps_rr",
         load: "movaps_rm",

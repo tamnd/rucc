@@ -1418,6 +1418,13 @@ pub fn compile_recording(
         let mov = *movs.get(usize::from(into.class.number()))?;
         Some(func.build_loose(mov).operand(into).operand(from).finish())
     };
+    // How much of each integer value is read, so that one read only at thirty two bits is spilled
+    // with a `movl` into a slot of four. Only where the class has a narrow spill to use it with.
+    let gpr = machine.conv.int_class;
+    let narrow = machine.insts.classes.get(usize::from(gpr.number()));
+    if narrow.is_some_and(|moves| !moves.narrow.is_empty()) {
+        bits::sized(&mut func, machine.bits, names, gpr, machine.conv.word);
+    }
     let allocating = Instant::now();
     let (allocation, used) = rucc_regalloc::run_first(
         &mut func,

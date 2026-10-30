@@ -117,7 +117,7 @@
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
-use rucc_target::{BitInsts, Constraint, MachineInsts, Role};
+use rucc_target::{BitInsts, Constraint, MachineInsts, RegClass, Role};
 
 use crate::changes::{Changes, Reads};
 
@@ -240,6 +240,41 @@ pub fn settled(
         }
     }
     send(func, &sent, gone, machine, names)
+}
+
+/// Says of every virtual register of that class how many bytes of it anything reads, where that is
+/// fewer than the `whole` its register has, and gives back how many it said it of.
+///
+/// That is [`dead`]'s analysis put to a second use. A value nothing reads above its low four bytes
+/// can be spilled with a store of four bytes and brought back with a load of four, whatever the
+/// instruction that wrote it left above them, because the bits the load fills in are bits nobody
+/// reads. On x86-64 that is a `movl` into a slot of four in place of a `movq` into a slot of eight,
+/// which is a byte shorter every time neither register needs a prefix, and it is how gcc spills an
+/// `int`. [`crate::frame::widths`] reads the answer, and only where the target has a narrow load
+/// and store for the class. Run just before allocation, so nothing rewrites a reader after it.
+pub fn sized(
+    func: &mut mir::Func,
+    insts: &BitInsts,
+    names: &Interner,
+    class: RegClass,
+    whole: u32,
+) -> usize {
+    let wanted = demand(func, insts, names);
+    let mut said = 0;
+    for number in 0..func.vregs() {
+        let Ok(number) = u32::try_from(number) else { break };
+        let reg = mir::Reg::virtual_reg(number);
+        let read = wanted.get(reg);
+        if func.class_of(reg) != Some(class) || func.width(reg).is_some() {
+            continue;
+        }
+        if read == 0 || read >= whole * 8 {
+            continue;
+        }
+        func.set_width(reg, read.div_ceil(8));
+        said += 1;
+    }
+    said
 }
 
 /// Every register whose upper thirty two bits are known to be clear because a `w` register was

@@ -3153,7 +3153,12 @@ mod tests {
             assert_eq!(form(narrow.load), Some(LoadVec));
             assert_eq!(form(narrow.store), Some(StoreVec));
         }
-        assert!(gpr.narrow.is_empty());
+        // And the one an integer read only at thirty two bits is spilled with, which is a `movl`.
+        assert_eq!(gpr.narrow.iter().map(|narrow| narrow.bytes).collect::<Vec<_>>(), [4]);
+        for narrow in gpr.narrow {
+            assert_eq!(form(narrow.load), Some(Load));
+            assert_eq!(form(narrow.store), Some(Store));
+        }
         assert_eq!(MoveVec.operands()[0].class, XMM);
         assert_eq!(Move.operands()[0].class, GPR);
     }
