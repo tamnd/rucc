@@ -181,7 +181,7 @@ use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_cost::Goal;
 use rucc_mir::{self as mir, Role};
-use rucc_target::{FlagInsts, MachineInsts, Narrowed, Reads, RegClass, ShortInsts};
+use rucc_target::{FlagInsts, MachineInsts, Narrowed, PhysReg, Reads, RegClass, ShortInsts};
 
 use crate::changes::{self, Changes, Plan};
 use crate::through;
@@ -405,6 +405,85 @@ pub fn shorter(
         }
     }
     took
+}
+
+/// Takes out a widening of a register into itself where what last wrote the register already left
+/// the top of it zero, and gives back how many it took out.
+///
+/// ```text
+///   shrl $12, %eax
+///   movl %eax, %eax      ->    shrl $12, %eax
+/// ```
+///
+/// The selector writes the widening for a value worked out at thirty two bits and read at sixty
+/// four, and the allocator then gives both ends of it the register the value was in. On x86-64 an
+/// instruction writing the low half of a register clears the rest, so the move clears what is clear
+/// already. The bench objects had 382 of these where gcc wrote 145.
+///
+/// Only in the block, walking back to the last instruction that writes the register, and that has
+/// to be one the table names. A call or an instruction the target does not know on the way stops
+/// the walk, since either may write the register without naming it. A widening behind a parameter
+/// or a call stays, since nothing here says what the caller or the callee left on top.
+pub fn widened(
+    func: &mut mir::Func,
+    short: &ShortInsts,
+    machine: &MachineInsts,
+    names: &Interner,
+) -> usize {
+    let Some(widening) = &short.widening else { return 0 };
+    let mut gone = Vec::new();
+    for block in func.blocks() {
+        let insts = func.insts(block).collect::<Vec<_>>();
+        for (at, &inst) in insts.iter().enumerate() {
+            let name = names.resolve(func[inst].opcode.name());
+            if name.strip_prefix(short.prefix) != Some(widening.name) || func[inst].mem.is_some() {
+                continue;
+            }
+            let [to, from] = func[func[inst].operands] else { continue };
+            let same = to.role.is_def() && !from.role.is_def() && to.class == from.class;
+            let Some(reg) = to.reg.phys().filter(|_| same && to.reg == from.reg) else { continue };
+            if cleared(func, short, machine, names, &insts[..at], (to.class, reg)) {
+                gone.push(inst);
+            }
+        }
+    }
+    for &inst in &gone {
+        func.remove_inst(inst);
+    }
+    gone.len()
+}
+
+/// Whether the last of those instructions to write the register is one that leaves the top of it
+/// zero, with nothing in between that could have written it unseen.
+///
+/// A shift is only that where it shifts by something. `shll $0, %eax` leaves the register as it
+/// found it, and what it found may have had something on top.
+fn cleared(
+    func: &mir::Func,
+    short: &ShortInsts,
+    machine: &MachineInsts,
+    names: &Interner,
+    before: &[mir::Inst],
+    (class, reg): (RegClass, PhysReg),
+) -> bool {
+    let Some(widening) = &short.widening else { return false };
+    for &inst in before.iter().rev() {
+        let data = &func[inst];
+        let name = names.resolve(data.opcode.name());
+        if machine.calls(name) || !machine.has(name) {
+            return false;
+        }
+        let writes = func[data.operands].iter().any(|operand| {
+            operand.role.is_def() && operand.class == class && operand.reg.phys() == Some(reg)
+        });
+        if !writes {
+            continue;
+        }
+        let Some(bare) = name.strip_prefix(short.prefix) else { return false };
+        let shifted = data.imm.is_some_and(|at| func[at].0 & 31 != 0);
+        return widening.cleared.contains(&bare) || (shifted && widening.shifts.contains(&bare));
+    }
+    false
 }
 
 /// Whether any block reads the condition state before writing it, which is what a state carried in
@@ -1217,6 +1296,79 @@ mod tests {
     /// The number an instruction carries, for an instruction that carries one.
     fn imm(func: &mir::Func, inst: mir::Inst) -> Option<i64> {
         func[inst].imm.map(|at| func[at].0)
+    }
+
+    /// A thirty two bit shift, then the widening of what it wrote into itself.
+    fn shifted(
+        names: &mut Interner,
+        func: &mut mir::Func,
+        block: mir::Block,
+        by: i64,
+    ) -> mir::Inst {
+        let rax = mir::Reg::physical(rucc_target::x86_64::RAX);
+        let shr = op(names, "shr_ri_32");
+        func.build(block, shr).def(rax, GPR).uses(rax, GPR).imm(by).finish();
+        let movl = op(names, "mov_32_to_64");
+        func.build(block, movl).def(rax, GPR).uses(rax, GPR).finish()
+    }
+
+    /// What the pass is for. The shift cleared the top of the register, so the widening goes.
+    #[test]
+    fn a_widening_of_what_a_thirty_two_bit_instruction_wrote_goes() {
+        let (mut names, mut func, block) = empty();
+        shifted(&mut names, &mut func, block, 12);
+
+        assert_eq!(widened(&mut func, &SHORT, &MACHINE, &names), 1);
+        assert_eq!(shape(&func, &names, block), ["shr_ri_32"]);
+    }
+
+    /// A shift by nothing leaves the register as it was, top and all.
+    #[test]
+    fn a_widening_behind_a_shift_by_nothing_stays() {
+        let (mut names, mut func, block) = empty();
+        shifted(&mut names, &mut func, block, 0);
+
+        assert_eq!(widened(&mut func, &SHORT, &MACHINE, &names), 0);
+    }
+
+    /// Nothing in the block wrote the register, so it may be a parameter with anything on top.
+    #[test]
+    fn a_widening_with_nothing_in_front_stays() {
+        let (mut names, mut func, block) = empty();
+        let rax = mir::Reg::physical(rucc_target::x86_64::RAX);
+        let movl = op(&mut names, "mov_32_to_64");
+        func.build(block, movl).def(rax, GPR).uses(rax, GPR).finish();
+
+        assert_eq!(widened(&mut func, &SHORT, &MACHINE, &names), 0);
+    }
+
+    /// A sixty four bit write in between is the last write, and it put something on top.
+    #[test]
+    fn a_widening_behind_a_wider_write_stays() {
+        let (mut names, mut func, block) = empty();
+        let rax = mir::Reg::physical(rucc_target::x86_64::RAX);
+        let shr = op(&mut names, "shr_ri_32");
+        func.build(block, shr).def(rax, GPR).uses(rax, GPR).imm(3).finish();
+        let add = op(&mut names, "add_ri_64");
+        func.build(block, add).def(rax, GPR).uses(rax, GPR).imm(1).finish();
+        let movl = op(&mut names, "mov_32_to_64");
+        func.build(block, movl).def(rax, GPR).uses(rax, GPR).finish();
+
+        assert_eq!(widened(&mut func, &SHORT, &MACHINE, &names), 0);
+    }
+
+    /// Into another register it is a copy as well as a widening, and stays.
+    #[test]
+    fn a_widening_into_another_register_stays() {
+        let (mut names, mut func, block) = empty();
+        let rax = mir::Reg::physical(rucc_target::x86_64::RAX);
+        let rcx = mir::Reg::physical(rucc_target::x86_64::RCX);
+        let shr = op(&mut names, "shr_ri_32");
+        func.build(block, shr).def(rax, GPR).uses(rax, GPR).imm(3).finish();
+        let movl = op(&mut names, "mov_32_to_64");
+        func.build(block, movl).def(rcx, GPR).uses(rax, GPR).finish();
+
+        assert_eq!(widened(&mut func, &SHORT, &MACHINE, &names), 0);
     }
 
     /// The shape the pass is for: a move of zero with nothing reading the condition state after it
@@ -2168,6 +2320,15 @@ mod tests {
                 assert!(MACHINE.has(name), "{name}");
             }
             assert!((MACHINE.takes_mem)(entry.into), "{}", entry.into);
+        }
+    }
+
+    /// Every name the widening table gives is one the target has.
+    #[test]
+    fn every_widening_names_instructions_the_target_has() {
+        let widening = SHORT.widening.expect("x86-64 has a widening");
+        for name in [widening.name].iter().chain(widening.cleared).chain(widening.shifts) {
+            assert!(MACHINE.has(name), "{name}");
         }
     }
 

@@ -67,7 +67,7 @@ use crate::operand::OperandDesc;
 use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
 };
-use crate::short::{Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Zeroed};
+use crate::short::{Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed};
 use rucc_abi::Convention;
 
 /// The general purpose registers.
@@ -769,6 +769,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     copying: &BARE_ADDRESSES,
     spreading: &SPREADS,
     unindexed: &[RSP],
+    widening: Some(Widened { name: "mov_32_to_64", cleared: &HALF_WRITES, shifts: &HALF_SHIFTS }),
 };
 
 /// Writing zero into a register without spelling the zero out.
@@ -919,6 +920,28 @@ static STEPS: [Stepped; 16] = [
 /// machine can do a move between registers by renaming and has to do an address computation with an
 /// adder. gcc writes no such address computation anywhere in the SQLite amalgamation.
 static BARE_ADDRESSES: [Copied; 1] = [Copied { name: "lea_64", into: "mov_rr_64" }];
+
+/// What writes the low thirty two bits of a register and clears the rest of it, after which `movl
+/// %eax, %eax` changes nothing.
+///
+/// Loads, moves, arithmetic and widenings into thirty two bits. Not the conditional moves, not the
+/// bit searches, which leave the register alone for a source of zero, and not a shift by `%cl`,
+/// whose count may be zero.
+#[rustfmt::skip]
+static HALF_WRITES: [&str; 38] = [
+    "mov_ri_32", "mov_rr_32", "mov_rm_32", "mov_32_to_64", "lea_32",
+    "add_rr_32", "sub_rr_32", "and_rr_32", "or_rr_32", "xor_rr_32", "imul_rr_32",
+    "add_rm_32", "sub_rm_32", "and_rm_32", "or_rm_32", "xor_rm_32", "imul_rm_32",
+    "add_ri_32", "sub_ri_32", "and_ri_32", "or_ri_32", "xor_ri_32", "imul_ri_32",
+    "neg_r_32", "not_r_32", "inc_r_32", "dec_r_32",
+    "movzx_8_32", "movzx_16_32", "movsx_8_32", "movsx_16_32",
+    "movzx_rm_8_32", "movzx_rm_16_32", "movsx_rm_8_32", "movsx_rm_16_32",
+    "bswap_32", "popcnt_32", "lzcnt_32",
+];
+
+/// The shifts by a constant into thirty two bits, which clear the top of the register where the
+/// constant is not zero.
+static HALF_SHIFTS: [&str; 5] = ["shl_ri_32", "shr_ri_32", "sar_ri_32", "rol_ri_32", "ror_ri_32"];
 
 /// A copy and an addition written as the address computation that does both.
 ///
