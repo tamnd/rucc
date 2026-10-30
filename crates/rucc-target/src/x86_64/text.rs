@@ -927,12 +927,14 @@ static TEXT: &[(&str, &[Written])] = &[
     ("test_set_ne_mi_64", &[spell("testq", &[Imm, Mem]), spell("setne", &SET)]),
     // The conversions between widths. Widening to sixty four bits from thirty two is a thirty two
     // bit move, because every instruction that writes a thirty two bit register clears the half
-    // above it, and taking the low bits of anything is a move of that many bits.
+    // above it, and taking the low bits of anything is a move of that many bits. Zero extending a
+    // byte or a word to sixty four bits is the thirty two bit form for the same reason, which is
+    // what gcc writes, and it needs no REX.W byte.
     ("movzx_8_16", &[spell("movzbw", &[Reg(1, Byte), Reg(0, Word)])]),
     ("movzx_8_32", &[spell("movzbl", &[Reg(1, Byte), Reg(0, Long)])]),
-    ("movzx_8_64", &[spell("movzbq", &[Reg(1, Byte), Reg(0, Quad)])]),
+    ("movzx_8_64", &[spell("movzbl", &[Reg(1, Byte), Reg(0, Long)])]),
     ("movzx_16_32", &[spell("movzwl", &[Reg(1, Word), Reg(0, Long)])]),
-    ("movzx_16_64", &[spell("movzwq", &[Reg(1, Word), Reg(0, Quad)])]),
+    ("movzx_16_64", &[spell("movzwl", &[Reg(1, Word), Reg(0, Long)])]),
     ("mov_32_to_64", &[spell("movl", &[Reg(1, Long), Reg(0, Long)])]),
     ("movsx_8_16", &[spell("movsbw", &[Reg(1, Byte), Reg(0, Word)])]),
     ("movsx_8_32", &[spell("movsbl", &[Reg(1, Byte), Reg(0, Long)])]),
@@ -947,7 +949,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("bit_to_8", &[spell("movb", &[Reg(1, Byte), Reg(0, Byte)])]),
     ("bit_to_16", &[spell("movzbw", &[Reg(1, Byte), Reg(0, Word)])]),
     ("bit_to_32", &[spell("movzbl", &[Reg(1, Byte), Reg(0, Long)])]),
-    ("bit_to_64", &[spell("movzbq", &[Reg(1, Byte), Reg(0, Quad)])]),
+    ("bit_to_64", &[spell("movzbl", &[Reg(1, Byte), Reg(0, Long)])]),
     ("bit_of_8", &[spell("andb", &[Imm, Reg(0, Byte)])]),
     ("bit_of_16", &[spell("andw", &[Imm, Reg(0, Word)])]),
     ("bit_of_32", &[spell("andl", &[Imm, Reg(0, Long)])]),
