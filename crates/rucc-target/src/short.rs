@@ -125,6 +125,9 @@ pub struct ShortInsts {
     /// The registers an addressing mode cannot take as an index, which an address computation this
     /// writes has to put in the base instead.
     pub unindexed: &'static [PhysReg],
+    /// The move that widens the low half of a register into the whole of it with zeros, and what
+    /// leaves the top of a register zero already, where this target has one.
+    pub widening: Option<Widened>,
 }
 
 impl ShortInsts {
@@ -286,6 +289,22 @@ pub struct Copied {
     /// The opcode that moves one register into another, which writes the register the first one
     /// wrote and reads the one its addressing mode named.
     pub into: &'static str,
+}
+
+/// A move that widens the low half of a register with zeros, and the instructions after which that
+/// move of a register into itself changes nothing.
+///
+/// Every instruction named here writes the low half of the register it writes and clears the rest,
+/// which is what an instruction of that width does on x86-64. A conditional move is not here, nor
+/// is a bit search, whose register is left alone for a source of zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Widened {
+    /// The opcode that widens one register into another.
+    pub name: &'static str,
+    /// The instructions that clear the top of the register they write.
+    pub cleared: &'static [&'static str],
+    /// The shifts that clear it too, where they shift by a count that is not zero.
+    pub shifts: &'static [&'static str],
 }
 
 /// One two address addition, and the address computation that does it and the copy in front of it.

@@ -1767,6 +1767,8 @@ pub fn compile_recording(
         flags.goal,
         &allocated,
     );
+    // Last of the rewrites, so that what it finds wrote a register is what the output has there.
+    shorten::widened(&mut func, machine.short, machine.shapes, names);
 
     // After every pass that writes or rewrites an instruction over the registers it was given, so
     // that the byte an instruction names is the one it ends up with. i386 only: see

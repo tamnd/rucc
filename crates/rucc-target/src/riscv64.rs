@@ -558,6 +558,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     copying: &[],
     spreading: &[],
     unindexed: &[],
+    widening: None,
 };
 
 /// The bit counts this machine has an instruction for, which is none without the Zbb extension.

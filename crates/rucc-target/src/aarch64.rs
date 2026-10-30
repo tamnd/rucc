@@ -537,6 +537,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     copying: &[],
     spreading: &[],
     unindexed: &[],
+    widening: None,
 };
 
 /// Whether the instruction of that name compares and keeps the answer, all in the one instruction.
