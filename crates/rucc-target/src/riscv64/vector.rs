@@ -164,7 +164,8 @@ enum From {
 
 /// The function and the operand kind of an integer operation on a group with `.vv`, `.vx` or
 /// `.vi` after it, for the ones the kernel writes: the arithmetic and logic its crypto code
-/// does, the slides, and the rotates and shifts of the Zvbb and Zvkb extensions.
+/// does, the shifts and the gather of its RAID-6 code, the slides, and the rotates and shifts of
+/// the Zvbb and Zvkb extensions.
 fn arith(mnemonic: &str) -> Option<(u32, u32, From)> {
     let (op, kind) = mnemonic.split_once('.')?;
     // The function, whether there is a `.vv` form, and the constant of the `.vi` form, if any.
@@ -176,10 +177,14 @@ fn arith(mnemonic: &str) -> Option<(u32, u32, From)> {
         "vand" => (0b00_1001, true, Some(From::Signed)),
         "vor" => (0b00_1010, true, Some(From::Signed)),
         "vxor" => (0b00_1011, true, Some(From::Signed)),
+        "vrgather" => (0b00_1100, true, Some(From::Unsigned)),
         "vslideup" => (0b00_1110, false, Some(From::Unsigned)),
         "vslidedown" => (0b00_1111, false, Some(From::Unsigned)),
         "vror" => (0b01_0100, true, Some(From::Six)),
         "vrol" => (0b01_0101, true, None),
+        "vsll" => (0b10_0101, true, Some(From::Unsigned)),
+        "vsrl" => (0b10_1000, true, Some(From::Unsigned)),
+        "vsra" => (0b10_1001, true, Some(From::Unsigned)),
         "vwsll" => (0b11_0101, true, Some(From::Unsigned)),
         _ => return None,
     };
@@ -531,6 +536,12 @@ mod tests {
             ("vand.vi v1, v2, -3", 0x262e_b0d7),
             ("vor.vv v3, v4, v5, v0.t", 0x2842_81d7),
             ("vsub.vx v6, v7, t0", 0x0a72_c357),
+            ("vsll.vi v1, v2, 7", 0x9623_b0d7),
+            ("vsll.vx v1, v2, a0", 0x9625_40d7),
+            ("vsrl.vi v3, v4, 1", 0xa240_b1d7),
+            ("vsra.vi v5, v6, 7", 0xa663_b2d7),
+            ("vsra.vv v5, v6, v7", 0xa663_82d7),
+            ("vrgather.vv v8, v9, v10", 0x3295_0457),
         ] {
             assert_eq!(vector(text), Some(Ok(word)), "{text}");
         }

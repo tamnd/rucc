@@ -153,6 +153,16 @@ pub enum Fixup {
     TprelLo12S,
     /// The `add` of the thread pointer, which carries no bits of anything.
     TprelAdd,
+    /// The low six bits of a byte less the value, which only `.reloc` writes.
+    Sub6,
+    /// The low six bits of a byte set to the value, which only `.reloc` writes.
+    Set6,
+    /// A byte set to the value, which only `.reloc` writes.
+    Set8,
+    /// Two bytes set to the value, which only `.reloc` writes.
+    Set16,
+    /// Four bytes set to the value, which only `.reloc` writes.
+    Set32,
 }
 
 impl Fixup {
@@ -175,6 +185,11 @@ impl Fixup {
             Fixup::TprelLo12I => 30,
             Fixup::TprelLo12S => 31,
             Fixup::TprelAdd => 32,
+            Fixup::Sub6 => 52,
+            Fixup::Set6 => 53,
+            Fixup::Set8 => 54,
+            Fixup::Set16 => 55,
+            Fixup::Set32 => 56,
         }
     }
 
@@ -197,6 +212,11 @@ impl Fixup {
             Fixup::TprelLo12I => "R_RISCV_TPREL_LO12_I",
             Fixup::TprelLo12S => "R_RISCV_TPREL_LO12_S",
             Fixup::TprelAdd => "R_RISCV_TPREL_ADD",
+            Fixup::Sub6 => "R_RISCV_SUB6",
+            Fixup::Set6 => "R_RISCV_SET6",
+            Fixup::Set8 => "R_RISCV_SET8",
+            Fixup::Set16 => "R_RISCV_SET16",
+            Fixup::Set32 => "R_RISCV_SET32",
         }
     }
 

@@ -3402,21 +3402,17 @@ impl Reader {
     ///
     /// Only the relocations that fill bytes of data with an address or a distance are taken, and
     /// they are written as the same expression would be in `.long` or `.quad` at that place, so the
-    /// writer picks the same relocation the name asks for. The one exception is RISC-V's ULEB128
-    /// pair, which the linker writes a number of its own length for and so is passed on as it is.
+    /// writer picks the same relocation the name asks for. The exceptions are the RISC-V ones that
+    /// [`riscv_named`] lists, which are passed on as they are.
     fn reloc(&mut self, args: &[String]) -> Result<(), Trouble> {
         let [place, name, rest @ ..] = args else {
             return Err(self.bad(".reloc wants a place, a relocation and an expression"));
         };
         let name = name.trim();
-        // The ULEB128 pair writes no bytes of its own here and the linker writes as many as the
-        // number takes, so it is written as it was asked for, at a place that may come later.
-        let leb = match name {
-            "R_RISCV_SET_ULEB128" if self.riscv => Some(false),
-            "R_RISCV_SUB_ULEB128" if self.riscv => Some(true),
-            _ => None,
-        };
-        if let Some(minus) = leb {
+        // These are written as they were asked for, at a place that may come later, since the
+        // bytes they fill are written after them or not here at all.
+        let kept = if self.riscv { riscv_named(name) } else { None };
+        if let Some(kind) = kept {
             let at = self.origin(place)?;
             let sum = match rest {
                 [] => Sum::default(),
@@ -3440,7 +3436,7 @@ impl Reader {
                 jump: false,
                 field: None,
                 leb: None,
-                named: Some(Reference::Leb { minus }),
+                named: Some(kind),
                 line: self.line,
             });
             return Ok(());
@@ -5493,10 +5489,9 @@ impl Reader {
             [] => String::new(),
             [Term { coeff: 1, what: What::Symbol(name) }] => name.clone(),
             _ => {
-                let why =
-                    "'.reloc' of a ULEB128 relocation wants a name, a number, or a name and a \
-                           number"
-                        .to_owned();
+                let why = "'.reloc' of a RISC-V relocation wants a name, a number, or a name and \
+                           a number"
+                    .to_owned();
                 return Err(Trouble { line: fixup.line, why });
             }
         };
@@ -6793,6 +6788,32 @@ fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
     Some((format!("{prefix} {next}"), after))
 }
 
+/// The RISC-V relocation a `.reloc` names that is written as it is asked for rather than as the
+/// expression would be in `.byte` or `.quad`. The ULEB128 pair fills as many bytes as the linker
+/// wants. The others add a name to bytes of data, take one off them or set them, and the kernel's
+/// module tests write each of them on bytes that come after the `.reloc`.
+fn riscv_named(name: &str) -> Option<Reference> {
+    let sum = |bytes, minus| Some(Reference::Sum { bytes, minus });
+    let field = |fixup| Some(Reference::Riscv(fixup));
+    match name {
+        "R_RISCV_SET_ULEB128" => Some(Reference::Leb { minus: false }),
+        "R_RISCV_SUB_ULEB128" => Some(Reference::Leb { minus: true }),
+        "R_RISCV_ADD8" => sum(1, false),
+        "R_RISCV_ADD16" => sum(2, false),
+        "R_RISCV_ADD32" => sum(4, false),
+        "R_RISCV_ADD64" => sum(8, false),
+        "R_RISCV_SUB8" => sum(1, true),
+        "R_RISCV_SUB16" => sum(2, true),
+        "R_RISCV_SUB32" => sum(4, true),
+        "R_RISCV_SUB64" => sum(8, true),
+        "R_RISCV_SUB6" => field(riscv64::Fixup::Sub6),
+        "R_RISCV_SET6" => field(riscv64::Fixup::Set6),
+        "R_RISCV_SET8" => field(riscv64::Fixup::Set8),
+        "R_RISCV_SET16" => field(riscv64::Fixup::Set16),
+        "R_RISCV_SET32" => field(riscv64::Fixup::Set32),
+        _ => None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7415,6 +7436,45 @@ _tls$tlv$init:
         ] {
             assert!(read(line, Arch::Riscv64).is_err(), "{line}");
         }
+    }
+
+    #[test]
+    fn a_riscv_reloc_that_sets_or_adds_to_data_is_passed_on_ahead_of_its_bytes() {
+        // The kernel's arch/riscv/kernel/tests/module_test/test_set6.S and test_sub8.S, which GNU
+        // as writes as these relocations, against the names and with no addend.
+        let out = match read(
+            concat!(
+                "\t.data\n",
+                "set6:\n",
+                "\t.reloc set6, R_RISCV_SET6, set6\n",
+                "\t.word 0\n",
+                "sub8:\n",
+                "\t.reloc sub8, R_RISCV_ADD8, second\n",
+                "\t.reloc sub8, R_RISCV_SUB8, first\n",
+                "\t.byte 0\n",
+                "first:\n",
+                "\t.space 4\n",
+                "second:\n",
+            ),
+            Arch::Riscv64,
+        ) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let part = out.parts.iter().find(|part| part.name == ".data").unwrap();
+        let relocs: Vec<_> = part
+            .relocs
+            .iter()
+            .map(|reloc| (reloc.at, reloc.symbol.as_str(), reloc.kind, reloc.addend))
+            .collect();
+        assert_eq!(
+            relocs,
+            [
+                (0, "set6", Reference::Riscv(riscv64::Fixup::Set6), 0),
+                (4, "second", Reference::Sum { bytes: 1, minus: false }, 0),
+                (4, "first", Reference::Sum { bytes: 1, minus: true }, 0),
+            ]
+        );
     }
 
     #[test]

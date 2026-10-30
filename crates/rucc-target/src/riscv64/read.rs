@@ -159,6 +159,16 @@ impl Line {
             }
             None => (Operator::Plain, text),
         };
+        // Around a number the parts are worked out here, as gas does, which is how the kernel's
+        // `runtime_const_ptr` writes the number it patches later: `lui a0, %hi(0x89ABCDEF)`.
+        if let Some(n) = number(inner) {
+            let low = ((n & 0xfff) ^ 0x800) - 0x800;
+            match operator {
+                Operator::Hi => return Some(Ok(Value::Imm(((n - low) >> 12) & 0xf_ffff))),
+                Operator::Lo => return Some(Ok(Value::Imm(low))),
+                _ => {}
+            }
+        }
         let (name, addend) = addend(inner)?;
         if self.symbol.as_deref().is_some_and(|held| held != name) {
             return Some(Err(error(text)));
@@ -368,6 +378,9 @@ mod tests {
         assert_eq!(read_ok("jal f").values, [Gpr(1), Symbol(Operator::Plain)]);
         assert_eq!(read_ok("j 1b").symbol.as_deref(), Some("1b"));
         assert!(read("lui a0, %hi(x)\n").is_ok());
+        assert_eq!(read_ok("lui a0, %hi(0x89ABCDEF)").values, [Gpr(10), Imm(0x89abd)]);
+        assert_eq!(read_ok("addiw a0, a0, %lo(0x89ABCDEF)").values[2], Imm(-0x211));
+        assert_eq!(read_ok("lui a0, %hi(0x7ff)").values[1], Imm(0));
         assert!(read("add a0, a1, %tprel_add(t), %lo(u)").is_err());
         assert!(read("addi a0, a0, %pcrel_lo(x)").is_err());
     }
