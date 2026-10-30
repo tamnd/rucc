@@ -263,8 +263,8 @@ pub fn shorter(
             if into.is_some_and(|op| narrowed(func, &mut counts, machine, names, inst, op)) {
                 took += 1;
                 known = Known::of(&mut seen, func, short, flags, names, inst);
-                // What stands there now is the same instruction at half the width, which is a
-                // move either way, so what it does to the state is what it did before: nothing.
+                // What stands there now is the same instruction at half the width, and the table
+                // only has the ones that leave the state as they found it or write it the same.
             }
             // Bits of a register asked about in its low byte. The table only has the constants
             // for which the byte test leaves the state the wide one left, so this is asked of
@@ -1250,7 +1250,10 @@ mod tests {
             let inst = func.build(block, test).uses(held, GPR).imm(value).finish();
             func.build(block, set).def(byte, GPR).finish();
 
-            assert_eq!(takes(&mut func, &mut names), 1, "{wide}");
+            // The sixty four bit one is narrowed to thirty two bits on the way, which is a second
+            // rewrite of the same instruction.
+            let took = if wide == "test_ri_64" { 2 } else { 1 };
+            assert_eq!(takes(&mut func, &mut names), took, "{wide}");
             assert_eq!(shape(&func, &names, block), ["test_ri_8", "set_ne"], "{wide}");
             assert_eq!(regs(&func, inst), [held], "{wide}");
             assert_eq!(imm(&func, inst), Some(value), "{wide}");
@@ -1258,10 +1261,11 @@ mod tests {
     }
 
     /// A bit at the top of the byte is the sign of the byte test and never the sign of the wide
-    /// one, and a bit above the byte is not in it at all.
+    /// one, and a bit above the byte is not in it at all. Such a mask below two to the thirty
+    /// first still tests the same at thirty two bits, and minus one does not.
     #[test]
     fn a_test_that_reaches_the_sign_of_the_byte_stays_wide() {
-        for value in [0x80, 0x100, 0x180, -1] {
+        for (value, wanted) in [(0x80, 1), (0x100, 1), (0x180, 1), (-1, 0)] {
             let (mut names, mut func, block) = empty();
             let held = func.new_vreg(GPR);
             let byte = func.new_vreg(GPR);
@@ -1270,8 +1274,9 @@ mod tests {
             func.build(block, test).uses(held, GPR).imm(value).finish();
             func.build(block, set).def(byte, GPR).finish();
 
-            assert_eq!(takes(&mut func, &mut names), 0, "{value}");
-            assert_eq!(shape(&func, &names, block), ["test_ri_64", "set_l"], "{value}");
+            let test = if wanted == 0 { "test_ri_64" } else { "test_ri_32" };
+            assert_eq!(takes(&mut func, &mut names), wanted, "{value}");
+            assert_eq!(shape(&func, &names, block), [test, "set_l"], "{value}");
         }
     }
 
@@ -1279,7 +1284,7 @@ mod tests {
     /// the byte is in reach for it.
     #[test]
     fn a_test_that_keeps_zero_or_not_has_the_whole_byte() {
-        for (value, wanted) in [(0x80, "test_set_ne_ri_8"), (0x100, "test_set_ne_ri_64")] {
+        for (value, wanted) in [(0x80, "test_set_ne_ri_8"), (0x100, "test_set_ne_ri_32")] {
             let (mut names, mut func, block) = empty();
             let held = func.new_vreg(GPR);
             let byte = func.new_vreg(GPR);
