@@ -1,64 +1,65 @@
-//! A copy or fill of a known size too large to be a run of moves, as a loop of four words, in a
-//! function that may not use the vector registers.
+//! A copy or fill of a known size too large to be a run of moves, as one `rep movsq` or
+//! `rep stosq`, in a function that may not use the vector registers.
 //!
 //! # Why
 //!
 //! [`crate::expand::bulk`] writes a copy or fill of up to [`expand::copies`] or [`expand::fills`]
-//! moves inline and calls `memcpy` or `memset` for a larger one. gcc 16 on x86-64 calls the library
-//! only above 256 bytes. Below that it writes vector moves where it may, and a loop of four
-//! general purpose words where it may not, which is the whole kernel: `-mno-sse` or
-//! `-mgeneral-regs-only` is on every kernel file. A copy of `struct pt_regs` (168 bytes) on every
-//! page fault and the zeroing of a `struct kstat` (192 bytes) on every `stat` were calls to
-//! `__memcpy` and `__memset`. Each one cost about 130 to 220 instructions in the kernel, where the
-//! loop is about 60, and the call took the registers a call clobbers away from the code around it.
-//! With the calls, a Linux 7.3 `defconfig` built by rucc ran 1.33 times the instructions of the
-//! gcc build for each `stat` and 1.30 times for each `brk`.
+//! moves inline and calls `memcpy` or `memset` for a larger one. Under `-mno-sse` gcc on x86-64
+//! calls the library only above 8192 bytes, and below that writes the string instruction: a zero
+//! fill of more than five words is `rep stosq`, and a copy of more than sixteen is `rep movsq`.
+//! Here a copy is the string from where `bulk` stops at twelve.
+//! `-mno-sse` or `-mgeneral-regs-only` is on every kernel file, so this is the whole kernel. A
+//! copy of `struct pt_regs` (168 bytes) on every page fault and the zeroing of a `struct kstat`
+//! (192 bytes) on every `stat` were calls to `__memcpy` and `__memset`, and then a loop of four
+//! words that came to about fifty bytes of code each time, where gcc's is about fifteen. The bench
+//! objects had 83 of those loops, and gcc 13 writes 353 `rep stosq` against rucc's 57.
 //!
-//! # What the loop is
+//! # What it writes
 //!
-//! For `memcpy to, from` of `size` bytes, with `tail` for whatever followed it, and `whole` for
-//! `size` rounded down to a multiple of 32:
+//! For `memcpy to, from` of `size` bytes, with `whole` for `size` rounded down to a multiple of 8:
 //!
 //! ```text
-//! head:                              ; what was in front of the instruction
-//!   jump body(0)
-//! body(i):
-//!   a, b, c, d = load from + i, from + i + 8, from + i + 16, from + i + 24
-//!   store a, b, c, d -> to + i, to + i + 8, to + i + 16, to + i + 24
-//!   br_if i + 32 < whole, body(i + 32), done()
-//! done:
-//!   memcpy to + whole, from + whole  ; size - whole bytes, which `bulk` writes as moves
-//!   tail
+//!   to', from' = asm "rep movsq" to, from, whole / 8   ; in rdi, rsi and rcx
+//!   memcpy to', from'                                  ; size - whole bytes, as moves
 //! ```
 //!
-//! A fill stores one word of its byte four times instead, made in `head`. A call to `memcpy` or
-//! `memset` of a constant size becomes the same loop, as [`expand::bulk`] takes a smaller one
-//! apart, and its answer is its first argument.
+//! A fill is `rep stosq` with the byte spread across `rax`. The instruction leaves `rdi` and `rsi`
+//! just past what it wrote, so the tail is written from there, which `bulk` takes apart into
+//! moves. A call to `memcpy` or `memset` of a constant size is rewritten the same way, and its
+//! answer is its first argument.
+//!
+//! The string instruction is an `asm` statement rather than an instruction of its own, because a
+//! template already says everything about it the allocator has to know: which three registers it
+//! reads, which two it leaves changed, and that it writes memory.
 //!
 //! # What it leaves alone
 //!
 //! A fill whose byte the program works out, a call that unwinds to a landing pad, a call in a
-//! function that said the names are not the library's, a size the target writes no loop for, and
-//! every function built for size or allowed the vector registers. Those last ones are left to the
-//! threshold `cargo xtask stringop` measured against the C library (tamnd/rucc#2971).
+//! function that said the names are not the library's, a size the target writes no string for,
+//! and every function built for size or allowed the vector registers. Those last ones are left to
+//! the threshold `cargo xtask stringop` measured against the C library (tamnd/rucc#2971).
 //!
 //! # Where it runs
 //!
-//! Beside `fills::loops`, at the front, since it makes blocks and nothing in `expand.rs` may.
+//! Beside `fills::loops`, at the front, so that `bulk` sees the tail it leaves.
 
 use rucc_base::Interner;
 use rucc_cost::Goal;
 use rucc_ir::{
-    AttrSet, Builder, Extra, Flags, Func, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode,
-    Restrict, Type, Value,
+    AsmInfo, AttrSet, BlockCallList, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
+    Opcode, Restrict, Type, Value,
 };
 
 use crate::{expand, retry};
 
-/// How many bytes one pass of the loop moves: four words of eight bytes.
-const PASS: u32 = 32;
+/// How many bytes the string instruction moves at a time: one word of eight.
+const WORD: u64 = 8;
 
-/// One copy or fill, as the loop needs it.
+/// The most words a fill of zero is written as before it is `rep stosq`, which is gcc's
+/// `clear_ratio` for `-mtune=generic` less one.
+const CLEARS: usize = 5;
+
+/// One copy or fill, as the rewrite needs it.
 struct Roll {
     /// `Memcpy` or `Memset`.
     opcode: Opcode,
@@ -77,7 +78,7 @@ struct Roll {
 }
 
 /// Rewrites every copy and fill of a known size that [`expand::bulk`] would make a call of, and
-/// that is no more than `most` bytes, into the loop the module describes.
+/// that is no more than `most` bytes, into the string instruction the module describes.
 ///
 /// `word` is how many bytes a register holds, `unaligned` is whether a word may be moved at any
 /// address, `most` is [`rucc_target::CallRegs::rolled`], which the pipeline makes zero for a
@@ -85,7 +86,7 @@ struct Roll {
 /// read for.
 pub fn loops(
     func: &mut Func,
-    names: &Interner,
+    names: &mut Interner,
     (word, unaligned, most): (u32, bool, u32),
     goal: Goal,
 ) {
@@ -99,11 +100,11 @@ pub fn loops(
         .filter_map(|inst| wanted(func, names, inst, moves, most).map(|roll| (inst, roll)))
         .collect();
     for (inst, roll) in found {
-        rewrite(func, inst, &roll);
+        rewrite(func, names, inst, &roll);
     }
 }
 
-/// The copy or fill an instruction is, where it is one this pass writes as a loop.
+/// The copy or fill an instruction is, where it is one this pass writes as a string instruction.
 fn wanted(
     func: &Func,
     names: &Interner,
@@ -148,10 +149,15 @@ fn wanted(
         Opcode::Memset => expand::literal(func, with)?,
         _ => 0,
     };
-    let moves = if opcode == Opcode::Memset { moves.1 } else { moves.0 };
-    // Only what `bulk` would call for. A word may be moved at any address here, so that is a size
-    // whose plan at the widest word is more moves than the threshold.
-    if info.size < u64::from(PASS)
+    let moves = match opcode {
+        Opcode::Memset if byte == 0 => CLEARS.min(moves.1),
+        Opcode::Memset => moves.1,
+        _ => moves.0,
+    };
+    // What `bulk` would call for, and a zero fill from where gcc stops writing moves. A word may
+    // be moved at any address here, so that is a size whose plan at the widest word is more moves
+    // than the threshold.
+    if info.size < WORD
         || info.size > u64::from(most)
         || info.order != MemOrder::NotAtomic
         || expand::plan(info.size, 8, 8, moves).is_some()
@@ -162,77 +168,49 @@ fn wanted(
     Some(Roll { opcode, to, with, byte, info, flags, answer })
 }
 
-/// One copy or fill, as the loop the module describes.
-fn rewrite(func: &mut Func, inst: Inst, roll: &Roll) {
-    let head = func.block_of(inst).expect("the instruction is in a block");
+/// One copy or fill, as the string instruction the module describes.
+fn rewrite(func: &mut Func, names: &mut Interner, inst: Inst, roll: &Roll) {
     let span = func.span(inst);
     let index = Type::int(64);
-    let whole = roll.info.size / u64::from(PASS) * u64::from(PASS);
+    let whole = roll.info.size / WORD * WORD;
     let rest = roll.info.size - whole;
-
-    let body = func.create_block();
-    let at = func.append_param(body, index);
-    let done = func.create_block();
-    func.move_after(inst, done);
-    func.remove_inst(inst);
-
-    let mut build = Builder::new(func, head).at(span);
     let copy = roll.opcode == Opcode::Memcpy;
-    // Worked out here rather than in the loop, so the loop stores one register over and over.
-    let value = (!copy).then(|| build.iconst(index, i128::from(expand::spread(roll.byte, 8))));
-    // Where the part after the loop starts, which `done` takes apart into moves.
-    let past = (rest > 0).then(|| {
-        let by = build.iconst(index, i128::from(whole));
-        let to = build.binary(Opcode::PtrAdd, roll.to, by, Flags::NONE);
-        let with =
-            if copy { build.binary(Opcode::PtrAdd, roll.with, by, Flags::NONE) } else { roll.with };
-        (to, with)
-    });
-    let zero = build.iconst(index, 0);
-    build.jump(body, &[zero]);
-
-    let access = MemInfo { size: 8, align: roll.info.align.clamp(1, 8), ..roll.info };
-    let mut build = Builder::new(func, body).at(span);
-    let to = build.binary(Opcode::PtrAdd, roll.to, at, Flags::NONE);
-    let stepped = |build: &mut Builder<'_>, base: Value, by: u64| {
-        if by == 0 {
-            return base;
-        }
-        let by = build.iconst(index, i128::from(by));
-        build.binary(Opcode::PtrAdd, base, by, Flags::NONE)
+    let (template, constraints) =
+        if copy { ("rep movsq", "=D,=S,=c,0,1,2") } else { ("rep stosq", "=D,=c,0,1,a") };
+    let info = AsmInfo {
+        template: names.intern(template),
+        constraints: names.intern(constraints),
+        clobbers: names.intern("memory"),
+        targets: BlockCallList::EMPTY,
     };
-    let words: Vec<Value> = match value {
-        Some(value) => vec![value; 4],
-        None => {
-            let from = build.binary(Opcode::PtrAdd, roll.with, at, Flags::NONE);
-            (0..4)
-                .map(|k| {
-                    let there = stepped(&mut build, from, k * 8);
-                    build.load(index, there, access, roll.flags)
-                })
-                .collect()
-        }
-    };
-    for (k, word) in (0..4).zip(words) {
-        let here = stepped(&mut build, to, k * 8);
-        build.store(word, here, access, roll.flags);
-    }
-    let pass = build.iconst(index, i128::from(PASS));
-    let next = build.binary(Opcode::Add, at, pass, Flags::NONE);
-    let end = build.iconst(index, i128::from(whole));
-    let more = build.icmp(IntPred::Ult, next, end);
-    build.br_if(more, body, &[next], done, &[]);
 
-    if let Some((to, with)) = past {
-        let info = MemInfo { size: rest, align: roll.info.align.clamp(1, PASS), ..roll.info };
+    let count = expand::ahead_const(func, inst, Imm::int(i128::from(whole / WORD), index), index);
+    let (args, results) = if copy {
+        (vec![roll.to, roll.with, count], vec![Type::PTR, Type::PTR, index])
+    } else {
+        let spread = i128::from(expand::spread(roll.byte, 8));
+        let value = expand::ahead_const(func, inst, Imm::int(spread, index), index);
+        (vec![roll.to, count, value], vec![Type::PTR, index])
+    };
+    let extra = Extra::Asm(func.add_asm(info));
+    let args = func.push_values(&args);
+    let flags = Flags::VOLATILE;
+    let data = InstData { args, extra, flags, ..InstData::new(Opcode::InlineAsm) };
+    let string = func.create_inst(data, &results, span);
+    func.insert_before(string, inst);
+    let past: Vec<Value> = func[string].results().collect();
+
+    if rest > 0 {
+        let info = MemInfo { size: rest, align: roll.info.align.clamp(1, 8), ..roll.info };
         let extra = Extra::Mem(func.add_mem(info));
-        let args = func.push_values(&[to, with]);
+        let with = if copy { past[1] } else { roll.with };
+        let args = func.push_values(&[past[0], with]);
         let flags = roll.flags;
         let data = InstData { args, extra, flags, ..InstData::new(roll.opcode) };
         let made = func.create_inst(data, &[], span);
-        let first = func.insts(done).next().expect("the block a loop ends in has a terminator");
-        func.insert_before(made, first);
+        func.insert_before(made, inst);
     }
+    func.remove_inst(inst);
     if let Some(answer) = roll.answer {
         retry::replace(func, answer, roll.to);
     }

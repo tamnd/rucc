@@ -89,11 +89,10 @@ pub enum Step {
     ///
     /// Beside the retries for the reason they are here: it makes blocks.
     Fills,
-    /// A copy or fill of a known size too large for a run of moves, as a loop of four words, in a
+    /// A copy or fill of a known size too large for a run of moves, as a string instruction, in a
     /// function without the vector registers on a machine that says how large, which is x86-64.
     ///
-    /// Beside the fills for the reason they are here: it makes blocks. After them, so a fill
-    /// `-finline-stringops=memset` asked for is theirs.
+    /// Beside the fills, and after them, so a fill `-finline-stringops=memset` asked for is theirs.
     Rolled,
     /// An ordered load or store, as the plain access and a barrier.
     ///
@@ -251,7 +250,7 @@ impl Step {
             Self::Switches => "a switch",
             Self::Retries => "a read modify write with no instruction behind it",
             Self::Fills => "a fill that has to be written inline",
-            Self::Rolled => "a copy or fill gcc writes as a loop",
+            Self::Rolled => "a copy or fill gcc writes as a string instruction",
             Self::Orderings => "an ordered load or store",
             Self::Overflows => "arithmetic that reports whether it overflowed",
             Self::Decimals => "a decimal float",

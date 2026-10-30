@@ -1,9 +1,10 @@
-//! A copy or fill of a known size from 97 to 256 bytes under `-mno-sse` on x86-64, which gcc 16
-//! writes as a loop of four words and rucc called `memcpy` or `memset` for (tamnd/rucc-kernel#109).
+//! A copy or fill of a known size too large for a run of moves under `-mno-sse` on x86-64, which
+//! gcc writes as `rep movsq` or `rep stosq` up to 8192 bytes and rucc called `memcpy` or `memset`
+//! for, and then wrote as a loop of four words (tamnd/rucc-kernel#109).
 //!
 //! Every kernel file is built with `-mno-sse`, and the copy of `struct pt_regs` on a page fault
 //! and the zeroing of `struct kstat` on a `stat` were calls to the kernel's `__memcpy` and
-//! `__memset`. Each case below is what gcc 16 does with the same source and flags.
+//! `__memset`. Each case below is what gcc 13 does with the same source and flags.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -14,11 +15,15 @@ extern void *memcpy(void *, const void *, size_t);
 extern void *memset(void *, int, size_t);
 struct regs { unsigned long r[21]; };
 struct stat { char a[192]; };
-struct big { char a[300]; };
+struct big { char a[8192]; };
+struct huge { char a[8200]; };
+struct six { unsigned long a[6]; };
 void copy(struct regs *to, const struct regs *from) { *to = *from; }
 void clear(struct stat *s) { memset(s, 0, sizeof *s); }
 void *kept(char *to, const char *from) { return memcpy(to, from, 200); }
 void large(struct big *to, const struct big *from) { *to = *from; }
+void small(struct six *s) { memset(s, 0, sizeof *s); }
+void huge(struct huge *to, const struct huge *from) { *to = *from; }
 "#;
 
 const RUN: &str = r#"
@@ -38,10 +43,22 @@ extern int printf(const char *, ...);
                 return 1; \
         return 0; \
     }
+#define ZERO(n) \
+    static int zero##n(void) { \
+        unsigned char to[n + 16]; \
+        for (int i = 0; i < n + 16; i++) to[i] = 0xee; \
+        if (memset(to + 7, 0, n) != to + 7) return 1; \
+        for (int i = 0; i < n + 16; i++) \
+            if (to[i] != (i >= 7 && i < n + 7 ? 0 : 0xee)) return 1; \
+        return 0; \
+    }
 SIZE(97) SIZE(127) SIZE(128) SIZE(129) SIZE(160) SIZE(168) SIZE(192) SIZE(200) SIZE(255) SIZE(256)
+SIZE(257) SIZE(1001) SIZE(8192)
+ZERO(41) ZERO(47) ZERO(48) ZERO(95) ZERO(301) ZERO(8191)
 int main(void) {
     int bad = copy97() | copy127() | copy128() | copy129() | copy160() | copy168() | copy192()
-        | copy200() | copy255() | copy256();
+        | copy200() | copy255() | copy256() | copy257() | copy1001() | copy8192();
+    bad |= zero41() | zero47() | zero48() | zero95() | zero301() | zero8191();
     printf("%d\n", bad);
     return bad;
 }
@@ -67,20 +84,27 @@ fn function<'a>(asm: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
-fn a_copy_or_fill_up_to_256_bytes_is_a_loop_without_the_vector_registers() {
+fn a_copy_or_fill_up_to_8192_bytes_is_a_string_instruction_without_the_vector_registers() {
     let dir = std::env::temp_dir().join(format!("rucc-rolled-{}", std::process::id()));
     let flags = ["--target=x86_64-unknown-linux-gnu", "-O2", "-mno-sse", "-S"];
     let out = compile(&dir, SIZES, &flags, "one.s");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let asm = std::fs::read_to_string(dir.join("one.s")).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&dir);
-    for name in ["copy", "clear", "kept"] {
+    for (name, string) in [
+        ("copy", "rep movsq"),
+        ("clear", "rep stosq"),
+        ("kept", "rep movsq"),
+        ("large", "rep movsq"),
+        ("small", "rep stosq"),
+    ] {
         let body = function(&asm, name);
+        assert!(body.contains(string), "{name}:\n{body}");
         assert!(!body.contains("call"), "{name}:\n{body}");
         assert!(!body.contains("jmp\tmem") && !body.contains("jmp mem"), "{name}:\n{body}");
     }
-    // Above 256 bytes gcc calls the library too.
-    assert!(function(&asm, "large").contains("memcpy"), "{asm}");
+    // Above 8192 bytes gcc calls the library too.
+    assert!(function(&asm, "huge").contains("memcpy"), "{asm}");
 }
 
 #[test]

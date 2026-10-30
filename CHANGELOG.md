@@ -36,6 +36,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A comparison against a constant that is held across a loop only to feed branches and selects in other blocks is now made again beside each of them, so the loop compares and jumps on the flags instead of keeping a `setcc` result in a register or stack slot. The kernel bench objects shrink by 1168 bytes. (#3984)
 - On x86-64 a zero extension of a byte or a word to 64 bits is now written as the 32 bit `movzbl` or `movzwl`, which clears the top half anyway and needs no REX.W byte, as gcc writes it. The kernel bench objects are 80 bytes smaller (#3987)
 - On x86-64 an addition whose register is copied right after and never read again is now one `lea` into the copy, so `addq $464, %rbp; movq %rbp, %rdi` is `leaq 464(%rbp), %rdi` as gcc writes it. An `asm` template is left as written, and its instructions now carry a `template` flag so passes can tell. The kernel bench objects are about 850 bytes smaller (#3988)
+- On x86-64 without the vector registers, a copy or fill of a known size too large for a run of moves is now one `rep movsq` or `rep stosq` up to 8192 bytes, and a zero fill is one from six words on, which is what gcc writes under `-mno-sse`. Before it was a loop of four words up to 256 bytes and a call above. The kernel bench objects are 6992 bytes smaller (#3989)
 
 ## 0.30.15
 
