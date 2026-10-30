@@ -8390,15 +8390,16 @@ decl #0 x : int object external static defined
     /// A word is eight bytes here and the `8(...)` is the whole claim: the call instruction pushed
     /// the return address and the prologue pushed the caller's frame pointer under it, so what the
     /// frame pointer points at is the link and what is above it is where control goes back to.
-    /// gcc 16.2.0 writes `movq 8(%rbp), %rax` for the first of these, measured at `-O2`.
     ///
+    /// A function's own return address needs no walk. It is the word the call pushed, so a leaf
+    /// reads it at `(%rsp)` and keeps no frame pointer, which is what gcc 16.2.0 writes at `-O2`.
     /// The second half is the same walk the frame address does, with the load at the end of it
     /// reading one word further along rather than the register itself being the answer.
     #[test]
     fn the_return_address_is_one_word_above_the_frame_the_walk_ended_at() {
         let text = asm("void *back(void) { return __builtin_return_address(0); }\n");
-        assert!(text.contains("pushq\t%rbp"), "a function that asks keeps a frame pointer: {text}");
-        assert!(text.contains("movq\t8(%rbp), %rax"), "{text}");
+        assert!(!text.contains("pushq\t%rbp"), "its own return address needs no frame: {text}");
+        assert!(text.contains("movq\t(%rsp), %rax"), "{text}");
         assert!(!text.contains("\tcall"), "a return address is not a call to anything: {text}");
 
         let text = asm("void *back(void) { return __builtin_return_address(2); }\n");

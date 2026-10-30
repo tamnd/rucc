@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The simplifier folds two masks in a row into one, so `(x & c) & d` is `x & (c & d)` and the same for `|` and `^`, and when the first mask has other uses it only does so when the new constant fits in 32 bits, so the kernel's `pte & PTE_FLAGS_MASK & _PAGE_RW` no longer loads the 64-bit mask with a `movabs` each time and the bench objects are 545 bytes smaller (#3979)
 - On x86-64 a function that keeps no frame pointer now hands out `rbp` right after `rbx` and before `r12`, as gcc does, rather than after `r15`, so a value kept across calls is more often in a register that needs no REX byte and the bench objects are 3858 bytes smaller (#3980)
 - On x86-64 an integer nothing reads above its low four bytes is spilled with a `movl` into a slot of four rather than a `movq` into a slot of eight, which is how gcc spills an `int`, found with the same bit demand analysis that takes out dead conversions (#3981)
+- On x86-64, a function that only reads its own return address now loads it from the stack pointer and keeps no frame pointer, the same as gcc. The kernel bench objects shrink by 768 bytes, 576 of them in slub.o. (#3982)
 
 ### Fixed
 
