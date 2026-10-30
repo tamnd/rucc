@@ -798,8 +798,13 @@ fn width(ty: Type, target: Target) -> Option<u64> {
     if ty == Type::I1 {
         return Some(1);
     }
+    // A 64-bit target holds an `__int128` in two registers, and one read or written whole over
+    // pieces is its halves shifted into place. That is `try_cmpxchg128` in the kernel, which
+    // copies the old and new values through `union __u128_halves`.
+    let pair = ty.is_int() && bits == 128 && target.pointer == Some(8);
     let whole = (ty.is_int() && matches!(bits, 8 | 16 | 32 | 64))
-        || (ty.is_float() && matches!(bits, 16 | 32 | 64));
+        || (ty.is_float() && matches!(bits, 16 | 32 | 64))
+        || pair;
     whole.then_some(u64::from(bits / 8))
 }
 
@@ -2083,6 +2088,32 @@ block2:
         assert_eq!(count_of(func, Opcode::ZExt), 2);
         assert_eq!(count_of(func, Opcode::Shl), 1);
         assert_eq!(count_of(func, Opcode::Or), 1);
+    }
+
+    #[test]
+    fn an_int128_written_whole_and_read_as_its_halves_becomes_values() {
+        // The kernel's `union __u128_halves` in `try_cmpxchg128`, which `__slab_free` in mm/slub.c
+        // kept on the stack round its `cmpxchg16b`.
+        let text = wrap(
+            "(i128, i64) -> i64",
+            "block0(%0: i128, %1: i64):
+    %2 = alloca, size 16, align 16
+    store %0 -> %2, align 16
+    %3 = iconst.i64 8
+    %4 = ptr_add %2, %3
+    store %1 -> %4, align 8
+    %5 = load.i128 %2, align 16
+    %6 = trunc.i64 %5
+    %7 = load.i64 %4, align 8
+    %8 = add %6, %7
+    return %8
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(stats.changed());
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::Load), 0);
     }
 
     #[test]
