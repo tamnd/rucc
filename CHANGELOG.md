@@ -42,6 +42,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A test of whether a mask is zero, made through a helper that returns `int` like `pte_special`, is now one `test` on x86-64 instead of an `and` at the narrow width followed by a `test` of it. (#3992)
 - A `bool` bit-field tested as a truth, like `vmg->just_expand`, is now one `testb` of its bit on x86-64 instead of a load, a shift, an `and` and a test. (#3993)
 - A pointer tested again after an `&&` that already tested it, like `if (vmg && vmg->a) ...; if (vmg && vmg->b) ...`, is now tested once, with the null path sent straight past the later tests. (#3994)
+- A local read or written whole as an `__int128` on a 64-bit target, like the old and new values `try_cmpxchg128` copies through `union __u128_halves`, is now split into registers instead of kept on the stack. `__slab_free` and `get_from_partial_node` no longer realign the stack to 16 bytes for it. (#3995)
 
 ## 0.30.15
 
