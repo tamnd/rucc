@@ -33,6 +33,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The redundant load pass now replaces an integer load with a constant when a `memset` of one constant byte wrote every byte it reads, which is a field read back from a struct zeroed a few lines above, as in `kmalloc` in mm/slub.c (#3977)
 - Dead store elimination now still narrows a `memset` or `memcpy` when the walk from it reaches its limit, by taking every byte still live on the paths it did not finish as read, so the 32 byte struct `__kmalloc_noprof` in mm/slub.c zeroes and then half overwrites is filled only where it is not overwritten, as gcc does (#3978)
 - On x86-64, an and or a test of a register against a mask below 2^31 is now written at 32 bits (`andl $0x300, %eax` in place of `andq $0x300, %rax`), which gives the same register and flags in one byte less. The kernel bench objects shrink by 1212 bytes. (#3983)
+- A comparison against a constant that is held across a loop only to feed branches and selects in other blocks is now made again beside each of them, so the loop compares and jumps on the flags instead of keeping a `setcc` result in a register or stack slot. The kernel bench objects shrink by 1168 bytes. (#3984)
 
 ## 0.30.15
 

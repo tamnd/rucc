@@ -67,7 +67,7 @@ const MOVED: &[(&str, &str, &[&str], u32)] = &[
     ("predict-early-return", "early-return", &["-O3"], 33),
     ("max-predicted-iterations", "dispatch-direct", &["-O2"], 10),
     ("loop-reserved-regs", "shift-xor", &["-O2"], 16),
-    ("licm-expensive", "early-exit", &["-O2"], 0),
+    ("licm-expensive", "scope-in-a-loop", &["-O2"], 0),
     ("unroll-max-times", "read-only", &["-O2"], 8),
     ("unroll-max-insns", "less-left", &["-O2"], 0),
     ("split-max-insns", "split", &["-O2", "-fsafety=detect"], 0),

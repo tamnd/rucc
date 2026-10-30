@@ -77,6 +77,18 @@
 //! which was 41 more stack accesses in the loop. So before the sinking walk, a plan of it works out
 //! for each loop the moves that pass it without saving work, and the walk leaves them all in front
 //! of a loop they would leave full and not pay for.
+//!
+//! # Comparisons beside their branches
+//!
+//! A comparison against a constant that only branches and selects in other blocks read goes the
+//! other way, into those blocks, with a copy beside each reader. The machine compares and jumps on
+//! the flags in two instructions, and a comparison held as a value costs those two plus a `setcc`
+//! where it was made and a register, or a stack slot, for the whole way to the reader, which then
+//! tests it again. `licm` takes comparisons out of loops on purpose, so that the loop can be split
+//! on them, and a loop that was not split is left holding every one of them. `__free_one_page`
+//! held five across its loop, each a `setcc` into a stack slot and a reload and test per turn,
+//! where comparing the argument again is the same one instruction. What is held instead is the
+//! other operand, which is one value for every comparison made against it.
 
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
@@ -111,6 +123,12 @@ const PAST: &str = "left in front of the loop, moving it past saves nothing and 
 
 /// Recorded for each address moved off a pointer that was a constant past another one.
 const REBASED: &str = "address counted from the pointer its base was a constant past";
+
+/// Recorded for each comparison worked out again beside the branch or select that reads it.
+const BESIDE: &str = "comparison worked out again beside the branch that reads it";
+
+/// The most readers a comparison is copied out to. Each copy is one more comparison in the code.
+const BESIDE_READERS: usize = 4;
 
 /// Global code motion.
 #[derive(Debug)]
@@ -176,6 +194,12 @@ impl Pass for Gcm {
             let insts: Vec<Inst> = func.insts(block).collect();
             for &inst in insts.iter().rev() {
                 job.sink(func, inst, fuel, &mut stats);
+            }
+        }
+        for &block in &order {
+            let insts: Vec<Inst> = func.insts(block).collect();
+            for inst in insts {
+                job.beside(func, inst, fuel, &mut stats);
             }
         }
         stats
@@ -324,6 +348,65 @@ impl Job<'_> {
         }
         let best = self.pick(low?, here, here)?;
         (best != here && !self.turns_back(func, best, here)).then_some((here, best))
+    }
+
+    /// Works a comparison against a constant out again beside each branch and select that reads it,
+    /// when nothing else does and none of them is in its own block. See the module documentation.
+    fn beside(&mut self, func: &mut Func, inst: Inst, fuel: &mut Fuel, stats: &mut Stats) {
+        if func[inst].opcode != Opcode::ICmp {
+            return;
+        }
+        let Some(&here) = self.at.get(&inst) else { return };
+        let Some(value) = one_result(func, inst) else { return };
+        let &[left, right] = &func[func[inst].args] else { return };
+        let constant = |arg| crate::discharge::constant(func, arg).is_some();
+        let word = |arg: Value| {
+            let ty = func[arg].ty;
+            ty.is_ptr() || (ty.is_int() && ty.bits() <= 64)
+        };
+        if !(constant(left) || constant(right)) || !word(left) || !word(right) {
+            return;
+        }
+        let Some(readers) = self.readers.get(&value) else { return };
+        if readers.is_empty() || readers.len() > BESIDE_READERS {
+            return;
+        }
+        for &reader in readers {
+            if self.at.get(&reader).is_none_or(|&block| block == here) {
+                return;
+            }
+            let data = &func[reader];
+            let first = func[data.args].first() == Some(&value);
+            if !matches!(data.opcode, Opcode::BrIf | Opcode::Select) || !first {
+                return;
+            }
+            let mut times = 0;
+            uses::operands(func, reader, |arg| times += usize::from(arg == value));
+            if times != 1 {
+                return;
+            }
+        }
+        if !fuel.take() {
+            stats.missed(NO_FUEL);
+            return;
+        }
+        let ty = func[value].ty;
+        let span = func.span(inst);
+        for reader in readers.clone() {
+            let args = func.push_values(&[left, right]);
+            let data = rucc_ir::InstData { args, ..func[inst] };
+            let copy = func.create_inst(data, &[ty], span);
+            func.insert_before(copy, reader);
+            let Some(made) = one_result(func, copy) else { return };
+            let list = func[reader].args;
+            func.rewrite(list, |arg| if arg == value { made } else { arg });
+            if let Some(&block) = self.at.get(&reader) {
+                self.at.insert(copy, block);
+            }
+            stats.optimized(BESIDE);
+        }
+        func.remove_inst(inst);
+        self.at.remove(&inst);
     }
 
     /// Whether `block` is a latch of the innermost loop `here` is in, with nothing in it but the
@@ -1268,5 +1351,44 @@ block0(%0: ptr, %1: i32):
     fn a_total_too_far_to_fold_into_an_access_leaves_every_field_where_it_was() {
         let out = moved(&fields(3800, "%0"));
         assert!(out.contains("ptr_add.nuw %2, %3") && out.contains("ptr_add.nuw %2, %6"), "{out}");
+    }
+
+    /// A loop that branches on a comparison made in front of it, the shape `licm` leaves behind.
+    fn held(against: &str) -> String {
+        r#"
+func @f(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = iconst.i32 3
+    %3 = icmp eq %0, AGAINST
+    %4 = iconst.i32 0
+    jump block1(%4)
+
+block1(%5: i32):
+    br_if %3, block2, block3
+
+block2:
+    %6 = iconst.i32 1
+    %7 = add %5, %6
+    %8 = icmp slt %7, %1
+    br_if %8, block1(%7), block3
+
+block3:
+    return %5
+}
+"#
+        .replace("AGAINST", against)
+    }
+
+    #[test]
+    fn a_comparison_against_a_constant_is_made_again_beside_its_branch() {
+        let out = moved(&held("%2"));
+        assert_eq!(block_of(&out, "icmp eq"), "block1", "{out}");
+        assert_eq!(out.matches("icmp eq").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn a_comparison_of_two_values_stays_where_it_was_made() {
+        let out = moved(&held("%1"));
+        assert_eq!(block_of(&out, "icmp eq"), "block0", "{out}");
     }
 }
