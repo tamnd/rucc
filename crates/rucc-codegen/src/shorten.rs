@@ -212,6 +212,7 @@ pub fn shorter(
     let wanted = wanted.chain(short.stepping.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.copying.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.spreading.iter().map(|entry| entry.into));
+    let wanted = wanted.chain(flags.compares.iter().filter_map(|entry| entry.kept));
     let opcodes: Vec<(&'static str, mir::Opcode)> =
         wanted.map(|into| (into, mir::Opcode::new(names.join(short.prefix, into)))).collect();
     let names = &*names;
@@ -292,6 +293,18 @@ pub fn shorter(
             if into.is_some_and(|op| tested(func, &mut counts, machine, names, inst, op)) {
                 took += 1;
                 known = Known::of(&mut seen, func, short, flags, names, inst);
+            }
+            // The same comparison when it keeps a byte. The two are one instruction and there is no
+            // form of it without the constant, so the test goes in front as one of its own and the
+            // set is what is left. The test writes what the comparison wrote and the set reads only
+            // that, so the walk goes on past the pair the way it would have gone past the one.
+            if known.splitting
+                && split(func, short, flags, &mut counts, machine, names, &opcodes, inst)
+            {
+                took += 1;
+                live = false;
+                carry = false;
+                continue;
             }
             // An address that is a register, written as the move it is. Nothing about the condition
             // state comes into it either, since neither instruction writes any, so this is asked of
@@ -458,6 +471,8 @@ struct Known {
     byte_testing: bool,
     /// Whether it has a shorter way of comparing against zero.
     testing: bool,
+    /// Whether it compares against zero and keeps a byte. See [`split`].
+    splitting: bool,
     /// Whether it has a move that says the same thing.
     copying: bool,
     /// Whether it has a shorter addition for some number.
@@ -493,6 +508,9 @@ impl Known {
                 narrowing: has(|short, bare| short.narrowed(bare).is_some()),
                 byte_testing: has(|short, bare| short.byte_tested(bare).is_some()),
                 testing: has(|short, bare| short.tested(bare).is_some()),
+                splitting: bare.and_then(|bare| flags.compare(bare)).is_some_and(|entry| {
+                    entry.kept.is_some() && short.tested(entry.asks).is_some()
+                }),
                 copying: has(|short, bare| short.copied(bare).is_some()),
                 stepping: has(|short, bare| short.stepping.iter().any(|entry| entry.name == bare)),
                 spreading: has(|short, bare| short.spread(bare).is_some()),
@@ -619,6 +637,57 @@ fn tested(
     let mut set = Changes::new();
     set.rewrite(inst, Plan { opcode, imm: None, ..Plan::of(func, inst) });
     set.commit(func, counts, names, machine).is_ok()
+}
+
+/// Splits a comparison against zero that keeps a byte into the test and the set.
+///
+/// `cmpl $0, %eax; sete %cl` is five bytes and `testl %eax, %eax; sete %cl` is five less one,
+/// which is [`tested_form`]'s saving on an instruction that table has no row for: the comparison
+/// that keeps a byte is one instruction here, and the description's answer for what is left of one
+/// once the state is already right is the set alone. So the test goes in as a copy of the
+/// instruction in front of it and the two are rewritten together, and a set the target turns down
+/// takes the copy back out. gcc writes every one of these as the test.
+#[allow(clippy::too_many_arguments)]
+fn split(
+    func: &mut mir::Func,
+    short: &ShortInsts,
+    flags: &FlagInsts,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> bool {
+    let Some(name) = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix) else {
+        return false;
+    };
+    let Some(entry) = flags.compare(name) else { return false };
+    let (Some(kept), Some(into)) = (entry.kept, short.tested(entry.asks)) else { return false };
+    if func[inst].imm.map(|at| func[at].0) != Some(0) {
+        return false;
+    }
+    let find = |want: &str| opcodes.iter().find(|&&(at, _)| at == want).map(|&(_, op)| op);
+    let (Some(test), Some(set)) = (find(into), find(kept)) else { return false };
+    let operands = func[func[inst].operands].to_vec();
+    let (read, byte): (Vec<_>, Vec<_>) =
+        operands.into_iter().partition(|operand| operand.role == Role::Use);
+    let before = func.create_inst(func[inst], func.span(inst));
+    func.insert_before(inst, before);
+    for operand in &read {
+        counts.gained(operand.reg);
+    }
+    let mut set_of = Changes::new();
+    let plan = Plan { opcode: test, operands: read.clone(), imm: None, ..Plan::of(func, before) };
+    set_of.rewrite(before, plan);
+    set_of.rewrite(inst, Plan { opcode: set, operands: byte, imm: None, ..Plan::of(func, inst) });
+    if set_of.commit(func, counts, names, machine).is_ok() {
+        return true;
+    }
+    func.remove_inst(before);
+    for operand in &read {
+        counts.lost(operand.reg);
+    }
+    false
 }
 
 /// The move this address computation is, when the address it works out is a register.
@@ -1384,6 +1453,36 @@ mod tests {
             assert_eq!(takes(&mut func, &mut names), 0, "{value}");
             assert_eq!(shape(&func, &names, block), ["cmp_ri_32", "set_e"], "{value}");
             assert_eq!(imm(&func, inst), Some(value), "{value}");
+        }
+    }
+
+    /// The same comparison when it keeps a byte, which has no form without the number and so
+    /// becomes the test and the set. A zero written in front of the pair still becomes the exclusive
+    /// or, since what the set reads is what the test has just written.
+    #[test]
+    fn a_comparison_against_zero_that_keeps_a_byte_becomes_the_test_and_the_set() {
+        for (cmp, test, set, value) in [
+            ("cmp_set_e_ri_32", "test_rr_32", "set_e", 0),
+            ("cmp_set_ne_ri_64", "test_rr_64", "set_ne", 0),
+            ("cmp_set_g_ri_8", "test_rr_8", "set_g", 0),
+            ("cmp_set_e_ri_32", "cmp_set_e_ri_32", "", 1),
+        ] {
+            let (mut names, mut func, block) = empty();
+            let held = func.new_vreg(GPR);
+            let byte = func.new_vreg(GPR);
+            let zero = op(&mut names, "mov_ri_32");
+            let fused = op(&mut names, cmp);
+            func.build(block, zero).def(byte, GPR).imm(0).finish();
+            let inst = func.build(block, fused).def(byte, GPR).uses(held, GPR).imm(value).finish();
+
+            takes(&mut func, &mut names);
+            let mut wanted = vec!["xor_rr_32", test];
+            wanted.extend((!set.is_empty()).then_some(set));
+            assert_eq!(shape(&func, &names, block), wanted, "{cmp}");
+            if !set.is_empty() {
+                assert_eq!(regs(&func, inst), [byte], "{cmp}");
+                assert_eq!(imm(&func, inst), None, "{cmp}");
+            }
         }
     }
 
