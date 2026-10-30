@@ -254,6 +254,20 @@
 //! count. It is written by hand because the mask it builds is the two constants worked out
 //! together, which no pattern in the rule tables can name.
 //!
+//! ### Two constants in a row
+//!
+//! `(x & c) & d` is `x & (c & d)`, and the same goes for `|` and `^`. Each of the three is
+//! associative, so the two constants are one constant worked out here. `pte_flags(pte) & BIT` in
+//! the kernel is `(pte & PTE_FLAGS_MASK) & BIT`, and the inner mask is one value read by every
+//! test of a flag on that entry, often in other blocks, so reassociation, which only takes an
+//! operand nothing else reads in the same block, leaves it. `change_protection` in mm/mprotect.c
+//! then loaded the 64 bit mask twenty times to test one bit after it, where gcc tests the bit in
+//! place. When something else reads the inner one it stays, so the rewrite only fires then when
+//! the new constant fits in 32 bits, which an instruction can carry, and an `and` or an `or` whose
+//! second constant adds nothing to the first is the inner one itself. It is written by hand
+//! because the constant it builds is the two worked out together, which no pattern in the rule
+//! tables can name.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -358,6 +372,13 @@ const TESTED: &str = "bit tested after a shift tested in place";
 
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_TESTED: &str = "bit tested after a shift left alone, the pass ran out of fuel";
+
+/// Recorded once for each pair of constants in a row made one.
+const MERGED: &str = "two constants in a row of one bitwise operation made one";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_MERGED: &str =
+    "two constants in a row of one bitwise operation left alone, the pass ran out of fuel";
 
 /// Recorded once for each floating point comparison a constant or a repeated operand settles.
 const BOUNDED: &str = "floating point comparison settled by a constant or by one operand twice";
@@ -846,6 +867,9 @@ impl<'a> Finder<'a> {
         }
         if let Some(rewrite) = tested_bits(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), TESTED, NO_FUEL_TESTED));
+        }
+        if let Some(rewrite) = merged_constants(func, inst, &self.uses) {
+            return Some((Found::Rule(rewrite), MERGED, NO_FUEL_MERGED));
         }
         let (rewrite, pattern) = identity(func, inst, self.address, &mut self.stacks)?;
         Some((Found::Rule(rewrite), pattern, NO_FUEL_RULE))
@@ -1756,6 +1780,44 @@ fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
         pred: None,
         lhs: Operand::Built(Box::new(inner)),
         rhs: Operand::Value(s),
+    })
+}
+
+/// `(x & c) & d` as `x & (c & d)`, and the same for `|` and `^`. See the module documentation for
+/// when it fires.
+fn merged_constants(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
+    let data = &func[inst];
+    let op = data.opcode;
+    if !matches!(op, Opcode::And | Opcode::Or | Opcode::Xor) {
+        return None;
+    }
+    let ty = func[data.first_result?].ty;
+    if !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let [inner, d] = func[data.args] else { return None };
+    let d = constant(func, d)?;
+    let (inner_op, [x, c]) = producer(func, inner)?;
+    if inner_op != op || constant(func, x).is_some() {
+        return None;
+    }
+    let c = constant(func, c)?;
+    let number = match op {
+        Opcode::And => c & d,
+        Opcode::Or => c | d,
+        _ => c ^ d,
+    };
+    if number == c && op != Opcode::Xor {
+        return Some(Rewrite::Value(inner));
+    }
+    if uses.get(inner.index()) != Some(&1) && i32::try_from(number).is_err() {
+        return None;
+    }
+    Some(Rewrite::Built {
+        opcode: op,
+        pred: None,
+        lhs: Operand::Value(x),
+        rhs: Operand::Constant { number, bits: ty.bits() },
     })
 }
 
@@ -3561,6 +3623,56 @@ mod tests {
             assert_eq!(args[0], x);
             assert_eq!(number(&func, args[1]), mask, "i{bits} >> {s} & {c}");
         }
+    }
+
+    /// `(x & c) & d` with the inner mask read by something else too, returned from a function of
+    /// `x` at 64 bits, as `((x & c) & d) * (x & c)` so that something does.
+    fn masked_twice(op: Opcode, c: i128, d: i128) -> (Func, Block, Value) {
+        let ty = Type::int(64);
+        let (_, mut func, block) = one_block(ty);
+        let x = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let c = build.iconst(ty, c);
+        let inner = build.binary(op, x, c, Flags::NONE);
+        let d = build.iconst(ty, d);
+        let outer = build.binary(op, inner, d, Flags::NONE);
+        let product = build.binary(Opcode::Mul, outer, inner, Flags::NONE);
+        build.ret(&[product]);
+        (func, block, x)
+    }
+
+    /// A flag of a page table entry tested through the mask every test of it shares is tested
+    /// on the entry, and the same for `|` and `^`.
+    #[test]
+    fn two_constants_in_a_row_are_one() {
+        let flags = 0xfff0_0000_0000_0fff_u64 as i64;
+        for (op, c, d, both) in [
+            (Opcode::And, i128::from(flags), 0x101, 0x101),
+            (Opcode::Or, 0x30, 0x0c, 0x3c),
+            (Opcode::Xor, 0x30, 0x18, 0x28),
+        ] {
+            let (mut func, block, x) = masked_twice(op, c, d);
+            assert!(simplify(&mut func), "{op:?}");
+            let outer = operands(&func, returned(&func, block))[0];
+            assert_eq!(came_from(&func, outer).0, op);
+            let args = operands(&func, outer);
+            assert_eq!(args[0], x, "{op:?}");
+            assert_eq!(number(&func, args[1]), both, "{op:?}");
+        }
+    }
+
+    /// A second mask that keeps every bit the first one kept is the first one, and two constants
+    /// that make one too wide to carry stay two while the inner one is read elsewhere.
+    #[test]
+    fn two_constants_in_a_row_that_gain_nothing_stay_two() {
+        let (mut func, block, _) = masked_twice(Opcode::And, 0xff, 0xffff);
+        assert!(simplify(&mut func));
+        let args = operands(&func, returned(&func, block));
+        assert_eq!(args[0], args[1]);
+        let (mut func, block, x) = masked_twice(Opcode::Or, 1 << 40, 1 << 41);
+        simplify(&mut func);
+        let outer = operands(&func, returned(&func, block))[0];
+        assert_ne!(operands(&func, outer)[0], x);
     }
 
     /// Truncating an extension back to the width it came from is the value that was there.
