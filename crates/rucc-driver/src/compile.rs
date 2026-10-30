@@ -8235,7 +8235,7 @@ decl #0 x : int object external static defined
         let text = asm("struct e { long v; } __attribute__((aligned(128)));\n\
              void use(void *, void *);\n\
              void f(int n) { long t[n]; struct e d[4]; use(t, d); }\n");
-        assert!(text.contains("andq\t$127, %"), "{text}");
+        assert!(text.contains("andl\t$127, %"), "{text}");
         assert!(!text.contains("andq\t$-128, %rsp"), "{text}");
     }
 

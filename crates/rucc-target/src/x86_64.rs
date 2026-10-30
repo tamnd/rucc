@@ -803,8 +803,18 @@ static SHORTER_ZEROS: [Zeroed; 3] = [
 /// Sixteen bits is not here for the reason eight bits is not above. `movw $7, %ax` is four bytes and
 /// `movl $7, %eax` is five, so the narrower instruction is the longer one, which is what the prefix
 /// byte in front of a sixteen bit instruction costs.
-static NARROWER_MOVES: [Narrowed; 1] =
-    [Narrowed { name: "mov_ri_64", into: "mov_ri_32", writes: 32 }];
+///
+/// An and or a test with a mask below two to the thirty-first is the same at thirty two bits. The
+/// mask clears the upper half either way, and the state is the same too: the zero, the parity and
+/// the sign all come out of bits the two agree on, the sign being clear at both widths. gcc writes
+/// `andl $0x300, %eax` where rucc wrote the `andq`, which is a byte longer.
+static NARROWER_MOVES: [Narrowed; 5] = [
+    Narrowed { name: "mov_ri_64", into: "mov_ri_32", writes: 32 },
+    Narrowed { name: "and_ri_64", into: "and_ri_32", writes: 31 },
+    Narrowed { name: "test_ri_64", into: "test_ri_32", writes: 31 },
+    Narrowed { name: "test_set_e_ri_64", into: "test_set_e_ri_32", writes: 31 },
+    Narrowed { name: "test_set_ne_ri_64", into: "test_set_ne_ri_32", writes: 31 },
+];
 
 /// Testing bits of a register in its low byte, when every bit the constant names is in that byte.
 ///
