@@ -927,7 +927,7 @@ pub fn compile_recording(
     // way it reaches a block the unwinder starts. Before the lowerings, so that a load or a store
     // at a width the machine does not have is rewritten with the rest. See [`pads`].
     pads::spill(source, machine.conv.word);
-    // A copy or fill gcc writes as a loop of words only where it may not write vector moves, so a
+    // A copy or fill gcc writes as a string instruction only where it may not write vector moves, so a
     // function with the vector registers keeps the threshold measured against the C library. See
     // [`crate::rolled`].
     let unrolled;

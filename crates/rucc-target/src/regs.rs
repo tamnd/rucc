@@ -588,10 +588,10 @@ pub struct CallRegs {
     /// ever touches. `-mstrict-align` makes it false there, and then a load or store less aligned
     /// than its width is split too. See [`CallRegs::strictly_aligned`].
     pub unaligned: bool,
-    /// The largest copy or fill of a known size written as a loop of words, in a function without
-    /// the vector registers, when it is too large for a run of moves. Zero for none.
+    /// The largest copy or fill of a known size written as a string instruction, in a function
+    /// without the vector registers, when it is too large for a run of moves. Zero for none.
     ///
-    /// Two hundred and fifty six on x86-64, which is where gcc 16 stops writing the loop and calls
+    /// 8192 on x86-64, which is where gcc stops writing `rep movsq` and `rep stosq` and calls
     /// `memcpy` or `memset` under `-mno-sse`, so a kernel built for x86-64 makes the same calls.
     /// Zero everywhere else, which keeps the threshold of `cargo xtask stringop`. See the
     /// `rolled` lowering in `rucc-codegen`.
