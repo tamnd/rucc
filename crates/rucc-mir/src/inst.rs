@@ -656,6 +656,13 @@ impl Flags {
     /// jump lands.
     pub const LANDS: Self = Self(8);
 
+    /// The instruction was written in an `asm` statement's template rather than chosen by this
+    /// compiler. It reads and writes what the template says it does, and a pass that rewrites one
+    /// instruction into another that does the same work would still be writing an instruction the
+    /// program did not ask for, which a test or a reader of the listing will not find where they
+    /// put it.
+    pub const TEMPLATE: Self = Self(16);
+
     /// Both of them at once.
     #[must_use]
     pub const fn with(self, other: Self) -> Self {
@@ -692,6 +699,9 @@ impl fmt::Display for Flags {
         }
         if self.contains(Self::LANDS) {
             f.write_str(" lands")?;
+        }
+        if self.contains(Self::TEMPLATE) {
+            f.write_str(" template")?;
         }
         Ok(())
     }
