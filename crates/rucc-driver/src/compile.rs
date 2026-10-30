@@ -5958,7 +5958,8 @@ decl #0 x : int object external static defined
     fn a_function_goes_from_c_to_instructions_with_real_registers_in_them() {
         let text = mir("int add(int a, int b) { return a + b; }\n");
         assert!(text.starts_with("mfunc @add {"), "{text}");
-        assert!(text.contains("x64.add_rr_32"), "{text}");
+        // The sum goes straight to the return register, so the addition is an address computation.
+        assert!(text.contains("x64.lea_32"), "{text}");
         assert!(text.contains("x64.ret"), "{text}");
         // A virtual register is what the allocator was there to remove, so one left in the
         // output is the difference between code and something that looks like code.
@@ -7129,7 +7130,7 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.globl\tadd\n"), "{text}");
         assert!(text.contains("\t.type\tadd, @function\n"), "{text}");
         assert!(text.contains("\nadd:\n"), "{text}");
-        assert!(text.contains("\taddl\t"), "{text}");
+        assert!(text.contains("\tleal\t"), "{text}");
         assert!(text.contains("\tret\n"), "{text}");
         assert!(text.contains("\t.size\tadd, .-add\n"), "{text}");
         // Without this the stack the program runs on is executable, which is not a default
@@ -7834,7 +7835,7 @@ decl #0 x : int object external static defined
         assert_eq!(&bytes[..4], b"\x7fELF", "an object file starts by saying it is one");
         let text = asm("int add(int a, int b) { return a + b; }\n");
         assert!(
-            text.contains("\taddl\t"),
+            text.contains("\tleal\t"),
             "and the listing of it is the same instructions:\n{text}"
         );
     }

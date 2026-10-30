@@ -2074,18 +2074,17 @@ mod tests {
                 .expect("every instruction has a rule");
 
         // `int f(int a, int b) { return a + b; }` end to end. A leaf that spills nothing needs no
-        // frame at all, so there is no prologue to see. The one move left is the one the machine's
-        // addition needs, since the sum is written into the register one of the two operands was
-        // read from and the return wants it in `rax`. The addition is marked as reading them
-        // either way round, which is why the allocator was free to pick.
+        // frame at all, so there is no prologue to see. The machine's addition writes the sum
+        // over one of the two operands and the return wants it in `rax`, so the allocator leaves
+        // a move behind it, and the two of them come out as one address computation that writes
+        // `rax` straight away, which is what gcc writes too.
         assert_eq!(
             mir::print_func(&out, &names, &REGS),
             "mfunc @f {\n\
              block0:\n    \
              $rdi($rdi) = x64.arg_val_32\n    \
              $rsi($rsi) = x64.arg_val_32\n    \
-             $rdi(reuse 1) = x64.add_rr_32 commutes $rdi, $rsi\n    \
-             $rax = x64.mov_rr_64 $rdi\n    \
+             $rax = x64.lea_32 commutes [$rdi + $rsi]\n    \
              x64.ret_val_32 $rax($rax)\n    \
              x64.ret\n\
              }\n"
