@@ -171,7 +171,7 @@ fn feeding(
 /// function reads only what its last instructions name, since a register a call keeps is put back
 /// by the epilogue in front of the return and the register is this function's to destroy
 /// otherwise.
-fn live_into(func: &mir::Func, target: (mir::Reg, RegClass)) -> Set<mir::Block> {
+pub(crate) fn live_into(func: &mir::Func, target: (mir::Reg, RegClass)) -> Set<mir::Block> {
     let blocks: Vec<mir::Block> = func.blocks().collect();
     // For each block, whether it reads the register before writing it, writes it first, or names
     // it nowhere at all.

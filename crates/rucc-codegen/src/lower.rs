@@ -8592,7 +8592,7 @@ impl<'a> Lowering<'a> {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let opcode = self.named(line.opcode);
-        let mut build = self.out.build(block, opcode).at(span);
+        let mut build = self.out.build(block, opcode).at(span).flags(mir::Flags::TEMPLATE);
         for operand in built {
             build = build.operand(operand);
         }
@@ -12560,8 +12560,8 @@ mod tests {
             lower(&mut names, &source),
             "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_ri_32 0\n    \
              %1:gpr = x64.mov_ri_64 0\n    \
-             %2:gpr($rax), %3:gpr($rbx), %4:gpr($rcx), %5:gpr($rdx) = x64.cpuid %0($rax), \
-             %1($rcx)\n    x64.ret_val_32 %2($rax)\n}\n"
+             %2:gpr($rax), %3:gpr($rbx), %4:gpr($rcx), %5:gpr($rdx) = x64.cpuid template \
+             %0($rax), %1($rcx)\n    x64.ret_val_32 %2($rax)\n}\n"
         );
     }
 
@@ -12586,7 +12586,7 @@ mod tests {
         // have come back with whatever was in the one it picked.
         assert_eq!(
             lower(&mut names, &source),
-            "mfunc @f {\nblock0:\n    %0:gpr($r12) = x64.mov_ri_64 17730\n    \
+            "mfunc @f {\nblock0:\n    %0:gpr($r12) = x64.mov_ri_64 template 17730\n    \
              x64.ret_val_64 %0($rax)\n}\n"
         );
     }
@@ -12603,7 +12603,7 @@ mod tests {
 
         assert_eq!(
             lower(&mut names, &source),
-            "mfunc @f {\nblock0:\n    x64.pause\n    $rsi = x64.template @\n}\n"
+            "mfunc @f {\nblock0:\n    x64.pause template\n    $rsi = x64.template @\n}\n"
         );
     }
 
@@ -12754,7 +12754,7 @@ mod tests {
         // `asm volatile ("pause")`, which is what every spin lock in every allocator writes. One
         // instruction, no operands, and nothing between the template and the machine but the table
         // that already says what a `pause` is.
-        assert_eq!(lower(&mut names, &source), "mfunc @f {\nblock0:\n    x64.pause\n}\n");
+        assert_eq!(lower(&mut names, &source), "mfunc @f {\nblock0:\n    x64.pause template\n}\n");
     }
 
     #[test]
@@ -12770,7 +12770,7 @@ mod tests {
         // variable, reached this time because a program wrote it out by hand.
         assert_eq!(
             lower(&mut names, &source),
-            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 [fs:0]\n    \
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rm_64 template [fs:0]\n    \
              x64.ret_val_64 %0($rax)\n}\n"
         );
     }
@@ -12858,7 +12858,7 @@ mod tests {
         // The source is the register itself and the destination is one the allocator picks.
         assert_eq!(
             lower(&mut names, &source),
-            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rr_64 $rax($rax)\n    \
+            "mfunc @f {\nblock0:\n    %0:gpr = x64.mov_rr_64 template $rax($rax)\n    \
              x64.ret_val_64 %0($rax)\n}\n"
         );
     }
@@ -12875,7 +12875,7 @@ mod tests {
 
         assert_eq!(
             lower(&mut names, &source),
-            "mfunc @f {\nblock0:\n    x64.mov_mr_64 $r12($r12), [$rdi + 48]\n}\n"
+            "mfunc @f {\nblock0:\n    x64.mov_mr_64 template $r12($r12), [$rdi + 48]\n}\n"
         );
     }
 

@@ -178,12 +178,13 @@
 //! computation in general.
 
 use rucc_base::Interner;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_cost::Goal;
 use rucc_mir::{self as mir, Role};
-use rucc_target::{FlagInsts, MachineInsts, Narrowed, Reads, ShortInsts};
+use rucc_target::{FlagInsts, MachineInsts, Narrowed, Reads, RegClass, ShortInsts};
 
 use crate::changes::{self, Changes, Plan};
+use crate::through;
 
 /// Rewrites every instruction that has a shorter spelling nothing would notice.
 ///
@@ -217,6 +218,9 @@ pub fn shorter(
     let mut counts = changes::Reads::of(func);
     let mut took = 0;
     let mut seen = Map::default();
+    // The blocks each register an addition hands on is live into, worked out once for each
+    // register a function asks about. See [`gathered_form`].
+    let mut wanted = Map::default();
     // Whether the rewrite that spends the condition state may be asked for at all. The narrower
     // instruction neither reads the state nor writes it, so it is not asked this and a function
     // this turns down still gets that one.
@@ -311,6 +315,25 @@ pub fn shorter(
                     known = Known::of(&mut seen, func, short, flags, names, inst);
                     // What stands there now writes no state and the state was already dead, so
                     // the walk past it is the one it would have taken past the addition.
+                }
+            }
+            // An addition and the copy behind it that hands the sum on, the same way round.
+            if free && !live && known.spreading {
+                let after = &insts[at + 1..];
+                let into = gathered_form(
+                    func,
+                    short,
+                    machine,
+                    names,
+                    &opcodes,
+                    after,
+                    inst,
+                    allocated,
+                    &mut wanted,
+                );
+                if into.is_some_and(|spread| spread.commit(func, &mut counts, names, machine)) {
+                    took += 1;
+                    known = Known::of(&mut seen, func, short, flags, names, inst);
                 }
             }
             // Adding one with the one in the opcode, which is the only rewrite here that is a
@@ -873,6 +896,23 @@ fn spread_form(
     if written.contains(&source) || func.cfi_after(copy).next().is_some() {
         return None;
     }
+    let plan = summed(short, machine, names, opcode, def, (source, second, disp))?;
+    Some(Spread { copy, inst, plan })
+}
+
+/// The address computation that writes `into` with the sum of a register, a second register or
+/// nothing, and a constant.
+///
+/// A register the addressing mode cannot take as an index goes in the base, and a sum of two of
+/// those is left as it is.
+fn summed(
+    short: &ShortInsts,
+    machine: &MachineInsts,
+    names: &Interner,
+    opcode: mir::Opcode,
+    into: mir::Operand,
+    (source, second, disp): (mir::Reg, Option<mir::Reg>, i32),
+) -> Option<Plan> {
     let unindexed = |reg: mir::Reg| reg.phys().is_some_and(|reg| short.unindexed.contains(&reg));
     let (base, index) = match second {
         None => (source, None),
@@ -882,17 +922,17 @@ fn spread_form(
     };
     let bare = machine.bare(names.resolve(opcode.name()));
     let &[want] = (machine.operands)(bare)? else { return None };
-    if want.class != def.class {
+    if want.class != into.class {
         return None;
     }
     let written = mir::Operand {
-        reg: def.reg,
+        reg: into.reg,
         class: want.class,
         role: want.role,
         constraint: want.constraint,
     };
-    let mut operands = vec![written, mir::Operand::read(base, def.class)];
-    operands.extend(index.map(|index| mir::Operand::read(index, def.class)));
+    let mut operands = vec![written, mir::Operand::read(base, into.class)];
+    operands.extend(index.map(|index| mir::Operand::read(index, into.class)));
     let amode = mir::Amode {
         base: Some(1),
         index: index.map(|_| 2),
@@ -900,8 +940,118 @@ fn spread_form(
         disp,
         ..mir::Amode::NOTHING
     };
-    let plan = Plan { opcode, operands, imm: None, amode: Some(amode), symbol: None };
+    Some(Plan { opcode, operands, imm: None, amode: Some(amode), symbol: None })
+}
+
+/// The address computation an addition and the copy right behind it are, when nothing reads the
+/// register the addition wrote once the copy has read it.
+///
+/// The other way round from [`spread_form`]. There the copy keeps the first source alive past the
+/// addition, and here the addition is the last thing done to its register before the allocator
+/// hands the sum to another one, most often an argument register for the call behind it. So `addq
+/// $464, %rbp` and `movq %rbp, %rdi` are `leaq 464(%rbp), %rdi`, which is what gcc writes, and the
+/// pair came up 384 times over the kernel bench objects where gcc had 52.
+///
+/// The register the addition wrote keeps what it held before, so it has to be dead behind the
+/// copy, which is asked of the rest of the block and then of every block it goes on to with
+/// [`crate::through::live_into`]. The stack pointer is never taken, since a push, a pop and a call
+/// read it without naming it, and a function with a landing pad is left alone, since a pad is
+/// reached by no edge and reads what a call left in a register it keeps.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the tables, the block after it and the allocator's mark are each read once"
+)]
+fn gathered_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    machine: &MachineInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    after: &[mir::Inst],
+    inst: mir::Inst,
+    allocated: &dyn Fn(mir::Inst) -> bool,
+    wanted: &mut Map<(mir::Reg, RegClass), Set<mir::Block>>,
+) -> Option<Spread> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let entry = short.spread(name)?;
+    let opcode = opcodes.iter().find(|&&(at, _)| at == entry.into).map(|&(_, opcode)| opcode)?;
+    if func[inst].mem.is_some() || func.cfi_after(inst).next().is_some() {
+        return None;
+    }
+    // An `asm` statement's addition stays the addition it was written as.
+    if !func.landings.is_empty() || func[inst].flags.contains(mir::Flags::TEMPLATE) {
+        return None;
+    }
+    let constant = func[inst].imm.map(|at| func[at].0);
+    let (def, first, second) = match (&func[func[inst].operands], constant) {
+        (&[def, first], Some(_)) => (def, first.reg, None),
+        (&[def, first, second], None) => (def, first.reg, Some(second.reg)),
+        _ => return None,
+    };
+    let stack = def.reg.phys().is_some_and(|reg| short.unindexed.contains(&reg));
+    if !def.role.is_def() || first != def.reg || stack {
+        return None;
+    }
+    let mut rest = after.iter().copied().filter(|&at| func.block_of(at).is_some());
+    let copy = rest.next()?;
+    let data = &func[copy];
+    let bare = names.resolve(data.opcode.name()).strip_prefix(short.prefix)?;
+    if !entry.copies.contains(&bare) || data.imm.is_some() || data.mem.is_some() {
+        return None;
+    }
+    if !allocated(copy) || func.cfi_after(copy).next().is_some() {
+        return None;
+    }
+    let &[to, from] = &func[data.operands] else { return None };
+    let shaped = to.role.is_def() && from.role == Role::Use && to.class == def.class;
+    if !shaped || from.class != def.class || from.reg != def.reg || to.reg == def.reg {
+        return None;
+    }
+    let block = func.block_of(copy)?;
+    if !unread(func, machine, names, (def.reg, def.class), (block, rest), wanted) {
+        return None;
+    }
+    let disp = match constant {
+        Some(value) => displacement(i128::from(value) * i128::from(entry.sign), entry.bits)?,
+        None => 0,
+    };
+    let plan = summed(short, machine, names, opcode, to, (def.reg, second, disp))?;
     Some(Spread { copy, inst, plan })
+}
+
+/// Whether nothing reads the register before something writes it, from the instructions given,
+/// which run to the end of their block, on into every block after it.
+///
+/// A name the target does not know might read anything, so it is taken as a read.
+fn unread(
+    func: &mir::Func,
+    machine: &MachineInsts,
+    names: &Interner,
+    target: (mir::Reg, RegClass),
+    (block, rest): (mir::Block, impl Iterator<Item = mir::Inst>),
+    wanted: &mut Map<(mir::Reg, RegClass), Set<mir::Block>>,
+) -> bool {
+    for at in rest {
+        let data = &func[at];
+        if !machine.has(names.resolve(data.opcode.name())) {
+            return false;
+        }
+        let operands = &func[data.operands];
+        let named = |def: bool| {
+            operands.iter().any(|operand| {
+                operand.role.is_def() == def && (operand.reg, operand.class) == target
+            })
+        };
+        if named(false) {
+            return false;
+        }
+        if named(true) {
+            return true;
+        }
+    }
+    let wanted = wanted.entry(target).or_insert_with(|| through::live_into(func, target));
+    let succs = &func[block].succs;
+    !succs.iter().any(|to| wanted.contains(&to.block) || to.args.contains(&target.0))
 }
 
 /// The number an address adds, for a constant an addition of that many bits carries.
@@ -1936,5 +2086,89 @@ mod tests {
         assert_eq!(takes(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, block), ["lea_64"]);
         assert_eq!(regs(&func, inst), [to, second, from]);
+    }
+
+    /// An addition of a constant into a register and the copy of the sum right behind it, built the
+    /// way the allocator leaves them when the sum goes on in another register.
+    fn added_then_copied(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        block: mir::Block,
+        add: &str,
+        (sum, into): (mir::Reg, mir::Reg),
+        value: i64,
+    ) -> mir::Inst {
+        let add = op(names, add);
+        let copy = op(names, "mov_rr_64");
+        let inst = func.build(block, add).operand(reuse(sum)).uses(sum, GPR).imm(value).finish();
+        func.build(block, copy).def(into, GPR).uses(sum, GPR).finish();
+        inst
+    }
+
+    /// The other way round from the sixth rewrite. The sum is written straight into the register
+    /// the copy handed it to, and the copy is gone, when nothing reads the first register after.
+    #[test]
+    fn an_addition_and_the_copy_behind_it_become_an_address_computation() {
+        for (add, value, into, disp) in
+            [("add_ri_64", 464, "lea_64", 464), ("sub_ri_64", 16, "lea_64", -16)]
+        {
+            let (mut names, mut func, block) = empty();
+            let [sum, to] = [(); 2].map(|()| func.new_vreg(GPR));
+            let inst = added_then_copied(&mut func, &mut names, block, add, (sum, to), value);
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{add}");
+            assert_eq!(shape(&func, &names, block), [into], "{add}");
+            assert_eq!(regs(&func, inst), [to, sum], "{add}");
+            let amode = func[inst].mem.map(|at| func[at]).expect("an address computation");
+            assert_eq!((amode.base, amode.index, amode.disp), (Some(1), None, disp), "{add}");
+        }
+    }
+
+    /// The first register keeps what it held before the addition, so a read of it after the copy
+    /// keeps the pair, and a write of it first lets the pair go.
+    #[test]
+    fn an_addition_whose_register_is_read_after_the_copy_stays() {
+        for (after, taken) in [("read", false), ("written", true)] {
+            let (mut names, mut func, block) = empty();
+            let [sum, to, other] = [(); 3].map(|()| func.new_vreg(GPR));
+            added_then_copied(&mut func, &mut names, block, "add_ri_64", (sum, to), 8);
+            let mov = op(&mut names, "mov_rr_64");
+            if after == "read" {
+                func.build(block, mov).def(other, GPR).uses(sum, GPR).finish();
+            } else {
+                func.build(block, mov).def(sum, GPR).uses(other, GPR).finish();
+            }
+
+            assert_eq!(takes(&mut func, &mut names), usize::from(taken), "{after}");
+            assert_eq!(shape(&func, &names, block)[0] == "lea_64", taken, "{after}");
+        }
+    }
+
+    /// The address computation writes no condition state, so a byte reading what the addition left
+    /// keeps the pair.
+    #[test]
+    fn an_addition_whose_state_something_reads_keeps_the_copy_behind_it() {
+        let (mut names, mut func, block) = empty();
+        let [sum, to, byte] = [(); 3].map(|()| func.new_vreg(GPR));
+        added_then_copied(&mut func, &mut names, block, "add_ri_64", (sum, to), 8);
+        let set = op(&mut names, "set_e");
+        func.build(block, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["add_ri_64", "mov_rr_64", "set_e"]);
+    }
+
+    /// The stack pointer is read by a push, a pop and a call without being named, so a sum in it is
+    /// never moved anywhere else.
+    #[test]
+    fn an_addition_to_the_stack_pointer_keeps_the_copy_behind_it() {
+        use rucc_target::x86_64::{RAX, RSP};
+
+        let (mut names, mut func, block) = empty();
+        let [sum, to] = [RSP, RAX].map(mir::Reg::physical);
+        added_then_copied(&mut func, &mut names, block, "add_ri_64", (sum, to), 16);
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["add_ri_64", "mov_rr_64"]);
     }
 }
