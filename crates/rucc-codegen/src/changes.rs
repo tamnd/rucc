@@ -210,7 +210,7 @@ impl Reads {
     }
 
     /// Records one read more.
-    fn gained(&mut self, reg: mir::Reg) {
+    pub(crate) fn gained(&mut self, reg: mir::Reg) {
         match reg.number() {
             Some(number) => {
                 let number = number as usize;
@@ -230,7 +230,7 @@ impl Reads {
     }
 
     /// Records one read fewer.
-    fn lost(&mut self, reg: mir::Reg) {
+    pub(crate) fn lost(&mut self, reg: mir::Reg) {
         let count = match reg.number() {
             Some(number) => self.virtuals.get_mut(number as usize),
             None => self.physical.get_mut(physical(reg)),
