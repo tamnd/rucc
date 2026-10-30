@@ -1837,7 +1837,8 @@ fn tested_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     let (Opcode::LShr, [x, s]) = producer(func, shifted)? else { return None };
     let ty = func[x].ty;
     let bits = ty.bits();
-    if !ty.is_int() || !ty.is_scalar() || bits > 64 {
+    let wide = bits > 64; // not a threshold: the mask is held in a `u64`.
+    if !ty.is_int() || !ty.is_scalar() || wide {
         return None;
     }
     let s = u32::try_from(constant(func, s)?).ok().filter(|&s| s < bits)?;
