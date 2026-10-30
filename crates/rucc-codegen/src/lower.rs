@@ -4909,8 +4909,12 @@ impl<'a> Lowering<'a> {
     /// x86-64 at `-O2` for depths zero to three of both builtins.
     ///
     /// The function is given a frame pointer because of this, which is what [`Stack::walks_frames`]
-    /// carries out to the layout. A depth of zero needs it as the answer and every depth above zero
-    /// needs it as the start, so there is no case here where it is not wanted.
+    /// carries out to the layout. A frame address needs it as the answer and every depth above zero
+    /// needs it as the start. A function's own return address does not: where the call put it is
+    /// one word below the caller's arguments, which the stack pointer reaches as well as the frame
+    /// pointer does, so it is read from there on a machine that keeps it on the stack. gcc 16.2.0
+    /// does the same, and the kernel's `_RET_IP_` is this, in the allocator and in every lock, where
+    /// a frame pointer kept for it was a register taken from every such function.
     ///
     /// How far the chain actually reaches is the program's business and not this one's. A caller
     /// compiled without a frame pointer has no link in it for the walk to follow, so a depth above
@@ -4927,7 +4931,11 @@ impl<'a> Lowering<'a> {
         let moves =
             self.selector.frame.moves(self.gpr).expect("a class the target says how to move");
         let load = self.named(moves.load);
-        self.stack.walks_frames = true;
+        let stacked = self.conv.return_address > 0 && !self.on_aarch64();
+        let own_return = returning && depth == 0 && stacked;
+        if !own_return {
+            self.stack.walks_frames = true;
+        }
 
         // Where the walk is up to. The frame pointer to begin with, and the register the last load
         // wrote after that.
@@ -4963,7 +4971,7 @@ impl<'a> Lowering<'a> {
             base = next;
         }
 
-        if returning && late && depth == 0 {
+        if own_return {
             own(self, word, reg);
         } else if returning && self.on_aarch64() {
             // A return address a callee signed has the signature in its top bits, which is no
