@@ -193,7 +193,7 @@ enum Fate {
     Trim { skip: i64, size: u64 },
     /// Something may read it, or a path from it goes round a loop.
     Kept,
-    /// The walk reached [`DSE_WALK_LIMIT`] first.
+    /// The walk reached [`DSE_WALK_LIMIT`] first, and narrowing it would have saved nothing.
     TooFar,
 }
 
@@ -263,12 +263,23 @@ impl Walk<'_> {
         // fewer live bytes can only be read less.
         let mut entered: Map<Block, Vec<Live>> = Map::default();
         let mut stack = vec![(home, next, Live::new(store.lo, store.hi))];
-        while let Some((block, from, mut live)) = stack.pop() {
+        let mut far = false;
+        'walk: while let Some((block, from, mut live)) = stack.pop() {
             let mut ended = false;
             for inst in self.func.insts(block).skip(from) {
                 steps += 1;
                 if steps > rucc_cost::param!(DSE_WALK_LIMIT) {
-                    return Fate::TooFar;
+                    // Whatever is still live on this path or on one not walked yet may be read,
+                    // which is still enough to narrow a fill. `__kmalloc_noprof` in mm/slub.c
+                    // fills a 32 byte struct, stores its first two words and goes on for longer
+                    // than the limit, and the whole fill stayed where gcc writes the other two.
+                    let mut rest = hull(needed, live.hull());
+                    for (_, _, pending) in &stack {
+                        rest = hull(Some(rest), pending.hull());
+                    }
+                    needed = Some(rest);
+                    far = true;
+                    break 'walk;
                 }
                 let (lo, hi) = live.hull();
                 if let Some(read) = self.read(store, inst, lo, hi) {
@@ -328,6 +339,14 @@ impl Walk<'_> {
                 stack.push((successor, 0, live.clone()));
             }
         }
+        match self.narrowed(store, needed) {
+            Fate::Kept if far => Fate::TooFar,
+            fate => fate,
+        }
+    }
+
+    /// What a store comes to when only these bytes of it may be read.
+    fn narrowed(&self, store: &Store, needed: Option<(i128, i128)>) -> Fate {
         match needed {
             None => Fate::Dead,
             Some((start, end)) if store.bulk && (store.lo < start || end < store.hi) => {
@@ -890,6 +909,27 @@ block0(%0: ptr):
         assert!(out.contains("size 8, align 8"), "{out}");
         assert!(out.contains("iconst.i64 8"), "eight bytes in, {out}");
         assert!(!out.contains("size 16"), "{out}");
+    }
+
+    /// A walk that reaches its limit still narrows a fill to what is live on the paths it did not
+    /// finish.
+    #[test]
+    fn a_fill_whose_walk_runs_out_is_narrowed_to_what_is_still_live() {
+        let filler: String = (3..700).map(|at| format!("    %{at} = iconst.i32 {at}\n")).collect();
+        let out = cleaned(&format!(
+            "
+func @f(ptr), linkage(external) {{
+block0(%0: ptr):
+    %1 = iconst.i8 0
+    memset %0, %1, size 32, align 8
+    %2 = iconst.i64 7
+    store %2 -> %0, align 8
+{filler}    return
+}}
+"
+        ));
+        assert!(out.contains("size 24, align 8"), "{out}");
+        assert!(!out.contains("size 32"), "{out}");
     }
 
     /// A fill whose first byte is overwritten keeps its aligned start, since narrowing it by one
