@@ -54,11 +54,15 @@
 //!
 //! # What a block boundary is
 //!
-//! The end of everything this knows. The state a comparison leaves is not a register and nothing
-//! in this back end carries one from a block to its successors: the layout writes the jump that
-//! reads a comparison into the same block as the comparison, which is the only place one is read
-//! at all. So the walk starts each block knowing nothing, which is what makes it a walk rather
-//! than a dataflow.
+//! Mostly the end of everything this knows. The layout writes the jump that reads a comparison
+//! into the same block as the comparison, so a block starts knowing nothing, with one exception.
+//! A block whose only way in is a conditional branch starts with what was left at the end of the
+//! block that branched, since the branch read the condition state and wrote none of it.
+//! `if (x == 50) ... else if (x > 50)` is the case: gcc writes one `cmp` with a `je` and a `jg`
+//! behind it, and rucc wrote the comparison again in the block the `je` falls to. The branch at
+//! the end has to read the condition state for this, which keeps it live to the end of the block
+//! for the passes behind this one, and nothing that runs later moves an instruction across a block
+//! boundary.
 //!
 //! # What it will not do
 //!
@@ -128,9 +132,15 @@ pub fn redundant(
     let mut counts = changes::Reads::of(func);
     let mut gone = 0;
     let mut seen = Map::default();
+    let only = only_ways_in(func);
+    let mut ends: Map<mir::Block, Left> = Map::default();
     for block in func.blocks().collect::<Vec<_>>() {
         let sequence: Vec<mir::Inst> = func.insts(block).collect();
-        let mut left: Option<Left> = None;
+        let mut left = only.get(&block).and_then(|&from| {
+            let last = func.terminator(from)?;
+            let reads = opcode(func, insts, names, last).and_then(|name| insts.reads(name));
+            reads.and(ends.get(&from).cloned())
+        });
         for at in 0..sequence.len() {
             let inst = sequence[at];
             let does = *seen
@@ -161,8 +171,29 @@ pub fn redundant(
                 Does::Neither => stale(func, inst, left),
             };
         }
+        if let Some(left) = left {
+            ends.insert(block, left);
+        }
     }
     gone
+}
+
+/// The block each block is reached from, for the blocks reached from one block alone. Not the
+/// entry, which the caller reaches too, and not a block with parameters, whose edge writes them.
+fn only_ways_in(func: &mir::Func) -> Map<mir::Block, mir::Block> {
+    let mut from: Map<mir::Block, Option<mir::Block>> = Map::default();
+    for block in func.blocks() {
+        for call in &func[block].succs {
+            from.entry(call.block)
+                .and_modify(|seen| *seen = seen.filter(|&other| other == block))
+                .or_insert(Some(block));
+        }
+    }
+    let entry = func.entry();
+    from.into_iter()
+        .filter(|&(to, _)| Some(to) != entry && func[to].params.is_empty())
+        .filter_map(|(to, one)| Some((to, one.filter(|&one| one != to)?)))
+        .collect()
 }
 
 /// What the description says an opcode does to the condition state.
@@ -203,6 +234,7 @@ impl<'a> Does<'a> {
 }
 
 /// What the condition state holds, and which registers it is a statement about.
+#[derive(Clone)]
 struct Left {
     /// Which of the two ways it got there.
     how: How,
@@ -211,6 +243,7 @@ struct Left {
 }
 
 /// The two ways the condition state comes to hold something this pass can use.
+#[derive(Clone)]
 enum How {
     /// A comparison made it, and this is the question it asked.
     Made {
@@ -690,7 +723,8 @@ mod tests {
         assert_eq!(shape(&func, &names, block).len(), 2);
     }
 
-    /// The condition state does not cross a block boundary, and neither does this.
+    /// The condition state does not cross a block boundary that no branch on it stands at, and
+    /// neither does this.
     #[test]
     fn a_comparison_in_another_block_is_not_one_the_arithmetic_answers() {
         let (mut names, mut func, block) = empty();
@@ -705,5 +739,43 @@ mod tests {
 
         assert_eq!(takes(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, next).len(), 1);
+    }
+
+    /// `if (x == 50) ... else if (x > 50)`: a branch on a comparison, and the block it falls to
+    /// making the same comparison again. When that block is reached from nowhere else it starts
+    /// with the answer, and `with` sends a second way in to it when asked.
+    fn twice(with: bool) -> (Interner, mir::Func, mir::Block, usize) {
+        let (mut names, mut func, block) = empty();
+        let next = func.create_block();
+        let (yes, no, other) = (func.create_block(), func.create_block(), func.create_block());
+        let value = func.new_vreg(GPR);
+        let cmp = op(&mut names, "cmp_ri_32");
+        let e = op(&mut names, "jcc_e");
+        let le = op(&mut names, "jcc_le");
+        func.build(block, cmp).uses(value, GPR).imm(50).finish();
+        func.build(block, e).finish();
+        *func.succs_mut(block) = vec![mir::BlockCall::to(yes), mir::BlockCall::to(next)];
+        func.build(next, cmp).uses(value, GPR).imm(50).finish();
+        func.build(next, le).finish();
+        *func.succs_mut(next) = vec![mir::BlockCall::to(yes), mir::BlockCall::to(no)];
+        if with {
+            *func.succs_mut(other) = vec![mir::BlockCall::to(next)];
+        }
+        let gone = takes(&mut func, &mut names);
+        (names, func, next, gone)
+    }
+
+    #[test]
+    fn a_block_reached_only_by_a_branch_on_the_same_comparison_does_not_make_it_again() {
+        let (names, func, next, gone) = twice(false);
+        assert_eq!(gone, 1);
+        assert_eq!(shape(&func, &names, next), ["jcc_le"]);
+    }
+
+    #[test]
+    fn a_block_with_a_second_way_in_makes_the_comparison_again() {
+        let (names, func, next, gone) = twice(true);
+        assert_eq!(gone, 0);
+        assert_eq!(shape(&func, &names, next), ["cmp_ri_32", "jcc_le"]);
     }
 }
