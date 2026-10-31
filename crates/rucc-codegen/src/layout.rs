@@ -467,7 +467,7 @@ fn ways_in(func: &mir::Func, ends: &Ends) -> (Vec<Vec<mir::Block>>, Vec<bool>) {
 /// [`forward`] then sends the branch past it. Every register is a machine register by now, so the
 /// same instruction does the same thing at the top of the block it went to as at the bottom of each
 /// block that went there, as long as those blocks are the only ways in. So the block it goes into
-/// has no way in [`ways_in`] calls fixed and no parameters, and each block above has that one arm,
+/// has no way in `ways_in` calls fixed and no parameters, and each block above has that one arm,
 /// carrying nothing. The instruction is left where it is when it has unwind rows, names a block or
 /// a table, is one [`merge`] leaves where it is, or is in `held`. Run after [`merge`], which does
 /// not share a block of one instruction, since this can leave blocks of one that were two.
