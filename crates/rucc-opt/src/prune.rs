@@ -329,7 +329,7 @@ fn selects(func: &Func, cfg: &Cfg, ranges: &mut Ranges<'_>, plan: &mut Plan) {
                 continue;
             }
             let (Some(&[cond, yes, no]), Some(value)) =
-                (func[func[inst].args].first_chunk::<3>(), func[inst].results().next())
+                (func[func[inst].args].first_chunk(), func[inst].results().next())
             else {
                 continue;
             };
