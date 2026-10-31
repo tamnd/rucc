@@ -2388,6 +2388,15 @@ impl<'a> Lowering<'a> {
                     }
                     continue;
                 }
+                // A constant distance past a name, written again in each block that reads it as the
+                // name is. See [`Rebuilt::Past`].
+                Opcode::PtrAdd
+                    if self.source[inst]
+                        .first_result
+                        .is_some_and(|result| self.rebuilt(result).is_some()) =>
+                {
+                    continue;
+                }
                 // The address of a label and the branch that reads one, built here for the same
                 // reason and for one more. The reason is the same: what the first of them names is
                 // a block, which is not a value a rule pattern can bind, and there is nothing in
@@ -2813,8 +2822,10 @@ impl<'a> Lowering<'a> {
                 let before = self.out.terminator(here);
                 let reg = self.reg_of(value)?;
                 let written = self.out.terminator(here);
-                if matches!(self.rebuilt(value), Some(Rebuilt::Local(_) | Rebuilt::Name(_)))
-                    && written != before
+                if matches!(
+                    self.rebuilt(value),
+                    Some(Rebuilt::Local(_) | Rebuilt::Name(_) | Rebuilt::Past(_))
+                ) && written != before
                 {
                     late.extend(written);
                 }
@@ -10209,7 +10220,7 @@ impl<'a> Lowering<'a> {
             let good = match rebuilt {
                 None => true,
                 Some(Rebuilt::Local(_)) => false,
-                Some(Rebuilt::Constant(_) | Rebuilt::Name(_)) => {
+                Some(Rebuilt::Constant(_) | Rebuilt::Name(_) | Rebuilt::Past(_)) => {
                     self.written[value.index()] == Some((here, self.crossed))
                 }
             };
@@ -10250,6 +10261,21 @@ impl<'a> Lowering<'a> {
                 self.address_of(inst)?;
                 self.written[value.index()] = Some((here, self.crossed));
                 Ok(self.regs[value.index()].expect("an address is written into a register"))
+            }
+            Some(Rebuilt::Past(inst)) => {
+                let named = self.named_address(value);
+                let (symbol, offset) = named.ok_or_else(|| self.unsupported(inst))?;
+                let Reach::Mode(name) = self.selector.symbols.near else {
+                    return Err(self.unsupported(inst));
+                };
+                let disp = i32::try_from(offset).map_err(|_| self.unsupported(inst))?;
+                let reg = self.new_reg(value);
+                let mem = self.counted_from_table(mir::Mem { disp, ..mir::Mem::of(symbol) });
+                let opcode = self.named(name);
+                let span = self.source.span(inst);
+                self.out.build(here, opcode).at(span).def(reg, self.gpr).mem(mem).finish();
+                self.written[value.index()] = Some((here, self.crossed));
+                Ok(reg)
             }
             None => Ok(self.new_reg(value)),
         }
@@ -10302,6 +10328,23 @@ impl<'a> Lowering<'a> {
                 }
                 _ => None,
             },
+            Opcode::PtrAdd => {
+                let &[base, step] = &self.source[data.args] else { return None };
+                self.number(step)?;
+                let (Rebuilt::Name(name) | Rebuilt::Past(name)) = self.rebuilt(base)? else {
+                    return None;
+                };
+                let Extra::Symbol(symbol) = self.source[name].extra else { return None };
+                if !matches!(self.selector.symbols.near, Reach::Mode(_))
+                    || self.elsewhere.holds(symbol)
+                    || self.elsewhere.slot(symbol).is_some()
+                {
+                    return None;
+                }
+                let (_, offset) = self.named_address(data.first_result?)?;
+                i32::try_from(offset).ok()?;
+                Some(Rebuilt::Past(name))
+            }
             _ => None,
         }
     }
@@ -10442,6 +10485,13 @@ enum Rebuilt {
     /// makes gcc treat it the same way. A thread-local variable is not here, because its address
     /// is this thread's copy and on Mach-O that takes a call.
     Name(Inst),
+    /// A constant distance past the address of a name, `&d.key` for a static `d`, which is the
+    /// name's instruction here. Written the way the name is and with the distance in the same
+    /// address, `leaq d+16(%rip)` or `movq $d+16` under the kernel code model, where it was the
+    /// name and then an `addq $16` that the optimizer had hoisted out of a loop into a register the
+    /// callee saves. Only for a name reached directly, since one read from the global offset table
+    /// is a load and the distance goes after it.
+    Past(Inst),
 }
 
 /// What the arguments of one replacement came to.
@@ -12338,6 +12388,38 @@ mod tests {
         let text = lower(&mut names, &source);
         // One in each arm and not two in the second, which reads it twice.
         assert_eq!(text.matches("x64.lea_64 [@counter]").count(), 2, "{text}");
+        let (head, _) = text.split_once("block1:").expect("more than one block");
+        assert!(!head.contains("x64.lea_64"), "{text}");
+    }
+
+    /// A constant past a name, `&rename_lock.lock` handed to a call in each of two arms, is the
+    /// name and the distance in one address in each arm, and nothing is added to it.
+    #[test]
+    fn a_constant_past_a_name_is_one_address_written_in_every_block_that_reads_it() {
+        let i32 = Type::int(32);
+        let (mut names, mut source, entry, args) = blank(&[i32, i32]);
+        let lock = address_of(&mut source, entry, &mut names, "rename_lock");
+        let then = source.create_block();
+        let other = source.create_block();
+        let sig = source.add_signature(Signature::new().with_params(&[Type::PTR]));
+        let callee = names.intern("g");
+
+        let mut build = Builder::new(&mut source, entry);
+        let four = build.iconst(Type::int(64), 4);
+        let stepped = build.func().push_values(&[lock, four]);
+        let inner =
+            build.value(InstData { args: stepped, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let cond = build.icmp(IntPred::Slt, args[0], args[1]);
+        build.br_if(cond, then, &[], other, &[]);
+        for arm in [then, other] {
+            let mut build = Builder::new(&mut source, arm);
+            build.call(callee, sig, &[inner]);
+            build.ret(&[]);
+        }
+
+        let text = lower(&mut names, &source);
+        assert_eq!(text.matches("x64.lea_64 [@rename_lock + 4]").count(), 2, "{text}");
+        assert!(!text.contains("add"), "{text}");
         let (head, _) = text.split_once("block1:").expect("more than one block");
         assert!(!head.contains("x64.lea_64"), "{text}");
     }
