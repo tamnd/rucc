@@ -146,6 +146,18 @@ use rucc_ir::{
 /// back to on cases a table cannot hold.
 pub const LINEAR: usize = 32;
 
+/// How many clusters or fewer are tested one after another when no table may be written.
+///
+/// [`LINEAR`] was measured on a `switch` that picks a case at random, where every node of a search
+/// is a branch the machine guesses wrong half the time and a walk is one wrong guess at the end.
+/// Under `-fno-jump-tables` the `switch` that matters is the kernel's system call dispatch, which
+/// a program calls with the same few numbers over and over, so every branch is guessed right and
+/// what is left is how many instructions it takes. gcc searches down to one or two cases there.
+/// With thirty two the dispatch went down five nodes and then along up to thirty two cases, which
+/// was 56 instructions for `getppid` and 62 for `futex` against 19 and 25 with gcc. With three
+/// every system call takes 18 to 22.
+pub const BALANCED: usize = 3;
+
 /// Rewrites every `switch` in the function into branches, and leaves everything else alone.
 ///
 /// The function is changed in place, which is what makes this the last thing that reads the IR as
@@ -350,7 +362,8 @@ fn lower(
     let leaf = match force {
         Some(Force::Tree) => 1,
         Some(Force::Walk) => usize::MAX,
-        Some(Force::Table) | None => rules.leaf,
+        Some(Force::Table) | None if allowed => rules.leaf,
+        Some(Force::Table) | None => rules.leaf.min(BALANCED),
     };
     let lowered = Lowered {
         cases: count,
@@ -1101,8 +1114,8 @@ mod tests {
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::{
-        Force, Goal, LINEAR, Lowered, Rules, SWITCH_PEEL_PERCENT, blocks_for, lowered, lowered_by,
-        switches,
+        BALANCED, Force, Goal, LINEAR, Lowered, Rules, SWITCH_PEEL_PERCENT, blocks_for, lowered,
+        lowered_by, switches,
     };
 
     fn target() -> TargetInfo {
@@ -1534,6 +1547,26 @@ mod tests {
         let worst = deepest(&built.func);
         assert!(worst <= LINEAR + 2, "{count} cases in {worst} comparisons at worst");
         assert!(worst > LINEAR, "and the splits are being counted too");
+    }
+
+    /// Under `-fno-jump-tables` the search goes on down to a few cases, as gcc's does, so the
+    /// kernel's system call `switch` reaches any case in about as many tests as there are splits.
+    #[test]
+    fn without_tables_the_search_goes_down_to_a_few_cases() {
+        let count = 4 * LINEAR as i128;
+        let cases: Vec<i128> = (0..count).map(|at| at * SPARSE).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let mut built = built(&cases);
+        let _ = lowered(&mut built.func, Goal::Speed, None, false, u64::BITS);
+
+        let worst = deepest(&built.func);
+        let (mut splits, mut left) = (0, cases.len());
+        while left > BALANCED {
+            left = left.div_ceil(2);
+            splits += 1;
+        }
+        assert!(worst <= splits + BALANCED, "{count} cases in {worst} comparisons at worst");
+        lands(&mut built, &cases, &arms, &around(&cases, Type::int(32)), Type::int(32));
     }
 
     /// How far apart the cases of a test about the tree are, which is further than a table would
