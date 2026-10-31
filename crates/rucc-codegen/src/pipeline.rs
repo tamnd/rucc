@@ -1123,6 +1123,10 @@ pub fn compile_recording(
     if flags.code_model == CodeModel::Kernel {
         fold::spread(&mut func, machine.insts, names);
     }
+    // A name added to a register is one address before the readers are offered it.
+    if absolute {
+        fold::absolute_sums(&mut func, machine.insts, machine.shapes, names);
+    }
     fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending, absolute);
     // Where the address of a name is a number, the names the first run left behind a sum it
     // folded, see `fold::names`.

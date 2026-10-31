@@ -189,6 +189,29 @@ fn a_kernel_model_store_of_an_address_carries_it_as_the_immediate() {
     assert_eq!(types.iter().filter(|&&kind| kind == SIGNED).count(), 2, "{types:?}");
 }
 
+/// A row of a table of pointers picked by one number and a cell by another, the way the kernel
+/// reads `kmalloc_caches[type][index]` in every `__kmalloc`.
+const ROWS: &str = "\
+struct kc;
+extern struct kc *caches[4][14];
+struct kc *pick(unsigned long t, unsigned i) { return caches[t][i]; }
+";
+
+/// Under the kernel model the name is the displacement of the load, `caches(%rax,%rcx,8)`, with
+/// the row as its base, rather than a `movq $caches` and an `addq` of the row in front of it.
+#[test]
+fn a_kernel_model_row_of_a_table_is_read_off_the_name() {
+    let flags = ["-mcmodel=kernel", "-fno-pic", "-O2"];
+    let text = asm("rows", &flags, ROWS);
+    assert!(text.contains("caches(%r"), "{text}");
+    assert!(!text.contains("$caches"), "{text}");
+    let line = ["-c", "-mcmodel=kernel", "-fno-pic", "-O2"];
+    let (ok, object, err) = run("rows-object", &line, ROWS);
+    assert!(ok, "{err}");
+    let types = relocation_types(&object);
+    assert_eq!(types.iter().filter(|&&kind| kind == SIGNED).count(), 1, "{types:?}");
+}
+
 /// The kernel model and a position independent build cannot both be true, and gcc says so in these
 /// words, the default included, since the default here is a position independent executable.
 #[test]
