@@ -1148,13 +1148,16 @@ pub fn compile_recording(
     // Last of the three, so that a name read or written directly is still read from the
     // instruction pointer and only an address wanted as a value is written as a number.
     if flags.code_model == CodeModel::Kernel {
+        if std::ptr::eq(machine.shapes, &x86_64::MACHINE) {
+            fold::named_stores(&mut func, names, machine.shapes, true);
+        }
         fold::absolute(&mut func, machine.insts, names);
         fold::tables(&mut func, machine.insts, names);
     }
     // i386 outside position independent code, where the address of a name is a number a store
     // can carry. After the three above for the same reason as the kernel's.
     if std::ptr::eq(machine.shapes, &x86::MACHINE) && !elsewhere.based() {
-        fold::named_stores(&mut func, names, machine.shapes);
+        fold::named_stores(&mut func, names, machine.shapes, false);
     }
     // A run of stores of a zero reads it from a register on x86-64. After the folds, which may
     // have put a store's address together, and only where a level optimizes.
