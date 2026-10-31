@@ -63,7 +63,7 @@ fn a_function_with_counters_compiles_for_i686() {
 #[test]
 fn a_counter_is_added_to_in_two_halves() {
     let text = assembly("halves", LOOP, "-O2");
-    assert!(text.contains("8(%eax)"), "{text}");
-    assert!(text.contains("12(%eax)"), "{text}");
+    assert!(text.contains("addl\t$1"), "{text}");
+    assert!(text.contains("adcl\t$0"), "{text}");
     assert!(!text.contains("%rax"), "{text}");
 }
