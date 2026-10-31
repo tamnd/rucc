@@ -801,7 +801,7 @@ fn width(ty: Type, target: Target) -> Option<u64> {
     // A 64-bit target holds an `__int128` in two registers, and one read or written whole over
     // pieces is its halves shifted into place. That is `try_cmpxchg128` in the kernel, which
     // copies the old and new values through `union __u128_halves`.
-    let pair = ty.is_int() && bits == 128 && target.pointer == Some(8);
+    let pair = ty.is_int() && ty.bits() == 128 && target.pointer == Some(8);
     let whole = (ty.is_int() && matches!(bits, 8 | 16 | 32 | 64))
         || (ty.is_float() && matches!(bits, 16 | 32 | 64))
         || pair;
