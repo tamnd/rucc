@@ -75,8 +75,8 @@ use rucc_diag::{SourceMap, Span};
 use rucc_sema::{DeclId, DeclKind, Definition, Linkage, Stmt, StmtId, StorageDuration, Tast, Used};
 use rucc_target::{Lane, TargetInfo, TypeName};
 use rucc_types::{
-    ArrayLen, FunctionId, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type, TypeId,
-    TypeKind, Types,
+    ArrayLen, FunctionId, FunctionType, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type,
+    TypeId, TypeKind, Types,
 };
 
 /// Everything the debug information says about what a unit's addresses mean.
@@ -1006,12 +1006,30 @@ impl Walk<'_> {
                 };
                 Shape::Array { of: self.over(elem, name, of)?, count }
             }
+            // The name's function under another convention is a function type of its own, as gcc
+            // writes it, and it returns what the name's own declaration wrote. The kernel's
+            // `efi_get_time_t __efiapi *get_time` returns `efi_status_t` in gcc's BTF.
+            TypeKind::Function(which) if self.reconvened(ty, base) => {
+                let returned = self.chained.get(&name).copied();
+                self.subroutine(which, returned)?
+            }
             TypeKind::Function(which) => self.subroutine(which, Some((name, of)))?,
             _ => return self.shaped(ty, id),
         };
         let at = self.out.len();
         self.out.push(shape);
         Some(at)
+    }
+
+    /// Whether `ty` is the function `base` under another calling convention, as
+    /// `efi_get_time_t __efiapi *get_time` makes of it.
+    fn reconvened(&self, ty: Type, base: Type) -> bool {
+        let (TypeKind::Function(which), TypeKind::Function(was)) = (ty.kind, base.kind) else {
+            return false;
+        };
+        let (now, then) = (self.types.signature(which), self.types.signature(was));
+        ty.quals == base.quals
+            && *now == FunctionType { convention: now.convention, ..then.clone() }
     }
 
     /// The qualifiers `id` has over `of` on its elements, where the two are the same array apart

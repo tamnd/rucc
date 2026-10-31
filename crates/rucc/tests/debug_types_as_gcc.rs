@@ -1138,6 +1138,24 @@ struct svc { get_time_t __attribute__((ms_abi)) *get_time; long (__attribute__((
     assert_eq!((u64.tag, u64.name.as_deref()), (DW_TAG_TYPEDEF, Some("u64")));
 }
 
+/// A function typedef name under `ms_abi` returns the typedef name its own declaration wrote, as gcc
+/// writes it. The kernel's `efi_get_time_t __efiapi *get_time` returns `efi_status_t` in gcc's BTF.
+#[test]
+fn a_function_under_another_convention_keeps_its_return_name() {
+    let source = "\
+typedef unsigned long status_t;
+typedef status_t get_t(int *a);
+struct svc { get_t __attribute__((ms_abi)) *get; } v;
+";
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "convention-return", source));
+    let member = named(&all, DW_TAG_MEMBER, "get").expect("the member is described");
+    let pointer = at(&all, member.ty.expect("a member has a type"));
+    let function = at(&all, pointer.ty.expect("a pointer has a type"));
+    assert_eq!(function.tag, DW_TAG_SUBROUTINE);
+    let status = at(&all, function.ty.expect("the function returns a value"));
+    assert_eq!((status.tag, status.name.as_deref()), (DW_TAG_TYPEDEF, Some("status_t")));
+}
+
 /// A cast to an array typedef name with a qualifier or an address space over it keeps the name, as
 /// gcc keeps it. C puts the qualifier on the elements, so the type of the cast is no longer the name
 /// itself. The kernel's `alloc_percpu(perf_trace_t)` casts to `typeof(perf_trace_t) __percpu *`,
