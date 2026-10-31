@@ -54,6 +54,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A number written into a register that already holds it is now left out on x86-64 as well as AArch64, so a loop counting from zero no longer zeroes its counter twice (#4008)
 - On x86-64 under `-mno-sse` a `memcpy` or `memset` whose size the program works out is now `rep movsq` or `rep stosq` when that size is a whole number of words no larger than 8192, as gcc does, so the maple tree copies of `size * sizeof(unsigned long)` behind `brk` and `mmap` are no longer calls to the kernel's `memcpy` and `memset`, and a `brk` grow and shrink runs about 17 percent fewer instructions (#4009)
 - Under `-fno-jump-tables` a switch now searches down to three cases before testing them one after another instead of 32, as gcc does, so the kernel's system call dispatch runs about 20 instructions for every call where `getppid` took 56 and `futex` took 62 (#4010)
+- On x86-64 a block reached only by a conditional branch now keeps the flags the comparison before that branch left, so `if (x == 50) ... else if (x > 50)` is one `cmpl` and a `je` and `jle`, as gcc writes it, instead of the same comparison twice (#4011)
 
 ## 0.30.15
 
