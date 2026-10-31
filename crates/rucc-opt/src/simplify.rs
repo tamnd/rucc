@@ -242,6 +242,23 @@
 //! else reads either shift, because otherwise both stay and the rewrite adds an instruction. It
 //! is written by hand because the rule tables cannot say that two operands are the same value.
 //!
+//! ### Two masks by one value
+//!
+//! `(a & m) ^ (b & m)` is `(a ^ b) & m`, and the same goes for `|` and `&`, since each bit of the
+//! three only reads the same bit of its operands. It only fires when nothing else reads either
+//! mask, so two `and`s become one, and with a 64 bit constant for `m` that is one `movabs` fewer.
+//! It is written by hand because the rule tables cannot say that two operands are the same value.
+//!
+//! ### A value kept under a mask and flipped outside it
+//!
+//! `(x & ~m) | (~x & m)` is `x ^ m`: the bits `m` has are flipped and the others are kept, and the
+//! two sides share no bit, so the same goes for `^` and `+` in place of the `|`. That is the
+//! kernel's `flip_protnone_guard` with `PTE_PFN_MASK` for `m`, which `change_protection` reaches
+//! through `pte_modify` on every entry it changes, and it was two `movabs`, an `and`, a `not`, an
+//! `and` and an `or` where gcc writes one `movabs` and an `xor`. Only with constants for both
+//! masks, whose bits it checks are each other's, and only when nothing else reads either side. It
+//! is written by hand because the rule tables cannot say that one constant is the other flipped.
+//!
 //! ### A bit tested after a shift
 //!
 //! `((x >> s) & c) != 0` is `(x & (c << s)) != 0`, and the same for `==`. The shift only moves the
@@ -366,6 +383,19 @@ const DISTRIBUTED: &str = "operation on two shifts by the same amount done befor
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_DISTRIBUTED: &str =
     "pair of shifts by one amount left alone, the pass ran out of fuel";
+
+/// Recorded once for each pair of masks by one value turned into one mask.
+const MASKED: &str = "operation on two masks by the same value done before one mask";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_MASKED: &str = "pair of masks by one value left alone, the pass ran out of fuel";
+
+/// Recorded once for each value kept on one side of a mask and flipped on the other made an `xor`.
+const FLIPPED_MASK: &str = "value kept under a mask and flipped outside it made one xor";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_FLIPPED_MASK: &str =
+    "value kept under a mask and flipped outside it left alone, the pass ran out of fuel";
 
 /// Recorded once for each bit tested after a shift that is tested where it is instead.
 const TESTED: &str = "bit tested after a shift tested in place";
@@ -864,6 +894,12 @@ impl<'a> Finder<'a> {
         }
         if let Some(rewrite) = distributed_shift(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), DISTRIBUTED, NO_FUEL_DISTRIBUTED));
+        }
+        if let Some(rewrite) = distributed_mask(func, inst, &self.uses) {
+            return Some((Found::Rule(rewrite), MASKED, NO_FUEL_MASKED));
+        }
+        if let Some(rewrite) = flipped_mask(func, inst, &self.uses) {
+            return Some((Found::Rule(rewrite), FLIPPED_MASK, NO_FUEL_FLIPPED_MASK));
         }
         if let Some(rewrite) = tested_bits(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), TESTED, NO_FUEL_TESTED));
@@ -1781,6 +1817,88 @@ fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
         lhs: Operand::Built(Box::new(inner)),
         rhs: Operand::Value(s),
     })
+}
+
+/// `(a & m) op (b & m)` as `(a op b) & m`, for an `op` of `&`, `|` or `^` and two masks nothing
+/// else reads. The mask is one value or one constant written twice.
+fn distributed_mask(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
+    let data = &func[inst];
+    let op = data.opcode;
+    if !matches!(op, Opcode::And | Opcode::Or | Opcode::Xor) {
+        return None;
+    }
+    let ty = func[data.first_result?].ty;
+    if !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let [lhs, rhs] = func[data.args] else { return None };
+    let alone = |value: Value| uses.get(value.index()) == Some(&1);
+    if lhs == rhs || !alone(lhs) || !alone(rhs) {
+        return None;
+    }
+    let (Opcode::And, [a, m]) = producer(func, lhs)? else { return None };
+    let (Opcode::And, [b, n]) = producer(func, rhs)? else { return None };
+    let same = m == n || constant(func, m).is_some_and(|c| constant(func, n) == Some(c));
+    if !same || func[a].ty != ty {
+        return None;
+    }
+    let inner = Nested {
+        opcode: op,
+        pred: None,
+        bits: ty.bits(),
+        args: vec![Operand::Value(a), Operand::Value(b)],
+    };
+    Some(Rewrite::Built {
+        opcode: Opcode::And,
+        pred: None,
+        lhs: Operand::Built(Box::new(inner)),
+        rhs: Operand::Value(m),
+    })
+}
+
+/// `(x & c) | (~x & d)` as `x ^ d`, where `d` is every bit `c` is not, and the same with `^` or
+/// `+` in place of the `|`, since the two sides share no bit. See the module documentation.
+fn flipped_mask(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
+    let data = &func[inst];
+    if !matches!(data.opcode, Opcode::Or | Opcode::Xor | Opcode::Add) {
+        return None;
+    }
+    let ty = func[data.first_result?].ty;
+    if !ty.is_int() || !ty.is_scalar() || ty.bits() > 64 {
+        return None;
+    }
+    let [lhs, rhs] = func[data.args] else { return None };
+    let alone = |value: Value| uses.get(value.index()) == Some(&1);
+    if lhs == rhs || !alone(lhs) || !alone(rhs) {
+        return None;
+    }
+    let (Opcode::And, [p, c]) = producer(func, lhs)? else { return None };
+    let (Opcode::And, [q, d]) = producer(func, rhs)? else { return None };
+    let (c, d) = (constant(func, c)?, constant(func, d)?);
+    let ones = (1i128 << ty.bits()) - 1;
+    if (c ^ d) & ones != ones {
+        return None;
+    }
+    // The constant is the one on the side that reads the flipped value.
+    let (x, number) = if flipped(func, q) == Some(p) {
+        (p, d)
+    } else if flipped(func, p) == Some(q) {
+        (q, c)
+    } else {
+        return None;
+    };
+    Some(Rewrite::Built {
+        opcode: Opcode::Xor,
+        pred: None,
+        lhs: Operand::Value(x),
+        rhs: Operand::Constant { number, bits: ty.bits() },
+    })
+}
+
+/// The value `value` is every bit of, flipped, `x ^ -1` for an `x`.
+fn flipped(func: &Func, value: Value) -> Option<Value> {
+    let (Opcode::Xor, [x, ones]) = producer(func, value)? else { return None };
+    (constant(func, ones) == Some(-1)).then_some(x)
 }
 
 /// `(x & c) & d` as `x & (c & d)`, and the same for `|` and `^`. See the module documentation for
@@ -3591,6 +3709,78 @@ mod tests {
                 result = operands(&func, result)[0];
             }
             assert_eq!(came_from(&func, result).0, op, "{op:?} of two {shift:?}");
+        }
+    }
+
+    /// `(a & m) ^ (b & m)` is `(a ^ b) & m`, which is how the kernel tells which of a page
+    /// table entry's bits changed, with one constant written twice for the mask.
+    #[test]
+    fn an_operation_on_two_masks_by_one_constant_is_done_before_one_mask() {
+        for op in [Opcode::And, Opcode::Or, Opcode::Xor] {
+            let ty = Type::int(64);
+            let (_, mut func, block) = one_block(ty);
+            let a = func.append_param(block, ty);
+            let b = func.append_param(block, ty);
+            let mut build = Builder::new(&mut func, block);
+            let m = build.iconst(ty, 0xffff_f000);
+            let left = build.binary(Opcode::And, a, m, Flags::NONE);
+            let n = build.iconst(ty, 0xffff_f000);
+            let right = build.binary(Opcode::And, b, n, Flags::NONE);
+            let both = build.binary(op, left, right, Flags::NONE);
+            build.ret(&[both]);
+            assert!(simplify(&mut func), "{op:?} of two masks");
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, Opcode::And, "{op:?} of two masks");
+            let args = operands(&func, result);
+            assert_eq!(number(&func, args[1]), 0xffff_f000);
+            if op != Opcode::And {
+                assert_eq!(came_from(&func, args[0]).0, op);
+                assert_eq!(operands(&func, args[0]), vec![a, b]);
+            }
+        }
+    }
+
+    /// `(x & c) op (~x & d)` returned from a function of `x` at 64 bits.
+    fn flipped_outside(op: Opcode, c: i128, d: i128) -> (Func, Block, Value) {
+        let ty = Type::int(64);
+        let (_, mut func, block) = one_block(ty);
+        let x = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let c = build.iconst(ty, c);
+        let kept = build.binary(Opcode::And, x, c, Flags::NONE);
+        let ones = build.iconst(ty, -1);
+        let flipped = build.binary(Opcode::Xor, x, ones, Flags::NONE);
+        let d = build.iconst(ty, d);
+        let other = build.binary(Opcode::And, flipped, d, Flags::NONE);
+        let both = build.binary(op, kept, other, Flags::NONE);
+        build.ret(&[both]);
+        (func, block, x)
+    }
+
+    /// The kernel's `flip_protnone_guard` keeps the bits outside `PTE_PFN_MASK` and flips the
+    /// ones inside it, which is one `xor` by the mask.
+    #[test]
+    fn a_value_kept_under_a_mask_and_flipped_outside_it_is_one_xor() {
+        const PFN: i128 = 0x000f_ffff_ffff_f000;
+        for op in [Opcode::Or, Opcode::Xor, Opcode::Add] {
+            let (mut func, block, x) = flipped_outside(op, !PFN, PFN);
+            assert!(simplify(&mut func), "{op:?}");
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, Opcode::Xor, "{op:?}");
+            let args = operands(&func, result);
+            assert_eq!(args[0], x);
+            assert_eq!(number(&func, args[1]), PFN, "{op:?}");
+        }
+    }
+
+    /// Two masks that share a bit, or that both leave one out, are not one value flipped.
+    #[test]
+    fn masks_that_overlap_or_leave_a_gap_are_not_a_flip() {
+        for (c, d) in [(0xff, -0x80), (0xff, -0x200)] {
+            let (mut func, block, _) = flipped_outside(Opcode::Or, c, d);
+            simplify(&mut func);
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, Opcode::Or, "{c:#x} and {d:#x}");
         }
     }
 

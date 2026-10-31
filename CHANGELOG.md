@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64 a function that keeps no frame pointer now hands out `rbp` right after `rbx` and before `r12`, as gcc does, rather than after `r15`, so a value kept across calls is more often in a register that needs no REX byte and the bench objects are 3858 bytes smaller (#3980)
 - On x86-64 an integer nothing reads above its low four bytes is spilled with a `movl` into a slot of four rather than a `movq` into a slot of eight, which is how gcc spills an `int`, found with the same bit demand analysis that takes out dead conversions (#3981)
 - On x86-64, a function that only reads its own return address now loads it from the stack pointer and keeps no frame pointer, the same as gcc. The kernel bench objects shrink by 768 bytes, 576 of them in slub.o. (#3982)
+- The optimizer now folds `(x & ~m) | (~x & m)` into `x ^ m` and `(a & m) ^ (b & m)` into `(a ^ b) & m`, which the kernel writes in `pte_modify` and when it checks which page table bits changed. (#4002)
 
 ### Fixed
 
