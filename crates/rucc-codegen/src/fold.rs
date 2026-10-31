@@ -720,6 +720,116 @@ fn named_alone(address: mir::Amode) -> bool {
         && address.table.is_none()
 }
 
+/// Writes the sum of a register and the address of a name as one `lea` of the name off that
+/// register, where the address of a name is a number, and gives back how many.
+///
+/// `caches[t][i]` for a static `struct kc *caches[4][14]` is the name, plus `t` times a row, plus
+/// `i` times eight. Selection writes the name and the row as a sum and the load reads the sum as
+/// its base with `i` as its index, so the sum cannot go into the load, which already has an index,
+/// and the name cannot go into the sum, which is not a memory operand. It came out as `movq
+/// $caches, %rax` and an `addq` in front of `(%rax,%rcx,8)` where gcc writes
+/// `caches(,%rax,8)` with the row and `i` added together first, and the kernel's `kmalloc_caches`
+/// is read that way in every `__kmalloc` there is.
+///
+/// As a `lea` the sum is an address with a base and a symbol, which a reader with an index can
+/// take whole, since the symbol is a displacement and the base and the index are both left: see
+/// [`candidate`]. Only for a name nothing else reads, in the block it is in, and only before
+/// [`addresses`], which is what hands the `lea` on to its reader. A sum nothing can take it into
+/// is still no longer than it was, one `lea` in place of a `mov` and an `add`.
+pub fn absolute_sums(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+) -> usize {
+    let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
+    let sum = mir::Opcode::new(names.join(insts.prefix, insts.sum));
+    let mut reads = Reads::of(func);
+    let mut joined = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        // The address of a name that one instruction reads, by the register it is in.
+        let mut named: Map<mir::Reg, (mir::Inst, mir::Amode)> = Map::default();
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            let opcode = func[inst].opcode;
+            let added = if opcode == lea {
+                let Some(address) = func[inst].mem.map(|mem| func[mem]) else { continue };
+                if named_alone(address) {
+                    if let Some((reg, 1)) = folding_def(func, &reads, inst) {
+                        named.insert(reg, (inst, address));
+                    }
+                    continue;
+                }
+                added(func, inst, address)
+            } else if opcode == sum && func[inst].mem.is_none() {
+                match &func[func[inst].operands] {
+                    [written, left, right] => Some((*written, *left, *right, 0)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let Some((written, left, right, disp)) = added else { continue };
+            let (other, &(from, address)) = match (named.get(&left.reg), named.get(&right.reg)) {
+                (_, Some(name)) => (left, name),
+                (Some(name), None) => (right, name),
+                (None, None) => continue,
+            };
+            if !written.reg.is_virtual() || !other.reg.is_virtual() || left.reg == right.reg {
+                continue;
+            }
+            let Some(disp) = i32::try_from(i64::from(address.disp) + disp).ok() else { continue };
+            let plan = Plan {
+                opcode: lea,
+                // A sum is tied to its left operand and a `lea` is tied to nothing.
+                operands: vec![
+                    mir::Operand::write(written.reg, written.class),
+                    mir::Operand::read(other.reg, other.class),
+                ],
+                imm: None,
+                amode: Some(mir::Amode {
+                    base: Some(1),
+                    disp,
+                    reach: mir::Reach::Absolute,
+                    ..address
+                }),
+                symbol: None,
+            };
+            let mut set = Changes::new();
+            set.rewrite(inst, plan);
+            set.remove(from);
+            if set.commit(func, &mut reads, names, machine).is_ok() {
+                joined += 1;
+            }
+        }
+    }
+    joined
+}
+
+/// What a `lea` adds when it is two registers and a displacement and nothing else: the register it
+/// writes, the two it adds and the displacement. Which is how selection writes the sum of two
+/// pointers' worth of registers, and what becomes an `add` once the allocator has a register to
+/// give it.
+fn added(
+    func: &mir::Func,
+    inst: mir::Inst,
+    address: mir::Amode,
+) -> Option<(mir::Operand, mir::Operand, mir::Operand, i64)> {
+    let plain = mir::Amode {
+        base: address.base,
+        index: address.index,
+        disp: address.disp,
+        ..mir::Amode::NOTHING
+    };
+    if address != plain {
+        return None;
+    }
+    let operands = &func[func[inst].operands];
+    let [written, ..] = operands else { return None };
+    let base = *operands.get(usize::from(address.base?))?;
+    let index = *operands.get(usize::from(address.index?))?;
+    Some((*written, base, index, i64::from(address.disp)))
+}
+
 /// Takes out every read of an argument the caller passed on the stack whose answer nothing reads,
 /// and gives back how many.
 ///
@@ -1547,8 +1657,12 @@ fn candidate(
         }
         // Counted from the global offset table in a register rather than from the instruction
         // pointer, which is i386 position independent code, and then there is room for the index
-        // beside the base: `arr@GOTOFF(%ebx,%eax,4)` is what gcc writes for `arr[i]`.
-        (None, Some(at)) if address.reach == mir::Reach::GotOff && address.base.is_some() => {
+        // beside the base: `arr@GOTOFF(%ebx,%eax,4)` is what gcc writes for `arr[i]`. A name that
+        // is a number and a register added to it is the same, see [`absolute_sums`].
+        (None, Some(at))
+            if matches!(address.reach, mir::Reach::GotOff | mir::Reach::Absolute)
+                && address.base.is_some() =>
+        {
             Some((*reader.get(usize::from(at))?, reading.scale))
         }
         (None, Some(_)) if address.symbol.is_some() || address.block.is_some() => return None,
