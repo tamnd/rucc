@@ -853,8 +853,8 @@ pub fn spread(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) ->
     wrote
 }
 
-/// Writes the address of a name straight into each store of it on i386, and gives back how many
-/// addresses that took.
+/// Writes the address of a name straight into each store of it on i386, or on x86-64 under the
+/// kernel code model when `wide` is set, and gives back how many addresses that took.
 ///
 /// Outside position independent code the address of a name on i386 is a number the linker fills
 /// in, and a store can carry it as its immediate. gcc writes `s->ops = &md_ops` as one
@@ -866,10 +866,21 @@ pub fn spread(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) ->
 /// reader is a store of the whole word whose address does not read the register too. Run last
 /// among the folds before allocation, after [`addresses`] has handed what it could to the loads
 /// and stores, so a name that is read or written directly is still read that way.
-pub fn named_stores(func: &mut mir::Func, names: &mut Interner, machine: &MachineInsts) -> usize {
-    let lea = mir::Opcode::new(names.intern("x64.lea_32"));
-    let store = mir::Opcode::new(names.intern("x64.mov_mr_32"));
-    let carry = mir::Opcode::new(names.intern("x64.mov_mi_32"));
+///
+/// The kernel code model promises every name is in the top 2 GiB, so on x86-64 the store's
+/// immediate is the name sign extended, `movq $md_ops, 8(%rax)` with `R_X86_64_32S`, which is what
+/// gcc writes for the kernel. There it runs before [`absolute`], which would otherwise have made
+/// the `lea` a `movq $md_ops` of its own.
+pub fn named_stores(
+    func: &mut mir::Func,
+    names: &mut Interner,
+    machine: &MachineInsts,
+    wide: bool,
+) -> usize {
+    let width = if wide { 64 } else { 32 };
+    let lea = mir::Opcode::new(names.intern(&format!("x64.lea_{width}")));
+    let store = mir::Opcode::new(names.intern(&format!("x64.mov_mr_{width}")));
+    let carry = mir::Opcode::new(names.intern(&format!("x64.mov_mi_{width}")));
     let mut leas = Vec::new();
     let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
     let mut writes: Map<mir::Reg, usize> = Map::default();
@@ -899,10 +910,20 @@ pub fn named_stores(func: &mut mir::Func, names: &mut Interner, machine: &Machin
         let Some(readers) = reads.get(&written.reg).filter(|readers| !readers.is_empty()) else {
             continue;
         };
+        // On x86-64 the store is encoded here rather than by an assembler, and an instruction
+        // has room for one name, so a store whose own address names something keeps the `lea`.
+        let plain = |reader: mir::Inst| {
+            !wide
+                || func[reader].mem.is_some_and(|mem| {
+                    let amode = func[mem];
+                    amode.symbol.is_none() && amode.table.is_none() && amode.block.is_none()
+                })
+        };
         let stores = readers.iter().all(|&(reader, at)| {
             func[reader].opcode == store
                 && at == 0
                 && func[reader].symbol.is_none()
+                && plain(reader)
                 && readers.iter().filter(|&&(other, _)| other == reader).count() == 1
         });
         if !stores {

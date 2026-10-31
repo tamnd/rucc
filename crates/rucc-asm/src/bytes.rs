@@ -1002,6 +1002,8 @@ impl Assembler<'_> {
             // The other thing an address can name, which is a place in this same function and so is
             // a distance nothing outside the file has to be told about.
             let mut labelled = None;
+            // Whether the immediate is the address of a name, which is then the last four bytes.
+            let mut carried = false;
             for arg in machine.args {
                 values.push(match *arg {
                     Arg::Reg(at, width) => {
@@ -1033,8 +1035,18 @@ impl Assembler<'_> {
                     Arg::Through => {
                         Value::Reg(self.phys(operands[defs(operands)], spelled)?, Width::Quad)
                     }
-                    // An immediate that is the address of a name is i386's, which a listing takes
-                    // to the assembler. See `fold::named_stores`.
+                    // The address of a name stored under the kernel code model, which is the
+                    // four byte immediate of a `movq` that the machine sign extends, the way gcc
+                    // writes `movq $md_ops, 8(%rax)`. See `fold::named_stores`.
+                    Arg::Imm if machine.mnemonic == "movq" && data.symbol.is_some() => {
+                        let symbol = data.symbol.map(|symbol| self.names.resolve(symbol));
+                        let disp = data.imm.map_or(0, |imm| self.func[imm].0);
+                        wanted = symbol.map(|symbol| (symbol.to_owned(), Reference::Signed, disp));
+                        carried = true;
+                        Value::Imm(0)
+                    }
+                    // Any other immediate that is the address of a name is i386's, which a listing
+                    // takes to the assembler.
                     Arg::Imm if data.symbol.is_some() => {
                         return Err(Error::Encode {
                             func: self.name.to_owned(),
@@ -1142,7 +1154,7 @@ impl Assembler<'_> {
                     | Reference::GotKept
                     | Reference::Thread => holes.rip,
                     Reference::Section => holes.disp,
-                    Reference::Signed if immediate => Some(end - 4),
+                    Reference::Signed if immediate || carried => Some(end - 4),
                     Reference::Signed => holes.disp,
                     // An address written into an image rather than reached by an instruction, and
                     // how far something is from the front of one, which is what a table of data

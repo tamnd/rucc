@@ -163,6 +163,32 @@ fn a_kernel_model_listing_writes_addresses_the_way_gcc_writes_them_for_a_kernel(
     assert!(text.contains("call\tperhaps"), "{text}");
 }
 
+/// A pointer to a name stored into a structure, the way a driver fills in its operations.
+const STORED: &str = "\
+struct ops { int x; };
+extern const struct ops md_ops, b_ops;
+struct s { long a; const struct ops *ops; };
+void set(struct s *p) { p->ops = &md_ops; }
+void set_past(struct s *p, int i) { p[i].ops = &b_ops + 1; }
+";
+
+/// Under the kernel model the store carries the name as its immediate, `movq $md_ops, 8(%rdi)`,
+/// which is what gcc writes, rather than a `movq $md_ops` into a register and a store of that.
+/// The object has the same instruction with `R_X86_64_32S` on its last four bytes.
+#[test]
+fn a_kernel_model_store_of_an_address_carries_it_as_the_immediate() {
+    let flags = ["-mcmodel=kernel", "-fno-pic", "-O2"];
+    let text = asm("stored", &flags, STORED);
+    assert!(text.contains("movq\t$md_ops, 8(%rdi)"), "{text}");
+    assert!(text.contains("movq\t$b_ops+4, 8(%rdi,"), "{text}");
+    assert!(!text.contains("ops, %r"), "{text}");
+    let line = ["-c", "-mcmodel=kernel", "-fno-PIE", "-O2"];
+    let (ok, object, err) = run("stored-object", &line, STORED);
+    assert!(ok, "{err}");
+    let types = relocation_types(&object);
+    assert_eq!(types.iter().filter(|&&kind| kind == SIGNED).count(), 2, "{types:?}");
+}
+
 /// The kernel model and a position independent build cannot both be true, and gcc says so in these
 /// words, the default included, since the default here is a position independent executable.
 #[test]
