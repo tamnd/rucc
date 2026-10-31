@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A function typedef name under `ms_abi` now returns the typedef name that its own declaration wrote, in the debug information. The kernel's `efi_get_time_t __efiapi *get_time` and the other members of `efi_runtime_services_t` returned `long unsigned int` in the BTF of a 7.3 X64 kernel built with rucc, and `efi_status_t` in gcc's.
 - On x86-64 a run of two or more stores of a zero in one block now stores it from a register, so a structure cleared a field at a time is `movq %rax, 8(%rsp)` at five bytes rather than `movq $0, 8(%rsp)` at nine (#3957)
 - Loop invariant motion now takes a read of a `const` global through `%fs` or `%gs` out of a loop that writes memory, which is `current` in the kernel, when the loop has a register to spare for it (#3958)
 - On x86-64 a test of a register against a constant whose bits all sit in the low byte now tests the byte, so `testq $4, %rax` at six bytes is `testb $4, %al` at two, which is what gcc writes (#3960)
