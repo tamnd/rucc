@@ -52,6 +52,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Under the kernel code model the sum of a register and the address of a name is now one `lea` the load can take whole, so `caches[t][i]` is read as `caches(%rax,%rcx,8)` instead of a `movq $caches` and an `addq` first (#4003)
 - When every block that goes to a block ends in the same instruction, that instruction now moves down into the block they go to, so a copy into the return register on two ways to a return is written once and the second way needs no block or jump (#4007)
 - A number written into a register that already holds it is now left out on x86-64 as well as AArch64, so a loop counting from zero no longer zeroes its counter twice (#4008)
+- On x86-64 under `-mno-sse` a `memcpy` or `memset` whose size the program works out is now `rep movsq` or `rep stosq` when that size is a whole number of words no larger than 8192, as gcc does, so the maple tree copies of `size * sizeof(unsigned long)` behind `brk` and `mmap` are no longer calls to the kernel's `memcpy` and `memset`, and a `brk` grow and shrink runs about 17 percent fewer instructions (#4009)
 
 ## 0.30.15
 

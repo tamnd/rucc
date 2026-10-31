@@ -28,6 +28,15 @@
 //! moves. A call to `memcpy` or `memset` of a constant size is rewritten the same way, and its
 //! answer is its first argument.
 //!
+//! A size the program works out is written the same way when it is a whole number of words no
+//! larger than 8192, which gcc reads off the value's range. The maple tree copies and clears parts
+//! of a node by `size * sizeof(unsigned long)` with `size` an `unsigned char`, and those were 17
+//! calls to `memcpy` and 7 to `memset` for every grow and shrink of `brk`, where gcc has one:
+//!
+//! ```text
+//!   to', from' = asm "rep movsq" to, from, size >> 3
+//! ```
+//!
 //! The string instruction is an `asm` statement rather than an instruction of its own, because a
 //! template already says everything about it the allocator has to know: which three registers it
 //! reads, which two it leaves changed, and that it writes memory.
@@ -46,8 +55,8 @@
 use rucc_base::Interner;
 use rucc_cost::Goal;
 use rucc_ir::{
-    AsmInfo, AttrSet, BlockCallList, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
-    Opcode, Restrict, Type, Value,
+    AsmInfo, AttrSet, BlockCallList, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo,
+    MemOrder, Opcode, Restrict, Type, Value,
 };
 
 use crate::{expand, retry};
@@ -75,6 +84,9 @@ struct Roll {
     flags: Flags,
     /// The value a call answers, which is `to`.
     answer: Option<Value>,
+    /// How many bytes, where the program works the count out, which is then a whole number of
+    /// words.
+    length: Option<Value>,
 }
 
 /// Rewrites every copy and fill of a known size that [`expand::bulk`] would make a call of, and
@@ -117,8 +129,12 @@ fn wanted(
         Opcode::Memcpy | Opcode::Memset => {
             let bulk = func.bulk(inst)?;
             let Extra::Mem(mem) = data.extra else { return None };
-            if bulk.length.is_some() || func.carries_mem(inst) {
+            if func.carries_mem(inst) {
                 return None;
+            }
+            if let Some(length) = bulk.length {
+                return worked_out(func, data.opcode, (bulk.to, bulk.with, length), most)
+                    .map(|roll| Roll { info: func[mem], flags: data.flags, ..roll });
             }
             (data.opcode, bulk.to, bulk.with, func[mem], data.flags, None)
         }
@@ -132,7 +148,11 @@ fn wanted(
                 _ => return None,
             };
             let &[to, with, length] = &func[data.args] else { return None };
-            let size = u64::try_from(expand::number(func, length)?).ok()?;
+            let Some(size) = expand::number(func, length) else {
+                return worked_out(func, opcode, (to, with, length), most)
+                    .map(|roll| Roll { answer: data.first_result, ..roll });
+            };
+            let size = u64::try_from(size).ok()?;
             let info = MemInfo {
                 size,
                 align: 1,
@@ -165,7 +185,104 @@ fn wanted(
         return None;
     }
     let flags = flags.intersection(Flags::legal_on(Opcode::Store));
-    Some(Roll { opcode, to, with, byte, info, flags, answer })
+    Some(Roll { opcode, to, with, byte, info, flags, answer, length: None })
+}
+
+/// A copy or fill whose size the program works out, where that is a whole number of words and no
+/// more than `most` bytes.
+fn worked_out(
+    func: &Func,
+    opcode: Opcode,
+    (to, with, length): (Value, Value, Value),
+    most: u32,
+) -> Option<Roll> {
+    let (largest, zeros) = bounded(func, length, DEPTH)?;
+    let words = largest <= u128::from(most) && zeros >= WORD.trailing_zeros();
+    if !words || func[length].ty.bits() > 64 {
+        return None;
+    }
+    let byte = match opcode {
+        Opcode::Memset => expand::literal(func, with)?,
+        _ => 0,
+    };
+    let info = MemInfo {
+        size: 0,
+        align: 1,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    };
+    let length = Some(length);
+    Some(Roll { opcode, to, with, byte, info, flags: Flags::NONE, answer: None, length })
+}
+
+/// How far back through the instructions a size is followed.
+const DEPTH: u32 = 6;
+
+/// The largest a value can be and how many of its low bits are known to be zero, for a value
+/// built from a narrower number by widening, shifting it up, multiplying it by a constant or
+/// masking it.
+fn bounded(func: &Func, value: Value, depth: u32) -> Option<(u128, u32)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let bits = func[value].ty.bits();
+    if depth == 0 || bits >= 128 {
+        return None;
+    }
+    let fits = |n: u128| (n >> bits == 0).then_some(n);
+    let args = &func[func[inst].args];
+    match (func[inst].opcode, args) {
+        (Opcode::IConst, _) => {
+            let n = expand::number(func, value)?;
+            Some((n, n.trailing_zeros()))
+        }
+        (Opcode::ZExt, &[narrow]) => {
+            let all = (1u128 << func[narrow].ty.bits()) - 1;
+            let (largest, zeros) = bounded(func, narrow, depth - 1).unwrap_or((all, 0));
+            Some((largest.min(all), zeros))
+        }
+        // A number that cannot be negative widens the same either way, which is how an `int`
+        // worked out from a narrower count reaches a size.
+        (Opcode::SExt, &[narrow]) => {
+            let (largest, zeros) = bounded(func, narrow, depth - 1)?;
+            (largest >> (func[narrow].ty.bits() - 1) == 0).then_some((largest, zeros))
+        }
+        (Opcode::Shl, &[number, by]) => {
+            let by = u32::try_from(expand::number(func, by)?).ok().filter(|&by| by < bits)?;
+            let (largest, zeros) = bounded(func, number, depth - 1)?;
+            Some((fits(largest.checked_shl(by)?)?, zeros + by))
+        }
+        (Opcode::Mul, &[a, b]) => {
+            let (number, by) = match expand::number(func, b) {
+                Some(by) => (a, by),
+                None => (b, expand::number(func, a)?),
+            };
+            let (largest, zeros) = bounded(func, number, depth - 1)?;
+            Some((fits(largest.checked_mul(by)?)?, zeros + by.trailing_zeros()))
+        }
+        (Opcode::And, &[a, b]) => {
+            let (number, mask) = match expand::number(func, b) {
+                Some(mask) => (a, mask),
+                None => (b, expand::number(func, a)?),
+            };
+            let (largest, zeros) = bounded(func, number, depth - 1).unwrap_or((mask, 0));
+            Some((largest.min(mask), zeros.max(mask.trailing_zeros())))
+        }
+        _ => None,
+    }
+}
+
+/// The number of words in a length written as that number times the size of a word. The bound
+/// was checked before, so the product did not wrap and the number is the length over 8.
+fn words(func: &Func, length: Value) -> Option<Value> {
+    let Def::Result { inst, .. } = func[length].def else { return None };
+    let word = Some(u128::from(WORD));
+    match (func[inst].opcode, &func[func[inst].args]) {
+        (Opcode::Shl, &[number, by]) if expand::number(func, by) == Some(3) => Some(number),
+        (Opcode::Mul, &[a, b]) if expand::number(func, b) == word => Some(a),
+        (Opcode::Mul, &[a, b]) if expand::number(func, a) == word => Some(b),
+        _ => None,
+    }
 }
 
 /// One copy or fill, as the string instruction the module describes.
@@ -184,7 +301,27 @@ fn rewrite(func: &mut Func, names: &mut Interner, inst: Inst, roll: &Roll) {
         targets: BlockCallList::EMPTY,
     };
 
-    let count = expand::ahead_const(func, inst, Imm::int(i128::from(whole / WORD), index), index);
+    let count = match roll.length {
+        Some(length) => {
+            let (number, apart) = match words(func, length) {
+                Some(number) => (number, false),
+                None => (length, true),
+            };
+            let wide = if func[number].ty == index {
+                number
+            } else {
+                expand::ahead(func, inst, Opcode::ZExt, &[number], index)
+            };
+            if apart {
+                let shift = i128::from(WORD.trailing_zeros());
+                let by = expand::ahead_const(func, inst, Imm::int(shift, index), index);
+                expand::ahead(func, inst, Opcode::LShr, &[wide, by], index)
+            } else {
+                wide
+            }
+        }
+        None => expand::ahead_const(func, inst, Imm::int(i128::from(whole / WORD), index), index),
+    };
     let (args, results) = if copy {
         (vec![roll.to, roll.with, count], vec![Type::PTR, Type::PTR, index])
     } else {
