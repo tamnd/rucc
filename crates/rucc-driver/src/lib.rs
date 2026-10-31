@@ -1970,6 +1970,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 inputs.push(Input::linker(&arg[..2]));
                 inputs.push(Input::linker(&value));
             }
+            // The entry point, which gcc hands to the linker as `-e`, joined or as two words, and
+            // drops on a `-c` line. Kconfig's CC_HAS_AUTO_VAR_INIT_ZERO_ENABLER probe passes
+            // clang's `-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang`,
+            // which gcc reads as `-e` with that symbol and so takes.
+            _ if arg.starts_with("--entry") || arg.starts_with("-e") => {
+                let value = match arg.strip_prefix("--entry") {
+                    Some(rest) if rest.starts_with('=') => rest[1..].to_owned(),
+                    Some(_) => joined_or_next("--entry", 7, args, &mut i)?,
+                    None => joined_or_next(arg, 2, args, &mut i)?,
+                };
+                inputs.push(Input::linker("-e"));
+                inputs.push(Input::linker(&value));
+            }
             _ if arg.starts_with("-Wl,") => {
                 // Commas separate arguments rather than being part of one, which is what makes
                 // `-Wl,-rpath,/opt/lib` two words to the linker and one word here.
@@ -8969,6 +8982,31 @@ mod tests {
         assert!(plan.link.is_none());
         assert!(plan.notes.is_empty(), "{:?}", plan.notes);
         assert_eq!(plan.jobs.len(), 1);
+    }
+
+    #[test]
+    fn the_entry_point_goes_to_the_linker_and_a_dash_c_line_drops_it() {
+        for line in [
+            &["-e", "start", "a.c"][..],
+            &["-estart", "a.c"],
+            &["--entry=start", "a.c"],
+            &["--entry", "start", "a.c"],
+        ] {
+            let mut words = vec![LINUX];
+            words.extend_from_slice(line);
+            let (_, plan) = linking(&words);
+            let link = plan.link.expect("expected a link step");
+            assert_eq!(
+                link.inputs[..2],
+                [link::Item::Linker("-e".into()), link::Item::Linker("start".into())],
+                "{line:?}"
+            );
+        }
+        // What Kconfig asks gcc in CC_HAS_AUTO_VAR_INIT_ZERO_ENABLER.
+        let flag = "-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang";
+        let (_, plan) = linking(&["-c", "-ftrivial-auto-var-init=zero", flag, "a.c"]);
+        assert!(plan.link.is_none());
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
     }
 
     #[test]
