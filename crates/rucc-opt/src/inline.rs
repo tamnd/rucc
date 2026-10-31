@@ -564,6 +564,13 @@ pub fn run(
     let later = RefCell::new(heap::Later { cyclic, ..heap::Later::default() });
     round(module, &wanted, &mut done, second_pass.and(Some(&later)));
     if let Some(second) = second_pass {
+        // gcc removes what its early inliner left unreachable before the second inliner measures
+        // the unit, so an `always_inline` body copied into every caller is neither part of the
+        // size the unit may grow from nor a caller whose calls are weighed. Left in, the four
+        // `__always_inline` helpers of mm/mprotect.c had the heap copy `pte_val` and `__pte` into
+        // their dead bodies, which used up the unit's growth before the live copies in
+        // `change_pte_range` were reached, and `pte_needs_flush` kept a call to `pte_val`.
+        while bury(module, &wanted) {}
         let later = later.into_inner();
         let (calls, elsewhere) = references(module);
         let cold = unlikely(module, names);
