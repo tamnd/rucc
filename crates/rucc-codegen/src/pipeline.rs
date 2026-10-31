@@ -1662,6 +1662,8 @@ pub fn compile_recording(
         let numbers: &[(&str, u32, held::From)] =
             if std::ptr::eq(machine.selector, &select::aarch64::SELECTOR) {
                 &held::A64_NUMBERS
+            } else if std::ptr::eq(machine.selector, &select::x86_64::SELECTOR) {
+                &held::X64_NUMBERS
             } else {
                 &[]
             };

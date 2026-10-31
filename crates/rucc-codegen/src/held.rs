@@ -1,4 +1,4 @@
-//! Taking out a write of a number into a register that holds that number already, on AArch64.
+//! Taking out a write of a number into a register that holds that number already.
 //!
 //! A constant is written where it is wanted rather than where the IR defined it, which is what
 //! [`crate::lower`] says about `reg_of`, so two blocks that want the same number write it twice.
@@ -48,13 +48,23 @@ pub const A64_NUMBERS: [(&str, u32, From); 4] = [
     ("a64.mov_rr_64", 64, From::Reg),
 ];
 
+/// The same four on x86-64, where a `movl` clears the top half of the register just as AArch64's
+/// narrow `mov` does. A zero is still a `movl $0` here: [`crate::shorten`] makes it an `xorl`
+/// later. A `movq` of a name carries a symbol and is not taken as a number.
+pub const X64_NUMBERS: [(&str, u32, From); 4] = [
+    ("x64.mov_ri_32", 32, From::Imm),
+    ("x64.mov_ri_64", 64, From::Imm),
+    ("x64.mov_rr_32", 32, From::Reg),
+    ("x64.mov_rr_64", 64, From::Reg),
+];
+
 /// What each register is known to hold, by its class and its number in the class.
 type Known = Map<(u8, PhysReg), u64>;
 
 /// Takes out every write of a number into a register that has it, and gives back how many.
 ///
 /// `numbers` is the list of instructions that write one or copy one, which is [`A64_NUMBERS`] on
-/// AArch64 and empty anywhere this has not been looked at.
+/// AArch64, [`X64_NUMBERS`] on x86-64 and empty anywhere this has not been looked at.
 pub fn again(
     func: &mut Func,
     machine: &MachineInsts,

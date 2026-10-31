@@ -49,6 +49,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Under the kernel code model, storing the address of a global into memory is now one `movq $sym, off(%reg)` with the address as a sign-extended immediate, rather than a `mov $sym` into a register and a store of that register. (#4000)
 - Under the kernel code model the sum of a register and the address of a name is now one `lea` the load can take whole, so `caches[t][i]` is read as `caches(%rax,%rcx,8)` instead of a `movq $caches` and an `addq` first (#4003)
 - When every block that goes to a block ends in the same instruction, that instruction now moves down into the block they go to, so a copy into the return register on two ways to a return is written once and the second way needs no block or jump (#4007)
+- A number written into a register that already holds it is now left out on x86-64 as well as AArch64, so a loop counting from zero no longer zeroes its counter twice (#4008)
 
 ## 0.30.15
 
