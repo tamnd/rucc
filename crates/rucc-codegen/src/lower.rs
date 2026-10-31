@@ -926,14 +926,6 @@ fn calls_out_rv(template: &str) -> bool {
         .any(|word| matches!(word, "call" | "jal" | "jalr"))
 }
 
-/// Whether a template calls out to a function, which is a `call` anywhere in it as a word of its
-/// own, whatever suffix it has.
-fn calls_out(template: &str) -> bool {
-    template
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .any(|word| matches!(word, "call" | "callq" | "calll" | "callw"))
-}
-
 /// Whether a template writes `%P` on an operand that is spelled as a constant, which `constant`
 /// says of a value.
 ///
@@ -6812,7 +6804,11 @@ impl<'a> Lowering<'a> {
             (
                 Self::clobbered_x86(inst, &clobbers, self.gpr, self.conv.sse_class)?,
                 spelled_registers(template, self.gpr, self.conv.sse_class),
-                calls_out(template),
+                // A call in an x86 template writes what the list names and nothing more, as gcc
+                // reads it. The kernel's paravirt calls name every register the called function
+                // may write, and its callee-save thunks name fewer, so a value kept across one
+                // stays in a register the call does not write.
+                false,
             )
         };
         // The ones past this are only spelled, which the list says nothing about.
@@ -12717,16 +12713,29 @@ mod tests {
         assert!(!text.contains("$rsi") && !text.contains("$r11"), "{text}");
     }
 
-    /// A template with a call in it, or one with no colons at all, takes away every register a call
-    /// may write, since what it writes is more than the list and the text say.
+    /// A template with no colons at all takes away every register a call may write, since there is
+    /// no list to say what it writes.
     #[test]
-    fn a_kept_template_that_calls_out_writes_what_a_call_writes() {
-        for (template, clobbers) in [("call foo", "memory"), ("lfence", "")] {
+    fn a_kept_template_with_no_list_writes_what_a_call_writes() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        clobbering(&mut source, block, &mut names, "lfence", "", "", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+        let text = lower(&mut names, &source);
+        assert!(text.contains("$rsi") && text.contains("$r11"), "{text}");
+    }
+
+    /// A template with a call in it writes what its list names and nothing more, as gcc reads it.
+    /// The kernel's paravirt calls are this shape: the list names every register the function
+    /// called may write, and a callee-save thunk is called with fewer named.
+    #[test]
+    fn a_kept_template_that_calls_out_writes_what_its_list_names() {
+        for template in ["hcf\n\tcall foo", "hcf\n\tcall *%%rax", "hcf\n\tcallq *pv_ops+8(%%rip)"] {
             let (mut names, mut source, block, _) = blank(&[]);
-            clobbering(&mut source, block, &mut names, template, "", clobbers, &[], &[]);
+            clobbering(&mut source, block, &mut names, template, "", "rdx, memory", &[], &[]);
             Builder::new(&mut source, block).ret(&[]);
             let text = lower(&mut names, &source);
-            assert!(text.contains("$rsi") && text.contains("$r11"), "{template}: {text}");
+            assert!(text.contains("$rdx"), "{template}: {text}");
+            assert!(!text.contains("$rsi") && !text.contains("$r11"), "{template}: {text}");
         }
     }
 
@@ -12892,36 +12901,32 @@ mod tests {
 
     /// A template kept as text with more outputs than the convention keeps registers across a call
     /// gets back as many of the registers a call may write as it needs, from the end of the order,
-    /// and keeps the rest. Six outputs against five preserved registers is one handed back, which is
-    /// `r9`. `r11` and `r10` come back ahead of it without counting, since they are the allocator's
-    /// scratch and no operand is given one, but an output it spills is carried in one of them, which
-    /// it cannot be while the template claims it. The shape is `sodium_sub` in libsodium, whose
-    /// `sbbq` into memory the reader has no form for, and before this the allocator ran out of
-    /// registers on it. Only basic assembly and a template with a call in it claim them now, and
-    /// basic assembly has no outputs, so the shape is written with a call in it.
+    /// and keeps the rest. The shape is `sodium_sub` in libsodium, whose `sbbq` into memory the
+    /// reader has no form for, and before this the allocator ran out of registers on it. Only basic
+    /// assembly and, on AArch64, a template with a call in it claim them, and basic assembly has no
+    /// outputs, so the shape is written on AArch64 with a `bl` in it. Twelve outputs against the
+    /// ten registers AAPCS64 preserves is more than fit, so some are handed back.
     #[test]
     fn a_template_kept_as_text_with_more_outputs_than_are_kept_gets_registers_back() {
         let i64 = Type::int(64);
         let (mut names, mut source, block, _) = blank(&[]);
-        let outputs = [i64; 6];
+        let outputs = [i64; 12];
         let asm = assembly(
             &mut source,
             block,
             &mut names,
-            "hcf %0, %1, %2, %3, %4, %5; call f",
-            "=&r,=&r,=&r,=&r,=&r,=&r",
+            "hcf %0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11\n\tbl f",
+            "=&r,=&r,=&r,=&r,=&r,=&r,=&r,=&r,=&r,=&r,=&r,=&r",
             &[],
             &outputs,
         );
         let produced: Vec<Value> = source[asm].results().collect();
         Builder::new(&mut source, block).ret(&produced[..1]);
 
-        let printed = lower(&mut names, &source);
-        let line = printed.lines().find(|line| line.contains("x64.template")).unwrap_or_default();
-        assert!(line.contains("early $r8"), "{printed}");
-        for reg in ["r9", "r10", "r11"] {
-            assert!(!line.contains(&format!("early ${reg}")), "{printed}");
-        }
+        let printed = lower_a64(&mut names, &source).expect("the outputs fit");
+        let line = printed.lines().find(|line| line.contains("a64.template")).unwrap_or_default();
+        assert!(line.contains("early $x0"), "{printed}");
+        assert!(!line.contains("early $x18"), "{printed}");
     }
 
     /// A register the template named is placed as itself, fixed to the register the program wrote
