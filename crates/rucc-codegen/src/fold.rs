@@ -733,7 +733,7 @@ fn named_alone(address: mir::Amode) -> bool {
 ///
 /// As a `lea` the sum is an address with a base and a symbol, which a reader with an index can
 /// take whole, since the symbol is a displacement and the base and the index are both left: see
-/// [`candidate`]. Only for a name nothing else reads, in the block it is in, and only before
+/// `candidate`. Only for a name nothing else reads, in the block it is in, and only before
 /// [`addresses`], which is what hands the `lea` on to its reader. A sum nothing can take it into
 /// is still no longer than it was, one `lea` in place of a `mov` and an `add`.
 pub fn absolute_sums(
