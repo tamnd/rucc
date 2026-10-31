@@ -48,6 +48,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The address of a field of a global, `&d.key`, is now one `lea d+16(%rip)` (or `movq $d+16` under the kernel code model) in each block that reads it, rather than the global's address and an `add` that the optimizer could hoist into a callee-saved register. (#3999)
 - Under the kernel code model, storing the address of a global into memory is now one `movq $sym, off(%reg)` with the address as a sign-extended immediate, rather than a `mov $sym` into a register and a store of that register. (#4000)
 - Under the kernel code model the sum of a register and the address of a name is now one `lea` the load can take whole, so `caches[t][i]` is read as `caches(%rax,%rcx,8)` instead of a `movq $caches` and an `addq` first (#4003)
+- When every block that goes to a block ends in the same instruction, that instruction now moves down into the block they go to, so a copy into the return register on two ways to a return is written once and the second way needs no block or jump (#4007)
 
 ## 0.30.15
 

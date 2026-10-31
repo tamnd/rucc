@@ -1733,6 +1733,16 @@ pub fn compile_recording(
     if flags.reorder && layout::merge(&mut func, machine.branch, names, &fusable, &loops) > 0 {
         tails.to_mut().retain(|tail| func.block_of(tail.call).is_some());
     }
+    // After the merging, which leaves a block of one instruction alone, so that blocks this would
+    // take down to one are made one copy first. The forwarding goes round again past what this
+    // empties. A tail call is known by its instruction, so it stays where it is.
+    if flags.reorder {
+        let held: Vec<mir::Inst> =
+            loops.iter().copied().chain(tails.iter().map(|tail| tail.call)).collect();
+        if layout::sink_tails(&mut func, machine.branch, names, &fusable, &held) > 0 {
+            layout::forward(&mut func, machine.branch, names);
+        }
+    }
     layout::blocks(&mut func, machine.branch, &fused, names, &fusable, &loops, flags.reorder);
 
     // After the layout for the reason the branches wait for it: a select that reads what a
