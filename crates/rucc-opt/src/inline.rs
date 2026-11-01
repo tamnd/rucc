@@ -2004,10 +2004,45 @@ fn slots(func: &Func, layout: DataLayout) -> Set<Value> {
 fn folded(
     func: &Func,
     layout: DataLayout,
+    known: Set<Value>,
+    values: Map<Value, (Imm, Type)>,
+    count: Count<'_>,
+    frequency: Option<&Map<Block, f64>>,
+) -> (usize, f64) {
+    folded_as(func, layout, known, values, count, frequency, true)
+}
+
+/// Whether `address` is a parameter or a constant offset from one.
+///
+/// gcc's `eliminated_by_inlining_prob` counts a load or a store through such an address at half
+/// its size in a copy, as a caller often passes the address of its own local or of a field it
+/// holds, and the access folds into the caller once the copy is in. The unit and a caller are
+/// still counted in full, as gcc counts them. rucc counted these in full in a copy too, and in
+/// `lib/maple_tree.c`, where most of a helper is reads and writes of the `ma_state` it is passed,
+/// a helper came to twice the size gcc gives it and the unit ran out of growth early.
+fn through_param(func: &Func, address: Value) -> bool {
+    let base = match func[address].def {
+        Def::Result { inst, .. } if func[inst].opcode == Opcode::PtrAdd => {
+            match func[func[inst].args] {
+                [base, offset] if crate::fold::constant(func, offset).is_some() => base,
+                _ => return false,
+            }
+        }
+        _ => address,
+    };
+    matches!(func[base].def, Def::Param { block, .. } if func.entry() == Some(block))
+}
+
+/// [`folded`], with a load or a store [`through_param`] counted at half its size when `halve` is
+/// set, which is how a copy is counted, and in full when not, which is how the unit is.
+fn folded_as(
+    func: &Func,
+    layout: DataLayout,
     mut known: Set<Value>,
     mut values: Map<Value, (Imm, Type)>,
     count: Count<'_>,
     frequency: Option<&Map<Block, f64>>,
+    halve: bool,
 ) -> (usize, f64) {
     known.extend(values.keys().copied());
     // Who reads each value and as which operand, for what is part of the instruction reading it
@@ -2021,7 +2056,8 @@ fn folded(
     let slots = slots(func, layout);
     let cfg = Cfg::new(func);
     let mut live: Set<Block> = cfg.entry().into_iter().collect();
-    let mut work = 0;
+    // In halves, so a load or a store through a parameter can count one.
+    let mut halves = 0;
     let mut time = 0.0;
     for block in cfg.reverse_postorder() {
         if !live.contains(&block) {
@@ -2124,7 +2160,7 @@ fn folded(
             if !costless {
                 let read = data.results().any(|result| readers.read(result));
                 let cost = count.cost(func, inst, read);
-                work += cost;
+                halves += if halve && halved(func, inst) { cost } else { 2 * cost };
                 let often = frequency.and_then(|it| it.get(&block)).copied().unwrap_or(1.0);
                 // A call takes longer than its size says, which is gcc's `eni_time_weights`.
                 let waits = match data.opcode {
@@ -2137,7 +2173,18 @@ fn folded(
             }
         }
     }
-    (work, time)
+    (halves.div_ceil(2), time)
+}
+
+/// Whether a copy counts `inst` at half its size, which is a load or a store [`through_param`].
+fn halved(func: &Func, inst: Inst) -> bool {
+    let args = &func[func[inst].args];
+    let address = match func[inst].opcode {
+        Opcode::Load => args.first(),
+        Opcode::Store => args.get(1),
+        _ => None,
+    };
+    address.is_some_and(|&address| through_param(func, address))
 }
 
 /// What an instruction works out to when it has one result and `operand` gives the numbers of what

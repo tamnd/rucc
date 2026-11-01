@@ -59,6 +59,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64 a block reached only by a conditional branch now keeps the flags the comparison before that branch left, so `if (x == 50) ... else if (x > 50)` is one `cmpl` and a `je` and `jle`, as gcc writes it, instead of the same comparison twice (#4011)
 - The inliner now times a caller and its callee the way gcc does, after they are cleaned up, when it asks whether a call over the limit is worth it for the speedup, so `recalc_sigpending_tsk` goes into `recalc_sigpending` in kernel/signal.c as it does under gcc; a `bool` returning `true` is no longer read as a failing negative return, and the `unlikely` of a static branch is no longer lost on the way (#4014)
 - The inliner's second pass no longer counts a call on a path its caller rarely takes as if it ran every time, so a large file's growth goes to the calls that run, as with gcc (#4015)
+- The inliner counts a load or a store through a parameter at half its size when it weighs a copy, as gcc does, so helpers that mostly read and write the struct they are passed are no longer weighed at twice their gcc size (#4017)
 
 ## 0.30.15
 
