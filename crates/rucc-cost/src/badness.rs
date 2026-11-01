@@ -103,15 +103,17 @@ pub fn overall(growth: i64) -> f64 {
 
 /// How bad a call is to inline, the least bad being the one to take first.
 ///
-/// [`Call::frequency`] is held between one and [`INLINE_FREQUENCY_CLAMP`], which is section
-/// 40.11's form. With no frequency at all it is gcc's fourth case, the growth halved for every
+/// [`Call::frequency`] is held under [`INLINE_FREQUENCY_CLAMP`], which is section 40.11's form. With no frequency at all it is gcc's fourth case, the growth halved for every
 /// loop the call is in, up to eight of them.
 #[must_use]
 pub fn badness(call: &Call) -> f64 {
     let base = if call.growth <= 0 {
         SHRINKS + call.growth as f64
     } else if let Some(frequency) = call.frequency {
-        let frequency = frequency.clamp(1.0, most_frequent());
+        // Not raised to one, as gcc does not raise it and as [`big_speedup`] does not. Raised, a
+        // call on a path the caller takes one time in ten was as urgent as one it always makes, and
+        // `lib/maple_tree.c` spent its growth on the rebalance paths before the calls `brk` makes.
+        let frequency = if frequency > 0.0 { frequency.min(most_frequent()) } else { 1.0 / 2048.0 };
         // gcc takes a call that saves nothing as saving a little, so that it still has an order.
         let saved = if call.saved > 0.0 { call.saved } else { 1.0 / 256.0 };
         let mut denominator = call.growth as f64 * (call.caller + call.growth).max(1) as f64;
@@ -214,6 +216,13 @@ mod tests {
         let mut inside = call(10);
         inside.frequency = Some(10.0);
         assert!(badness(&inside) < badness(&call(10)));
+    }
+
+    #[test]
+    fn a_call_on_a_path_the_caller_rarely_takes_comes_after_one_it_always_makes() {
+        let mut cold = call(10);
+        cold.frequency = Some(0.1);
+        assert!(badness(&call(10)) < badness(&cold));
     }
 
     #[test]
