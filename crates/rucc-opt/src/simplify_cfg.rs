@@ -280,6 +280,7 @@ impl Pass for SimplifyCfg {
         // function had one forwarder ago. The parameters nothing reads go first, for the reason
         // this module's documentation gives, which is that a block they leave empty is a forwarder
         // and the worklist below is what takes forwarders out.
+        lift_hints(func);
         let dropped = drop_unread(func, fuel, &mut stats);
         if straighten(func, fuel, &mut stats, &mut forward) || dropped {
             an.clear();
@@ -1124,6 +1125,36 @@ fn straighten(
     changed
 }
 
+/// Puts a hint left on a jump onto the `asm goto` edge that is the only way into the jump's block.
+///
+/// `static_branch_unlikely` is an `asm goto` whose two labels each return a constant, and the
+/// `unlikely` around it is a branch on which one came back. Threading takes that branch out and
+/// leaves its weights on the jumps at the end of the labels, where nothing reads them and the
+/// forwarding and merging after this drop them. On the `asm goto` they are what the predictor
+/// reads, and without them `freezing_slow_path` behind `freezing` in kernel/signal.c was a call
+/// made one time in two, which kept `recalc_sigpending_tsk` out of `recalc_sigpending`.
+fn lift_hints(func: &mut Func) {
+    let edges = incoming(func);
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(block) else { continue };
+        if func[term].opcode != Opcode::Jump {
+            continue;
+        }
+        let Some(out) = func.target_list(term).iter().next() else { continue };
+        let hint = func[out].hint;
+        if hint.taken().is_none() {
+            continue;
+        }
+        let Some(&[(from, at)]) = edges.get(&block).map(Vec::as_slice) else { continue };
+        let asm = func.terminator(from).is_some_and(|it| func[it].opcode == Opcode::InlineAsm);
+        if !asm || func[at].hint.taken().is_some() {
+            continue;
+        }
+        let call = func[at];
+        func.set_block_call(at, BlockCall { hint, ..call });
+    }
+}
+
 /// Puts a block back on the worklist, if it is not on it already.
 fn requeue(block: Block, work: &mut VecDeque<Block>, queued: &mut Set<Block>) {
     if queued.insert(block) {
@@ -1545,8 +1576,8 @@ fn numbered(func: &Func, value: Value, subst: &Bindings) -> Option<(Imm, Type)> 
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Def, Extra, Flags, Func, Hint, Inst, InstData, IntPred, MemInfo, MemOrder,
-        Module, Opcode, Restrict, Signature, Type, Value,
+        AsmInfo, Block, BlockCall, Builder, Def, Extra, Flags, Func, Hint, Inst, InstData, IntPred,
+        MemInfo, MemOrder, Module, Opcode, Restrict, Signature, Type, Value,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -3094,6 +3125,38 @@ block2:
         simplify(&mut func);
         module.add_func(func);
         rucc_ir::verify(&module, &names).expect("the pass left the function verifiable");
+    }
+
+    /// `static_branch_unlikely` once the branch on which label came back has been threaded out:
+    /// each label ends in a jump with that branch's weight on it.
+    #[test]
+    fn a_weight_on_the_jump_after_an_asm_goto_label_moves_onto_the_label() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let at: Vec<Block> = (0..5).map(|_| func.create_block()).collect();
+        let none = func.push_values(&[]);
+        let labels =
+            func.push_block_calls(&[BlockCall::new(at[1], none), BlockCall::new(at[2], none)]);
+        let info = AsmInfo {
+            template: names.intern("jmp %l0"),
+            constraints: names.intern(""),
+            clobbers: names.intern(""),
+            targets: labels,
+        };
+        Builder::new(&mut func, at[0]).inline_asm(info, &[], &[], Flags::NONE);
+        for (from, to, parts) in [(1, 3, 9_000), (2, 4, 1_000)] {
+            let jump = Builder::new(&mut func, at[from]).jump(at[to], &[]);
+            let edge = func.target_list(jump).iter().next().expect("a jump has a target");
+            let call = func[edge];
+            func.set_block_call(edge, BlockCall { hint: Hint::parts(parts), ..call });
+        }
+        for block in [at[3], at[4]] {
+            Builder::new(&mut func, block).ret(&[]);
+        }
+        simplify(&mut func);
+        let term = func.terminator(at[0]).expect("the entry still ends in the asm goto");
+        let hints: Vec<Option<u32>> = func.successors(term).map(|call| call.hint.taken()).collect();
+        assert_eq!(hints, [Some(9_000), Some(1_000)]);
     }
 
     #[test]

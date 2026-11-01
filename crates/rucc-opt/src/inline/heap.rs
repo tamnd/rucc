@@ -213,6 +213,14 @@ struct Profile {
 /// call passes removed some of it, with the callee's change it was measured at. See [`Heap::bodies`].
 type Body = (u32, usize, f64, Hints, bool);
 
+/// The most rounds of threading [`Heap::cleaned_time`] gives a body after the cleanup. Each round
+/// takes one join out of an `||` or `&&`, so this is enough for a chain of ten tests.
+const JOINS: usize = 8;
+
+/// What a cleaned up body's time depends on: the function, its change and the constants it was
+/// given. See [`Heap::timed`].
+type Timed = (FuncId, u32, Vec<(Value, Imm, Type)>);
+
 /// What a body's measurement depends on. See [`Heap::measured`].
 type Measured = (FuncId, u32, Vec<(Value, Imm, Type)>, bool, usize, usize);
 
@@ -253,6 +261,9 @@ struct Heap<'a> {
     /// places with the same constants is copied and folded once for all of them rather than once
     /// for each, and that copy was most of the pass.
     measured: Map<Measured, (usize, f64, bool)>,
+    /// How long a body takes once it has been cleaned up the way a copy is, by function, its
+    /// change and the constants it was given. See [`Heap::cleaned_speedup`].
+    timed: Map<Timed, f64>,
     /// The parameters of each function that every call to it passes the same constant for, which
     /// give no hint. See [`Second::constants`].
     settled: Map<FuncId, Set<Value>>,
@@ -303,6 +314,7 @@ pub(super) fn run(
         frames: Map::default(),
         bodies: Map::default(),
         measured: Map::default(),
+        timed: Map::default(),
         settled,
         once: Set::default(),
         pools: Map::default(),
@@ -629,10 +641,99 @@ impl Heap<'_> {
             caller: size(caller),
             hints,
         });
-        let speedup =
+        let mut speedup =
             badness::big_speedup(time, copied, call_time, frequency, spent, self.second.speedup);
+        if !speedup && growth > 0 && self.speedup_decides(kind, body, growth, hints) {
+            speedup = self.cleaned_speedup(module, caller, callee, &values, call_time, frequency);
+        }
         let adds = (copied - call_time) * frequency;
         Some(Weighed { callee, kind, body, growth, hints, overall, badness, speedup, adds, cut })
+    }
+
+    /// Whether a call over the limit its hints give it would be let through by a large enough
+    /// speedup, which is what [`Heap::wants`] asks the speedup for.
+    fn speedup_decides(&self, kind: Kind, body: usize, growth: i64, hints: Hints) -> bool {
+        if hints.enables || hints.asks {
+            return false;
+        }
+        let percent = self.second.percent;
+        let one = Hints { enables: true, ..Hints::default() };
+        match kind {
+            Kind::Hinted => {
+                let base = u32::try_from(self.how.limit).unwrap_or(u32::MAX);
+                u64::try_from(body).unwrap_or(u64::MAX) <= one.limit(base, percent)
+            }
+            _ => growth < i64::try_from(one.limit(self.how.auto, percent)).unwrap_or(i64::MAX),
+        }
+    }
+
+    /// gcc's `big_speedup_p` with the caller, the callee and the copy timed once they have been
+    /// cleaned up, which is how gcc times them, after its early passes.
+    ///
+    /// This pass weighs bodies as the front end wrote them, and an `a || b || c` there is a join
+    /// of a true and the next test after each one. The early return guess is on edges into the
+    /// `return`, and with the joins in the way it reaches none of them, so every test looked as
+    /// if it ran each time. `recalc_sigpending_tsk` in kernel/signal.c is four tests and a `lock
+    /// orb`, 14 to gcc against 22 here, and its caller 21 against 33. Cleaned up they are 13 and
+    /// 21, and the copy goes into `recalc_sigpending` for the speedup on every signal as it does
+    /// under gcc, where it stayed a call.
+    fn cleaned_speedup(
+        &mut self,
+        module: &Module,
+        caller: FuncId,
+        callee: FuncId,
+        values: &Map<Value, (Imm, Type)>,
+        call_time: f64,
+        frequency: f64,
+    ) -> bool {
+        let none = Map::default();
+        let (Some(time), Some(copied), Some(spent)) = (
+            self.cleaned_time(module, callee, &none),
+            self.cleaned_time(module, callee, values),
+            self.cleaned_time(module, caller, &none),
+        ) else {
+            return false;
+        };
+        badness::big_speedup(time, copied, call_time, frequency, spent, self.second.speedup)
+    }
+
+    /// How long the function takes once a copy of it given `values` has been cleaned up.
+    fn cleaned_time(
+        &mut self,
+        module: &Module,
+        id: FuncId,
+        values: &Map<Value, (Imm, Type)>,
+    ) -> Option<f64> {
+        let mut passed: Vec<(Value, Imm, Type)> =
+            values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
+        passed.sort_unstable_by_key(|&(param, ..)| param);
+        let key = (id, self.version(id), passed);
+        if let Some(&time) = self.timed.get(&key) {
+            return Some(time);
+        }
+        use crate::Pass;
+        let mut copy = super::cleaned(&module[id], values, true)?;
+        // Each threading takes one join out of a chain, so an `||` of four tests needs three, and
+        // the cleanup threads twice.
+        let mut an = crate::Analyses::new(crate::machine::Machine::unknown());
+        let mut fuel = crate::Fuel::unlimited();
+        let passes: [&dyn Pass; 2] = [&crate::thread::FREE, &crate::simplify_cfg::SimplifyCfg];
+        for _ in 0..JOINS {
+            let mut changed = false;
+            for pass in passes {
+                if pass.run(&mut copy, &mut an, &mut fuel).changed() {
+                    let keeps = an.unmoved(&copy, pass.preserves());
+                    an.settle(&copy, keeps, false);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let time = profile(&copy, module.datalayout, self.how.names).time;
+        self.timed.insert(key, time);
+        Some(time)
     }
 
     /// Whether the limit for the call's kind lets it through, which is gcc's

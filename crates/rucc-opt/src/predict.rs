@@ -68,7 +68,7 @@ use rucc_cost::heuristics::{
     PREDICT_NEVER_RETURNS, PREDICT_NULL_RETURN, PREDICT_POINTER_NOT_NULL, PREDICT_RETURN_BLOCKS,
 };
 use rucc_ir::{
-    AttrSet, Attrs, Block, Def, Extra, Flags, Func, Inst, IntPred, Module, Opcode, Value,
+    AttrSet, Attrs, Block, Def, Extra, Flags, Func, Inst, IntPred, Module, Opcode, Type, Value,
 };
 
 use crate::cfg::Cfg;
@@ -734,8 +734,11 @@ fn returns_constant(func: &Func, cfg: &Cfg, start: Block) -> Option<Returned> {
             if is_null(func, value) {
                 return Some(Returned::Null);
             }
+            // A `bool` is never negative, though its `true` is all ones in one bit. Read as -1, a
+            // function returning `true` early looked like one failing 98 times in 100.
             let (value, ty) = constant(func, value)?;
-            return Some(if value.signed(ty) < 0 { Returned::Negative } else { Returned::Other });
+            let negative = ty != Type::I1 && value.signed(ty) < 0;
+            return Some(if negative { Returned::Negative } else { Returned::Other });
         }
         match cfg.successors(at) {
             [only] => at = *only,
@@ -1121,6 +1124,25 @@ mod tests {
         let (seen, _) = predict(&func);
         assert_eq!(seen.by(at[0]), Predictor::NegativeReturn);
         assert_eq!(seen.taken(at[0], 0), Probability::percent(98, Quality::Guessed).complement());
+    }
+
+    /// `recalc_sigpending_tsk` in kernel/signal.c returns `true` from each of its tests, and read
+    /// as -1 each test went on to the next 98 times in 100 where gcc has 66.
+    #[test]
+    fn a_bool_that_returns_true_is_not_a_negative_number() {
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        let mut build = Builder::new(&mut func, at[1]);
+        let yes = build.iconst(Type::I1, 1);
+        build.ret(&[yes]);
+        let mut build = Builder::new(&mut func, at[2]);
+        let no = build.iconst(Type::I1, 0);
+        build.ret(&[no]);
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::Nothing);
     }
 
     #[test]
