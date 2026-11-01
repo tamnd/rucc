@@ -164,6 +164,27 @@ pub fn big_speedup(
     (before - after) * 100.0 > before * f64::from(percent)
 }
 
+/// Whether [`big_speedup`] can say yes for the call in a caller of any size, which needs no time
+/// for the caller.
+///
+/// A larger caller makes the part the copy saves smaller, so the best caller is the smallest one
+/// that `after` is not held up for at its floor of 1/256. For a smaller caller the floor keeps
+/// `after` where it is while `before` gets smaller, which is not better either. The inliner asks
+/// this first, because the caller is the largest body to time and the one that changes with
+/// each copy put into it.
+#[must_use]
+pub fn big_speedup_possible(
+    callee: f64,
+    specialized: f64,
+    call: f64,
+    frequency: f64,
+    percent: u32,
+) -> bool {
+    let at = if frequency > 0.0 { frequency.min(most_frequent()) } else { 1.0 / 2048.0 };
+    let best = (1.0 / 256.0 - (specialized - call) * at).max(0.0);
+    big_speedup(callee, specialized, call, frequency, best, percent)
+}
+
 /// The most a frequency is believed, [`INLINE_FREQUENCY_CLAMP`] and never less than once, so that a
 /// `--param` of nothing does not put the clamp below its own floor.
 fn most_frequent() -> f64 {
@@ -179,7 +200,7 @@ fn favour(badness: f64, shift: u32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Call, Hints, badness, big_speedup, overall};
+    use super::{Call, Hints, badness, big_speedup, big_speedup_possible, overall};
     use crate::heuristics::{INLINE_GROWTH_SQUARING_BOUND, INLINE_HINT_PERCENT};
 
     fn call(growth: i64) -> Call {
@@ -283,6 +304,31 @@ mod tests {
         assert!(big_speedup(40.0, 10.0, 3.0, 1.0, 10.0, 30));
         // The same in a caller that takes a thousand saves too little of it.
         assert!(!big_speedup(40.0, 10.0, 3.0, 1.0, 1000.0, 30));
+    }
+
+    #[test]
+    fn a_speedup_no_caller_can_give_is_known_without_the_caller() {
+        // A body of forty that folds to ten can save enough of a small caller.
+        assert!(big_speedup_possible(40.0, 10.0, 3.0, 1.0, 30));
+        // A body that folds to nearly what it was saves too little of any caller.
+        assert!(!big_speedup_possible(40.0, 38.0, 3.0, 1.0, 30));
+        assert!(!big_speedup(40.0, 38.0, 3.0, 1.0, 0.0, 30));
+        // The floor of `after`: with no caller the copy of a body that folds to less than the
+        // call is held at 1/256, and a tiny callee then saves too little, while a caller of one
+        // saves enough. The best caller is the one where the floor stops holding.
+        assert!(!big_speedup(0.004, -1.0, 0.0, 1.0, 0.0, 30));
+        assert!(big_speedup(0.004, -1.0, 0.0, 1.0, 1.0, 30));
+        assert!(big_speedup_possible(0.004, -1.0, 0.0, 1.0, 30));
+        // Whatever the caller, the answer is no when this one is no.
+        for &(callee, specialized, call, frequency) in
+            &[(40.0, 38.0, 3.0, 1.0), (40.0, 10.0, 3.0, 0.01), (5.0, 4.0, 0.5, 2.0)]
+        {
+            if !big_speedup_possible(callee, specialized, call, frequency, 30) {
+                for caller in [0.0, 0.001, 0.5, 1.0, 10.0, 1000.0] {
+                    assert!(!big_speedup(callee, specialized, call, frequency, caller, 30));
+                }
+            }
+        }
     }
 
     #[test]
