@@ -14,6 +14,7 @@
 //! skipping looks at the directive name and nothing else, and only the seven conditional
 //! directives mean anything while it is going on.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use rucc_base::hash::{Map, Set};
@@ -148,16 +149,20 @@ pub struct Preprocessor {
     deps: Vec<Dependency>,
     /// What is already in `deps`, by the name the file system gives the file.
     ///
-    /// A header reached through two spellings is one dependency, and a header included a
-    /// hundred times is one line in the rule.
+    /// A header reached through one spelling of its path two times is one dependency, and a
+    /// header included a hundred times through the same spelling is one name in the rule.
     ///
-    /// This is the one place the rule is not what GCC writes. GCC keys its list on the pair of
-    /// the directory the search started from and the name the directive wrote, which is the key
-    /// of the cache it reads the file through rather than a decision, so `"x.h"` and `"./x.h"`
-    /// are two prerequisites there and a header two other headers in the same directory reach
-    /// by different relative paths is listed twice. Naming a file once is what the flag means,
-    /// and a duplicate prerequisite means nothing to `make` either way.
-    dep_ids: Set<PathBuf>,
+    /// The key is the path as the search spelled it, which is what GCC keys its list on, and not
+    /// the file. So `"x.h"` and `"./x.h"`, or `d/a.h` and `d/e/../a.h`, are two prerequisites, as
+    /// they are in GCC. A duplicate means nothing to `make`, but kbuild's modpost makes the
+    /// `srcversion` of each module from a hash of the files the rule names, and a header named
+    /// two times is hashed two times. The kernel's trace headers reach a header a second time
+    /// through `TRACE_INCLUDE_PATH`, so with one name for each file every module that uses them
+    /// had another `srcversion` than GCC gives it. tamnd/rucc#4018.
+    ///
+    /// The key is the path as bytes and not a `PathBuf`, which compares by components and so
+    /// would make `d//a.h` and `d/./a.h` the same as `d/a.h`.
+    dep_ids: Set<OsString>,
     /// The names `#pragma GCC poison` took away. Any later appearance of one in the file is an
     /// error, while one a macro defined earlier writes is not, which is why this is checked
     /// on the lines as they are read rather than on what the expander produces.
@@ -1034,9 +1039,8 @@ impl Preprocessor {
     /// The name is the one the `#include` wrote, with no directory in front, as GCC writes it. An
     /// angled name counts as a system header, so `-MM` leaves it out, as it does in GCC.
     fn generated(&mut self, name: &str, angled: bool) {
-        let path = PathBuf::from(name);
-        if self.dep_ids.insert(path.clone()) {
-            self.deps.push(Dependency { path, is_system: angled });
+        if self.dep_ids.insert(OsString::from(name)) {
+            self.deps.push(Dependency { path: PathBuf::from(name), is_system: angled });
         }
     }
 
@@ -1087,14 +1091,8 @@ impl Preprocessor {
         // refusals is about reading the file again rather than about whether the file is one
         // this translation unit was built from. A header the guard optimization skips is still
         // a header that, if it changed, would change the output.
-        if self.dep_ids.insert(id.clone()) {
-            // The `.` components come out, which is what GCC writes and is measured: `-I./d`
-            // gives a prerequisite of `d/f.h` there while the line marker and `__FILE__` for the
-            // same header both say `./d/f.h`. The two answers are to two different questions. A
-            // marker names the file the way the search reached it, which is what a debugger and
-            // a `#line` are about, and a prerequisite names a file `make` has to compare a
-            // timestamp against, which the leading `./` says nothing about.
-            let path = rucc_session::path_key(&found.path);
+        if self.dep_ids.insert(found.path.clone().into_os_string()) {
+            let path = prerequisite(&found.path);
             self.deps.push(Dependency { path, is_system: found.is_system });
         }
         // The multiple-include optimization. A file wrapped in an include guard whose macro
@@ -2541,6 +2539,27 @@ impl Names {
     }
 }
 
+/// The name a prerequisite is written with: the path as the search spelled it, with each `./` at
+/// the front taken off, as GCC's `apply_vpath` does.
+///
+/// `-I./d` gives a prerequisite of `d/f.h` while the line marker and `__FILE__` for the same
+/// header both say `./d/f.h`. A marker names the file the way the search reached it, which is
+/// what a debugger and a `#line` are about, and a prerequisite names a file `make` compares a
+/// timestamp against, which the leading `./` says nothing about. A `.` or a second separator
+/// inside the path stays, as it does in GCC.
+fn prerequisite(path: &Path) -> PathBuf {
+    let Some(mut name) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    while let Some(rest) = name.strip_prefix('.') {
+        let Some(after) = rest.strip_prefix(std::path::is_separator) else {
+            break;
+        };
+        name = after.trim_start_matches(std::path::is_separator);
+    }
+    PathBuf::from(name)
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_diag::{Severity, SourceMap};
@@ -3514,6 +3533,34 @@ mod tests {
         let names: Vec<String> =
             run.pp.dependencies().iter().map(|d| d.path.to_string_lossy().into_owned()).collect();
         assert_eq!(names.iter().map(|n| n.replace('\\', "/")).collect::<Vec<_>>(), ["d/f.h"]);
+    }
+
+    #[test]
+    fn a_header_is_a_prerequisite_once_for_each_spelling_of_its_path() {
+        // Measured against GCC 13.3, where `gcc -M` on `#include "d/a.h"`, `"./d/a.h"`,
+        // `"d/a.h"`, `"d/./a.h"`, `"d//a.h"` and `"d/e/../a.h"` writes `d/a.h d/a.h d/./a.h
+        // d//a.h d/e/../a.h`. The third include is the first spelling again and adds nothing,
+        // and the second `d/a.h` is `./d/a.h` with its `./` taken off. Here the main file is in
+        // `/`, so each path starts there and no `./` is at the front. The `..` spelling is left
+        // out, because the memory file system does not resolve a `..`.
+        let mut run = Run::new();
+        run.file("/d/a.h", "\n");
+        let includes = ["d/a.h", "./d/a.h", "d/a.h", "d/./a.h", "d//a.h"];
+        let text: String = includes.iter().map(|i| format!("#include \"{i}\"\n")).collect();
+        run.go(&text);
+        let messages = run.messages();
+        assert!(messages.is_empty(), "{messages:?}");
+        let names: Vec<String> = run
+            .pp
+            .dependencies()
+            .iter()
+            .map(|d| d.path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(names, ["/d/a.h", "/./d/a.h", "/d/./a.h", "/d//a.h"]);
+        assert_eq!(prerequisite(Path::new("./d/a.h")), Path::new("d/a.h"));
+        assert_eq!(prerequisite(Path::new(".//./d/a.h")), Path::new("d/a.h"));
+        assert_eq!(prerequisite(Path::new("d/./a.h")).to_str(), Some("d/./a.h"));
+        assert_eq!(prerequisite(Path::new("../d/a.h")).to_str(), Some("../d/a.h"));
     }
 
     #[test]
