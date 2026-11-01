@@ -1788,6 +1788,7 @@ fn cleaned(callee: &Func, values: &Map<Value, (Imm, Type)>, threads: bool) -> Op
             }
         }
     }
+    crate::expect::place(&mut copy, &hints);
     crate::uses::substitute(&mut copy, &through);
     for inst in hints {
         copy.remove_inst(inst);

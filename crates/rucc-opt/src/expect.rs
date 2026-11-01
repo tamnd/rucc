@@ -302,6 +302,31 @@ fn literal(func: &Func, value: Value) -> Option<i128> {
     }
 }
 
+/// Writes what each of the `expect` instructions in `gone` says onto the branch behind it, which is
+/// what the pass does before it takes them out.
+///
+/// The inliner takes them out of a copy itself, all but the ones a call's constants decide, and
+/// without this a copy it times has nothing on its branches. `freezing` in kernel/signal.c tests
+/// `static_branch_unlikely`, and with the `unlikely` gone the call to `freezing_slow_path` behind it
+/// was one time in two in a copy of `recalc_sigpending`.
+pub(crate) fn place(func: &mut Func, gone: &[Inst]) {
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(block) else { continue };
+        let Some(&value) = func[func[term].args].first() else { continue };
+        let behind = match func[term].opcode {
+            Opcode::BrIf => through(func, value).map(|(inst, _)| inst),
+            Opcode::Switch => expected(func, value).map(|(inst, _)| inst),
+            _ => None,
+        };
+        if !behind.is_some_and(|inst| gone.contains(&inst)) {
+            continue;
+        }
+        if let Some(hints) = claims(func, term) {
+            write(func, term, &hints);
+        }
+    }
+}
+
 /// Writes the claim onto the arms of a branch or a `switch`, one hint per arm.
 fn write(func: &mut Func, term: Inst, hints: &[Hint]) {
     for (at, &hint) in func.target_list(term).iter().zip(hints) {
