@@ -66,19 +66,20 @@
 //! `spec/10-backend.md` section 10.8 as it applies to the one pass that would otherwise be full
 //! of `x64.` by hand.
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_mir::{
-    Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg, Role, Weight,
+    Block, BlockCall, CfiOp, Flags, Func, Inst, InstData, Mem, Opcode, Operand, Patch, Reg, Role,
+    Weight,
 };
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
 use rucc_target::x86_64;
 use rucc_target::{
-    BranchInsts, CallRegs, Chkstk, ClassMoves, FrameInsts, Guard, PhysReg, Probe, RegClass,
-    SignReturn, Signing, SpillMove,
+    BranchInsts, CallRegs, Chkstk, ClassMoves, FrameInsts, Guard, MachineInsts, PhysReg, Probe,
+    RegClass, SignReturn, Signing, SpillMove,
 };
 
 use crate::frame::Frame;
@@ -216,6 +217,9 @@ pub struct Convention<'a> {
     /// Which functions sign their return address on the way in and check it on the way out,
     /// from `-mbranch-protection=pac-ret`. Nothing on a target with no instructions for it.
     pub sign: SignReturn,
+    /// What the machine's instructions are, when the prologue may go further in than the top of
+    /// the function, or `None` when it stays there. See [`region`].
+    pub wrap: Option<&'a MachineInsts>,
 }
 
 /// The furthest below the frame pointer an ARM64 Windows unwind code can say the stack pointer
@@ -237,6 +241,7 @@ impl<'a> Convention<'a> {
             pad: None,
             hooked: false,
             sign: SignReturn::None,
+            wrap: None,
         }
     }
 }
@@ -293,8 +298,8 @@ pub fn finish(
     stack: &Stack,
     convention: Convention<'_>,
     names: &mut Interner,
-) -> (Moves, Vec<Inst>, Vec<Inst>) {
-    let Convention { regs: conv, insts, protect, probe, landing, trace, pad, hooked, sign } =
+) -> (Moves, Vec<Inst>, Vec<Inst>, Option<Wrapped>) {
+    let Convention { regs: conv, insts, protect, probe, landing, trace, pad, hooked, sign, wrap } =
         convention;
     let entry = func.entry().expect("a function with a block in it");
 
@@ -434,15 +439,44 @@ pub fn finish(
     // where its own text ends, which for micropython's `nlr_push` is a jump somewhere else and for
     // everything else is the `ud2` the lowering put there.
     let bare = frame.naked();
+    // Where the prologue goes, which is the top of the function unless every block that wants the
+    // frame is behind one block that is not the entry. See [`region`].
+    // Room for a patcher that is all in front of the label is not in the function at all.
+    let plain = protect.is_none()
+        && probe.is_none()
+        && trace.is_none()
+        && pad.is_none_or(|pad| pad.after == 0);
+    let wrap = wrap
+        .filter(|_| plain && !writer.hooked && writer.signing.is_none())
+        .filter(|_| stack.dynamic.is_empty() && stack.grown.is_empty())
+        .filter(|_| wrappable(writer.func, frame, conv));
+    if wrap.is_some() {
+        writer.sink(&mut moves, frame, entry);
+    }
+    let mut wrap = wrap.and_then(|machine| region(writer.func, frame, conv, machine, writer.names));
+    if let Some(wrap) = &mut wrap {
+        for tail in std::mem::take(&mut wrap.tails) {
+            let twin = twin(writer.func, &mut moves, tail, &wrap.blocks);
+            wrap.blocks.insert(twin);
+        }
+    }
     let prologue = writer.prologue(
         frame,
         protect,
         probe.filter(|_| !bare),
-        landing,
+        landing.filter(|_| wrap.is_none()),
         trace.filter(|_| !bare),
         pad.filter(|_| !bare),
     );
+    let top = wrap.as_ref().map_or(entry, |wrap| wrap.at);
     for &inst in prologue.iter().rev() {
+        writer.func.prepend_inst(top, inst);
+    }
+    // The pad stays the first instruction of the function wherever the rest went, since the address
+    // an indirect branch arrives at is the address of the function.
+    if let (Some(_), Some(name)) = (&wrap, landing) {
+        let opcode = writer.opcode(name);
+        let inst = writer.func.build_loose(opcode).finish();
         writer.func.prepend_inst(entry, inst);
     }
     let returns: Vec<Block> = if bare {
@@ -452,6 +486,16 @@ pub fn finish(
             |block: &Block| writer.func[*block].succs.is_empty() && !writer.func[*block].dead_end;
         writer.func.blocks().filter(returns).collect()
     };
+    // A block that returns without having been through the prologue has nothing to give back, so
+    // all it gets is the return.
+    let (returns, early): (Vec<Block>, Vec<Block>) = returns
+        .into_iter()
+        .partition(|block| wrap.as_ref().is_none_or(|wrap| wrap.blocks.contains(block)));
+    for block in early {
+        let ret = writer.opcode(writer.insts.ret);
+        let inst = writer.func.build_loose(ret).finish();
+        writer.func.append_inst(block, inst);
+    }
     // The blocks that return jump to one block that returns for all of them, so that the check
     // and the epilogue are written once rather than at every return. That is what gcc writes. The
     // check is five instructions and a branch where a jump is one, and an epilogue that puts back
@@ -508,7 +552,374 @@ pub fn finish(
         let order: Vec<Block> = ahead.into_iter().chain(rest).collect();
         writer.func.set_block_order(&order);
     }
-    (moves, writer.loops, writer.checks)
+    let wrapped = wrap.map(|_| writer.wrapped(&prologue, frame));
+    (moves, writer.loops, writer.checks, wrapped)
+}
+
+/// One copy [`Writer::sink`] is taking out of the entry block.
+struct Way<'a> {
+    entry: Block,
+    to: PhysReg,
+    from: PhysReg,
+    class: RegClass,
+    /// The blocks the copy is read in or after. See [`live`].
+    live: Set<Block>,
+    preds: &'a Map<Block, usize>,
+}
+
+impl Way<'_> {
+    /// Whether the copy can be left out in front of those instructions, which are the rest of that
+    /// block, with the reads of it there and further in that this adds to `reads` made reads of
+    /// the argument, and the copy made at the top of each block this adds to `tops`.
+    fn follow(
+        &self,
+        func: &Func,
+        insts: &[Inst],
+        block: Block,
+        depth: u32,
+        reads: &mut Vec<(Inst, usize)>,
+        tops: &mut Vec<Block>,
+    ) -> bool {
+        let mut here = Vec::new();
+        for &inst in insts {
+            if func[inst].flags.contains(Flags::TEMPLATE) {
+                return false;
+            }
+            let operands = func[func[inst].operands].iter().enumerate();
+            for (at, op) in operands.filter(|(_, op)| op.class == self.class) {
+                let reg = op.reg.phys();
+                if reg != Some(self.to) && reg != Some(self.from) {
+                    continue;
+                }
+                if op.role != Role::Use {
+                    return false;
+                }
+                if reg == Some(self.to) {
+                    here.push((inst, at));
+                }
+            }
+        }
+        for call in &func[block].succs {
+            let next = call.block;
+            if !self.live.contains(&next) || tops.contains(&next) {
+                continue;
+            }
+            if next == self.entry || self.preds.get(&next) != Some(&1) {
+                return false;
+            }
+            let (kept, made) = (reads.len(), tops.len());
+            let insts: Vec<Inst> = func.insts(next).collect();
+            if depth >= 4 || !self.follow(func, &insts, next, depth + 1, reads, tops) {
+                reads.truncate(kept);
+                tops.truncate(made);
+                tops.push(next);
+            }
+        }
+        reads.extend(here);
+        true
+    }
+}
+
+/// The block a prologue goes at the top of instead of the entry, and the blocks behind it.
+struct Region {
+    at: Block,
+    blocks: Set<Block>,
+    /// The blocks outside that some block behind it goes to, each of which ends the function, is
+    /// short and wants nothing of the frame, so that a copy of it can go behind it. See [`twin`].
+    tails: Vec<Block>,
+}
+
+/// What [`rows`] needs to know about a function whose prologue is further in than its entry.
+#[derive(Debug, Clone)]
+pub struct Wrapped {
+    /// The last instruction of the prologue, after which the body's rules hold.
+    opened: Inst,
+    /// The rules the body runs under, as the prologue wrote them.
+    body: Vec<CfiOp>,
+    /// The rules the function was entered under, which hold again after each epilogue. The first
+    /// is the distance an epilogue ends on, which is how a block that holds one is known.
+    entered: Vec<CfiOp>,
+}
+
+/// The block the prologue can go at the top of instead of the entry, when there is one. This is
+/// shrink wrapping, which gcc does at `-O1` and up.
+///
+/// A path that touches none of the registers the prologue saves, reads nothing through the stack
+/// pointer and calls nothing has no use for the frame, and in the kernel that is often the path
+/// that runs: `mas_ascend` in lib/maple_tree.c saved two registers on every call for a path it
+/// takes once in a while. So the prologue goes at the top of the block every block that wants the
+/// frame is behind, when that is not the entry, when nothing behind it goes back into it, and when
+/// nothing behind it leaves but by returning. Then each way through the function runs the prologue
+/// once or not at all, and the blocks that return without it return with a bare `ret`.
+///
+/// Only when it is cheaper, which is when the block is run less often than the entry. See
+/// [`wrappable`] for the frames it is done for.
+fn region(
+    func: &Func,
+    frame: &Frame,
+    conv: &CallRegs,
+    machine: &MachineInsts,
+    names: &Interner,
+) -> Option<Region> {
+    let entry = func.entry()?;
+    let saved = frame.saved_int();
+    let touches = |operand: &Operand| {
+        operand.class == conv.int_class
+            && operand.reg.phys().is_some_and(|at| at == conv.stack_pointer || saved.contains(&at))
+    };
+    // A template and the address of a block are both somewhere this cannot see past.
+    let wants = |inst: Inst| {
+        let data = &func[inst];
+        data.flags.contains(Flags::TEMPLATE)
+            || machine.calls(names.resolve(data.opcode.name()))
+            || data.mem.is_some_and(|mem| func[mem].block.is_some())
+            || func[data.operands].iter().any(touches)
+    };
+    let (idom, number) = dominators(func, entry);
+    let mut at = None;
+    for block in func.blocks() {
+        if !func.insts(block).any(wants) {
+            continue;
+        }
+        if !idom.contains_key(&block) {
+            return None;
+        }
+        at = Some(at.map_or(block, |at| meet(&idom, &number, at, block)));
+    }
+    // When the blocks that want the frame are in a loop, the block they are all behind is in it
+    // too, and the prologue goes in front of the loop instead, as far up as it has to.
+    let mut at = at?;
+    while at != entry && func[at].weight.raw() < func[entry].weight.raw() {
+        let under = |mut block: Block| loop {
+            if block == at {
+                return true;
+            }
+            match idom.get(&block) {
+                Some(&up) if block != entry => block = up,
+                _ => return false,
+            }
+        };
+        let blocks: Set<Block> = idom.keys().copied().filter(|&block| under(block)).collect();
+        let mut tails = Vec::new();
+        let mut leaves = false;
+        let inside: Vec<Block> = func.blocks().filter(|block| blocks.contains(block)).collect();
+        for &block in &inside {
+            for call in &func[block].succs {
+                let to = call.block;
+                if to == at {
+                    leaves = true;
+                } else if !blocks.contains(&to) && !tails.contains(&to) {
+                    let short = func[to].succs.is_empty() && func.insts(to).count() <= 6;
+                    leaves |= !short || func.insts(to).any(wants);
+                    tails.push(to);
+                }
+            }
+        }
+        if !leaves {
+            return Some(Region { at, blocks, tails });
+        }
+        at = idom[&at];
+    }
+    None
+}
+
+/// A copy of that block for the blocks behind the prologue that go to it, which the others keep
+/// going to. The two end the function under different rules, the one with the frame to give back
+/// and the other without, which one block cannot do. gcc copies the tail too.
+fn twin(func: &mut Func, moves: &mut Moves, block: Block, inside: &Set<Block>) -> Block {
+    let twin = func.create_block();
+    for inst in func.insts(block).collect::<Vec<Inst>>() {
+        let data = func[inst];
+        let operands = func[data.operands].to_vec();
+        let operands = func.push_operands(&operands);
+        let mem = data.mem.map(|mem| func[mem]).map(|amode| func.add_amode(amode));
+        let span = func.span(inst);
+        let made = func.create_inst(InstData { operands, mem, ..data }, span);
+        if let Some(edit) = moves.at(inst) {
+            moves.record(made, edit);
+        }
+        func.append_inst(twin, made);
+    }
+    let mut weight = 0u64;
+    for from in func.blocks().filter(|from| inside.contains(from)).collect::<Vec<Block>>() {
+        for call in func.succs_mut(from).iter_mut().filter(|call| call.block == block) {
+            call.block = twin;
+            weight = weight.saturating_add(call.weight.raw());
+        }
+    }
+    let left = func[block].weight.raw().saturating_sub(weight);
+    func.set_weight(block, Weight::parts(left));
+    func.set_weight(twin, Weight::parts(weight));
+    if func[block].dead_end {
+        func.set_dead_end(twin);
+    }
+    twin
+}
+
+/// Whether the prologue of that frame can go somewhere other than the top: it is pushes and one
+/// subtraction, which is every frame on SysV x86-64 without a frame pointer, and nothing else in
+/// the function says where it begins.
+fn wrappable(func: &Func, frame: &Frame, conv: &CallRegs) -> bool {
+    let odd = frame.naked()
+        || (frame.saved_int().is_empty() && frame.size() == 0)
+        || frame.frame_pointer()
+        || frame.home() > 0
+        || frame.realign().is_some()
+        || frame.grows()
+        || !frame.saved_sse().is_empty()
+        || frame.interrupt().is_some()
+        || frame.clears()
+        || frame.popped() > 0;
+    !odd && !conv.unwind_codes && func.labels.is_empty() && func.landings.is_empty()
+}
+
+/// Which blocks that register is read in, or read in after, before anything writes it.
+fn live(func: &Func, reg: PhysReg, class: RegClass) -> Set<Block> {
+    let mut reads = Set::default();
+    let mut writes = Set::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let ops = func[func[inst].operands].iter();
+            let ops = ops.filter(|op| op.class == class && op.reg.phys() == Some(reg));
+            let (read, written) = ops.fold((false, false), |(read, written), op| {
+                (read || op.role == Role::Use, written || op.role != Role::Use)
+            });
+            if read && !writes.contains(&block) {
+                reads.insert(block);
+            }
+            if written {
+                writes.insert(block);
+            }
+        }
+    }
+    let mut live = reads;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in func.blocks() {
+            let on = |call: &BlockCall| live.contains(&call.block);
+            let through = !writes.contains(&block) && func[block].succs.iter().any(on);
+            if through && !live.contains(&block) {
+                live.insert(block);
+                changed = true;
+            }
+        }
+    }
+    live
+}
+
+/// The block that runs first on every way into each block reached from the entry, and the place
+/// of each block in reverse postorder, which is what [`meet`] walks by. The entry is its own.
+fn dominators(func: &Func, entry: Block) -> (Map<Block, Block>, Map<Block, usize>) {
+    let mut order = Vec::new();
+    let mut seen: Set<Block> = Set::default();
+    seen.insert(entry);
+    let mut stack = vec![(entry, 0usize)];
+    while let Some(top) = stack.last_mut() {
+        let (block, next) = *top;
+        if let Some(call) = func[block].succs.get(next) {
+            top.1 += 1;
+            let to = call.block;
+            if seen.insert(to) {
+                stack.push((to, 0));
+            }
+        } else {
+            order.push(block);
+            stack.pop();
+        }
+    }
+    order.reverse();
+    let number: Map<Block, usize> = order.iter().enumerate().map(|(n, &b)| (b, n)).collect();
+    let mut preds: Map<Block, Vec<Block>> = Map::default();
+    for &block in &order {
+        for call in &func[block].succs {
+            preds.entry(call.block).or_default().push(block);
+        }
+    }
+    let mut idom: Map<Block, Block> = Map::default();
+    idom.insert(entry, entry);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &block in &order[1..] {
+            let mut new: Option<Block> = None;
+            for &pred in preds.get(&block).map_or(&[][..], Vec::as_slice) {
+                if idom.contains_key(&pred) {
+                    new = Some(new.map_or(pred, |new| meet(&idom, &number, pred, new)));
+                }
+            }
+            if let Some(new) = new {
+                if idom.insert(block, new) != Some(new) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    (idom, number)
+}
+
+/// The nearest block both of those are behind.
+fn meet(idom: &Map<Block, Block>, number: &Map<Block, usize>, a: Block, b: Block) -> Block {
+    let (mut a, mut b) = (a, b);
+    while a != b {
+        while number[&a] > number[&b] {
+            a = idom[&a];
+        }
+        while number[&b] > number[&a] {
+            b = idom[&b];
+        }
+    }
+    a
+}
+
+/// Writes the rules each block of a function whose prologue is further in wants at its top, where
+/// the block in front of it in the layout left them the other way.
+///
+/// Run last, once the layout has said which block is in front of which. A block wants the body's
+/// rules when the way into it is through the prologue and the ones the function was entered under
+/// when it is not, and every way in agrees, since nothing behind the prologue goes back out of it.
+/// What a block leaves is what it wanted, unless it holds the end of the prologue, which leaves the
+/// body's rules, or an epilogue, which leaves the others. The rows go after the last instruction
+/// of the block in front, which is where they take effect.
+pub fn rows(func: &mut Func, wrapped: &Wrapped) {
+    let Some(entry) = func.entry() else { return };
+    let closed = wrapped.entered[0];
+    let leaves = |func: &Func, block: Block, framed: bool| {
+        let mut framed = framed;
+        for inst in func.insts(block) {
+            framed = framed || inst == wrapped.opened;
+            if func.cfi_after(inst).any(|op| op == closed) {
+                framed = false;
+            }
+        }
+        framed
+    };
+    let mut wants: Map<Block, bool> = Map::default();
+    wants.insert(entry, false);
+    let mut work = vec![entry];
+    while let Some(block) = work.pop() {
+        let framed = leaves(func, block, wants[&block]);
+        for call in &func[block].succs {
+            if let std::collections::hash_map::Entry::Vacant(slot) = wants.entry(call.block) {
+                slot.insert(framed);
+                work.push(call.block);
+            }
+        }
+    }
+    let mut framed = false;
+    let mut last = None;
+    let mut rows = Vec::new();
+    for block in func.blocks() {
+        if let Some(&want) = wants.get(&block) {
+            if let (true, Some(at)) = (want != framed, last) {
+                let ops = if want { &wrapped.body } else { &wrapped.entered };
+                rows.extend(ops.iter().map(|&op| (at, op)));
+            }
+            framed = leaves(func, block, want);
+        }
+        last = func.insts(block).last().or(last);
+    }
+    func.cfi.extend(rows);
 }
 
 /// Points every access to the frame that its instruction cannot carry the offset of at a scratch
@@ -1652,6 +2063,79 @@ impl Writer<'_> {
     /// One row of the unwind table, taking effect after that instruction.
     fn row(&mut self, inst: Inst, op: CfiOp) {
         self.func.cfi.push((inst, op));
+    }
+
+    /// Takes each copy of an argument into a register the frame saves out of the entry block, to
+    /// the top of the blocks further in that read it, so that the entry and a way through the
+    /// function that does not read it leave the register alone. This is what gcc does before it
+    /// shrink wraps, in `prepare_shrink_wrap`.
+    ///
+    /// The allocator puts a value that lives across a call in a saved register and copies it there
+    /// as soon as it arrives, which is the entry, so without this every function that calls on
+    /// some way through it would want the frame at the top. Reads of the copy on the way are made
+    /// reads of the argument's register instead, as far as nothing writes either of the two, and
+    /// the copy is made at the top of the first block on each way where something does.
+    fn sink(&mut self, moves: &mut Moves, frame: &Frame, entry: Block) {
+        let saved = frame.saved_int();
+        let int = self.conv.int_class;
+        let sp = self.conv.stack_pointer;
+        let copies: Vec<(Inst, Edit)> = self
+            .func
+            .insts(entry)
+            .filter_map(|inst| Some((inst, moves.at(inst)?)))
+            .filter(|(_, edit)| match (edit.mov.to, edit.mov.from) {
+                (Place::Reg(to), Place::Reg(from)) => {
+                    edit.class == int && saved.contains(&to) && !saved.contains(&from) && from != sp
+                }
+                _ => false,
+            })
+            .collect();
+        let mut preds: Map<Block, usize> = Map::default();
+        for block in self.func.blocks() {
+            for call in &self.func[block].succs {
+                *preds.entry(call.block).or_default() += 1;
+            }
+        }
+        for (copy, edit) in copies {
+            let (Place::Reg(to), Place::Reg(from)) = (edit.mov.to, edit.mov.from) else { continue };
+            let live = live(self.func, to, int);
+            let way = Way { entry, to, from, class: int, live, preds: &preds };
+            let after: Vec<Inst> =
+                self.func.insts(entry).skip_while(|&inst| inst != copy).skip(1).collect();
+            let (mut reads, mut tops) = (Vec::new(), Vec::new());
+            if !way.follow(self.func, &after, entry, 0, &mut reads, &mut tops) {
+                continue;
+            }
+            for (inst, at) in reads {
+                let operands = self.func[inst].operands;
+                self.func[operands][at].reg = Reg::physical(from);
+            }
+            self.func.remove_inst(copy);
+            for block in tops {
+                let inst = self.mov(&edit, frame);
+                moves.record(inst, edit);
+                self.func.prepend_inst(block, inst);
+            }
+        }
+    }
+
+    /// What [`rows`] needs for a function whose prologue went further in than its entry.
+    ///
+    /// The rows that remember the body's rules at the end of the prologue and bring them back after
+    /// each epilogue say the body is all that comes after the prologue in the layout, which is no
+    /// longer so, and [`rows`] writes what each block wants instead.
+    fn wrapped(&mut self, prologue: &[Inst], frame: &Frame) -> Wrapped {
+        let kept = |op: &CfiOp| !matches!(op, CfiOp::RememberState | CfiOp::RestoreState);
+        self.func.cfi.retain(|(_, op)| kept(op));
+        let body = self.func.cfi.iter().filter(|(inst, _)| prologue.contains(inst));
+        let body = body.map(|&(_, op)| op).collect();
+        let int = self.conv.int_class;
+        let mut entered = vec![CfiOp::DefCfaOffset(offset(self.conv.return_address))];
+        for &reg in frame.saved_int() {
+            entered.push(CfiOp::Restore(self.dwarf(int, reg)));
+        }
+        let opened = *prologue.last().expect("a function that wants a frame has a prologue");
+        Wrapped { opened, body, entered }
     }
 
     /// A row saying the caller's copy of that register is that far from the canonical frame

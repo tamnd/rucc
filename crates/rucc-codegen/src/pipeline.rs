@@ -1593,6 +1593,11 @@ pub fn compile_recording(
         Some(targets) => Some(targets.call),
         None => landing.filter(|_| asked && !source.attrs.set.contains(ir::AttrSet::NOCF)),
     };
+    // Only x86-64, where a frame without a frame pointer is pushes and a subtraction and the
+    // unwinder reads rows, and only when optimizing, as gcc does.
+    let wraps = flags.reloads
+        && std::ptr::eq(machine.shapes, &x86_64::MACHINE)
+        && !machine.conv.unwind_codes;
     let convention = Convention {
         protect,
         probe,
@@ -1603,9 +1608,11 @@ pub fn compile_recording(
         hooked: source.attrs.set.contains(ir::AttrSet::MS_HOOK)
             && std::ptr::eq(machine.insts, &x86::FRAME),
         sign: flags.branch.sign,
+        wrap: wraps.then_some(machine.shapes),
         ..Convention::new(machine.conv, machine.insts)
     };
-    let (moves, loops, checks) = finish(&mut func, &allocation, &frame, &stack, convention, names);
+    let (moves, loops, checks, wrapped) =
+        finish(&mut func, &allocation, &frame, &stack, convention, names);
     // The comparison in each loop that walks the stack and in each stack protector check is written
     // after the question above was asked, and only the branch behind it reads its byte, so it can
     // be joined with that branch.
@@ -1864,6 +1871,12 @@ pub fn compile_recording(
     // pass above is free to take an instruction out or move one. The frame is wanted here as well
     // as above, since a value the allocator spilled is in the frame over its stretch rather than in
     // a register, and it is the same distance from the call frame address the locals were given.
+    // After the layout, which is what says which block a block's rules are left by. See
+    // [`finish::rows`].
+    if let Some(wrapped) = &wrapped {
+        finish::rows(&mut func, wrapped);
+    }
+
     func.kept = match line {
         Some(line) => kept::of(&func, &line, &allocation, &frame, &framed, &unread),
         None => Vec::new(),
