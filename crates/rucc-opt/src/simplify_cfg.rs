@@ -65,6 +65,12 @@
 //! section 21.1's last paragraph telling us not to: it costs a branch to save a copy, so it belongs
 //! at the machine level under `-Os`, which is document 37.
 //!
+//! Two whole blocks that do the same thing and jump to the same place are different, and those are
+//! made one here, as gcc's tail merging does at `-O2`. Both already end in the jump, so nothing is
+//! added and a copy goes. The arms of a `switch` the inliner leaves behind are often two copies of
+//! one arm, as in the kernel's `ma_pivots`, where two kinds of node keep their pivots at the same
+//! place. Made one, the cases are one run and the `switch` is one range test.
+//!
 //! # What a forwarder is allowed to be
 //!
 //! Section 21.1 wants four things of a block before its predecessors are pointed past it: one
@@ -200,6 +206,12 @@ const MERGED: &str = "block with one way into it merged into the block above it"
 /// Recorded once for each block that did nothing but jump and is no longer in the way.
 const FORWARDED: &str = "block that only jumped somewhere else removed and its edges pointed past";
 
+/// Recorded once for each block that did what an earlier one did and went, its ways in sent there.
+const TWINNED: &str = "block that was the same as another removed and its edges sent to the other";
+
+/// Recorded for a block with a twin that would have gone if there had been fuel for it.
+const NO_FUEL_TWIN: &str = "block that was the same as another kept, the pass ran out of fuel";
+
 /// Recorded once for each block parameter that turned out to be one value.
 const SAME_EVERY_WAY: &str = "block parameter that arrives as the same value every way in removed";
 
@@ -316,6 +328,19 @@ impl Pass for SimplifyCfg {
                 sweep(func, an, &mut stats);
             }
         }
+        // Before the cases are put together below, as a case can be going to a twin of the block
+        // the case beside it goes to.
+        if twins(func, fuel, &mut stats) {
+            an.clear();
+            if fold_branches(func, fuel, &mut stats) {
+                sweep(func, an, &mut stats);
+            }
+        }
+        // A case that went to a twin of the default goes to the default now, and the lowering
+        // tests for every case it is handed.
+        if undo_cases(func, fuel, &mut stats) {
+            an.clear();
+        }
         // Again, because the cases of `case 0: case 1: return x;` each go to a block that only
         // jumps to the next one, and they all go to one block only now that the forwarders are out
         // of the way. Without this the switch reaches the second `phiopt` as a switch.
@@ -426,6 +451,50 @@ fn undefault(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
         let info = func.add_switch(SwitchInfo { targets, cases });
         func[term].extra = Extra::Switch(info);
         stats.optimized(UNDEFAULTED);
+        changed = true;
+    }
+    changed
+}
+
+/// Recorded once for each `switch` that had cases going where its default goes.
+const UNCASED: &str = "switch cases that went where the default goes taken out";
+
+/// Recorded for such a `switch` that would have lost them if there had been fuel.
+const NO_FUEL_UNCASED: &str =
+    "switch cases that went where the default goes kept, the pass ran out of fuel";
+
+/// Takes out of every `switch` the cases that go where its default goes with the same arguments,
+/// and says whether any went.
+fn undo_cases(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let mut changed = false;
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(block) else { continue };
+        let Extra::Switch(info) = func[term].extra else { continue };
+        let calls: Vec<BlockCall> = func[func[info].targets].to_vec();
+        let cases: Vec<Imm> = func[func[info].cases].to_vec();
+        let Some((&default, rest)) = calls.split_first() else { continue };
+        let same =
+            |call: &BlockCall| call.block == default.block && func[call.args] == func[default.args];
+        if !rest.iter().any(same) {
+            continue;
+        }
+        if !fuel.take() {
+            stats.missed(NO_FUEL_UNCASED);
+            continue;
+        }
+        let mut targets = vec![default];
+        let mut kept = Vec::with_capacity(cases.len());
+        for (call, &case) in rest.iter().zip(&cases) {
+            if !same(call) {
+                targets.push(*call);
+                kept.push(case);
+            }
+        }
+        let targets = func.push_block_calls(&targets);
+        let cases = func.push_imms(&kept);
+        let info = func.add_switch(SwitchInfo { targets, cases });
+        func[term].extra = Extra::Switch(info);
+        stats.optimized(UNCASED);
         changed = true;
     }
     changed
@@ -1123,6 +1192,149 @@ fn straighten(
         }
     }
     changed
+}
+
+/// Sends every way into a block to an earlier block that is its twin, and says whether any went.
+///
+/// Twins are the same instructions on the same values, jumping to the same block with the same
+/// arguments. A value made in either is read only in it, so nothing below can be reading the one
+/// that goes, and a value from outside that both read dominates both, so it dominates every way
+/// into either and the earlier block can be reached from all of them.
+fn twins(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let Some(entry) = func.entry() else { return false };
+    let addressed = addressed(func);
+    let elsewhere = read_elsewhere(func);
+    let mut seen: Map<(Block, usize), Vec<Block>> = Map::default();
+    let mut gone = Vec::new();
+    for block in func.blocks() {
+        if block == entry || addressed.contains(&block) || !func[block].params.is_empty() {
+            continue;
+        }
+        let Some(key) = twin_key(func, block, &elsewhere) else { continue };
+        let earlier = seen.entry(key).or_default();
+        match earlier.iter().find(|&&other| same_blocks(func, other, block)) {
+            Some(&other) => gone.push((block, other)),
+            None => earlier.push(block),
+        }
+    }
+    let leaving: Set<Block> = gone.iter().map(|&(block, _)| block).collect();
+    let edges = incoming(func);
+    let mut changed = false;
+    for (block, into) in gone {
+        if !fuel.take() {
+            stats.missed(NO_FUEL_TWIN);
+            break;
+        }
+        for &(from, at) in edges.get(&block).into_iter().flatten() {
+            // An edge out of a twin that goes as well goes with it.
+            if !leaving.contains(&from) {
+                let call = func[at];
+                func.set_block_call(at, BlockCall { block: into, ..call });
+            }
+        }
+        func.remove_block(block);
+        stats.optimized(TWINNED);
+        changed = true;
+    }
+    changed
+}
+
+/// The values read in a block other than the one that makes them.
+fn read_elsewhere(func: &Func) -> Set<Value> {
+    let mut out = Set::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let mut read = func[func[inst].args].to_vec();
+            if func.is_terminator(inst) {
+                for call in func.successors(inst) {
+                    read.extend_from_slice(&func[call.args]);
+                }
+            }
+            for value in read {
+                let made = func[value].def;
+                if matches!(made, Def::Result { inst, .. } if func.block_of(inst) != Some(block)) {
+                    out.insert(value);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Where a block that can have a twin jumps and how many instructions it has, which a twin of it
+/// shares, or nothing when it cannot have one: it does not end in a jump somewhere else, a value it
+/// makes is read in another block, or it does something whose copy is not the same thing, such as
+/// a call or an `alloca`.
+fn twin_key(func: &Func, block: Block, elsewhere: &Set<Value>) -> Option<(Block, usize)> {
+    let term = func.terminator(block)?;
+    let into = func.successors(term).next()?.block;
+    if func[term].opcode != Opcode::Jump || into == block {
+        return None;
+    }
+    let mut count = 0;
+    for inst in func.insts(block) {
+        count += 1;
+        let data = &func[inst];
+        let plain = matches!(
+            data.extra,
+            Extra::None
+                | Extra::Imm(_)
+                | Extra::Symbol(_)
+                | Extra::IntPred(_)
+                | Extra::FloatPred(_)
+                | Extra::Mem(_)
+                | Extra::Member(_)
+                | Extra::Array(_)
+        );
+        if (!plain && inst != term) || data.opcode == Opcode::Alloca {
+            return None;
+        }
+        if data.results().any(|result| elsewhere.contains(&result)) {
+            return None;
+        }
+        if func[data.args].iter().any(|&arg| from_a_terminator(func, arg)) {
+            return None;
+        }
+    }
+    let call = func.successors(term).next()?;
+    if func[call.args].iter().any(|&arg| from_a_terminator(func, arg)) {
+        return None;
+    }
+    Some((into, count))
+}
+
+/// Whether two blocks [`twin_key`] gives the same answer for are twins.
+fn same_blocks(func: &Func, a: Block, b: Block) -> bool {
+    // What each value `b` makes is in `a`.
+    let mut made: Map<Value, Value> = Map::default();
+    let same = |made: &Map<Value, Value>, x: &[Value], y: &[Value]| {
+        x.len() == y.len()
+            && x.iter().zip(y).all(|(&x, &y)| made.get(&y).copied().unwrap_or(y) == x)
+    };
+    for (x, y) in func.insts(a).zip(func.insts(b)) {
+        let (one, two) = (&func[x], &func[y]);
+        // The jump's targets are compared below, by where they go rather than where they are kept.
+        let extra = match (one.extra, two.extra) {
+            (Extra::Imm(p), Extra::Imm(q)) => func[p] == func[q],
+            (Extra::Mem(p), Extra::Mem(q)) => func[p] == func[q],
+            _ if func.is_terminator(x) => true,
+            (p, q) => p == q,
+        };
+        let typed = one.results().zip(two.results()).all(|(p, q)| func[p].ty == func[q].ty);
+        let kind = one.opcode == two.opcode && one.flags == two.flags && one.results == two.results;
+        if !kind || !extra || !typed || !same(&made, &func[one.args], &func[two.args]) {
+            return false;
+        }
+        if func.is_terminator(x) {
+            let (p, q) = (func.successors(x).next(), func.successors(y).next());
+            let Some((p, q)) = p.zip(q) else { return false };
+            if p.block != q.block || !same(&made, &func[p.args], &func[q.args]) {
+                return false;
+            }
+        }
+        made.extend(two.results().zip(one.results()));
+    }
+    true
 }
 
 /// Puts a hint left on a jump onto the `asm goto` edge that is the only way into the jump's block.
@@ -3157,6 +3369,122 @@ block2:
         let term = func.terminator(at[0]).expect("the entry still ends in the asm goto");
         let hints: Vec<Option<u32>> = func.successors(term).map(|call| call.hint.taken()).collect();
         assert_eq!(hints, [Some(9_000), Some(1_000)]);
+    }
+
+    /// `ma_pivots` from the kernel's `lib/maple_tree.c` once it is inlined. Two kinds of node keep
+    /// their pivots at the same place, so two of the cases go to blocks that are the same.
+    #[test]
+    fn two_blocks_that_do_the_same_thing_are_one() {
+        let text = "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+
+func @f(ptr, i32) -> ptr {
+block0(%0: ptr, %1: i32):
+    switch %1, block1, [3 => block2, 2 => block3, 1 => block3]
+block1:
+    %2 = iconst.i64 0
+    %3 = inttoptr.ptr %2
+    jump block4(%3)
+block2:
+    %4 = iconst.i64 8
+    %5 = ptr_add.nuw %0, %4
+    jump block4(%5)
+block3:
+    %6 = iconst.i64 8
+    %7 = ptr_add.nuw %0, %6
+    jump block4(%7)
+block4(%8: ptr):
+    return %8
+}
+";
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let stats = simplify(&mut module[id]);
+        rucc_ir::verify(&module, &names).expect("the pass left the function verifiable");
+        let func = &module[id];
+        let adds = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::PtrAdd)
+            .count();
+        assert_eq!(adds, 1, "{}", rucc_ir::print(&module, &names));
+        assert_eq!(stats.count(Kind::Optimized, super::TWINNED), 1);
+    }
+
+    /// A case going to a twin of the default goes to the default, and then it is no case at all.
+    #[test]
+    fn a_case_going_where_the_default_goes_is_taken_out() {
+        let text = "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+
+func @f(ptr, i32) -> ptr {
+block0(%0: ptr, %1: i32):
+    switch %1, block1, [3 => block2, 2 => block2, 0 => block3]
+block1:
+    %2 = iconst.i64 16
+    %3 = ptr_add.nuw %0, %2
+    jump block4(%3)
+block2:
+    %4 = iconst.i64 8
+    %5 = ptr_add.nuw %0, %4
+    jump block4(%5)
+block3:
+    %6 = iconst.i64 16
+    %7 = ptr_add.nuw %0, %6
+    jump block4(%7)
+block4(%8: ptr):
+    return %8
+}
+";
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let stats = simplify(&mut module[id]);
+        rucc_ir::verify(&module, &names).expect("the pass left the function verifiable");
+        assert_eq!(stats.count(Kind::Optimized, super::TWINNED), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::UNCASED), 1);
+    }
+
+    /// The same two blocks reading different values are not twins.
+    #[test]
+    fn two_blocks_on_different_values_stay_two() {
+        let text = "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+
+func @f(ptr, i32) -> ptr {
+block0(%0: ptr, %1: i32):
+    switch %1, block1, [3 => block2, 2 => block3]
+block1:
+    %2 = iconst.i64 0
+    %3 = inttoptr.ptr %2
+    jump block4(%3)
+block2:
+    %4 = iconst.i64 8
+    %5 = ptr_add.nuw %0, %4
+    jump block4(%5)
+block3:
+    %6 = iconst.i64 16
+    %7 = ptr_add.nuw %0, %6
+    jump block4(%7)
+block4(%8: ptr):
+    return %8
+}
+";
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let stats = simplify(&mut module[id]);
+        assert_eq!(stats.count(Kind::Optimized, super::TWINNED), 0);
     }
 
     #[test]

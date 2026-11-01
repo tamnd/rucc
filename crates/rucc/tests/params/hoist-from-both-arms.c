@@ -16,7 +16,7 @@ int main(void) {
     if (flag) {
         total = a * b + (int)1;
     } else {
-        total = a * b + (int)1;
+        total = a * b - (int)3;
     }
 
     printf("%lld\n", (long long)(total));
