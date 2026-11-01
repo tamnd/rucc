@@ -36,7 +36,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::{INLINE_CALL_TIME, INLINE_SUMMARY_CLAUSES};
 use rucc_ir::{Block, DataLayout, Def, Func, Imm, Inst, Opcode, Type, Value};
 
-use super::{Count, Readers, computed, goes_to, weight};
+use super::{Count, Readers, computed, goes_to, halved, weight};
 use crate::cfg::Cfg;
 
 /// The parameters something needs known, one bit for each, or nothing when no set of them does.
@@ -56,9 +56,9 @@ struct Entry {
     predicate: u32,
     /// The parameters whose being known folds them away, either of two sets, sorted.
     unless: [Mask; 2],
-    /// How many there are.
+    /// How many there are, in halves, as a copy counts a load or a store through a parameter one.
     plain: usize,
-    /// What gcc's `estimate_num_insns` charges for them. See [`weight`].
+    /// What gcc's `estimate_num_insns` charges for them, in halves too. See [`weight`].
     weighed: usize,
     /// How long they take, each weighed by how often its block runs.
     time: f64,
@@ -341,8 +341,9 @@ impl Summary {
                     });
                 }
                 let entry = &mut summary.entries[at];
-                entry.plain += Count::Plain(names).cost(func, inst, read);
-                entry.weighed += cost;
+                let twice = if halved(func, inst) { 1 } else { 2 };
+                entry.plain += Count::Plain(names).cost(func, inst, read) * twice;
+                entry.weighed += cost * twice;
                 entry.time += (cost as f64 + waits) * often;
             }
         }
@@ -380,6 +381,8 @@ impl Summary {
                 estimate.cut = true;
             }
         }
+        estimate.plain = estimate.plain.div_ceil(2);
+        estimate.weighed = estimate.weighed.div_ceil(2);
         Some(estimate)
     }
 
@@ -673,6 +676,8 @@ block2:
     /// `start_dir_add` from fs/dcache.c cut down: a count read into a local, tested, and written
     /// back one larger. The local is a value once the early passes have run, so neither the store
     /// nor the load through it is counted, only the load of the count, the add and the store of it.
+    /// The load and the store of the count are through the parameter, so a copy counts them at half
+    /// each, as gcc does, and the three come to two.
     #[test]
     fn a_load_or_a_store_through_a_local_that_becomes_a_value_is_not_counted() {
         let body = r#"
@@ -688,7 +693,7 @@ block0(%0: ptr):
     return
 }
 "#;
-        assert_eq!(sized(body, &[]), (3, false));
+        assert_eq!(sized(body, &[]), (2, false));
     }
 
     /// The time is the walk's, each block weighed by how often it runs.

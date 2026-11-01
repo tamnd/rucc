@@ -50,9 +50,9 @@ use rucc_target::TargetInfo;
 
 use super::summary::Summary;
 use super::{
-    ASKED_DEPTH, CUT, Count, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits,
-    folded_size, frame, grows, made_of_params, passed, passes_asked, resolved, runs_once, splice,
-    summed_size, summed_time,
+    ASKED_DEPTH, CUT, Count, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits, folded_as,
+    frame, grows, made_of_params, passed, passes_asked, resolved, runs_once, splice, summed_size,
+    summed_time,
 };
 use crate::Stats;
 use crate::callgraph::CallGraph;
@@ -1082,7 +1082,8 @@ fn calls_to(func: &Func, name: Symbol) -> usize {
 
 /// How large a function is, the way the second pass counts the unit and a caller.
 fn measure(func: &Func, layout: DataLayout, names: &Interner) -> usize {
-    folded_size(func, layout, Set::default(), Map::default(), Count::Weighed(names))
+    let count = Count::Weighed(names);
+    folded_as(func, layout, Set::default(), Map::default(), count, None, false).0
 }
 
 /// What [`Profile`] says about a function.
