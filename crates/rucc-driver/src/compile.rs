@@ -293,7 +293,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         // these as well.
         // Consecutive tokens of an expansion are nearly always spelled in the same file, so the
         // file the last one was in is tried before the search over every file.
-        let quiet = !opts.system_header_warnings;
+        // A unit with no system header in it has nothing to mark, and finding the file of each
+        // expanded token was most of what this loop cost in a kernel build, which includes no
+        // system header at all. tamnd/rucc-kernel#109.
+        let quiet = !opts.system_header_warnings
+            && sess.sources.files().iter().any(|file| file.system_from.is_some());
         let mut last: Option<&SourceFile> = None;
         tokens
             .iter()
