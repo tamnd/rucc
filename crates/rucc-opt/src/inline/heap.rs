@@ -187,6 +187,13 @@ struct Weighed {
     badness: f64,
     /// Whether the copy saves enough of the time the call and its caller take.
     speedup: bool,
+    /// Whether the speedup is still to be asked of cleaned up copies, which
+    /// [`Heap::cleaned_speedup`] does when [`Heap::refused`] needs it.
+    asks: bool,
+    /// The time of the call the copy replaces.
+    call_time: f64,
+    /// How often the call runs each time its caller does.
+    frequency: f64,
     /// How much longer the caller takes with the copy in it, which is the copy less the call, as
     /// often as the call runs.
     adds: f64,
@@ -641,13 +648,29 @@ impl Heap<'_> {
             caller: size(caller),
             hints,
         });
-        let mut speedup =
+        let speedup =
             badness::big_speedup(time, copied, call_time, frequency, spent, self.second.speedup);
-        if !speedup && growth > 0 && self.speedup_decides(kind, body, growth, hints) {
-            speedup = self.cleaned_speedup(module, caller, callee, &values, call_time, frequency);
-        }
+        // The cleaned up copies are timed only when the call comes off the heap. Most weighings
+        // are of calls in a caller that a copy has just changed, and the caller is cleaned up
+        // again at each change, which made the pass two to three times slower on kernel units.
+        // The order of the heap is the badness alone. tamnd/rucc#4019.
+        let asks = !speedup && growth > 0 && self.speedup_decides(kind, body, growth, hints);
         let adds = (copied - call_time) * frequency;
-        Some(Weighed { callee, kind, body, growth, hints, overall, badness, speedup, adds, cut })
+        Some(Weighed {
+            callee,
+            kind,
+            body,
+            growth,
+            hints,
+            overall,
+            badness,
+            speedup,
+            asks,
+            call_time,
+            frequency,
+            adds,
+            cut,
+        })
     }
 
     /// Whether a call over the limit its hints give it would be let through by a large enough
@@ -665,6 +688,25 @@ impl Heap<'_> {
             }
             _ => growth < i64::try_from(one.limit(self.how.auto, percent)).unwrap_or(i64::MAX),
         }
+    }
+
+    /// Whether [`Heap::wants`] lets the call through once the speedup is asked of cleaned up
+    /// copies.
+    fn wants_cleaned(
+        &mut self,
+        module: &Module,
+        caller: FuncId,
+        call: Inst,
+        weighed: &Weighed,
+    ) -> bool {
+        if !weighed.asks {
+            return false;
+        }
+        let values = passed(&module[caller], call, &module[weighed.callee]);
+        let (call_time, frequency) = (weighed.call_time, weighed.frequency);
+        let speedup =
+            self.cleaned_speedup(module, caller, weighed.callee, &values, call_time, frequency);
+        speedup && self.wants(&Weighed { speedup, ..*weighed })
     }
 
     /// gcc's `big_speedup_p` with the caller, the callee and the copy timed once they have been
@@ -687,14 +729,21 @@ impl Heap<'_> {
         frequency: f64,
     ) -> bool {
         let none = Map::default();
-        let (Some(time), Some(copied), Some(spent)) = (
-            self.cleaned_time(module, callee, &none),
-            self.cleaned_time(module, callee, values),
-            self.cleaned_time(module, caller, &none),
-        ) else {
+        let (Some(time), Some(copied)) =
+            (self.cleaned_time(module, callee, &none), self.cleaned_time(module, callee, values))
+        else {
             return false;
         };
-        badness::big_speedup(time, copied, call_time, frequency, spent, self.second.speedup)
+        // The caller is the largest body of the three, so it is cleaned up only for a call some
+        // caller would let in.
+        let percent = self.second.speedup;
+        if !badness::big_speedup_possible(time, copied, call_time, frequency, percent) {
+            return false;
+        }
+        let Some(spent) = self.cleaned_time(module, caller, &none) else {
+            return false;
+        };
+        badness::big_speedup(time, copied, call_time, frequency, spent, percent)
     }
 
     /// How long the function takes once a copy of it given `values` has been cleaned up.
@@ -800,7 +849,7 @@ impl Heap<'_> {
         weighed: &Weighed,
         pool: &Pool,
     ) -> Result<u64, InlineFailure> {
-        if !self.wants(weighed) {
+        if !self.wants(weighed) && !self.wants_cleaned(module, caller, call, weighed) {
             return Err(InlineFailure::TooLarge);
         }
         let func = &module[caller];
