@@ -188,6 +188,11 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// by a test of the result is two conditional moves when `phiopt` sees it first, and two branches
 /// and three more saved registers when the copy does. The corpus `clamp` shapes found that.
 ///
+/// A copy for a branch above on the same condition is the other way round, so at `-O2` and `-O3` the
+/// first instance is `thread-implied`, which makes those copies as well. `if (!load) runnable = 0;`
+/// followed by tests of `load` and then `runnable` is three branches gcc threads into a straight
+/// run, and once `phiopt` has made `runnable` a `select` on `load` no edge decides the third.
+///
 /// From `-O2` up `thread` runs a second time, straight after the `simplify-cfg` that follows the
 /// unroller, which is section 23.5's late instance. The early one sees the function as inlining
 /// left it, and an inline function that returns `a && b` arrives as a truth value carried through
@@ -463,7 +468,7 @@ const O2: &[&str] = &[
     "tail-recursion",
     "switch-conv",
     "short-circuit",
-    "thread",
+    "thread-implied",
     "phiopt",
     "rangeswitch",
     "rangetest",
@@ -536,7 +541,7 @@ const O3: &[&str] = &[
     "tail-recursion",
     "switch-conv",
     "short-circuit",
-    "thread",
+    "thread-implied",
     "phiopt",
     "rangeswitch",
     "rangetest",
