@@ -443,8 +443,8 @@ impl Checker<'_> {
             return;
         }
         let placed: Vec<u64> = info.fields.iter().map(|field| field.offset).collect();
+        // Spelled only for a warning, since nearly every record has no member that asks.
         let record = self.types.record(id);
-        let spelled = self.spell(record);
         for ((decl, at), offset) in fields.iter().zip(placed) {
             let own = asked.iter().find(|(span, _)| span == at).map(|&(_, own)| own);
             let Some(wanted) = own.or_else(|| self.types.warn_if_not_aligned(decl.ty)) else {
@@ -455,6 +455,7 @@ impl Checker<'_> {
             }
             let wanted = u64::from(wanted.get());
             if whole.align % wanted != 0 {
+                let spelled = self.spell(record);
                 let what =
                     format!("alignment {} of '{spelled}' is less than {wanted}", whole.align);
                 self.report(Diagnostic::warning(what, span).with_code("E0824"));
@@ -464,6 +465,7 @@ impl Checker<'_> {
                     Some(name) => self.text(name).to_owned(),
                     None => String::from("<anonymous>"),
                 };
+                let spelled = self.spell(record);
                 let what =
                     format!("'{who}' offset {offset} in '{spelled}' isn't aligned to {wanted}");
                 self.report(Diagnostic::warning(what, *at).with_code("E0824"));
