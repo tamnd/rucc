@@ -722,8 +722,10 @@ impl Checker<'_> {
         self.check_interrupt_call(callee, span);
         self.sse_refused_call(callee, &signature, span);
 
-        if signature.prototyped {
-            let (wanted, given) = (signature.params.len(), checked.len());
+        // The message is put together only for a call that has the wrong count, since every call
+        // to a prototyped function comes through here. tamnd/rucc-kernel#109.
+        let (wanted, given) = (signature.params.len(), checked.len());
+        if signature.prototyped && (given < wanted || (given > wanted && !signature.variadic)) {
             let quoted = function.map(|name| format!(" '{}'", self.text(name))).unwrap_or_default();
             // The counts are spelled out because the prototype is often nowhere near the call, and
             // for a variadic one the number that matters is the number of named parameters rather
@@ -738,7 +740,7 @@ impl Checker<'_> {
                     )
                     .with_code("E0511"),
                 );
-            } else if given > wanted && !signature.variadic {
+            } else {
                 self.report(
                     Diagnostic::error(
                         format!("too many arguments to function{quoted}{counted}"),
