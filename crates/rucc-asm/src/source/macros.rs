@@ -34,7 +34,7 @@
 //! a backslash, `&` to join one to what follows and `LOCAL`. Nothing in the 7.2 kernel turns it on,
 //! so it is here for the programs that do and is not what the tests lean on.
 
-use super::{Reader, Trouble, labelled, split, starts};
+use super::{Reader, Trouble, labelled, pieces, split, starts};
 use rucc_base::hash::Map;
 use rucc_object::Held;
 
@@ -184,11 +184,11 @@ fn parts(text: &str) -> Parts<'_> {
 impl Reader {
     /// One line of the file, or of an expansion, with its comments already gone.
     pub(super) fn feed(&mut self, line: &str) -> Result<(), Trouble> {
-        for statement in split(line, ';') {
+        for statement in pieces(line, ';') {
             if self.macros.exiting {
                 break;
             }
-            self.take(statement.trim())?;
+            self.take(statement)?;
         }
         Ok(())
     }

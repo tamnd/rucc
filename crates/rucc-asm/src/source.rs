@@ -6617,18 +6617,23 @@ fn wide(text: &str) -> Option<u128> {
 /// The brackets matter as much as the quotes: `.long (1 + 2), 3` is two operands and splitting on
 /// every comma would be right here and wrong the moment one turns up inside brackets.
 pub(crate) fn split(text: &str, on: char) -> Vec<String> {
+    pieces(text, on).into_iter().map(str::to_owned).collect()
+}
+
+/// [`split`] as slices of `text`. Every character of a piece is the character at the same place
+/// in `text`, so a piece is the text between two separators, trimmed. Copying each one out a
+/// character at a time was most of what reading a line cost, and every line of a listing is
+/// split on `;` before anything else is done with it. tamnd/rucc-kernel#109.
+pub(crate) fn pieces(text: &str, on: char) -> Vec<&str> {
     let mut out = Vec::new();
-    let mut piece = String::new();
+    let mut start = 0;
     let mut depth = 0i32;
     let mut quote = None;
-    let mut chars = text.chars();
-    while let Some(ch) = chars.next() {
+    let mut chars = text.char_indices();
+    while let Some((at, ch)) = chars.next() {
         if let Some(mark) = quote {
-            piece.push(ch);
             if ch == '\\' {
-                if let Some(next) = chars.next() {
-                    piece.push(next);
-                }
+                chars.next();
                 continue;
             }
             if ch == mark {
@@ -6637,43 +6642,31 @@ pub(crate) fn split(text: &str, on: char) -> Vec<String> {
             continue;
         }
         match ch {
-            '"' => {
-                quote = Some(ch);
-                piece.push(ch);
-            }
+            '"' => quote = Some(ch),
             // A character constant, which is one character whatever it is, so `','` is not the
             // end of an operand. Its closing quote is optional, as it is to gas.
             '\'' => {
-                piece.push(ch);
-                let mut next = chars.next();
-                if next == Some('\\') {
-                    piece.push('\\');
-                    next = chars.next();
+                if chars.next().is_some_and(|(_, next)| next == '\\') {
+                    chars.next();
                 }
-                piece.extend(next);
-                if chars.clone().next() == Some('\'') {
-                    piece.push('\'');
+                if chars.clone().next().is_some_and(|(_, next)| next == '\'') {
                     chars.next();
                 }
             }
-            '(' => {
-                depth += 1;
-                piece.push(ch);
-            }
-            ')' => {
-                depth -= 1;
-                piece.push(ch);
-            }
+            '(' => depth += 1,
+            ')' => depth -= 1,
             _ if ch == on && depth == 0 => {
-                out.push(std::mem::take(&mut piece));
+                out.push(text[start..at].trim());
+                start = at + ch.len_utf8();
             }
-            _ => piece.push(ch),
+            _ => {}
         }
     }
-    if !piece.trim().is_empty() || !out.is_empty() {
-        out.push(piece);
+    let last = text[start..].trim();
+    if !last.is_empty() || !out.is_empty() {
+        out.push(last);
     }
-    out.into_iter().map(|piece| piece.trim().to_owned()).collect()
+    out
 }
 
 /// The byte a prefix written as a word is, for the ones a line may write in front of an instruction.
