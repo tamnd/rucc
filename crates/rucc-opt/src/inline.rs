@@ -1981,12 +1981,11 @@ impl Readers {
 /// weighs a body after its early scalar replacement, so it counts nothing for them. In
 /// `start_dir_add` from fs/dcache.c the sequence count is read into a local and written back, and
 /// counted that made the body six larger than gcc has it.
-fn slots(func: &Func, layout: DataLayout) -> Set<Value> {
-    let mut slots = crate::sroa::scalarizable(func, layout);
+fn slots(func: &Func, cfg: &Cfg, layout: DataLayout) -> Set<Value> {
+    let mut slots = crate::sroa::scalarizable(func, layout, Some(cfg));
     if slots.is_empty() {
         return slots;
     }
-    let cfg = Cfg::new(func);
     for block in cfg.reverse_postorder() {
         for inst in func.insts(block) {
             let data = &func[inst];
@@ -2053,8 +2052,8 @@ fn folded_as(
         |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| readers.only(value, fits);
     let address =
         |opcode: Opcode, at: usize| matches!((opcode, at), (Opcode::Load, 0) | (Opcode::Store, 1));
-    let slots = slots(func, layout);
     let cfg = Cfg::new(func);
+    let slots = slots(func, &cfg, layout);
     let mut live: Set<Block> = cfg.entry().into_iter().collect();
     // In halves, so a load or a store through a parameter can count one.
     let mut halves = 0;
@@ -2693,7 +2692,7 @@ fn made(func: &Func, mark: usize) -> u64 {
 /// tracepoints in it stayed calls with their static keys out of line.
 fn gone(func: &Func, layout: DataLayout) -> Set<Value> {
     let mut out = unread(func);
-    out.extend(crate::sroa::scalarizable(func, layout));
+    out.extend(crate::sroa::scalarizable(func, layout, None));
     out
 }
 
@@ -2779,7 +2778,7 @@ fn splice(
     let stand_in = Func::new(module[caller].name, Signature::new());
     let mut func = std::mem::replace(&mut module[caller], stand_in);
     let mut copies = std::mem::take(&mut module.copies);
-    let scalar = crate::sroa::scalarizable(&module[callee], module.datalayout);
+    let scalar = crate::sroa::scalarizable(&module[callee], module.datalayout, None);
     let result = check(&func, call, &module[callee], convention, kind).map(|plan| {
         copy(&mut func, call, &module[callee], &plan, pool, &scalar, &mut copies);
     });
