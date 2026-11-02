@@ -62,7 +62,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The inliner now times a caller and its callee the way gcc does, after they are cleaned up, when it asks whether a call over the limit is worth it for the speedup, so `recalc_sigpending_tsk` goes into `recalc_sigpending` in kernel/signal.c as it does under gcc; a `bool` returning `true` is no longer read as a failing negative return, and the `unlikely` of a static branch is no longer lost on the way (#4014)
 - The inliner's second pass no longer counts a call on a path its caller rarely takes as if it ran every time, so a large file's growth goes to the calls that run, as with gcc (#4015)
 - The inliner counts a load or a store through a parameter at half its size when it weighs a copy, as gcc does, so helpers that mostly read and write the struct they are passed are no longer weighed at twice their gcc size (#4017)
-- Blocks that do the same thing on the same values and jump to the same place are merged into one, and switch cases that go where the default goes are taken out, so a switch like the one in `ma_pivots` lowers to one range test as gcc does (#4018)
+- Blocks that do the same thing on the same values and jump to the same place are merged into one, and switch cases that go where the default goes are taken out, so a switch like the one in `ma_pivots` lowers to one range test as gcc does (#4020)
+- On x86-64 at `-O1` and up the prologue now goes at the top of the block every block that needs the frame is behind, when that block runs less often than the entry, and a way through the function that needs no frame returns with a bare `ret`, as gcc does with shrink wrapping. Copies of arguments into saved registers move out of the entry to where they are read, and a short return block shared with that way is copied, so `mas_ascend` in lib/maple_tree.c no longer pushes two registers on the path it takes most of the time (#4023)
 
 ## 0.30.15
 
