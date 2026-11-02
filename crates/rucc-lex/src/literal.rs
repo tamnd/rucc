@@ -375,10 +375,10 @@ pub fn character(
     let mut value: u64 = 0;
     let mut count = 0u32;
     while let Some(piece) = reader.next(width)? {
-        for element in piece.elements(width) {
+        piece.elements(width, |element| {
             value = (value << width) | u64::from(element);
             count += 1;
-        }
+        });
     }
     let mut remarks = reader.remarks;
 
@@ -455,12 +455,14 @@ pub fn strings(
     }
 
     let width = encoding.element_width(target);
-    let mut elements = Vec::new();
+    // A byte of the body is one element or more of a narrow string and seldom less, so the
+    // bodies' length is room enough nearly always.
+    let mut elements = Vec::with_capacity(bodies.iter().map(|body| body.len()).sum());
     let mut remarks = Remarks::NONE;
     for body in bodies {
         let mut reader = Reader { bytes: body, index: 0, std, remarks: Remarks::NONE };
         while let Some(piece) = reader.next(width)? {
-            elements.extend(piece.elements(width));
+            piece.elements(width, |element| elements.push(element));
         }
         remarks = remarks.with(reader.remarks);
     }
@@ -512,10 +514,12 @@ enum Piece {
 }
 
 impl Piece {
-    /// The elements this piece becomes in an encoding of the given element width.
-    fn elements(self, width: u32) -> Vec<u32> {
+    /// Hands each element this piece becomes in an encoding of the given element width to
+    /// `out`, which is one or two for most pieces. A list for each piece was an allocation for
+    /// each character of every string in a unit. tamnd/rucc-kernel#109.
+    fn elements(self, width: u32, mut out: impl FnMut(u32)) {
         let code = match self {
-            Piece::Value(value) => return vec![value],
+            Piece::Value(value) => return out(value),
             Piece::Char(code) => code,
         };
         match width {
@@ -524,15 +528,16 @@ impl Piece {
                 let text = char::from_u32(code)
                     .map(|character| character.encode_utf8(&mut buffer).len())
                     .unwrap_or(0);
-                buffer[..text].iter().map(|&byte| u32::from(byte)).collect()
+                buffer[..text].iter().for_each(|&byte| out(u32::from(byte)));
             }
             // UTF-16 is the one encoding where a character can take two elements, which is why
             // a wide string is not the same length on Windows as it is anywhere else.
             16 if code > 0xffff => {
                 let value = code - 0x1_0000;
-                vec![0xd800 + (value >> 10), 0xdc00 + (value & 0x3ff)]
+                out(0xd800 + (value >> 10));
+                out(0xdc00 + (value & 0x3ff));
             }
-            _ => vec![code],
+            _ => out(code),
         }
     }
 }
