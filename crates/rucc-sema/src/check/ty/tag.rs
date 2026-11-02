@@ -443,8 +443,8 @@ impl Checker<'_> {
             return;
         }
         let placed: Vec<u64> = info.fields.iter().map(|field| field.offset).collect();
+        // Spelled only for a warning, since nearly every record has no member that asks.
         let record = self.types.record(id);
-        let spelled = self.spell(record);
         for ((decl, at), offset) in fields.iter().zip(placed) {
             let own = asked.iter().find(|(span, _)| span == at).map(|&(_, own)| own);
             let Some(wanted) = own.or_else(|| self.types.warn_if_not_aligned(decl.ty)) else {
@@ -455,6 +455,7 @@ impl Checker<'_> {
             }
             let wanted = u64::from(wanted.get());
             if whole.align % wanted != 0 {
+                let spelled = self.spell(record);
                 let what =
                     format!("alignment {} of '{spelled}' is less than {wanted}", whole.align);
                 self.report(Diagnostic::warning(what, span).with_code("E0824"));
@@ -464,6 +465,7 @@ impl Checker<'_> {
                     Some(name) => self.text(name).to_owned(),
                     None => String::from("<anonymous>"),
                 };
+                let spelled = self.spell(record);
                 let what =
                     format!("'{who}' offset {offset} in '{spelled}' isn't aligned to {wanted}");
                 self.report(Diagnostic::warning(what, *at).with_code("E0824"));
@@ -533,8 +535,10 @@ impl Checker<'_> {
             return None;
         }
         let canonical = self.types.canonical(ty);
-        let who = self.member_named(subject.name);
+        // Named only where a message says it, since nearly every member is fine and the name
+        // is a string built for each one. tamnd/rucc-kernel#109.
         if is_function(&self.types, canonical) {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("field {who} declared as a function"), subject.span)
                     .with_code("E0551"),
@@ -542,6 +546,7 @@ impl Checker<'_> {
             return None;
         }
         if is_void(&self.types, canonical) {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("variable or field {who} declared void"), subject.span)
                     .with_code("E0550"),
@@ -552,6 +557,7 @@ impl Checker<'_> {
         // any other, and which of the two it is depends on where it sits rather than on what it
         // is, so it is left for the pass that knows the answer.
         if !is_complete(&self.types, canonical) && !self.is_flexible(ty) {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("field {who} has incomplete type"), subject.span)
                     .with_code("E0549"),
@@ -682,13 +688,13 @@ impl Checker<'_> {
 
     /// The width of a bit-field, folded and measured against the type it was declared in.
     fn bit_width(&mut self, ty: TypeId, width: ast::ExprId, subject: Subject) -> Option<u32> {
-        let who = self.member_named(subject.name);
         let value = self.expr(width);
         let span = self.tast.expr_span(value);
         if self.is_poisoned(value) {
             return None;
         }
         let Ok(bits) = self.eval_integer(value) else {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("bit-field {who} width not an integer constant"), span)
                     .with_code("E0555"),
@@ -703,6 +709,7 @@ impl Checker<'_> {
         // atomic type is a type of its own rather than a qualified version of one, so this is
         // outside that list either way. gcc refuses it as well.
         if let TypeKind::Atomic(_) = self.types.kind(self.types.canonical(ty)) {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("bit-field {who} has atomic type"), subject.span)
                     .with_code("E0700"),
@@ -713,6 +720,7 @@ impl Checker<'_> {
         // `int` and `unsigned int`, and both compilers take every integer type, which is what
         // every header that declares a `long` bit-field relies on.
         let Some(info) = integer_info(&self.types, ty, self.cx.target) else {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("bit-field {who} has invalid type"), subject.span)
                     .with_code("E0556"),
@@ -720,6 +728,7 @@ impl Checker<'_> {
             return None;
         };
         if bits < 0 {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("negative width in bit-field {who}"), span)
                     .with_code("E0558"),
@@ -729,6 +738,7 @@ impl Checker<'_> {
         // Zero is the width that means the next member starts at the next boundary, and it says
         // nothing about a member of its own, so a name on it has nothing to name.
         if bits == 0 && subject.name.is_some() {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("zero width for bit-field {who}"), span)
                     .with_code("E0557"),
@@ -739,6 +749,7 @@ impl Checker<'_> {
         // Against the width of the value rather than of the object, which is what makes
         // `_Bool b : 2` too wide while its storage is eight bits.
         if bits > info.width {
+            let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("width of {who} exceeds its type"), subject.span)
                     .with_code("E0559"),
