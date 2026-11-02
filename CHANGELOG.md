@@ -64,6 +64,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The inliner counts a load or a store through a parameter at half its size when it weighs a copy, as gcc does, so helpers that mostly read and write the struct they are passed are no longer weighed at twice their gcc size (#4017)
 - Blocks that do the same thing on the same values and jump to the same place are merged into one, and switch cases that go where the default goes are taken out, so a switch like the one in `ma_pivots` lowers to one range test as gcc does (#4020)
 - On x86-64 at `-O1` and up the prologue now goes at the top of the block every block that needs the frame is behind, when that block runs less often than the entry, and a way through the function that needs no frame returns with a bare `ret`, as gcc does with shrink wrapping. Copies of arguments into saved registers move out of the entry to where they are read, and a short return block shared with that way is copied, so `mas_ascend` in lib/maple_tree.c no longer pushes two registers on the path it takes most of the time (#4023)
+- At `-O2` and `-O3` the first jump threading pass is now `thread-implied`. Before `phiopt` it also copies a block whose test a branch above on the same condition decides, so `if (!load) runnable = 0;` followed by tests of `load` and `runnable` is a straight run of tests and not conditional moves that get tested again, as in `___update_load_sum` (#4028).
 
 ## 0.30.15
 

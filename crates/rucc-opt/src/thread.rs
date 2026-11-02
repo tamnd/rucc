@@ -193,6 +193,11 @@ const WOULD_COPY_CARRIED: &str =
 const WOULD_BREAK_A_LOOP: &str =
     "edge decides the branch it arrives at, but threading it would give a loop a second way in";
 
+/// Recorded for an edge whose block would be copied for a value it carries, by the instance that
+/// leaves those to `thread-copy`.
+const WOULD_COPY_A_VALUE: &str =
+    "edge decides the branch it arrives at with a value it carries, which is left for after phiopt";
+
 /// Recorded once for each edge pointed at a copy of the block it arrived at.
 const COPIED: &str =
     "edge pointed at a copy of the block it arrives at that goes straight to the arm it decides";
@@ -221,15 +226,35 @@ pub struct Thread {
     /// The most instructions a block threaded past may hold, and zero for a pass that copies none.
     /// A function rather than the number, because `--param` sets it after this was built.
     budget: fn() -> u32,
+    /// Whether a block is copied only for a branch above that decides it, and never for a value the
+    /// edge carries. See [`IMPLIED`].
+    implied: bool,
 }
 
 /// The instance `-Os` and `-Oz` run, which threads an edge only where nothing has to be copied.
-pub static FREE: Thread = Thread { name: "thread", budget: || 0 };
+pub static FREE: Thread = Thread { name: "thread", budget: || 0, implied: false };
+
+/// The instance `-O2` and `-O3` run ahead of `phiopt`, which copies a block only where a branch
+/// above it on the same condition decides it.
+///
+/// `if (!load) runnable = 0; if (load) a(); if (runnable) b();` in `___update_load_sum` is the
+/// shape. The way in from `runnable = 0` knows `load` is zero, so it decides the second test, but
+/// the third reads `runnable` from the block of the second, so the thread needs a copy of it. Left
+/// to `thread-copy`, `phiopt` gets there first and makes `runnable` a `select` on `load`, which no
+/// edge decides, and gcc's straight run of three tests is three tests and two conditional moves.
+/// A copy for a value the edge carries is still left for after `phiopt`, for the reason the
+/// pipeline gives about `clamp`.
+pub static IMPLIED: Thread = Thread {
+    name: "thread-implied",
+    budget: || rucc_cost::param!(heuristics::JUMP_THREAD_DUPLICATION_INSNS),
+    implied: true,
+};
 
 /// The instance `-O1` and above run, which copies a block of up to section 23.4's fifteen.
 pub static COPY: Thread = Thread {
     name: "thread-copy",
     budget: || rucc_cost::param!(heuristics::JUMP_THREAD_DUPLICATION_INSNS),
+    implied: false,
 };
 
 impl Pass for Thread {
@@ -238,7 +263,10 @@ impl Pass for Thread {
     }
 
     fn describe(&self) -> &'static str {
-        if self.name == FREE.name {
+        if self.implied {
+            "an edge that already decides the branch it arrives at is pointed at the arm that \
+             branch would have taken, through a copy of the block if a branch above decides it"
+        } else if self.name == FREE.name {
             "an edge that already decides the branch it arrives at is pointed at the arm that \
              branch would have taken"
         } else {
@@ -306,8 +334,9 @@ impl Pass for Thread {
                     continue;
                 }
                 let subst = bind(func, block, at);
-                let decided = taken(func, term, &subst)
-                    .or_else(|| above(func, &edges, block, term, &subst, from, at));
+                let carries = taken(func, term, &subst);
+                let decided =
+                    carries.or_else(|| above(func, &edges, block, term, &subst, from, at));
                 let Some(call) = decided else {
                     let (spent, edge) = ((&mut stats, &mut *fuel), (block, term, from));
                     if !effect && through(func, an, &mut edges, &mut leaks, edge, &subst, spent) {
@@ -335,6 +364,9 @@ impl Pass for Thread {
                 let copies_it = free.is_none();
                 let path = if free.is_some() {
                     0
+                } else if self.implied && carries.is_some() {
+                    stats.missed(WOULD_COPY_A_VALUE);
+                    continue;
                 } else {
                     match self.path(func, an.loops(func), block, from, call.block, &paths, copies) {
                         Ok(path) => path,
