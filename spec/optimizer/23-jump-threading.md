@@ -195,6 +195,8 @@ if-conversion. A clamp followed by a test of the clamped value is a diamond `phi
 `select` and then a conditional move, and a copy made first threads the test through both arms and
 leaves two branches where the moves would have been.
 
+A copy for a test that a branch above on the same condition decides does not have to wait, and waiting loses it. `if (!load) runnable = 0;` followed by `if (load)` and then `if (runnable)` is decided on the way in from `runnable = 0`, but `phiopt` makes `runnable` a `select` on `load` and then no edge decides the third test. So `-O2` and `-O3` run `thread-implied` in place of the first `thread`. It makes the free threads and also the copies a branch above decides, under the same limits as `thread-copy`, and leaves a copy for a value the edge carries until after `phiopt`.
+
 ## 23.7 How this is wrong
 
 **A thread is performed on a path the condition does not actually determine.** The path-sensitive

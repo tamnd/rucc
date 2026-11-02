@@ -52,7 +52,8 @@ fn report() -> String {
 fn the_or_in_a_handler_is_threaded() {
     let said = report();
     let threaded = said.lines().any(|line| {
-        line.contains("optimized: edge pointed straight at") && line.ends_with("[thread]")
+        let early = line.ends_with("[thread]") || line.ends_with("[thread-implied]");
+        line.contains("optimized: edge pointed straight at") && early
     });
     assert!(threaded, "nothing was threaded:\n{said}");
     assert!(!said.contains("would give a loop a second way in"), "an edge was refused:\n{said}");
