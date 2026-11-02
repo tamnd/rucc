@@ -218,7 +218,7 @@ pub struct Convention<'a> {
     /// from `-mbranch-protection=pac-ret`. Nothing on a target with no instructions for it.
     pub sign: SignReturn,
     /// What the machine's instructions are, when the prologue may go further in than the top of
-    /// the function, or `None` when it stays there. See [`region`].
+    /// the function, or `None` when it stays there. See `region`.
     pub wrap: Option<&'a MachineInsts>,
 }
 
