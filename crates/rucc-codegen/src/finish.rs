@@ -655,7 +655,7 @@ pub struct Wrapped {
 
 impl Wrapped {
     /// The registers a value was moved into in front of the prologue, so that the early returns
-    /// save nothing. See [`Writer::rename`].
+    /// save nothing. See `Writer::rename`.
     ///
     /// The passes after this one take a scratch register nothing was allocated to as holding
     /// nothing into a block, and one of these holds a value from the entry to wherever it is read.
