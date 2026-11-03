@@ -206,6 +206,7 @@ pub fn shorter(
     // holds a name it read out of the interner while it edits the function and interning a new one
     // there would be the same interner borrowed twice. The same reason [`crate::compare`] has.
     let wanted = short.zeroing.iter().map(|entry| entry.into);
+    let wanted = wanted.chain(short.clearing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.byte_testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.testing.iter().map(|entry| entry.into));
@@ -253,6 +254,15 @@ pub fn shorter(
                     took += 1;
                     // What stands there now writes the state, and the state was already dead, so
                     // nothing about what the instructions in front of it may do has changed.
+                    continue;
+                }
+            }
+            // The same trade for a mask that clears the low byte, which the exclusive or of that
+            // byte with itself does in fewer bytes and with the state written differently.
+            if !live && known.clearing {
+                let into = cleared_form(func, short, names, &opcodes, inst);
+                if into.is_some_and(|op| zeroed(func, &mut counts, machine, names, inst, op)) {
+                    took += 1;
                     continue;
                 }
             }
@@ -551,6 +561,8 @@ fn live_out(
 struct Known {
     /// Whether it has a shorter way of writing zero.
     zeroing: bool,
+    /// Whether it has a shorter way of clearing the low byte.
+    clearing: bool,
     /// Whether it has a narrower instruction.
     narrowing: bool,
     /// Whether it has a test of the low byte.
@@ -591,6 +603,7 @@ impl Known {
             let name = opcode(func, flags, names, inst);
             Self {
                 zeroing: has(|short, bare| short.zeroed(bare).is_some()),
+                clearing: has(|short, bare| short.clearing.iter().any(|entry| entry.name == bare)),
                 narrowing: has(|short, bare| short.narrowed(bare).is_some()),
                 byte_testing: has(|short, bare| short.byte_tested(bare).is_some()),
                 testing: has(|short, bare| short.tested(bare).is_some()),
@@ -628,6 +641,20 @@ fn shorter_form(
     if func[inst].imm.map(|at| func[at].0) != Some(0) {
         return None;
     }
+    opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)
+}
+
+/// The instruction that clears the low byte this one clears, when it has one and the number it
+/// carries is the mask that clears that byte and nothing else.
+fn cleared_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> Option<mir::Opcode> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let into = short.cleared(name, func[func[inst].imm?].0)?;
     opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)
 }
 
@@ -845,6 +872,10 @@ fn copied(
 /// A description whose operands are not all of the register's class, or which writes more than the
 /// one register or none, is a description this does not fit, and the answer there is to leave the
 /// instruction alone rather than to guess.
+///
+/// The mask that clears a low byte comes here too. It reads the register it writes, and after
+/// allocation that is the one register, so building every operand of the exclusive or on the
+/// register written is building it on the register read as well.
 fn zeroed(
     func: &mut mir::Func,
     counts: &mut changes::Reads,
@@ -1407,6 +1438,56 @@ mod tests {
 
         assert_eq!(takes(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, block), ["xor_rr_32"]);
+    }
+
+    /// A mask that clears the low byte of a register and keeps the rest, with nothing reading the
+    /// condition state after it. The exclusive or of that byte with itself leaves the same bits in
+    /// two bytes where the mask took seven, and names the register in all three operands.
+    #[test]
+    fn a_mask_that_clears_the_low_byte_becomes_an_exclusive_or_of_the_byte() {
+        let (mut names, mut func, block) = empty();
+        let rcx = mir::Reg::physical(rucc_target::x86_64::RCX);
+        let and = op(&mut names, "and_ri_64");
+        let inst = func.build(block, and).operand(reuse(rcx)).uses(rcx, GPR).imm(-256).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["xor_rr_8"]);
+        assert_eq!(regs(&func, inst), [rcx, rcx, rcx]);
+        assert!(func[inst].imm.is_none());
+    }
+
+    /// The same mask with the state it writes read behind it. The exclusive or always leaves zero
+    /// in what it writes and so always sets the zero flag, where the mask sets it from the whole
+    /// register, so this one stays.
+    #[test]
+    fn a_mask_whose_state_is_read_stays() {
+        let (mut names, mut func, block) = empty();
+        let rcx = mir::Reg::physical(rucc_target::x86_64::RCX);
+        let byte = func.new_vreg(GPR);
+        let and = op(&mut names, "and_ri_64");
+        let set = op(&mut names, "set_e");
+        func.build(block, and).operand(reuse(rcx)).uses(rcx, GPR).imm(-256).finish();
+        func.build(block, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["and_ri_64", "set_e"]);
+    }
+
+    /// Masks the table does not have. One that clears more than the low byte has no single
+    /// exclusive or, and the thirty-two bit one clears the high half of the register as well, which
+    /// the exclusive or of the low byte leaves alone.
+    #[test]
+    fn a_mask_that_is_not_the_low_byte_of_the_whole_register_stays() {
+        let (mut names, mut func, block) = empty();
+        let rcx = mir::Reg::physical(rucc_target::x86_64::RCX);
+        let rdx = mir::Reg::physical(rucc_target::x86_64::RDX);
+        let wide = op(&mut names, "and_ri_64");
+        let half = op(&mut names, "and_ri_32");
+        func.build(block, wide).operand(reuse(rcx)).uses(rcx, GPR).imm(-4096).finish();
+        func.build(block, half).operand(reuse(rdx)).uses(rdx, GPR).imm(-256).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["and_ri_64", "and_ri_32"]);
     }
 
     /// The other rewrite. A number that is not zero has nothing shorter than a move, and the move
