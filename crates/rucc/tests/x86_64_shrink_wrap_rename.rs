@@ -81,6 +81,7 @@ int upd(u64 now, struct sa *sa, unsigned long w, int on, int cur) {
 
 /// Runs it over a spread of times and prints what it leaves behind, so that two builds can be
 /// held up against each other.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 const MAIN: &str = "\
 #include <stdio.h>
 int main(void) {
@@ -141,6 +142,7 @@ long rq(struct task *t, unsigned long flags, int which) {
 ";
 
 /// What [`KEPT`] calls, and a run over a few tasks that prints what it leaves behind.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 const KEPT_MAIN: &str = "\
 #include <stdio.h>
 struct cpu cpus[4];
