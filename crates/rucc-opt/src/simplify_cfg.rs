@@ -292,8 +292,10 @@ impl Pass for SimplifyCfg {
         // function had one forwarder ago. The parameters nothing reads go first, for the reason
         // this module's documentation gives, which is that a block they leave empty is a forwarder
         // and the worklist below is what takes forwarders out.
-        lift_hints(func);
-        let dropped = drop_unread(func, fuel, &mut stats);
+        // One record of the edges for both, since putting a hint on an edge moves no edge.
+        let edges = incoming(func);
+        lift_hints(func, &edges);
+        let dropped = drop_unread(func, &edges, fuel, &mut stats);
         if straighten(func, fuel, &mut stats, &mut forward) || dropped {
             an.clear();
         }
@@ -937,10 +939,9 @@ pub(crate) fn incoming(func: &Func) -> Edges {
 /// step can do because it has already worked out the whole answer. The parameters of a block are
 /// taken together once they have all been paid for, since an argument list that has lost some of
 /// its entries and not others is a function the verifier refuses.
-fn drop_unread(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+fn drop_unread(func: &mut Func, edges: &Edges, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     let Some(entry) = func.entry() else { return false };
-    let live = live(func, entry, &addressed(func));
-    let edges = incoming(func);
+    let live = live(func, entry, &addressed(func), edges);
     let mut changed = false;
     let mut gone: Set<Value> = Set::default();
     for block in func.blocks().collect::<Vec<Block>>() {
@@ -1029,7 +1030,7 @@ fn strand(func: &mut Func, mut gone: Set<Value>) {
 /// The entry block's parameters are the function's own and are live by declaration rather than by
 /// use, and so are the parameters of a block whose address is taken, because an `indirect_br` is a
 /// way in that this reads from the wrong end.
-fn live(func: &Func, entry: Block, addressed: &Set<Block>) -> Set<Value> {
+fn live(func: &Func, entry: Block, addressed: &Set<Block>, edges: &Edges) -> Set<Value> {
     let mut where_from: Map<Value, (Block, usize)> = Map::default();
     let mut live: Set<Value> = Set::default();
     let mut work: Vec<Value> = Vec::new();
@@ -1056,7 +1057,6 @@ fn live(func: &Func, entry: Block, addressed: &Set<Block>) -> Set<Value> {
         }
     }
 
-    let edges = incoming(func);
     while let Some(value) = work.pop() {
         match func[value].def {
             Def::Result { inst, .. } => {
@@ -1347,8 +1347,7 @@ fn same_blocks(func: &Func, a: Block, b: Block) -> bool {
 /// forwarding and merging after this drop them. On the `asm goto` they are what the predictor
 /// reads, and without them `freezing_slow_path` behind `freezing` in kernel/signal.c was a call
 /// made one time in two, which kept `recalc_sigpending_tsk` out of `recalc_sigpending`.
-fn lift_hints(func: &mut Func) {
-    let edges = incoming(func);
+fn lift_hints(func: &mut Func, edges: &Edges) {
     for block in func.blocks().collect::<Vec<Block>>() {
         let Some(term) = func.terminator(block) else { continue };
         if func[term].opcode != Opcode::Jump {
