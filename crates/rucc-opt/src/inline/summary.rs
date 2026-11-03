@@ -197,13 +197,13 @@ impl Summary {
             summary.masks.insert(param, 1 << at);
         }
         let readers = Readers::of(func);
-        let slots = super::slots(func, layout);
+        let cfg = Cfg::new(func);
+        let slots = super::slots(func, &cfg, layout);
         let only =
             |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| readers.only(value, fits);
         let address = |opcode: Opcode, at: usize| {
             matches!((opcode, at), (Opcode::Load, 0) | (Opcode::Store, 1))
         };
-        let cfg = Cfg::new(func);
         let mut reaching: Map<Block, Predicate> = Map::default();
         reaching.insert(entry, vec![Vec::new()]);
         let mut interned: Map<Predicate, u32> = Map::default();

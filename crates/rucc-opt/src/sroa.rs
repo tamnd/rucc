@@ -217,7 +217,10 @@ impl Pass for Sroa {
 /// scalar replacement has run on the callee. A `guard()` from `<linux/cleanup.h>` is a structure
 /// whose address only goes to the destructor, and once that is inlined it is two values. A function
 /// whose blocks this pass would not take at all has none, so the inliner counts every one.
-pub(crate) fn scalarizable(func: &Func, layout: DataLayout) -> Set<Value> {
+///
+/// `cfg` is the graph of `func` when the caller has made it already, so that it is not made again
+/// for the same body. tamnd/rucc-kernel#109.
+pub(crate) fn scalarizable(func: &Func, layout: DataLayout, cfg: Option<&Cfg>) -> Set<Value> {
     let mut out = Set::default();
     let Some(entry) = func.entry() else {
         return out;
@@ -229,8 +232,15 @@ pub(crate) fn scalarizable(func: &Func, layout: DataLayout) -> Set<Value> {
     if !func.insts(entry).any(local) {
         return out;
     }
-    let cfg = Cfg::new(func);
-    if !shaped(func, &cfg, entry) {
+    let made;
+    let cfg = match cfg {
+        Some(cfg) => cfg,
+        None => {
+            made = Cfg::new(func);
+            &made
+        }
+    };
+    if !shaped(func, cfg, entry) {
         return out;
     }
     let target = Target {
