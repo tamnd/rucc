@@ -1613,6 +1613,11 @@ pub fn compile_recording(
     };
     let (moves, loops, checks, wrapped) =
         finish(&mut func, &allocation, &frame, &stack, convention, names);
+    // Less any that a value was moved into so that the prologue could go further in, since that
+    // one holds the value from one block into the next. See `finish::Wrapped::taken`.
+    let taken = wrapped.as_ref().map_or(&[][..], finish::Wrapped::taken);
+    let free: Vec<PhysReg> = held.iter().copied().filter(|reg| !taken.contains(reg)).collect();
+    let held = &free[..];
     // The comparison in each loop that walks the stack and in each stack protector check is written
     // after the question above was asked, and only the branch behind it reads its byte, so it can
     // be joined with that branch.
