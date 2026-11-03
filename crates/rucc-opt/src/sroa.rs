@@ -254,7 +254,7 @@ pub(crate) fn scalarizable(func: &Func, layout: DataLayout, cfg: Option<&Cfg>) -
     for (rank, block) in cfg.reverse_postorder().enumerate() {
         rpo[block.index()] = rank;
     }
-    let mut readers = Readers::new(func);
+    let mut readers = Readers::addresses(func);
     // Nothing changes here, so where each instruction is in its block can be found once and kept.
     let mut places = Places::default();
     for alloca in func.insts(entry) {
@@ -336,10 +336,36 @@ struct Readers {
 
 impl Readers {
     fn new(func: &Func) -> Self {
+        Self::filed(func, |_| true)
+    }
+
+    /// The readers of the addresses a local's walk can reach and of no other value, for
+    /// [`scalarizable`], which changes nothing and only follows a local from its `alloca` through
+    /// each `ptr_add` of it.
+    ///
+    /// The inliner asks that of each body it weighs, and filing every value of a large caller each
+    /// time was 2.6% of the compile of `mm/memory.c`. A list that is filed holds what
+    /// [`Readers::new`] would put in it, in the same order. tamnd/rucc-kernel#109.
+    fn addresses(func: &Func) -> Self {
+        let mut address = vec![false; func.counts().values];
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                if matches!(func[inst].opcode, Opcode::Alloca | Opcode::PtrAdd) {
+                    if let Some(value) = func[inst].first_result {
+                        address[value.index()] = true;
+                    }
+                }
+            }
+        }
+        Self::filed(func, |value| address.get(value.index()).copied().unwrap_or(false))
+    }
+
+    /// Files every placed instruction under the values it reads that `keep` asks for.
+    fn filed(func: &Func, keep: impl Fn(Value) -> bool) -> Self {
         let mut readers = Self { of: vec![Vec::new(); func.counts().values], seen: 0 };
         for block in func.blocks() {
             for inst in func.insts(block) {
-                readers.add(func, inst);
+                readers.add_kept(func, inst, &keep);
             }
         }
         readers.seen = func.counts().insts;
@@ -349,12 +375,21 @@ impl Readers {
     /// Files an instruction under everything it reads, its own arguments and the ones it passes
     /// along an edge.
     fn add(&mut self, func: &Func, inst: Inst) {
+        self.add_kept(func, inst, &|_| true);
+    }
+
+    /// [`Readers::add`] for the values `keep` asks for.
+    fn add_kept(&mut self, func: &Func, inst: Inst, keep: &impl Fn(Value) -> bool) {
         for &value in &func[func[inst].args] {
-            self.push(value, inst);
+            if keep(value) {
+                self.push(value, inst);
+            }
         }
         for call in func.successors(inst) {
             for &value in &func[call.args] {
-                self.push(value, inst);
+                if keep(value) {
+                    self.push(value, inst);
+                }
             }
         }
     }

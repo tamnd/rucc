@@ -75,7 +75,6 @@ use rucc_mir::{
 };
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
-use rucc_regalloc::moves::Move;
 use rucc_regalloc::rewrite::{At, Edit};
 use rucc_target::x86_64;
 use rucc_target::{
@@ -454,14 +453,7 @@ pub fn finish(
     if wrap.is_some() {
         writer.sink(&mut moves, frame, entry);
     }
-    let mut wrap = wrap.and_then(|machine| {
-        let every = &mut |_: &Region| true;
-        let found = region(writer.func, frame, conv, machine, writer.names, &[], every);
-        if found.is_some() || !writer.rename(&mut moves, frame, machine) {
-            return found;
-        }
-        region(writer.func, frame, conv, machine, writer.names, &[], every)
-    });
+    let mut wrap = wrap.and_then(|machine| region(writer.func, frame, conv, machine, writer.names));
     if let Some(wrap) = &mut wrap {
         for tail in std::mem::take(&mut wrap.tails) {
             let twin = twin(writer.func, &mut moves, tail, &wrap.blocks);
@@ -632,9 +624,8 @@ impl Way<'_> {
 struct Region {
     at: Block,
     blocks: Set<Block>,
-    /// The blocks outside that some block behind it goes to, each of which is short, wants nothing
-    /// of the frame and ends the function or goes straight to one that does, so that a copy of it
-    /// can go behind it. See [`twin`]. The ones that end it are last.
+    /// The blocks outside that some block behind it goes to, each of which ends the function, is
+    /// short and wants nothing of the frame, so that a copy of it can go behind it. See [`twin`].
     tails: Vec<Block>,
 }
 
@@ -662,41 +653,32 @@ pub struct Wrapped {
 /// once or not at all, and the blocks that return without it return with a bare `ret`.
 ///
 /// Only when it is cheaper, which is when the block is run less often than the entry. See
-/// [`wrappable`] for the frames it is done for. A block that touches only the saved registers in
-/// `loose` is taken not to want the frame, which is the question [`Writer::rename`] asks. A block
-/// past the end of the region still has to leave all of them alone. When those are all that want
-/// it, the blocks nearest the entry that are run less often than it are tried in turn, the least
-/// run first. A region is only taken when `fits` says so.
+/// [`wrappable`] for the frames it is done for.
 fn region(
     func: &Func,
     frame: &Frame,
     conv: &CallRegs,
     machine: &MachineInsts,
     names: &Interner,
-    loose: &[PhysReg],
-    fits: &mut dyn FnMut(&Region) -> bool,
 ) -> Option<Region> {
     let entry = func.entry()?;
     let saved = frame.saved_int();
-    let touches = |operand: &Operand, loose: &[PhysReg]| {
+    let touches = |operand: &Operand| {
         operand.class == conv.int_class
-            && operand.reg.phys().is_some_and(|at| {
-                at == conv.stack_pointer || (saved.contains(&at) && !loose.contains(&at))
-            })
+            && operand.reg.phys().is_some_and(|at| at == conv.stack_pointer || saved.contains(&at))
     };
     // A template and the address of a block are both somewhere this cannot see past.
-    let needs = |inst: Inst, loose: &[PhysReg]| {
+    let wants = |inst: Inst| {
         let data = &func[inst];
         data.flags.contains(Flags::TEMPLATE)
             || machine.calls(names.resolve(data.opcode.name()))
             || data.mem.is_some_and(|mem| func[mem].block.is_some())
-            || func[data.operands].iter().any(|operand| touches(operand, loose))
+            || func[data.operands].iter().any(touches)
     };
-    let wants = |inst: Inst| needs(inst, &[]);
     let (idom, number) = dominators(func, entry);
     let mut at = None;
     for block in func.blocks() {
-        if !func.insts(block).any(|inst| needs(inst, loose)) {
+        if !func.insts(block).any(wants) {
             continue;
         }
         if !idom.contains_key(&block) {
@@ -704,89 +686,46 @@ fn region(
         }
         at = Some(at.map_or(block, |at| meet(&idom, &number, at, block)));
     }
-    let cheap = |block: Block| func[block].weight.raw() < func[entry].weight.raw();
-    let Some(mut at) = at else {
-        if loose.is_empty() {
-            return None;
-        }
-        let mut tried: Vec<Block> = idom.keys().copied().filter(|&at| at != entry).collect();
-        tried.retain(|&at| cheap(at));
-        // The ones nearest the entry, since the ones further in leave more of it outside.
-        tried.sort_by_key(|&at| number[&at]);
-        tried.truncate(32);
-        tried.sort_by_key(|&at| (func[at].weight.raw(), number[&at]));
-        let mut found = tried.into_iter().filter_map(|at| behind(func, &idom, entry, at, &wants));
-        return found.find(|found| fits(found));
-    };
     // When the blocks that want the frame are in a loop, the block they are all behind is in it
     // too, and the prologue goes in front of the loop instead, as far up as it has to.
-    while at != entry && cheap(at) {
-        if let Some(found) = behind(func, &idom, entry, at, &wants) {
-            if fits(&found) {
-                return Some(found);
+    let mut at = at?;
+    while at != entry && func[at].weight.raw() < func[entry].weight.raw() {
+        let under = |mut block: Block| loop {
+            if block == at {
+                return true;
             }
+            match idom.get(&block) {
+                Some(&up) if block != entry => block = up,
+                _ => return false,
+            }
+        };
+        let blocks: Set<Block> = idom.keys().copied().filter(|&block| under(block)).collect();
+        let mut tails = Vec::new();
+        let mut leaves = false;
+        let inside: Vec<Block> = func.blocks().filter(|block| blocks.contains(block)).collect();
+        for &block in &inside {
+            for call in &func[block].succs {
+                let to = call.block;
+                if to == at {
+                    leaves = true;
+                } else if !blocks.contains(&to) && !tails.contains(&to) {
+                    let short = func[to].succs.is_empty() && func.insts(to).count() <= 6;
+                    leaves |= !short || func.insts(to).any(wants);
+                    tails.push(to);
+                }
+            }
+        }
+        if !leaves {
+            return Some(Region { at, blocks, tails });
         }
         at = idom[&at];
     }
     None
 }
 
-/// The blocks behind that one, when nothing behind it goes back into it and nothing leaves but
-/// for a short block that ends the function and does not want the frame.
-fn behind(
-    func: &Func,
-    idom: &Map<Block, Block>,
-    entry: Block,
-    at: Block,
-    wants: &dyn Fn(Inst) -> bool,
-) -> Option<Region> {
-    let under = |mut block: Block| loop {
-        if block == at {
-            return true;
-        }
-        match idom.get(&block) {
-            Some(&up) if block != entry => block = up,
-            _ => return false,
-        }
-    };
-    let blocks: Set<Block> = idom.keys().copied().filter(|&block| under(block)).collect();
-    let mut tails = Vec::new();
-    let short = |block: Block| func.insts(block).count() <= 6 && !func.insts(block).any(wants);
-    let inside: Vec<Block> = func.blocks().filter(|block| blocks.contains(block)).collect();
-    for &block in &inside {
-        for call in &func[block].succs {
-            let to = call.block;
-            if to == at {
-                return None;
-            }
-            if blocks.contains(&to) || tails.contains(&to) {
-                continue;
-            }
-            let next = match func[to].succs.as_slice() {
-                [] => None,
-                [next] if next.args.is_empty() && func[next.block].succs.is_empty() => {
-                    Some(next.block).filter(|next| !blocks.contains(next) && short(*next))
-                }
-                _ => return None,
-            };
-            if !short(to) || (next.is_none() && !func[to].succs.is_empty()) {
-                return None;
-            }
-            tails.push(to);
-            if let Some(next) = next.filter(|next| !tails.contains(next)) {
-                tails.push(next);
-            }
-        }
-    }
-    // A copy of a block that ends the function takes over the edges from the copies before it.
-    tails.sort_by_key(|&tail| func[tail].succs.is_empty());
-    Some(Region { at, blocks, tails })
-}
-
 /// A copy of that block for the blocks behind the prologue that go to it, which the others keep
 /// going to. The two end the function under different rules, the one with the frame to give back
-/// and the other without, which one block cannot do. gcc copies the tail too. A copy of a block
-/// that goes on to another goes to the same one, until that is copied too.
+/// and the other without, which one block cannot do. gcc copies the tail too.
 fn twin(func: &mut Func, moves: &mut Moves, block: Block, inside: &Set<Block>) -> Block {
     let twin = func.create_block();
     for inst in func.insts(block).collect::<Vec<Inst>>() {
@@ -811,12 +750,6 @@ fn twin(func: &mut Func, moves: &mut Moves, block: Block, inside: &Set<Block>) -
     let left = func[block].weight.raw().saturating_sub(weight);
     func.set_weight(block, Weight::parts(left));
     func.set_weight(twin, Weight::parts(weight));
-    let mut succs = func[block].succs.clone();
-    for (made, call) in succs.iter_mut().zip(func.succs_mut(block)) {
-        made.weight = Weight::parts(weight);
-        call.weight = Weight::parts(left);
-    }
-    *func.succs_mut(twin) = succs;
     if func[block].dead_end {
         func.set_dead_end(twin);
     }
@@ -2184,94 +2117,6 @@ impl Writer<'_> {
                 self.func.prepend_inst(block, inst);
             }
         }
-    }
-
-    /// Puts what a register the frame saves holds in front of where the prologue could go in a
-    /// register a call clobbers instead, and copies it across at the top of the block the prologue
-    /// then goes in, so that the ways through the function that never get there leave the saved
-    /// register alone. Whether anything moved is the answer.
-    ///
-    /// `__update_load_avg_se` in kernel/sched/pelt.c works out how long it has been in `%rbp` and
-    /// returns at once when that is under a microsecond, which is most calls, so six registers were
-    /// pushed and popped for a way through it that needs none of them. gcc has the same value in
-    /// `%rax` there. This is after allocation, so it is done only with a register that nothing on
-    /// those ways reads or writes, and that holds nothing read further on.
-    fn rename(&mut self, moves: &mut Moves, frame: &Frame, machine: &MachineInsts) -> bool {
-        let conv = self.conv;
-        let saved = frame.saved_int();
-        let int = conv.int_class;
-        let Some(entry) = self.func.entry() else { return false };
-        let func = &*self.func;
-        let regs = saved.iter().chain(conv.int_order.iter());
-        let lives = regs.map(|&reg| (reg, live(func, reg, int)));
-        let lives: Map<PhysReg, Set<Block>> = lives.collect();
-        let mut plan = None;
-        let mut fits = |region: &Region| {
-            let outside = func.blocks().filter(|at| !region.blocks.contains(at));
-            let outside: Vec<Block> = outside.collect();
-            let named = |reg: PhysReg| {
-                outside.iter().any(|&block| {
-                    func.insts(block).any(|inst| {
-                        let mut operands = func[func[inst].operands].iter();
-                        operands.any(|op| op.class == int && op.reg.phys() == Some(reg))
-                    })
-                })
-            };
-            let free = |reg: PhysReg| {
-                let live = &lives[&reg];
-                !live.contains(&region.at) && outside.iter().all(|block| !live.contains(block))
-            };
-            // Last first, so that taking one off the end takes the one the allocator likes best.
-            let mut spare: Vec<PhysReg> = (conv.int_order.iter().rev().copied())
-                .filter(|reg| !conv.int_saved.contains(reg) && *reg != conv.stack_pointer)
-                .filter(|&reg| !named(reg) && free(reg))
-                .collect();
-            let mut swaps: Vec<(PhysReg, PhysReg, bool)> = Vec::new();
-            for &reg in saved.iter().filter(|&&reg| named(reg)) {
-                let live = &lives[&reg];
-                let Some(other) = spare.pop().filter(|_| !live.contains(&entry)) else {
-                    return false;
-                };
-                swaps.push((reg, other, live.contains(&region.at)));
-            }
-            if swaps.is_empty() {
-                return false;
-            }
-            plan = Some((region.at, outside, swaps));
-            true
-        };
-        if region(func, frame, conv, machine, self.names, saved, &mut fits).is_none() {
-            return false;
-        }
-        let Some((at, outside, swaps)) = plan else { return false };
-        let swapped = |reg: PhysReg| swaps.iter().find(|swap| swap.0 == reg).map(|swap| swap.1);
-        for &block in &outside {
-            for inst in self.func.insts(block).collect::<Vec<Inst>>() {
-                let operands = self.func[inst].operands;
-                for op in self.func[operands].iter_mut().filter(|op| op.class == int) {
-                    if let Some(other) = op.reg.phys().and_then(swapped) {
-                        op.reg = Reg::physical(other);
-                    }
-                }
-                let Some(mut edit) = moves.at(inst).filter(|edit| edit.class == int) else {
-                    continue;
-                };
-                for place in [&mut edit.mov.to, &mut edit.mov.from] {
-                    if let Place::Reg(reg) = place {
-                        *reg = swapped(*reg).unwrap_or(*reg);
-                    }
-                }
-                moves.record(inst, edit);
-            }
-        }
-        for &(reg, other, _) in swaps.iter().filter(|swap| swap.2) {
-            let mov = Move::new(Place::Reg(reg), Place::Reg(other));
-            let edit = Edit { at: At::StartOf(at), mov, class: int };
-            let inst = self.mov(&edit, frame);
-            moves.record(inst, edit);
-            self.func.prepend_inst(at, inst);
-        }
-        true
     }
 
     /// What [`rows`] needs for a function whose prologue went further in than its entry.

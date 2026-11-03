@@ -454,6 +454,12 @@ const O1: &[&str] = &[
 /// `widen` goes right in front of `ivopts`. What it does is give a loop over an `int` a sixty four
 /// bit counter that its arrays can be read off with a scaled index, and that only pays if `ivopts`
 /// sees the counter when it chooses. See tamnd/rucc#1994.
+///
+/// `dce` runs once early, right in front of `short-circuit` and the first threading. The kernel's
+/// `WARN_ON` hands back the value it tested through a `__builtin_expect` nobody reads, and that
+/// read of the `&&` makes `thread` refuse the edge, since a block below would read a value the one
+/// it copies defines. Taken out first, the two compares branch straight to the `ud2`, which is what
+/// gcc does in `fpregs_assert_state_consistent` on every return to user space. `-O3` does the same.
 const O2: &[&str] = &[
     "expect",
     "fold",
@@ -467,6 +473,7 @@ const O2: &[&str] = &[
     "simplify",
     "tail-recursion",
     "switch-conv",
+    "dce",
     "short-circuit",
     "thread-implied",
     "phiopt",
@@ -540,6 +547,7 @@ const O3: &[&str] = &[
     "simplify",
     "tail-recursion",
     "switch-conv",
+    "dce",
     "short-circuit",
     "thread-implied",
     "phiopt",
