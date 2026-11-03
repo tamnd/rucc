@@ -100,6 +100,26 @@ fn size(class: usize) -> usize {
     (4 + quarter + 1) << (top - 2)
 }
 
+/// Asks the processor to bring a block into the cache before it is taken.
+///
+/// Taking a block off a list reads the address of the next block from the block's first word.
+/// The block was given back a while before, so that read missed the cache, and the compile waited
+/// for it. On mm/memory.c from Linux 7.3 `__rust_alloc` was 5.9% of the samples, and 85% of those
+/// were on that one read. The block that is now at the head is the one the next allocation of
+/// the same class takes, so it is fetched here, while the caller uses the block it got.
+/// tamnd/rucc-kernel#109.
+#[inline]
+fn prefetch(block: *mut u8) {
+    // SAFETY: a prefetch is only a hint to the cache. It reads nothing the program can see, and
+    // it does not fault on a null address or on any other one.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(block.cast());
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = block;
+}
+
 impl Local {
     /// A block of the class off its list, or cut from the region when the list is empty.
     #[inline]
@@ -109,7 +129,9 @@ impl Local {
             // SAFETY: a block on a list was put there by `give`, which wrote the next block's
             // address in its first word. Every block is at least sixteen bytes and aligned to
             // sixteen, and nothing else holds it while it is on the list.
-            self.free[class].set(unsafe { head.cast::<*mut u8>().read() });
+            let next = unsafe { head.cast::<*mut u8>().read() };
+            self.free[class].set(next);
+            prefetch(next);
             return head;
         }
         self.cut(size(class))
