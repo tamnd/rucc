@@ -72,6 +72,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The change in #4031 that swapped a saved register in front of an early return for one a call clobbers is backed out. In `rcu_preempt_deferred_qs_irqrestore` in kernel/rcu/tree_plugin.h the copy of the first argument into the new register was lost, so the function read through whatever was left in `%r10` and the kernel did not boot. (#4035)
 - The shrink wrap rename from #4031 is back, and a register it moves a saved value into is no longer taken for a scratch register by the copy passes behind it, which deleted the copy into `%r10` in `rcu_preempt_deferred_qs_irqrestore` and stopped the kernel booting (#4036)
 - The pass that writes shorter instructions on x86-64 works out where the condition state is live across blocks, rather than turning down every function with a block that reads a state its predecessor set, which kept `movl $0` instead of `xorl` and the `lea` and `inc` forms out of 35 functions in lib/maple_tree.c (#4040)
+- The stack protector check says the arm that calls `__stack_chk_fail` never runs, so the layout puts the epilogue right after the compare and the call out of the way, as gcc does, instead of jumping over the call on every return (#4045)
 
 ## 0.30.15
 
