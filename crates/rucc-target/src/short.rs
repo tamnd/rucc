@@ -102,6 +102,10 @@ pub struct ShortInsts {
     /// Every instruction that puts a constant in a register and has a shorter way of putting zero
     /// there.
     pub zeroing: &'static [Zeroed],
+    /// Every instruction that ands a register with a constant that clears its low byte and keeps
+    /// the rest, and has a shorter way of clearing that byte alone. Empty on a machine where some
+    /// register has no low byte to name, for the reason [`ShortInsts::byte_testing`] is.
+    pub clearing: &'static [Cleared],
     /// Every instruction that puts a constant in a register and has a narrower one that writes the
     /// same register and clears the rest of it.
     pub narrowing: &'static [Narrowed],
@@ -135,6 +139,14 @@ impl ShortInsts {
     #[must_use]
     pub fn zeroed(&self, name: &str) -> Option<&'static str> {
         self.zeroing.iter().find(|entry| entry.name == name).map(|entry| entry.into)
+    }
+
+    /// The shorter way of clearing the low byte of a register, for the instruction of that name
+    /// carrying that constant.
+    #[must_use]
+    pub fn cleared(&self, name: &str, keeps: i64) -> Option<&'static str> {
+        let mut found = self.clearing.iter();
+        found.find(|entry| entry.name == name && entry.keeps == keeps).map(|entry| entry.into)
     }
 
     /// The narrower instruction that writes the same register, for the instruction of that name.
@@ -204,6 +216,20 @@ pub struct Zeroed {
     /// The opcode that writes zero into the one register the first one wrote, reading that same
     /// register twice. It writes the condition state, which is the whole of why this is a
     /// description and not a rewrite anyone could do without looking around.
+    pub into: &'static str,
+}
+
+/// One instruction that ands a register with a constant, and the one that writes the same bits
+/// into it without the constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cleared {
+    /// The opcode that takes the constant.
+    pub name: &'static str,
+    /// The constant: every bit set but the ones the shorter instruction clears.
+    pub keeps: i64,
+    /// The opcode that clears those bits of the one register the first one wrote, reading that
+    /// same register twice. It writes the condition state differently from the first, so this too
+    /// is a description and not a rewrite anyone could do without looking around.
     pub into: &'static str,
 }
 

@@ -723,7 +723,8 @@ fn machine_commutes(name: &str) -> bool {
 ///
 /// All but the byte tests. Only the first four registers have a low byte here, and the pass that
 /// writes those does not ask which register it was given.
-pub static SHORT: ShortInsts = ShortInsts { byte_testing: &[], ..crate::x86_64::SHORT };
+pub static SHORT: ShortInsts =
+    ShortInsts { byte_testing: &[], clearing: &[], ..crate::x86_64::SHORT };
 
 /// What an i386 conditional branch becomes once the blocks are in an order.
 ///

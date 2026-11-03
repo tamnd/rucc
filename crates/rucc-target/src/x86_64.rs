@@ -67,7 +67,9 @@ use crate::operand::OperandDesc;
 use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
 };
-use crate::short::{Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed};
+use crate::short::{
+    Cleared, Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed,
+};
 use rucc_abi::Convention;
 
 /// The general purpose registers.
@@ -762,6 +764,7 @@ pub static FLAGS: FlagInsts = FlagInsts {
 pub static SHORT: ShortInsts = ShortInsts {
     prefix: "x64.",
     zeroing: &SHORTER_ZEROS,
+    clearing: &LOW_BYTE_CLEARS,
     narrowing: &NARROWER_MOVES,
     byte_testing: &BYTE_TESTS,
     testing: &ZERO_COMPARES,
@@ -792,6 +795,19 @@ static SHORTER_ZEROS: [Zeroed; 3] = [
     Zeroed { name: "mov_ri_32", into: "xor_rr_32" },
     Zeroed { name: "mov_ri_64", into: "xor_rr_32" },
 ];
+
+/// Clearing the low byte of a register without spelling out the mask.
+///
+/// `andq $-256, %rax` is seven bytes, since a sixty four bit `and` carries its mask as four bytes
+/// sign extended. `xorb %al, %al` is two, or three for a register that needs a prefix to name its
+/// low byte, and it leaves every other bit where it was, the way the `and` does. gcc writes the
+/// second, and the kernel does this on every pointer to a maple tree node it opens, since the low
+/// byte of one is where the node's type is kept.
+///
+/// Sixty four bits only. `andl $-256, %eax` clears the high half as well, which the exclusive or
+/// does not.
+static LOW_BYTE_CLEARS: [Cleared; 1] =
+    [Cleared { name: "and_ri_64", keeps: -256, into: "xor_rr_8" }];
 
 /// Writing a number into a register with the instruction that writes half of it.
 ///
