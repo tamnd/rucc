@@ -1902,6 +1902,7 @@ impl Writer<'_> {
                 let call = self.opcode(self.insts.call);
                 let symbol = self.names.intern(protect.guard.fail);
                 self.func.build(failed, call).symbol(symbol).finish();
+                self.func.set_weight(failed, Weight::NEVER);
                 self.failed = Some(failed);
                 failed
             }
@@ -1911,8 +1912,14 @@ impl Writer<'_> {
         let inst = self.func.build_loose(cond).uses(Reg::physical(theirs), class).finish();
         self.func.append_inst(block, inst);
         // The first arm is the one taken when the condition held, and the condition is that the
-        // two words differ, so the first arm is the one the canary was overwritten on.
-        *self.func.succs_mut(block) = vec![BlockCall::to(failed), BlockCall::to(ok)];
+        // two words differ, so the first arm is the one the canary was overwritten on. That arm
+        // never runs in a program that works, and saying so is what has the layout put the
+        // epilogue next and the call out of the way, like gcc does, rather than jump over the
+        // call on every return.
+        let taken = self.func[block].weight;
+        self.func.set_weight(ok, taken);
+        *self.func.succs_mut(block) =
+            vec![BlockCall::to(failed).taken(Weight::NEVER), BlockCall::to(ok).taken(taken)];
         ok
     }
 
