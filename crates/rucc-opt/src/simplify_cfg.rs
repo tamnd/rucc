@@ -626,7 +626,9 @@ fn emit_before(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value
 /// The arms carry their hints with them, so what `__builtin_expect` said about each arm is still
 /// said about the same arm.
 fn unnegate(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
-    let uses = uses::count(func);
+    // Counted at the first branch on a negation, since most functions have none and the count
+    // walks every instruction. Nothing is rewritten before that branch, so the count is the same.
+    let mut uses: Option<Vec<u32>> = None;
     let mut changed = false;
     for block in func.blocks().collect::<Vec<Block>>() {
         let Some(term) = func.terminator(block) else { continue };
@@ -636,7 +638,7 @@ fn unnegate(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
         let Extra::Targets(targets) = func[term].extra else { continue };
         let Some(&cond) = func[func[term].args].first() else { continue };
         let Some((not, negated)) = negation(func, cond) else { continue };
-        if uses[cond.index()] != 1 {
+        if uses.get_or_insert_with(|| uses::count(func))[cond.index()] != 1 {
             continue;
         }
         let [then, otherwise] = func[targets] else { continue };
