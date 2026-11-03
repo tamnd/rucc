@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64 an integer nothing reads above its low four bytes is spilled with a `movl` into a slot of four rather than a `movq` into a slot of eight, which is how gcc spills an `int`, found with the same bit demand analysis that takes out dead conversions (#3981)
 - On x86-64, a function that only reads its own return address now loads it from the stack pointer and keeps no frame pointer, the same as gcc. The kernel bench objects shrink by 768 bytes, 576 of them in slub.o. (#3982)
 - The optimizer now folds `(x & ~m) | (~x & m)` into `x ^ m` and `(a & m) ^ (b & m)` into `(a ^ b) & m`, which the kernel writes in `pte_modify` and when it checks which page table bits changed. (#4002)
+- A branch on whether two numbers are equal that no other predictor decides is guessed to find them not equal, at gcc's 66 percent, so code that tests a state against one value after another falls through the tests it does not take instead of jumping past each one (#4041)
 
 ### Fixed
 
@@ -69,6 +70,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - At -O2 and -O3 the test in a `WARN_ON` of an `&&` is now threaded instead of worked out into a truth value with `sete` and tested again. `WARN_ON` hands back the value it tested through a `__builtin_expect` nobody reads, and that read stopped jump threading, since dead code elimination ran long after it. It now also runs once in front of the first threading. `fpregs_assert_state_consistent` in arch/x86/kernel/fpu/core.c runs on every return to user space and now branches straight from its two compares, as gcc does. (#4034)
 - The change in #4031 that swapped a saved register in front of an early return for one a call clobbers is backed out. In `rcu_preempt_deferred_qs_irqrestore` in kernel/rcu/tree_plugin.h the copy of the first argument into the new register was lost, so the function read through whatever was left in `%r10` and the kernel did not boot. (#4035)
 - The shrink wrap rename from #4031 is back, and a register it moves a saved value into is no longer taken for a scratch register by the copy passes behind it, which deleted the copy into `%r10` in `rcu_preempt_deferred_qs_irqrestore` and stopped the kernel booting (#4036)
+- The pass that writes shorter instructions on x86-64 works out where the condition state is live across blocks, rather than turning down every function with a block that reads a state its predecessor set, which kept `movl $0` instead of `xorl` and the `lea` and `inc` forms out of 35 functions in lib/maple_tree.c (#4040)
 
 ## 0.30.15
 

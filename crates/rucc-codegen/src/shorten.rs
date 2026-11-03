@@ -106,15 +106,16 @@
 //!
 //! # What a block boundary is
 //!
-//! The end of everything this knows, which is the same sentence [`crate::compare`] uses and the
-//! same reason: the condition state is not a register, nothing in this back end carries one from a
-//! block to its successors, and the only place a comparison is read is the block it was made in.
+//! Not the end of what this knows. [`crate::compare`] takes out a comparison a block's predecessor
+//! already made, and what is left is a block that opens with a jump on the state the predecessor
+//! left, so the state does go from a block into its successors. `live_out` works out, for every
+//! block, whether anything behind its end reads the state before writing it, and the walk starts
+//! each block from that answer rather than from the state being dead.
 //!
-//! That is an invariant of the passes in front rather than of this one, so it is checked instead of
-//! believed. `carried` walks every block and asks whether any of them reads the condition state
-//! before writing it, which is what a block reading a predecessor's state would look like from
-//! here, and one that does turns the whole function down. What it buys is that if some later pass
-//! starts writing that shape, this pass stops rather than starts being wrong.
+//! It used to be the other way round. Every block had to write the state before reading it or the
+//! whole function was turned down, and a function the compare pass had been through always had one
+//! that did not. In `lib/maple_tree.c` that was 35 functions, `mas_next_slot` among them, and every
+//! move of zero in them stayed five bytes.
 //!
 //! Reads it rather than mentions it. A comparison that keeps a byte makes the comparison and reads
 //! the answer in the one instruction, so a block opening with one is not a block reading anything a
@@ -123,10 +124,9 @@
 //! the SQLite amalgamation were turned down and every one of them was turned down by this, which is
 //! most of the functions in it that have anything for this pass to do.
 //!
-//! Down for the exclusive or and the increment. The narrower move reads no condition state and
-//! writes none, the test writes the same state the comparison it replaces wrote, and neither an
-//! address computation nor a move touches any state at all, so where a state is alive is not a
-//! question those three have to ask, and a function this turns down still gets all of them.
+//! Where the state is live only matters to the exclusive or, the increment and the address
+//! computations. The narrower move reads no condition state and writes none, and the test writes
+//! the same state the comparison it replaces wrote, so those two are asked wherever the state is.
 //!
 //! What the walk carries for the increment is a second answer beside the first, which is whether
 //! anything behind reads the carry rather than whether anything behind reads the state. The two are
@@ -222,23 +222,21 @@ pub fn shorter(
     // The blocks each register an addition hands on is live into, worked out once for each
     // register a function asks about. See [`gathered_form`].
     let mut wanted = Map::default();
-    // Whether the rewrite that spends the condition state may be asked for at all. The narrower
-    // instruction neither reads the state nor writes it, so it is not asked this and a function
-    // this turns down still gets that one.
-    let free = !carried(func, short, flags, names, &mut seen);
+    // Whether the state, and the carry in it, is read behind the end of each block. A rewrite only
+    // ever makes the state live in fewer places, so this is worked out once and not again.
+    let ends = live_out(func, short, flags, names, &mut seen);
     // Whether the rewrite that trades the carry for a byte may be asked for. It is the one thing
     // here that is not free, so it waits for a level that said it wanted small code.
-    let small = free && goal == Goal::Size;
+    let small = goal == Goal::Size;
     for block in func.blocks().collect::<Vec<_>>() {
-        // Backwards, because the question each instruction asks is about the ones behind it. The
-        // state is dead at the end of a block, which is the invariant [`carried`] has just held the
-        // function to.
-        let mut live = false;
-        // The same question about the carry alone, which is the part of the state the shorter
-        // addition does not write. It starts false for the reason `live` does and moves separately,
-        // because an instruction that writes the whole state ends the life of both and one that
-        // writes everything but the carry ends the life of neither.
-        let mut carry = false;
+        // Backwards, because the question each instruction asks is about the ones behind it, and
+        // from what the successors read, which is what is behind the end of the block.
+        //
+        // The same question about the carry alone is the second answer, which is the part of the
+        // state the shorter addition does not write. It moves separately, because an instruction
+        // that writes the whole state ends the life of both and one that writes everything but the
+        // carry ends the life of neither.
+        let (mut live, mut carry) = ends.get(&block).copied().unwrap_or_default();
         let insts = func.insts(block).collect::<Vec<_>>();
         for (at, &inst) in insts.iter().enumerate().rev() {
             // A copy an addition behind it has taken in, which is gone from the block. It wrote no
@@ -249,7 +247,7 @@ pub fn shorter(
             // Asked again after each rewrite that is taken, since what stands there then is another
             // instruction and the questions below are about that one.
             let mut known = Known::of(&mut seen, func, short, flags, names, inst);
-            if free && !live && known.zeroing {
+            if !live && known.zeroing {
                 let into = shorter_form(func, short, names, &opcodes, inst);
                 if into.is_some_and(|op| zeroed(func, &mut counts, machine, names, inst, op)) {
                     took += 1;
@@ -319,7 +317,7 @@ pub fn shorter(
             // no condition state where the addition wrote all of it, so this waits on the state
             // being dead the way the exclusive or does. It is asked before the step because the one
             // instruction it leaves is shorter than the copy and the increment together.
-            if free && !live && known.spreading {
+            if !live && known.spreading {
                 let before = &insts[..at];
                 let into =
                     spread_form(func, short, machine, names, &opcodes, before, inst, allocated);
@@ -331,7 +329,7 @@ pub fn shorter(
                 }
             }
             // An addition and the copy behind it that hands the sum on, the same way round.
-            if free && !live && known.spreading {
+            if !live && known.spreading {
                 let after = &insts[at + 1..];
                 let into = gathered_form(
                     func,
@@ -363,48 +361,47 @@ pub fn shorter(
                     // walk past it is the walk it would have taken anyway.
                 }
             }
-            if !known.covered {
-                // A name the description does not cover may have read the state and may have
-                // written it, and the answer that finds fewer rewrites is that it read it.
-                live = true;
-                carry = true;
-                continue;
-            }
-            // What it reads before whether it writes, because an instruction can do both and the
-            // read it does is a read of what is there now. An add with carry is the one that does,
-            // and asking the other way round would call it the end of the state's life and let a
-            // rewrite in front of it take the carry away.
-            //
-            // Unless what it reads is what it wrote itself. A comparison that keeps a byte makes
-            // the comparison and reads the answer in the one instruction, so the state it was
-            // handed is state it wrote over before anything looked at it, and it ends a life rather
-            // than extending one. Asking the description which kind it is rather than stopping at
-            // the word read is most of what this pass gets to do in real code, since a C function
-            // of any size has one of these in it.
-            if known.own {
-                live = false;
-                carry = false;
-            } else if let Some(reads) = known.reads {
-                live = true;
-                // Which part of the state the condition on it is about. A condition that asks where
-                // a value sits as an unsigned number reads the carry, and so does an instruction
-                // that is adding a carry on rather than asking a question about one.
-                if matches!(reads, Reads::Unsigned | Reads::Carry) {
-                    carry = true;
-                }
-            } else if known.ends {
-                // An instruction that writes the state ends the life of everything in it. One that
-                // writes all of it but the carry ends the life of none of it, which is the second
-                // half of the sentence and is why this asks the description rather than stopping at
-                // the flag. That answer is about `live` as much as about `carry`: a rewrite in front
-                // that spends the state would be spending a carry this instruction was going to
-                // leave for something behind it.
-                live = false;
-                carry = false;
-            }
+            (live, carry) = behind(&known, live, carry);
         }
     }
     took
+}
+
+/// Whether the state and the carry are live in front of an instruction, given whether they are
+/// behind it.
+fn behind(known: &Known, live: bool, carry: bool) -> (bool, bool) {
+    if !known.covered {
+        // A name the description does not cover may have read the state and may have written it,
+        // and the answer that finds fewer rewrites is that it read it.
+        return (true, true);
+    }
+    // What it reads before whether it writes, because an instruction can do both and the read it
+    // does is a read of what is there now. An add with carry is the one that does, and asking the
+    // other way round would call it the end of the state's life and let a rewrite in front of it
+    // take the carry away.
+    //
+    // Unless what it reads is what it wrote itself. A comparison that keeps a byte makes the
+    // comparison and reads the answer in the one instruction, so the state it was handed is state
+    // it wrote over before anything looked at it, and it ends a life rather than extending one.
+    // Asking the description which kind it is rather than stopping at the word read is most of what
+    // this pass gets to do in real code, since a C function of any size has one of these in it.
+    if known.own {
+        (false, false)
+    } else if let Some(reads) = known.reads {
+        // Which part of the state the condition on it is about. A condition that asks where a value
+        // sits as an unsigned number reads the carry, and so does an instruction that is adding a
+        // carry on rather than asking a question about one.
+        (true, carry || matches!(reads, Reads::Unsigned | Reads::Carry))
+    } else if known.ends {
+        // An instruction that writes the state ends the life of everything in it. One that writes
+        // all of it but the carry ends the life of none of it, which is the second half of the
+        // sentence and is why this asks the description rather than stopping at the flag. That
+        // answer is about `live` as much as about `carry`: a rewrite in front that spends the state
+        // would be spending a carry this instruction was going to leave for something behind it.
+        (false, false)
+    } else {
+        (live, carry)
+    }
 }
 
 /// Takes out a widening of a register into itself where what last wrote the register already left
@@ -486,46 +483,56 @@ fn cleared(
     false
 }
 
-/// Whether any block reads the condition state before writing it, which is what a state carried in
-/// from a predecessor would look like from inside this pass.
+/// Whether the condition state, and the carry in it, is read behind the end of each block before
+/// anything writes it.
 ///
-/// The passes in front are the ones that promise this does not happen and the promise is theirs to
-/// keep, so what this does is hold them to it rather than restate it. A function where it is broken
-/// gets no rewrites at all, which is the answer that is wrong about nothing.
+/// The usual backwards liveness over the successors, one answer for the state and one for the
+/// carry. What a block does to each answer depends only on the same answer at its end, and only on
+/// whether that is true or false, so each block is walked twice up front, once from both dead and
+/// once from both live, and the fixed point only has to look the two results up.
 ///
-/// An instruction that leaves the carry alone does not count as having written the state here, for
-/// the same reason it does not count as having written it in the walk. A block opening with one and
-/// reading a carry afterwards is reading a carry a predecessor left, which is exactly the shape this
-/// is looking for, and stopping at it would be calling that block clean.
-///
-/// An instruction that reads what it wrote itself does not count as having read the state, for the
-/// same reason it does not in the walk. A block opening with a comparison that keeps a byte opens
-/// with a comparison, and what the comparison found is not what anything in front of it left.
-/// Counting it as a read is the difference between this turning down a few functions and turning
-/// down most of them, because a comparison that keeps a byte is what every `!` and every `==` in a
-/// value position comes out as.
-fn carried(
+/// A block that returns or leaves by a tail call has no successors and nothing live at its end,
+/// since nothing a caller or a callee does reads a state this function left.
+fn live_out(
     func: &mir::Func,
     short: &ShortInsts,
     flags: &FlagInsts,
     names: &Interner,
     seen: &mut Map<mir::Opcode, Known>,
-) -> bool {
-    func.blocks().any(|block| {
-        for inst in func.insts(block) {
-            let known = Known::of(seen, func, short, flags, names, inst);
-            if !known.covered {
-                return true;
-            }
-            if known.reads.is_some() && !known.own {
-                return true;
-            }
-            if known.ends {
-                return false;
+) -> Map<mir::Block, (bool, bool)> {
+    let blocks: Vec<mir::Block> = func.blocks().collect();
+    let mut from = Map::default();
+    for &block in &blocks {
+        let walk = |seen: &mut Map<mir::Opcode, Known>, end: bool| {
+            let insts = func.insts(block).collect::<Vec<_>>();
+            insts.iter().rev().fold((end, end), |(live, carry), &inst| {
+                behind(&Known::of(seen, func, short, flags, names, inst), live, carry)
+            })
+        };
+        let dead = walk(seen, false);
+        let alive = walk(seen, true);
+        from.insert(block, (dead, alive));
+    }
+    let mut ends: Map<mir::Block, (bool, bool)> = Map::default();
+    let mut into: Map<mir::Block, (bool, bool)> = Map::default();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &block in blocks.iter().rev() {
+            let end = func[block].succs.iter().fold((false, false), |(live, carry), to| {
+                let (next, kept) = into.get(&to.block).copied().unwrap_or_default();
+                (live || next, carry || kept)
+            });
+            let (dead, alive) = from[&block];
+            let start =
+                (if end.0 { alive.0 } else { dead.0 }, if end.1 { alive.1 } else { dead.1 });
+            ends.insert(block, end);
+            if into.insert(block, start) != Some(start) {
+                changed = true;
             }
         }
-        false
-    })
+    }
+    ends
 }
 
 /// What the description says about one opcode, asked once for each opcode a function has rather
@@ -1457,13 +1464,14 @@ mod tests {
         assert_eq!(imm(&func, inst), Some(0));
     }
 
-    /// A function the state carried across an edge turns down, which is the first rewrite's rule
-    /// and not the second one's. The narrower move writes no state and reads none, so a function
-    /// that rule turns down still gets it.
+    /// A move in front of a block that reads the state the move's block leaves, which keeps the
+    /// first rewrite out and not the second one. The narrower move writes no state and reads none,
+    /// so it is taken wherever the state is live.
     #[test]
-    fn a_function_the_carried_state_turns_down_is_still_narrowed() {
+    fn a_move_in_front_of_a_state_read_across_an_edge_is_still_narrowed() {
         let (mut names, mut func, first) = empty();
         let second = func.create_block();
+        func.succs_mut(first).push(mir::BlockCall::to(second));
         let into = func.new_vreg(GPR);
         let byte = func.new_vreg(GPR);
         let wide = op(&mut names, "mov_ri_64");
@@ -1544,12 +1552,30 @@ mod tests {
         assert_eq!(shape(&func, &names, block), ["xor_rr_32", "add_rr_32", "set_e"]);
     }
 
-    /// A function where a block reads the condition state before it writes one, which is what a
-    /// state carried across an edge looks like from here. The passes in front say that does not
-    /// happen and this is where that is held to rather than believed, so the whole function is
-    /// turned down and the move in the other block stays as well.
+    /// A block that reads the condition state before it writes one, which is what the compare pass
+    /// leaves when it takes out a comparison a predecessor already made. The state is live at the
+    /// end of the predecessor, so the move there stays a move.
     #[test]
-    fn a_state_carried_into_a_block_turns_the_whole_function_down() {
+    fn a_state_a_successor_reads_keeps_the_move_in_front_of_it() {
+        let (mut names, mut func, first) = empty();
+        let second = func.create_block();
+        func.succs_mut(first).push(mir::BlockCall::to(second));
+        let into = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let zero = op(&mut names, "mov_ri_32");
+        let set = op(&mut names, "set_e");
+        func.build(first, zero).def(into, GPR).imm(0).finish();
+        func.build(second, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, first), ["mov_ri_32"]);
+    }
+
+    /// The same two blocks with no edge between them. The block that reads the state first is
+    /// reading what some other block left, and that is no reason to keep a move anywhere else in the
+    /// function, which is what turning the whole function down used to do.
+    #[test]
+    fn a_state_read_elsewhere_does_not_keep_this_move() {
         let (mut names, mut func, first) = empty();
         let second = func.create_block();
         let into = func.new_vreg(GPR);
@@ -1559,7 +1585,30 @@ mod tests {
         func.build(first, zero).def(into, GPR).imm(0).finish();
         func.build(second, set).def(byte, GPR).finish();
 
-        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, first), ["xor_rr_32"]);
+    }
+
+    /// A state read two blocks on, through a block that neither reads nor writes it. The liveness
+    /// goes back through the middle block to the move.
+    #[test]
+    fn a_state_read_two_blocks_on_keeps_the_move() {
+        let (mut names, mut func, first) = empty();
+        let middle = func.create_block();
+        let last = func.create_block();
+        func.succs_mut(first).push(mir::BlockCall::to(middle));
+        func.succs_mut(middle).push(mir::BlockCall::to(last));
+        let into = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let zero = op(&mut names, "mov_ri_32");
+        let wide = op(&mut names, "mov_ri_64");
+        let set = op(&mut names, "set_e");
+        func.build(first, zero).def(into, GPR).imm(0).finish();
+        func.build(middle, wide).def(other, GPR).imm(7).finish();
+        func.build(last, set).def(byte, GPR).finish();
+
+        takes(&mut func, &mut names);
         assert_eq!(shape(&func, &names, first), ["mov_ri_32"]);
     }
 
@@ -1963,11 +2012,13 @@ mod tests {
 
     /// The other kind of read, which is the one this must go on stopping at. An add with carry is
     /// reading the bit the instruction in front of it left rather than one it wrote itself, and it
-    /// makes no comparison, which is how the description tells the two apart.
+    /// makes no comparison, which is how the description tells the two apart. Here it opens the
+    /// block the move goes on to, so the carry it reads is live at the end of the move's block.
     #[test]
     fn an_add_with_carry_opening_a_block_is_still_a_carried_state() {
         let (mut names, mut func, first) = empty();
         let second = func.create_block();
+        func.succs_mut(first).push(mir::BlockCall::to(second));
         let into = func.new_vreg(GPR);
         let value = func.new_vreg(GPR);
         let zero = op(&mut names, "mov_ri_32");

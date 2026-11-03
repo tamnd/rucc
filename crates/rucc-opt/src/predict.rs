@@ -2,7 +2,7 @@
 //!
 //! Design: section 11.2 of `spec/optimizer/11-profile-and-frequency.md`.
 //!
-//! # Eleven predictors and not fifty five
+//! # Twelve predictors and not fifty five
 //!
 //! GCC has fifty five, in `gcc/predict.def`, each naming a syntactic situation and the rate at
 //! which the guess turned out right when somebody measured it. Ten of those are for Fortran, and
@@ -45,7 +45,7 @@
 //!
 //! # The early return
 //!
-//! The eleventh, asked last. gcc's front end guesses that a `return` written inside an `if`, an arm
+//! The eleventh, asked after the other ten. gcc's front end guesses that a `return` written inside an `if`, an arm
 //! of `?:` or the right of `&&` or `||` is not taken, which is `PRED_TREE_EARLY_RETURN`, and it is
 //! the guess that the work of a function is on the long path and not on the quick way out at the
 //! top. It came after the other ten because the inliner weighs what a call saves by how often each
@@ -57,6 +57,16 @@
 //! edge that enters the part of the function a marked `return` post-dominates from outside that
 //! part, which is the branch whose arm returns and not the branches inside that arm, and two arms
 //! that each reach a marked `return` of their own cancel out.
+//!
+//! # Two numbers not equal
+//!
+//! The twelfth, asked last, and it is gcc's `PRED_OPCODE_NONEQUAL` at sixty six percent: a test of
+//! whether two numbers are equal usually finds they are not. It came last because of the layout
+//! and not the inliner. A branch no predictor decided is even, and an even branch lays out the arm
+//! the condition is true for next, so code that tests a state against one value after another, as
+//! the maple tree in the Linux kernel does on every walk, jumped past each test it was not going to
+//! take and took a branch per test where gcc's layout falls through. Asked last, it only decides a
+//! branch that was even before it.
 
 use std::cell::OnceCell;
 
@@ -65,7 +75,8 @@ use rucc_base::hash::Map;
 use rucc_cost::heuristics::{
     PREDICT_CALL_NOT_TAKEN, PREDICT_COLD_CALL, PREDICT_CONTINUE_TAKEN, PREDICT_EARLY_RETURN,
     PREDICT_EXPECT, PREDICT_LOOP_EXIT_NOT_TAKEN, PREDICT_LOOP_GUARD_TAKEN, PREDICT_NEGATIVE_RETURN,
-    PREDICT_NEVER_RETURNS, PREDICT_NULL_RETURN, PREDICT_POINTER_NOT_NULL, PREDICT_RETURN_BLOCKS,
+    PREDICT_NEVER_RETURNS, PREDICT_NULL_RETURN, PREDICT_OPCODE_NONEQUAL, PREDICT_POINTER_NOT_NULL,
+    PREDICT_RETURN_BLOCKS,
 };
 use rucc_ir::{
     AttrSet, Attrs, Block, Def, Extra, Flags, Func, Inst, IntPred, Module, Opcode, Type, Value,
@@ -105,6 +116,8 @@ pub enum Predictor {
     Continue,
     /// One arm leaves the function by a `return` written inside a test.
     EarlyReturn,
+    /// The condition asks whether two numbers are equal.
+    NonEqual,
     /// Nothing applied, so the arms are even.
     Nothing,
 }
@@ -125,6 +138,7 @@ impl Predictor {
             Self::CallNotTaken => "the arm that calls something",
             Self::Continue => "the continue",
             Self::EarlyReturn => "the early return",
+            Self::NonEqual => "the two numbers are not equal",
             Self::Nothing => "nothing, so even",
         }
     }
@@ -144,14 +158,15 @@ impl Predictor {
             Self::CallNotTaken => rucc_cost::param!(PREDICT_CALL_NOT_TAKEN),
             Self::Continue => rucc_cost::param!(PREDICT_CONTINUE_TAKEN),
             Self::EarlyReturn => rucc_cost::param!(PREDICT_EARLY_RETURN),
+            Self::NonEqual => rucc_cost::param!(PREDICT_OPCODE_NONEQUAL),
             // Even, which is the absence of a prediction rather than one, and not a number
             // anybody would tune.
             Self::Nothing => 50,
         }
     }
 
-    /// The eleven, in the order they are asked.
-    pub const ORDER: [Self; 11] = [
+    /// The twelve, in the order they are asked.
+    pub const ORDER: [Self; 12] = [
         Self::Expect,
         Self::NeverReturns,
         Self::ColdCall,
@@ -163,6 +178,7 @@ impl Predictor {
         Self::CallNotTaken,
         Self::Continue,
         Self::EarlyReturn,
+        Self::NonEqual,
     ];
 }
 
@@ -452,6 +468,10 @@ fn branch(
         );
     }
 
+    if let Some(taken) = nonequal(func, cond) {
+        return (taken, Predictor::NonEqual);
+    }
+
     (Probability::even(), Predictor::Nothing)
 }
 
@@ -684,6 +704,37 @@ fn pointer_null(func: &Func, cond: Value) -> Option<Probability> {
     match pred {
         IntPred::Eq => Some(toward(false, rucc_cost::param!(PREDICT_POINTER_NOT_NULL))),
         IntPred::Ne => Some(toward(true, rucc_cost::param!(PREDICT_POINTER_NOT_NULL))),
+        _ => None,
+    }
+}
+
+/// The prediction a test of whether two values are equal makes, if that is what the condition is.
+///
+/// Asked last, so it only decides a branch nothing else had anything to say about, and that is
+/// most of the branches in a program that dispatches on a state: `if (mas->status == ma_none)`
+/// says nothing about loops, calls or returns. Without it such a branch is even, and an even
+/// branch puts the arm the condition is true for next in the layout, which is the arm that is
+/// usually not run.
+///
+/// Numbers and not pointers. Two pointers tested for equal are as often asking whether this is the
+/// object it should be, as the kernel's `WARN_ON(fpu != owner)` does on every return to user space,
+/// and there the guess would lay out the warning next.
+fn nonequal(func: &Func, cond: Value) -> Option<Probability> {
+    let Def::Result { inst, .. } = func[cond].def else { return None };
+    let data = &func[inst];
+    if data.opcode != Opcode::ICmp {
+        return None;
+    }
+    if func[data.args].iter().any(|&arg| func[arg].ty.is_ptr()) {
+        return None;
+    }
+    match data.extra {
+        Extra::IntPred(IntPred::Eq) => {
+            Some(toward(false, rucc_cost::param!(PREDICT_OPCODE_NONEQUAL)))
+        }
+        Extra::IntPred(IntPred::Ne) => {
+            Some(toward(true, rucc_cost::param!(PREDICT_OPCODE_NONEQUAL)))
+        }
         _ => None,
     }
 }
@@ -1069,6 +1120,73 @@ mod tests {
         assert_eq!(seen.taken(at[0], 0), Probability::percent(70, Quality::Guessed).complement());
     }
 
+    /// A branch on whether `left` and `right` are equal, into two arms that return zero, which
+    /// none of the predictors in front of the last one has anything to say about.
+    fn compared(pred: IntPred, left: i128, right: i128) -> (Func, Vec<Block>) {
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let left = build.iconst(Type::int(32), left);
+        let right = build.iconst(Type::int(32), right);
+        let cond = build.icmp(pred, left, right);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        returns(&mut func, &[(at[1], 0, false), (at[2], 0, false)]);
+        (func, at)
+    }
+
+    #[test]
+    fn two_numbers_tested_for_equal_are_predicted_not_equal() {
+        let (func, at) = compared(IntPred::Eq, 3, 4);
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::NonEqual);
+        // The arm taken when they are equal, which is the one not run most of the time.
+        assert_eq!(seen.taken(at[0], 0), Probability::percent(66, Quality::Guessed).complement());
+
+        let (func, at) = compared(IntPred::Ne, 3, 4);
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::NonEqual);
+        assert_eq!(seen.taken(at[0], 0), Probability::percent(66, Quality::Guessed));
+    }
+
+    #[test]
+    fn two_pointers_tested_for_equal_are_still_even() {
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let seven = build.iconst(Type::int(64), 7);
+        let one = build.unary(Opcode::IntToPtr, seven, Type::PTR);
+        let eight = build.iconst(Type::int(64), 8);
+        let other = build.unary(Opcode::IntToPtr, eight, Type::PTR);
+        let cond = build.icmp(IntPred::Eq, one, other);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        returns(&mut func, &[(at[1], 0, false), (at[2], 0, false)]);
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::Nothing);
+    }
+
+    #[test]
+    fn a_number_tested_for_less_is_still_even() {
+        let (func, at) = compared(IntPred::Slt, 3, 4);
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::Nothing);
+        assert_eq!(seen.taken(at[0], 0), Probability::even());
+    }
+
+    #[test]
+    fn an_early_return_decides_before_the_numbers_do() {
+        // `if (x == 3) return 1; return 2;`, where the test says the return is not taken and so
+        // does the mark, and the mark is asked first.
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let left = build.iconst(Type::int(32), 3);
+        let right = build.iconst(Type::int(32), 4);
+        let cond = build.icmp(IntPred::Ne, left, right);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        returns(&mut func, &[(at[1], 1, true), (at[2], 2, false)]);
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::EarlyReturn);
+    }
+
     #[test]
     fn a_branch_into_a_block_the_caller_says_is_unlikely_goes_the_other_way() {
         let (_, mut func, at) = blank(3);
@@ -1433,8 +1551,8 @@ mod tests {
     }
 
     #[test]
-    fn the_eleven_are_the_ones_the_document_names_and_they_are_asked_in_its_order() {
-        assert_eq!(Predictor::ORDER.len(), 11);
+    fn the_twelve_are_the_ones_the_document_names_and_they_are_asked_in_its_order() {
+        assert_eq!(Predictor::ORDER.len(), 12);
         assert!(!Predictor::ORDER.contains(&Predictor::Nothing));
         let mut sorted = Predictor::ORDER;
         sorted.sort_unstable();

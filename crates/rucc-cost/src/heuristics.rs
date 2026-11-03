@@ -588,6 +588,14 @@ pub const PREDICT_CONTINUE_TAKEN: u32 = 67;
 /// block of the callee runs (tamnd/rucc#3182).
 pub const PREDICT_EARLY_RETURN: u32 = 66;
 
+/// How often a test of whether two numbers are equal finds them not equal, in percent, per section
+/// 11.2.
+///
+/// GCC's `PRED_OPCODE_NONEQUAL`, for numbers and not pointers. It is asked after every other
+/// predictor, so it only decides a branch none of them had anything to say about. An even branch lays out the arm for equal next,
+/// and in code that tests a state against one value after another that is the arm least often run.
+pub const PREDICT_OPCODE_NONEQUAL: u32 = 66;
+
 /// How many iterations a loop is predicted to run when nothing measured it, per section 11.2.
 ///
 /// GCC's `max-predicted-iterations`. It is a cap and not an estimate: the frequency of a loop
@@ -1421,6 +1429,14 @@ pub const ALL: &[Constant] = &[
         unit: "percent",
         document: "11.2",
         gcc: "PRED_TREE_EARLY_RETURN",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_OPCODE_NONEQUAL",
+        value: 66,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_OPCODE_NONEQUAL",
         provenance: Provenance::Gcc,
     },
     Constant {
