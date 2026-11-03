@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86-64, a function that only reads its own return address now loads it from the stack pointer and keeps no frame pointer, the same as gcc. The kernel bench objects shrink by 768 bytes, 576 of them in slub.o. (#3982)
 - The optimizer now folds `(x & ~m) | (~x & m)` into `x ^ m` and `(a & m) ^ (b & m)` into `(a ^ b) & m`, which the kernel writes in `pte_modify` and when it checks which page table bits changed. (#4002)
 - A branch on whether two numbers are equal that no other predictor decides is guessed to find them not equal, at gcc's 66 percent, so code that tests a state against one value after another falls through the tests it does not take instead of jumping past each one (#4041)
+- The pass that writes shorter instructions on x86-64 writes `andq $-256` on a register whose condition state nobody reads as an exclusive or of its low byte with itself, which is 2 or 3 bytes instead of 7 and what gcc writes for the maple tree clearing the low bits of a node pointer (#4044)
 
 ### Fixed
 

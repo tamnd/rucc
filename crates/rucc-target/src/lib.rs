@@ -84,7 +84,9 @@ pub use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, Places, RegClass, RegFile, Segment,
     Trace, Where,
 };
-pub use crate::short::{Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed};
+pub use crate::short::{
+    Cleared, Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed,
+};
 pub use crate::timing::{Timing, TimingInsts, Unit};
 pub use crate::typenames::{Lane, TypeName};
 

@@ -551,6 +551,7 @@ fn writes_flags(name: &str) -> bool {
 pub static SHORT: ShortInsts = ShortInsts {
     prefix: "rv.",
     zeroing: &[],
+    clearing: &[],
     narrowing: &[],
     byte_testing: &[],
     testing: &[],
