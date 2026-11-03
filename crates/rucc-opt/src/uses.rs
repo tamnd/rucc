@@ -54,7 +54,13 @@ pub fn operands(func: &Func, inst: Inst, mut each: impl FnMut(Value)) {
 /// rewrote a hundred values would otherwise walk the function a hundred times, and the map is
 /// what makes the cost of the walk independent of how much the pass did.
 pub fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
-    let with = |value: Value| chase(forward, value);
+    // An operand outside the range of the keys is not one of them, which is a compare rather than
+    // a lookup. A pass points only a few values away, and most operands are not one of those.
+    let (Some(&low), Some(&high)) = (forward.keys().min(), forward.keys().max()) else {
+        return;
+    };
+    let within = low..=high;
+    let with = |value: Value| if within.contains(&value) { chase(forward, value) } else { value };
     // One list of instructions and one of edges, filled again for each block and each terminator,
     // where a list was made for each of them. tamnd/rucc#3052.
     let mut insts = Vec::new();
