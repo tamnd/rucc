@@ -147,9 +147,12 @@ pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
     let mut stats = Stats::new();
     let mut forward = Map::default();
     let mut split_up = Vec::new();
+    // One list of instructions, filled again for each block, not one list made for each block.
+    let mut insts: Vec<Inst> = Vec::new();
     for block in blocks {
-        let insts: Vec<Inst> = func.insts(block).collect();
-        for inst in insts {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
             if let Some(both) = overflow(func, inst) {
                 if !fuel.take() {
                     stats.missed(NO_FUEL);

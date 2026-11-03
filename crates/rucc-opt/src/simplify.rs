@@ -672,8 +672,12 @@ impl Pass for Simplify {
             None => false,
         };
         let mut finder = Finder::new(func, an);
+        // One list of instructions, filled again for each block, not one list made for each block.
+        let mut insts: Vec<Inst> = Vec::new();
         for block in func.blocks().collect::<Vec<Block>>() {
-            for inst in func.insts(block).collect::<Vec<Inst>>() {
+            insts.clear();
+            insts.extend(func.insts(block));
+            for &inst in &insts {
                 if dead(func, inst) {
                     continue;
                 }
