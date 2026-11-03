@@ -22,6 +22,42 @@ struct Binding<V> {
     value: V,
 }
 
+/// The bindings of one name, the innermost kept in place.
+///
+/// Most names are bound once, at file scope, and a lookup reads only the innermost binding. To
+/// keep that binding in the map entry spares a heap block for each such name and a pointer chase
+/// on each lookup. Only a binding that a deeper one hides goes out to `hidden`.
+#[derive(Debug)]
+struct Stack<V> {
+    /// The innermost binding, or [`None`] when the name is not bound.
+    top: Option<Binding<V>>,
+    /// The bindings `top` hides, innermost last.
+    hidden: Vec<Binding<V>>,
+}
+
+impl<V> Default for Stack<V> {
+    fn default() -> Self {
+        Stack { top: None, hidden: Vec::new() }
+    }
+}
+
+impl<V: Copy> Stack<V> {
+    fn push(&mut self, binding: Binding<V>) {
+        if let Some(outer) = self.top.replace(binding) {
+            self.hidden.push(outer);
+        }
+    }
+
+    fn pop(&mut self) {
+        self.top = self.hidden.pop();
+    }
+
+    /// The bindings from the innermost outwards.
+    fn outwards(&self) -> impl Iterator<Item = &Binding<V>> {
+        self.top.iter().chain(self.hidden.iter().rev())
+    }
+}
+
 /// A map from a name to a value, in a stack of scopes.
 ///
 /// A lookup has to find the innermost binding of a name, and a scope closing has to expose
@@ -31,10 +67,10 @@ struct Binding<V> {
 /// names bound in each open scope so that closing one knows what to undo.
 #[derive(Debug)]
 pub struct ScopeMap<V> {
-    /// The bindings of each name, innermost last. An empty stack means the name is not bound,
-    /// and the entry is kept rather than removed so that the allocation is reused by the next
-    /// declaration of that name, which in a header is usually the same names again.
-    bindings: Map<Symbol, Vec<Binding<V>>>,
+    /// The bindings of each name. An empty stack means the name is not bound, and the entry is
+    /// kept rather than removed so that the next declaration of that name, which in a header is
+    /// usually the same names again, finds its slot.
+    bindings: Map<Symbol, Stack<V>>,
     /// Every name bound in an open scope, in the order it was bound.
     log: Vec<Symbol>,
     /// Where each open scope starts in `log`. The file scope is not in here, which is what
@@ -101,7 +137,7 @@ impl<V: Copy> ScopeMap<V> {
     pub fn declare(&mut self, name: Symbol, value: V) -> Option<V> {
         let depth = self.depth();
         let stack = self.bindings.entry(name).or_default();
-        match stack.last_mut() {
+        match &mut stack.top {
             Some(top) if top.depth == depth => {
                 let was = top.value;
                 top.value = value;
@@ -127,7 +163,7 @@ impl<V: Copy> ScopeMap<V> {
     /// over and this has no log entry to undo.
     pub fn declare_at_file_scope(&mut self, name: Symbol, value: V) -> bool {
         let stack = self.bindings.entry(name).or_default();
-        if !stack.is_empty() {
+        if stack.top.is_some() {
             return false;
         }
         // Not logged, which is what makes it survive every scope that closes over it. The log
@@ -140,7 +176,7 @@ impl<V: Copy> ScopeMap<V> {
     /// What `name` is bound to in the innermost scope that binds it.
     #[must_use]
     pub fn get(&self, name: Symbol) -> Option<V> {
-        Some(self.bindings.get(&name)?.last()?.value)
+        Some(self.bindings.get(&name)?.top?.value)
     }
 
     /// What `name` is bound to in the innermost scope that binds it to something `wanted` takes.
@@ -152,14 +188,14 @@ impl<V: Copy> ScopeMap<V> {
     #[must_use]
     pub fn get_where(&self, name: Symbol, wanted: impl Fn(V) -> bool) -> Option<V> {
         let stack = self.bindings.get(&name)?;
-        stack.iter().rev().map(|binding| binding.value).find(|&value| wanted(value))
+        stack.outwards().map(|binding| binding.value).find(|&value| wanted(value))
     }
 
     /// What `name` is bound to in the innermost scope alone, ignoring the ones outside it.
     #[must_use]
     pub fn get_here(&self, name: Symbol) -> Option<V> {
         let depth = self.depth();
-        let top = self.bindings.get(&name)?.last()?;
+        let top = self.bindings.get(&name)?.top?;
         (top.depth == depth).then_some(top.value)
     }
 }
@@ -225,6 +261,19 @@ mod tests {
         assert_eq!(names.get(X), Some(1));
         names.pop();
         assert_eq!(names.get(X), None);
+    }
+
+    #[test]
+    fn a_search_outwards_goes_past_the_inner_bindings_in_order() {
+        let mut names = ScopeMap::new();
+        names.declare(X, 1);
+        names.push();
+        names.declare(X, 2);
+        names.push();
+        names.declare(X, 3);
+        assert_eq!(names.get_where(X, |value| value < 3), Some(2));
+        assert_eq!(names.get_where(X, |value| value < 2), Some(1));
+        assert_eq!(names.get_where(X, |value| value > 3), None);
     }
 
     #[test]
