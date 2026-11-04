@@ -646,8 +646,7 @@ mod tests {
     /// The last two are the return of a function that takes the address its result went through
     /// off the stack, and the exchange `crate::bytes` puts around an instruction that named the low
     /// byte of `esi` or `edi`. Neither is an answer to a term on either machine.
-    const I386: &[&str] =
-        &["lea_32", "mov_rr_32", "push_32", "pop_32", "endbr32", "ret_pop", "xchg_rr_32"];
+    const I386: &[&str] = &["mov_rr_32", "push_32", "pop_32", "endbr32", "ret_pop", "xchg_rr_32"];
 
     /// The instructions that change an object where it lives, which a template asks for and
     /// nothing else does.
