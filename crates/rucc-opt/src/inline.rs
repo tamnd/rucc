@@ -1092,10 +1092,13 @@ impl How<'_> {
         let func = &module[callee];
         let (plain, weighs) = match cleaned(func, values, threads) {
             Some(copy) => {
-                let (names, layout) = (self.names, module.datalayout);
-                let sized =
-                    |count| folded_size(&copy, layout, Set::default(), Map::default(), count);
-                (sized(Count::Plain(names)), sized(Count::Weighed(names)))
+                // One walk counts the copy both ways, as only the cost of each instruction
+                // changes between the two.
+                let counts = [Count::Plain(self.names), Count::Weighed(self.names)];
+                let none = (Set::default(), Map::default());
+                let ([plain, weighs], _) =
+                    folded_as(&copy, module.datalayout, none.0, none.1, counts, None, true);
+                (plain, weighs)
             }
             None => (size(func), size(func)),
         };
@@ -2011,7 +2014,8 @@ fn folded(
     count: Count<'_>,
     frequency: Option<&Map<Block, f64>>,
 ) -> (usize, f64) {
-    folded_as(func, layout, known, values, count, frequency, true)
+    let ([size], time) = folded_as(func, layout, known, values, [count], frequency, true);
+    (size, time)
 }
 
 /// Whether `address` is a parameter or a constant offset from one.
@@ -2037,15 +2041,17 @@ fn through_param(func: &Func, address: Value) -> bool {
 
 /// [`folded`], with a load or a store [`through_param`] counted at half its size when `halve` is
 /// set, which is how a copy is counted, and in full when not, which is how the unit is.
-fn folded_as(
+///
+/// The size is counted once for each of `counts` in the one walk, and the time with the first.
+fn folded_as<const N: usize>(
     func: &Func,
     layout: DataLayout,
     mut known: Set<Value>,
     mut values: Map<Value, (Imm, Type)>,
-    count: Count<'_>,
+    counts: [Count<'_>; N],
     frequency: Option<&Map<Block, f64>>,
     halve: bool,
-) -> (usize, f64) {
+) -> ([usize; N], f64) {
     known.extend(values.keys().copied());
     // Who reads each value and as which operand, for what is part of the instruction reading it
     // once there is code: an address a load or a store takes, the index it scales, and the
@@ -2059,7 +2065,7 @@ fn folded_as(
     let slots = slots(func, &cfg, layout);
     let mut live: Set<Block> = cfg.entry().into_iter().collect();
     // In halves, so a load or a store through a parameter can count one.
-    let mut halves = 0;
+    let mut halves = [0; N];
     let mut time = 0.0;
     for block in cfg.reverse_postorder() {
         if !live.contains(&block) {
@@ -2161,8 +2167,12 @@ fn folded_as(
             };
             if !costless {
                 let read = data.results().any(|result| readers.read(result));
-                let cost = count.cost(func, inst, read);
-                halves += if halve && halved(func, inst) { cost } else { 2 * cost };
+                let costs = counts.map(|count| count.cost(func, inst, read));
+                let half = halve && halved(func, inst);
+                for (sum, cost) in halves.iter_mut().zip(costs) {
+                    *sum += if half { cost } else { 2 * cost };
+                }
+                let cost = costs.first().copied().unwrap_or_default();
                 let often = frequency.and_then(|it| it.get(&block)).copied().unwrap_or(1.0);
                 // A call takes longer than its size says, which is gcc's `eni_time_weights`.
                 let waits = match data.opcode {
@@ -2175,7 +2185,7 @@ fn folded_as(
             }
         }
     }
-    (halves.div_ceil(2), time)
+    (halves.map(|sum: usize| sum.div_ceil(2)), time)
 }
 
 /// Whether a copy counts `inst` at half its size, which is a load or a store [`through_param`].
