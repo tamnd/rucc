@@ -906,7 +906,10 @@ impl Func {
     ///
     /// This is the one place that knows a `switch` keeps its targets in a side table and
     /// `asm goto` in another one, so nothing walking the CFG has to.
-    #[inline]
+    // Always, because the passes call it on every instruction to read the edge arguments, and
+    // the build kept it as a call. Almost every instruction is not a terminator, so in the caller
+    // it is one compare.
+    #[inline(always)]
     pub fn successors(&self, inst: Inst) -> impl Iterator<Item = BlockCall> + use<'_> {
         self.block_calls[self.target_list(inst).as_usize_range()].iter().copied()
     }
@@ -918,7 +921,7 @@ impl Func {
     /// wants, because an edge that will grow an argument later has to be named by its place in
     /// the table rather than by the block it went to.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub fn target_list(&self, inst: Inst) -> BlockCallList {
         match self[inst].extra {
             Extra::Targets(targets) => targets,
