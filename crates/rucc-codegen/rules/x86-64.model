@@ -408,6 +408,7 @@
 (semantics (amode_base_index_scale base index scale) (bvadd base (bvmul index scale)))
 (semantics (amode_index_scale index scale) (bvmul index scale))
 (semantics (x64.lea_64 address) address)
+(semantics (x64.lea_32 address) address)
 
 ;; Two more addressing modes, which are the ones a load and a store reach through. A `mov`
 ;; can use every mode `lea` can, so nothing here is about memory: an addressing mode is an

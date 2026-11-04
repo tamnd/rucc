@@ -80,6 +80,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - At `-O2` and `-O3` the optimizer now runs `dce` and `sroa` again right after `__builtin_constant_p` is settled, so a set of flags the kernel builds in a local with `mk_vma_flags` and `__set_bit` is a constant and not a stack slot, and the flag it holds is tested once. In the kernel's brk loop that is 8 percent fewer instructions, level with gcc. (#4052)
 Jump threading treats a branch on a condition and a later branch on its `!` as the same test with the arms swapped, so the exit of a `try_cmpxchg` loop goes straight to where the result says. In `__refcount_add_not_zero` this removes the `xor`, `test` and `cmov` rucc wrote after the loop to pick the old value (#4058)
 A branch on two tests of the same kind against zero is now one test of their `or` or `and`, as gcc folds it before expanding, so `a < 0 || b < 0` is `or` and one jump instead of two tests and two jumps, and the same for `a != 0 || b != 0`, `a == 0 && b == 0` and both signed forms (#4059)
+- On x86-64 an `int` multiplied by 2, 3, 4, 5, 8 or 9, and an `int` added to one multiplied by 2, 4 or 8, is now one `leal` instead of `imull`, as gcc writes it. The kernel's `avc_hash` multiply and the slot counts in the maple tree took `imull` before. (#4060)
 
 ## 0.30.15
 

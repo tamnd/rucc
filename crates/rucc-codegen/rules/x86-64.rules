@@ -352,11 +352,57 @@
       (x64.lea_64 (amode_index_scale y 8))
       (spec (= (bvmul y 8) (result))))
 
+;; The same at thirty two bits, which is an `int` index and the arithmetic the kernel's maple tree
+;; does on a slot count. `leal` keeps the low half of the sum and clears the rest of the register,
+;; which is what the thirty two bit addition and `imull` do.
+
+(rule (lower (add.i32 (value.i32 x) (mul.i32 (value.i32 y) (iconst.i32 2))))
+      (x64.lea_32 (amode_base_index_scale x y 2))
+      (spec (= (bvadd x (bvmul y 2)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (mul.i32 (value.i32 y) (iconst.i32 4))))
+      (x64.lea_32 (amode_base_index_scale x y 4))
+      (spec (= (bvadd x (bvmul y 4)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (mul.i32 (value.i32 y) (iconst.i32 8))))
+      (x64.lea_32 (amode_base_index_scale x y 8))
+      (spec (= (bvadd x (bvmul y 8)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 1))))
+      (x64.lea_32 (amode_base_index_scale x y 2))
+      (spec (= (bvadd x (bvshl y 1)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 2))))
+      (x64.lea_32 (amode_base_index_scale x y 4))
+      (spec (= (bvadd x (bvshl y 2)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 3))))
+      (x64.lea_32 (amode_base_index_scale x y 8))
+      (spec (= (bvadd x (bvshl y 3)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (add.i32 (value.i32 y) (value.i32 y))))
+      (x64.lea_32 (amode_base_index_scale x y 2))
+      (spec (= (bvadd x (bvadd y y)) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 2)))
+      (x64.lea_32 (amode_index_scale y 2))
+      (spec (= (bvmul y 2) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 4)))
+      (x64.lea_32 (amode_index_scale y 4))
+      (spec (= (bvmul y 4) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 8)))
+      (x64.lea_32 (amode_index_scale y 8))
+      (spec (= (bvmul y 8) (result))))
+
 ;; A value added to itself times two, four or eight is three, five or nine of it, which is one
 ;; `lea` with the value as both the base and the index where `imul` takes three cycles. Twice,
 ;; four or eight times one of those is the same `lea` and a shift, which is how gcc writes the
 ;; index into an array of structures of 24, 40 or 72 bytes, such as Postgres' table of memory
-;; context methods that every `pfree` reads.
+;; context methods that every `pfree` reads. An `int` times three, five or nine is the same `lea`
+;; at thirty two bits, which keeps the low half of the sum and clears the rest of the register as
+;; `imull` does, and is how gcc writes the multiply of a hash such as the kernel's `avc_hash`.
 
 (rule (lower (mul.i64 (value.i64 y) (iconst.i64 3)))
       (x64.lea_64 (amode_base_index_scale y y 2))
@@ -368,6 +414,18 @@
 
 (rule (lower (mul.i64 (value.i64 y) (iconst.i64 9)))
       (x64.lea_64 (amode_base_index_scale y y 8))
+      (spec (= (bvmul y 9) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 3)))
+      (x64.lea_32 (amode_base_index_scale y y 2))
+      (spec (= (bvmul y 3) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 5)))
+      (x64.lea_32 (amode_base_index_scale y y 4))
+      (spec (= (bvmul y 5) (result))))
+
+(rule (lower (mul.i32 (value.i32 y) (iconst.i32 9)))
+      (x64.lea_32 (amode_base_index_scale y y 8))
       (spec (= (bvmul y 9) (result))))
 
 (rule (lower (mul.i64 (value.i64 y) (iconst.i64 6)))
