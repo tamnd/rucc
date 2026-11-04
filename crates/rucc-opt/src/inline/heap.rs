@@ -1136,7 +1136,7 @@ fn calls_to(func: &Func, name: Symbol) -> usize {
 /// How large a function is, the way the second pass counts the unit and a caller.
 fn measure(func: &Func, layout: DataLayout, names: &Interner) -> usize {
     let count = Count::Weighed(names);
-    folded_as(func, layout, Set::default(), Map::default(), count, None, false).0
+    folded_as(func, layout, Set::default(), Map::default(), [count], None, false).0[0]
 }
 
 /// What [`Profile`] says about a function.
