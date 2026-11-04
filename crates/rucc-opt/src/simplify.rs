@@ -271,6 +271,16 @@
 //! count. It is written by hand because the mask it builds is the two constants worked out
 //! together, which no pattern in the rule tables can name.
 //!
+//! ### A bit moved to another place
+//!
+//! `(x & 2^k) != 0 ? 2^m : 0` is `x & 2^k` shifted by `m - k`, left or right, and widened first
+//! when the mask is narrower than the choice. `(x & 2^k) != 0 ? v | 2^m : v` is `v` or'ed with
+//! that, and the same with `^`, and for `==` the arms trade places. The kernel turns one set of
+//! flags into another this way all over, `calc_vm_prot_bits` and `vm_get_page_prot` among them,
+//! and with bits past the 32nd each one was a 64 bit constant loaded twice, a test and a
+//! conditional move, where a shift is one instruction. It is written by hand because the shift
+//! amount is the two constants worked out together, which no pattern in the rule tables can name.
+//!
 //! ### Two constants in a row
 //!
 //! `(x & c) & d` is `x & (c & d)`, and the same goes for `|` and `^`. Each of the three is
@@ -402,6 +412,12 @@ const TESTED: &str = "bit tested after a shift tested in place";
 
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_TESTED: &str = "bit tested after a shift left alone, the pass ran out of fuel";
+
+/// Recorded once for each choice between a bit and nothing made a shift of the bit tested.
+const MOVED: &str = "choice of one bit on another bit made a shift";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_MOVED: &str = "choice of one bit on another bit left alone, the pass ran out of fuel";
 
 /// Recorded once for each pair of constants in a row made one.
 const MERGED: &str = "two constants in a row of one bitwise operation made one";
@@ -907,6 +923,9 @@ impl<'a> Finder<'a> {
         }
         if let Some(rewrite) = tested_bits(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), TESTED, NO_FUEL_TESTED));
+        }
+        if let Some(rewrite) = moved_bit(func, inst) {
+            return Some((Found::Rule(rewrite), MOVED, NO_FUEL_MOVED));
         }
         if let Some(rewrite) = merged_constants(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), MERGED, NO_FUEL_MERGED));
@@ -1785,6 +1804,7 @@ fn narrowed_shift(func: &Func, inst: Inst) -> Option<Rewrite> {
 /// For `and`, `or` and `xor` the two shifts can be any one of the three, as long as both are the
 /// same one. An addition or a subtraction only goes through a left shift, because a right shift
 /// drops the bits a carry or a borrow would have come out of.
+/// The two amounts can be one value or one constant written twice.
 fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     let data = &func[inst];
     let ty = func[data.first_result?].ty;
@@ -1806,7 +1826,8 @@ fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
         }
         _ => false,
     };
-    if !fits || other != shift || s != t || func[a].ty != ty {
+    let same = s == t || constant(func, s).is_some_and(|s| constant(func, t) == Some(s));
+    if !fits || other != shift || !same || func[a].ty != ty {
         return None;
     }
     let inner = Nested {
@@ -1982,6 +2003,83 @@ fn tested_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
         lhs: Operand::Built(Box::new(inner)),
         rhs: Operand::Value(zero),
     })
+}
+
+/// `(x & 2^k) != 0 ? 2^m : 0` as `x & 2^k` shifted to bit `m`, and `(x & 2^k) != 0 ? v op 2^m : v`
+/// as `v op` that, for an `op` of `|` or `^`. For `==` the two arms trade places. The mask is
+/// widened first when it is narrower than the choice, and one wider than it is left alone.
+fn moved_bit(func: &Func, inst: Inst) -> Option<Rewrite> {
+    let data = &func[inst];
+    if data.opcode != Opcode::Select {
+        return None;
+    }
+    let ty = func[data.first_result?].ty;
+    let bits = ty.bits();
+    if !ty.is_int() || !ty.is_scalar() || bits < 8 || bits > 64 {
+        return None;
+    }
+    let &[cond, then, other] = &func[data.args] else { return None };
+    let Def::Result { inst: test, .. } = func[cond].def else { return None };
+    let Extra::IntPred(pred @ (IntPred::Eq | IntPred::Ne)) = func[test].extra else { return None };
+    let [masked, zero] = func[func[test].args] else { return None };
+    if func[test].opcode != Opcode::ICmp || constant(func, zero) != Some(0) {
+        return None;
+    }
+    let (Opcode::And, [_, k]) = producer(func, masked)? else { return None };
+    let narrow = func[masked].ty;
+    if !narrow.is_int() || !narrow.is_scalar() || narrow.bits() > bits {
+        return None;
+    }
+    let low = |number: i128, width: u32| number & i128::from(u64::MAX >> (64 - width));
+    let k = low(constant(func, k)?, narrow.bits());
+    let (set, unset) = if pred == IntPred::Ne { (then, other) } else { (other, then) };
+    let bit = |value: Value| {
+        let m = low(constant(func, value)?, bits);
+        (m != 0 && m & (m - 1) == 0).then_some(m)
+    };
+    if k == 0 || k & (k - 1) != 0 {
+        return None;
+    }
+    let (onto, m) = if constant(func, unset) == Some(0) {
+        (None, bit(set)?)
+    } else {
+        let (op @ (Opcode::Or | Opcode::Xor), [v, m]) = producer(func, set)? else { return None };
+        if v != unset {
+            return None;
+        }
+        (Some((op, v)), bit(m)?)
+    };
+    let widen = narrow.bits() < bits;
+    let mut moved = Operand::Value(masked);
+    if widen {
+        let widened = Nested { opcode: Opcode::ZExt, pred: None, bits, args: vec![moved] };
+        moved = Operand::Built(Box::new(widened));
+    }
+    let by = i128::from(m.trailing_zeros()) - i128::from(k.trailing_zeros());
+    let shift = match by.cmp(&0) {
+        Ordering::Greater => Some((Opcode::Shl, by)),
+        Ordering::Less => Some((Opcode::LShr, -by)),
+        Ordering::Equal => None,
+    };
+    let Some((op, v)) = onto else {
+        return Some(match shift {
+            Some((opcode, by)) => Rewrite::Built {
+                opcode,
+                pred: None,
+                lhs: moved,
+                rhs: Operand::Constant { number: by, bits },
+            },
+            None if widen => {
+                Rewrite::Converted { opcode: Opcode::ZExt, from: Operand::Value(masked) }
+            }
+            None => Rewrite::Value(masked),
+        });
+    };
+    if let Some((opcode, by)) = shift {
+        let args = vec![moved, Operand::Constant { number: by, bits }];
+        moved = Operand::Built(Box::new(Nested { opcode, pred: None, bits, args }));
+    }
+    Some(Rewrite::Built { opcode: op, pred: None, lhs: Operand::Value(v), rhs: moved })
 }
 
 /// Whether anything other than `inst` reads `value` and is not itself dead. A rewrite earlier in
@@ -3817,6 +3915,95 @@ mod tests {
             let args = operands(&func, masked);
             assert_eq!(args[0], x);
             assert_eq!(number(&func, args[1]), mask, "i{bits} >> {s} & {c}");
+        }
+    }
+
+    /// `(x & 2^k) pred 0 ? then : other` returned from a function of `x` of type `narrow` and `v`
+    /// of type `ty`, where `then` and `other` are worked out from `v` and the two constants.
+    fn moving(
+        narrow: Type,
+        ty: Type,
+        k: i128,
+        pred: IntPred,
+        arms: impl FnOnce(&mut Builder<'_>, Value) -> (Value, Value),
+    ) -> (Func, Block, Value, Value) {
+        let (_, mut func, block) = one_block(ty);
+        let x = func.append_param(block, narrow);
+        let v = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let k = build.iconst(narrow, k);
+        let masked = build.binary(Opcode::And, x, k, Flags::NONE);
+        let zero = build.iconst(narrow, 0);
+        let cond = build.icmp(pred, masked, zero);
+        let (then, other) = arms(&mut build, v);
+        let out = build.select(cond, then, other);
+        build.ret(&[out]);
+        (func, block, x, v)
+    }
+
+    /// The flag bits of `calc_vm_prot_bits` and `vm_get_page_prot` are the bit tested shifted to
+    /// where it goes, left or right, widened first from a narrower mask, and with no shift at all
+    /// when the two are the same bit.
+    #[test]
+    fn a_bit_chosen_on_another_bit_is_that_bit_moved() {
+        let (i32, i64) = (Type::int(32), Type::int(64));
+        for (narrow, k, m, shift) in [
+            (i64, 1 << 35, 1 << 40, Some((Opcode::Shl, 5))),
+            (i64, 1 << 40, 1 << 3, Some((Opcode::LShr, 37))),
+            (i32, 1, 1 << 32, Some((Opcode::Shl, 32))),
+            (i32, 4, 4, None),
+            (i64, 1 << 63, 1 << 63, None),
+        ] {
+            for pred in [IntPred::Ne, IntPred::Eq] {
+                let (mut func, block, x, _) = moving(narrow, i64, k, pred, |build, _| {
+                    let (m, zero) = (build.iconst(i64, m), build.iconst(i64, 0));
+                    if pred == IntPred::Ne { (m, zero) } else { (zero, m) }
+                });
+                assert!(simplify(&mut func), "{k:#x} to {m:#x} on {pred:?}");
+                let mut got = returned(&func, block);
+                if let Some((opcode, by)) = shift {
+                    assert_eq!(came_from(&func, got).0, opcode, "{k:#x} to {m:#x}");
+                    let args = operands(&func, got);
+                    assert_eq!(number(&func, args[1]), by, "{k:#x} to {m:#x}");
+                    got = args[0];
+                }
+                if narrow != i64 {
+                    assert_eq!(came_from(&func, got).0, Opcode::ZExt, "{k:#x} to {m:#x}");
+                    got = operands(&func, got)[0];
+                }
+                assert_eq!(came_from(&func, got).0, Opcode::And, "{k:#x} to {m:#x}");
+                assert_eq!(operands(&func, got)[0], x, "{k:#x} to {m:#x}");
+            }
+        }
+    }
+
+    /// `if (x & 2^k) v |= 2^m` is `v` or'ed with the bit moved, and the same for `^`, while an arm
+    /// that is not a bit, or not the other arm with the bit added, leaves the choice alone.
+    #[test]
+    fn a_bit_added_on_another_bit_is_that_bit_moved_and_added() {
+        let i64 = Type::int(64);
+        for (op, m, moves) in [
+            (Opcode::Or, 1 << 40, true),
+            (Opcode::Xor, 1 << 40, true),
+            (Opcode::Or, 3 << 40, false),
+            (Opcode::And, 1 << 40, false),
+        ] {
+            let (mut func, block, x, v) = moving(i64, i64, 1 << 35, IntPred::Ne, |build, v| {
+                let m = build.iconst(i64, m);
+                (build.binary(op, v, m, Flags::NONE), v)
+            });
+            simplify(&mut func);
+            let got = returned(&func, block);
+            if !moves {
+                assert_eq!(came_from(&func, got).0, Opcode::Select, "{op:?} {m:#x}");
+                continue;
+            }
+            assert_eq!(came_from(&func, got).0, op, "{op:?}");
+            let args = operands(&func, got);
+            assert_eq!(args[0], v);
+            assert_eq!(came_from(&func, args[1]).0, Opcode::Shl);
+            let masked = operands(&func, args[1])[0];
+            assert_eq!(operands(&func, masked)[0], x);
         }
     }
 
