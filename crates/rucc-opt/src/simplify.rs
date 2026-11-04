@@ -2015,7 +2015,7 @@ fn moved_bit(func: &Func, inst: Inst) -> Option<Rewrite> {
     }
     let ty = func[data.first_result?].ty;
     let bits = ty.bits();
-    if !ty.is_int() || !ty.is_scalar() || bits < 8 || bits > 64 {
+    if !ty.is_int() || !ty.is_scalar() || ty.bits() < 8 || ty.bits() > 64 {
         return None;
     }
     let &[cond, then, other] = &func[data.args] else { return None };
