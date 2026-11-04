@@ -6,6 +6,10 @@
 //! read the wrong flags. The kernel's ELF loader builds the protection of a segment that way, one
 //! bit at a time, and mapped a writable segment without its write bit, so init died on its first
 //! store.
+//!
+//! The second and the third flag set two bits each, not one. A flag that moves one bit to another
+//! bit is a shift since tamnd/rucc#4053, with no select to read the flags, and then the test has
+//! nothing left to check.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,9 +22,9 @@ static inline int make_prot(unsigned p_flags, int s)
     if (p_flags & 4)
         prot |= 1;
     if (p_flags & 2)
-        prot |= 2;
+        prot |= 6;
     if (p_flags & 1)
-        prot |= 4;
+        prot |= 12;
     return adjust(prot, s);
 }
 struct phdr { unsigned type, flags; };
@@ -107,7 +111,7 @@ int main(void) {{
     struct phdr ph[8];
     int bad = 0;
     for (unsigned p = 0; p < 8; p++) {{
-        int want = (p & 4 ? 1 : 0) | (p & 2 ? 2 : 0) | (p & 1 ? 4 : 0);
+        int want = (p & 4 ? 1 : 0) | (p & 2 ? 6 : 0) | (p & 1 ? 12 : 0);
         if (one(p, 0) != want) bad++;
         ph[p].type = 1;
         ph[p].flags = p;
