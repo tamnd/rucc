@@ -75,6 +75,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The stack protector check says the arm that calls `__stack_chk_fail` never runs, so the layout puts the epilogue right after the compare and the call out of the way, as gcc does, instead of jumping over the call on every return (#4045)
 - The not-equal branch guess leaves a byte or a half tested against zero alone, which is a flag being read, so the slab fast path in the Linux kernel no longer lays out the locked arm of `local_trylock` next and jumps to the path that runs (#4048)
 - The shrink wrap rename no longer swaps a saved register that a template kept as text names in its clobbers, which put the prologue of `getresgid` in the Linux kernel after two calls to `__put_user_4` that write `%rbx`, so the syscall entry lost its pointer to the registers and the kernel oopsed in LTP (#4050)
+- At `-O2` and `-O3` the optimizer now runs `dce` and `sroa` again right after `__builtin_constant_p` is settled, so a set of flags the kernel builds in a local with `mk_vma_flags` and `__set_bit` is a constant and not a stack slot, and the flag it holds is tested once. In the kernel's brk loop that is 8 percent fewer instructions, level with gcc. (#4052)
 
 ## 0.30.15
 
