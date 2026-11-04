@@ -1719,10 +1719,44 @@ fn passed(func: &Func, call: Inst, callee: &Func) -> Map<Value, (Imm, Type)> {
         .iter()
         .zip(args)
         .filter_map(|(&param, &arg)| {
-            let found = crate::fold::evaluated(func, arg, ASKED_DEPTH)?;
+            let found = argument(func, arg)?;
             Some((param, found))
         })
         .collect()
+}
+
+/// The constant an argument works out to, which for a parameter of a block other than the entry
+/// is the one every edge into the block passes for it. An `always_inline` wrapper copied in leaves
+/// the constant it passed on as the argument of a jump, and the call in `folio_add_file_rmap_ptes`
+/// on mm/rmap.c then weighs `__folio_mod_stat` without the arm the constant takes out, too large
+/// to go in where gcc puts it in.
+fn argument(func: &Func, arg: Value) -> Option<(Imm, Type)> {
+    let Def::Param { block, index } = func[arg].def else {
+        return crate::fold::evaluated(func, arg, ASKED_DEPTH);
+    };
+    let index = usize::try_from(index).ok()?;
+    if func.entry() == Some(block) {
+        return None;
+    }
+    let mut found = None;
+    for from in func.blocks() {
+        let Some(term) = func.terminator(from) else { continue };
+        for at in func.target_list(term).iter() {
+            if func[at].block != block {
+                continue;
+            }
+            let &passed = func[func[at].args].get(index)?;
+            if passed == arg {
+                return None;
+            }
+            let value = crate::fold::evaluated(func, passed, ASKED_DEPTH)?;
+            if found.is_some_and(|seen| seen != value) {
+                return None;
+            }
+            found = Some(value);
+        }
+    }
+    found
 }
 
 /// The copy [`How::specialized_size`] measures: the body with the constants a call passes in it
@@ -5299,6 +5333,58 @@ block0(%0: i64, %1: i32):
     %2 = iconst.i64 1
     %3 = call @node({arg}, %1) : (i64, i32) -> i32
     return %3
+}}
+"#
+            )
+        };
+        let out = inlined_under(&body("%2"), Some(1));
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @node"), "{out}");
+        let out = inlined_under(&body("%0"), Some(1));
+        assert!(out.contains("call @node"), "{out}");
+    }
+
+    /// The same with the constant passed on through a block parameter, which is how a wrapper
+    /// copied in leaves it, so it counts when every edge into the block passes it and not when
+    /// one edge passes something else.
+    #[test]
+    fn a_constant_passed_on_through_a_block_parameter_counts_too() {
+        let body = |other: &str| {
+            format!(
+                r#"
+func @node(i64, i32) -> i32, linkage(external), attrs(inline_hint) {{
+block0(%0: i64, %1: i32):
+    %2 = shl %0, %0
+    switch %2, block1, [4 => block2]
+
+block1:
+    jump block3(%1)
+
+block2:
+    %3 = global_addr @numa_node
+    %4 = load.i32 %3, align 4
+    jump block3(%4)
+
+block3(%5: i32):
+    return %5
+}}
+
+func @g(i64, i32) -> i32, linkage(external) {{
+block0(%0: i64, %1: i32):
+    %2 = iconst.i64 1
+    %3 = iconst.i32 0
+    %4 = icmp ne %1, %3
+    br_if %4, block1, block2
+
+block1:
+    jump block3(%2)
+
+block2:
+    jump block3({other})
+
+block3(%5: i64):
+    %6 = call @node(%5, %1) : (i64, i32) -> i32
+    return %6
 }}
 "#
             )
