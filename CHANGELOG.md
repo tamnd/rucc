@@ -84,6 +84,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - The complete unroller now copies out a loop with inline assembly in it when the assembly has no labels, as gcc does. The kernel's `mk_vma_flags` loop over a list of bits with `__set_bit` in it was kept as a loop with the list on the stack, and in `folio_add_file_rmap_ptes` it is now one `or` and three `btsq` with an immediate and the stack protector goes. (#4061)
 - The inliner now weighs a call with the constant an argument carries when the argument is a block parameter and every edge into its block passes the same constant, which is how a constant an `always_inline` wrapper passed on is left once the wrapper is copied in. In mm/rmap.c `folio_add_file_rmap_ptes` and `folio_add_anon_rmap_ptes` now take `__folio_mod_stat` in, as gcc does. (#4062)
 - x86-64: a product two words wide is one `mulq` that gives both halves, where it was an `imulq` for the low word and a `mulq` for the high one on the same registers. The same goes for `mull` on i386. (#4063)
+- x86-64: the prologue goes further in when the only register a call clobbers that is free on the early return is the byte of a comparison the layout joins with its branch. `__update_load_avg_se` returns early without pushing six registers, as gcc does. (#4064)
 
 ## 0.30.15
 
