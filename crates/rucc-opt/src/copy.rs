@@ -162,8 +162,18 @@ pub(crate) fn addressed(func: &Func) -> Set<Block> {
 /// in a side table this does not remap, so the copy would branch into the original. A `va_object`
 /// carries a layout that is written once per function and a second one would be a second reading of
 /// the same argument list.
+///
+/// An `inline_asm` with no labels is copied, and the copy shares the original's entry in the table,
+/// which is the template, the constraints and the clobbers and nothing that names a block. Every
+/// pass that changes one of those writes a new entry rather than editing the old one, and `%=` is
+/// numbered by the instruction it is written for, so two copies still get two numbers. This is how
+/// the kernel's `mk_vma_flags` loop of four `__set_bit` calls is unrolled, as gcc does.
 pub(crate) fn copyable(func: &Func, inst: Inst) -> bool {
-    !matches!(func[inst].extra.kind(), ExtraKind::Switch | ExtraKind::Asm | ExtraKind::VaObject)
+    match func[inst].extra.kind() {
+        ExtraKind::Switch | ExtraKind::VaObject => false,
+        ExtraKind::Asm => func.target_list(inst).is_empty(),
+        _ => true,
+    }
 }
 
 /// The arguments a terminator hands the target it shares with this block.
