@@ -455,6 +455,14 @@ const O1: &[&str] = &[
 /// bit counter that its arrays can be read off with a scaled index, and that only pays if `ivopts`
 /// sees the counter when it chooses. See tamnd/rucc#1994.
 ///
+/// `dce` and `sroa` run again right after `constant-p`. The kernel builds a set of flags in a local
+/// with `__set_bit`, which only takes its plain C path once `__builtin_constant_p` has said yes to
+/// the bit and to what the local holds, and that is not known until `constant-p`. Until then the
+/// address of the local is also turned into an integer for the null test in that macro. Taken out
+/// by `dce`, the local is one `sroa` takes, and the flags are the constant they always were by the
+/// time `simplify` and `thread` see them. `unmapped_area_topdown` in mm/vma.c stored the mask to
+/// the stack and tested the flag it holds twice, where gcc tests it once.
+///
 /// `dce` runs once early, right in front of `short-circuit` and the first threading. The kernel's
 /// `WARN_ON` hands back the value it tested through a `__builtin_expect` nobody reads, and that
 /// read of the `&&` makes `thread` refuse the edge, since a block below would read a value the one
@@ -499,6 +507,8 @@ const O2: &[&str] = &[
     "bswap",
     "rejoin",
     "constant-p",
+    "dce",
+    "sroa",
     "fold",
     "image",
     "fold",
@@ -573,6 +583,8 @@ const O3: &[&str] = &[
     "bswap",
     "rejoin",
     "constant-p",
+    "dce",
+    "sroa",
     "fold",
     "image",
     "fold",
