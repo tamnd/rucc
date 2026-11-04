@@ -1611,7 +1611,7 @@ pub fn compile_recording(
         hooked: source.attrs.set.contains(ir::AttrSet::MS_HOOK)
             && std::ptr::eq(machine.insts, &x86::FRAME),
         sign: flags.branch.sign,
-        wrap: wraps.then_some(machine.shapes),
+        wrap: wraps.then_some((machine.shapes, &fusable)),
         ..Convention::new(machine.conv, machine.insts)
     };
     let (moves, loops, checks, wrapped) =
@@ -1636,6 +1636,13 @@ pub fn compile_recording(
     copies::itself(&mut func, machine.insts, names);
     let pointer = frame.frame_pointer();
     let joined = layout::joined(&func, machine.branch, &fused, &fusable, names);
+    // The rename that moved the prologue further in took each of these as writing nothing, and
+    // the assert after the cleanup keeps them joined from here on.
+    let joins = wrapped.as_ref().map_or(&[][..], finish::Wrapped::joins);
+    assert!(
+        joins.iter().all(|compare| joined.contains(compare)),
+        "a comparison the rename took as joined was not"
+    );
     copies::clean(
         &mut func,
         &moves,

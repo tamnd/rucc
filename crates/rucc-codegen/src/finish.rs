@@ -219,8 +219,9 @@ pub struct Convention<'a> {
     /// from `-mbranch-protection=pac-ret`. Nothing on a target with no instructions for it.
     pub sign: SignReturn,
     /// What the machine's instructions are, when the prologue may go further in than the top of
-    /// the function, or `None` when it stays there. See `region`.
-    pub wrap: Option<&'a MachineInsts>,
+    /// the function, or `None` when it stays there, and the comparisons the layout may join with
+    /// the branch behind them. See `region` and [`Writer::rename`].
+    pub wrap: Option<(&'a MachineInsts, &'a Set<Inst>)>,
 }
 
 /// The furthest below the frame pointer an ARM64 Windows unwind code can say the stack pointer
@@ -403,6 +404,7 @@ pub fn finish(
         checks: Vec::new(),
         failed: None,
         taken: Vec::new(),
+        joins: Vec::new(),
     };
 
     let mut cursors: Map<At, Inst> = Map::default();
@@ -455,10 +457,10 @@ pub fn finish(
     if wrap.is_some() {
         writer.sink(&mut moves, frame, entry);
     }
-    let mut wrap = wrap.and_then(|machine| {
+    let mut wrap = wrap.and_then(|(machine, fusable)| {
         let every = &mut |_: &Region| true;
         let found = region(writer.func, frame, conv, machine, writer.names, &[], every);
-        if found.is_some() || !writer.rename(&mut moves, frame, machine) {
+        if found.is_some() || !writer.rename(&mut moves, frame, machine, fusable) {
             return found;
         }
         region(writer.func, frame, conv, machine, writer.names, &[], every)
@@ -651,6 +653,8 @@ pub struct Wrapped {
     entered: Vec<CfiOp>,
     /// See [`Wrapped::taken`].
     taken: Vec<PhysReg>,
+    /// See [`Wrapped::joins`].
+    joins: Vec<Inst>,
 }
 
 impl Wrapped {
@@ -666,6 +670,14 @@ impl Wrapped {
     #[must_use]
     pub fn taken(&self) -> &[PhysReg] {
         &self.taken
+    }
+
+    /// The comparisons `Writer::rename` took as never writing their byte, because the layout joins
+    /// each with the branch behind it. One that came apart from its branch would write a register
+    /// that holds a value there.
+    #[must_use]
+    pub fn joins(&self) -> &[Inst] {
+        &self.joins
     }
 }
 
@@ -869,6 +881,33 @@ fn wrappable(func: &Func, frame: &Frame, conv: &CallRegs) -> bool {
         || frame.clears()
         || frame.popped() > 0;
     !odd && !conv.unwind_codes && func.labels.is_empty() && func.landings.is_empty()
+}
+
+/// The comparison in front of the branch that ends that block, when the layout is to join the two,
+/// so that the byte the one writes and the other reads is never written at all.
+///
+/// The same three things [`crate::layout::joined`] asks, which it asks again later, and a template
+/// is left out because its byte is not the first thing it writes.
+fn joins(
+    func: &Func,
+    machine: &MachineInsts,
+    names: &Interner,
+    fusable: &Set<Inst>,
+    block: Block,
+) -> Option<Inst> {
+    let insts: Vec<Inst> = func.insts(block).collect();
+    let [.., compare, branch] = insts[..] else { return None };
+    let template = machine.bare(names.resolve(func[compare].opcode.name())) == x86_64::TEMPLATE;
+    let (byte, read) =
+        (func[func[compare].operands].first()?, func[func[branch].operands].first()?);
+    let joined = func[block].succs.len() == 2
+        && fusable.contains(&compare)
+        && !template
+        && !func[compare].flags.contains(Flags::TEMPLATE)
+        && byte.role == Role::Def
+        && read.role == Role::Use
+        && byte.reg == read.reg;
+    joined.then_some(compare)
 }
 
 /// Which blocks that register is read in, or read in after, before anything writes it.
@@ -1208,6 +1247,8 @@ struct Writer<'a> {
     /// The registers [`Writer::rename`] moved a value into, which hold it from one block into the
     /// next. See [`Wrapped::taken`].
     taken: Vec<PhysReg>,
+    /// See [`Wrapped::joins`].
+    joins: Vec<Inst>,
 }
 
 impl Writer<'_> {
@@ -2235,10 +2276,18 @@ impl Writer<'_> {
     /// `__update_load_avg_se` in kernel/sched/pelt.c works out how long it has been in `%rbp` and
     /// returns at once when that is under a microsecond, which is most calls, so six registers were
     /// pushed and popped for a way through it that needs none of them. gcc has the same value in
-    /// `%rax` there. This is after allocation, so it is done only with a register that nothing on
-    /// those ways reads or writes, and that holds nothing read further on. The ones it took are
-    /// kept in [`Writer::taken`].
-    fn rename(&mut self, moves: &mut Moves, frame: &Frame, machine: &MachineInsts) -> bool {
+    /// `%rax` there. This is after allocation, so it is done only with a register that holds
+    /// nothing read further on, and that holds nothing on those ways while the saved one does. A
+    /// compare whose byte only the branch behind it reads is one that does, since the layout writes
+    /// the two as a `cmp` and a `jcc` and the byte is never written at all, but the one test does
+    /// for both. The ones it took are kept in [`Writer::taken`].
+    fn rename(
+        &mut self,
+        moves: &mut Moves,
+        frame: &Frame,
+        machine: &MachineInsts,
+        fusable: &Set<Inst>,
+    ) -> bool {
         let conv = self.conv;
         let saved = frame.saved_int();
         let int = conv.int_class;
@@ -2247,7 +2296,9 @@ impl Writer<'_> {
         let regs = saved.iter().chain(conv.int_order.iter());
         let lives = regs.map(|&reg| (reg, live(func, reg, int)));
         let lives: Map<PhysReg, Set<Block>> = lives.collect();
+        let names = &*self.names;
         let mut plan = None;
+        let mut joined_by = Vec::new();
         let mut fits = |region: &Region| {
             let outside = func.blocks().filter(|at| !region.blocks.contains(at));
             let outside: Vec<Block> = outside.collect();
@@ -2263,22 +2314,63 @@ impl Writer<'_> {
                 let live = &lives[&reg];
                 !live.contains(&region.at) && outside.iter().all(|block| !live.contains(block))
             };
+            // Whether the two hold something at the same time out there, so that one of them
+            // cannot have what the other holds as well. The spare holds nothing on the way into any
+            // of those blocks, so each thing it holds is written in the block that reads it.
+            let clash = |reg: PhysReg, other: PhysReg| {
+                outside.iter().any(|&block| {
+                    let out = |reg: PhysReg| {
+                        let live = &lives[&reg];
+                        func[block].succs.iter().any(|call| live.contains(&call.block))
+                    };
+                    let (mut held, mut spare) = (out(reg), out(other));
+                    let insts: Vec<Inst> = func.insts(block).collect();
+                    let join = joins(func, machine, names, fusable, block);
+                    insts.iter().rev().any(|&inst| {
+                        // The byte of a comparison that is joined with its branch, and the
+                        // branch's read of it, are not there once the two are written.
+                        let ends = |compare: Inst| inst == compare || insts.last() == Some(&inst);
+                        let byte = |n: usize| n == 0 && join.is_some_and(ends);
+                        let ops = func[func[inst].operands].iter().enumerate();
+                        let ops = ops.filter(|&(n, op)| !byte(n) && op.class == int);
+                        let on = |at: PhysReg, role: Role| {
+                            let mut ops = ops.clone();
+                            ops.any(|(_, op)| op.reg.phys() == Some(at) && op.role == role)
+                        };
+                        let wrote = |at: PhysReg| on(at, Role::Def) || on(at, Role::EarlyDef);
+                        let early = (on(reg, Role::EarlyDef) && on(other, Role::Use))
+                            || (on(other, Role::EarlyDef) && on(reg, Role::Use));
+                        if early || (wrote(other) && held) || (wrote(reg) && spare) {
+                            return true;
+                        }
+                        held = (held && !wrote(reg)) || on(reg, Role::Use);
+                        spare = (spare && !wrote(other)) || on(other, Role::Use);
+                        false
+                    })
+                })
+            };
             // Last first, so that taking one off the end takes the one the allocator likes best.
             let mut spare: Vec<PhysReg> = (conv.int_order.iter().rev().copied())
                 .filter(|reg| !conv.int_saved.contains(reg) && *reg != conv.stack_pointer)
-                .filter(|&reg| !named(reg) && free(reg))
+                .filter(|&reg| free(reg))
                 .collect();
             let mut swaps: Vec<(PhysReg, PhysReg, bool)> = Vec::new();
             for &reg in saved.iter().filter(|&&reg| named(reg)) {
                 let live = &lives[&reg];
-                let Some(other) = spare.pop().filter(|_| !live.contains(&entry)) else {
-                    return false;
-                };
+                let fits = spare.iter().rposition(|&other| !clash(reg, other));
+                let Some(at) = fits.filter(|_| !live.contains(&entry)) else { return false };
+                let other = spare.remove(at);
                 swaps.push((reg, other, live.contains(&region.at)));
             }
             if swaps.is_empty() {
                 return false;
             }
+            let held = |compare: Inst| {
+                let byte = func[func[compare].operands][0].reg.phys();
+                swaps.iter().any(|swap| byte == Some(swap.0) || byte == Some(swap.1))
+            };
+            let joined = outside.iter().filter_map(|&at| joins(func, machine, names, fusable, at));
+            joined_by = joined.filter(|&compare| held(compare)).collect();
             plan = Some((region.at, outside, swaps));
             true
         };
@@ -2307,6 +2399,7 @@ impl Writer<'_> {
             }
         }
         self.taken.extend(swaps.iter().map(|swap| swap.1));
+        self.joins = joined_by;
         for &(reg, other, _) in swaps.iter().filter(|swap| swap.2) {
             let mov = Move::new(Place::Reg(reg), Place::Reg(other));
             let edit = Edit { at: At::StartOf(at), mov, class: int };
@@ -2333,7 +2426,8 @@ impl Writer<'_> {
             entered.push(CfiOp::Restore(self.dwarf(int, reg)));
         }
         let opened = *prologue.last().expect("a function that wants a frame has a prologue");
-        Wrapped { opened, body, entered, taken: std::mem::take(&mut self.taken) }
+        let (taken, joins) = (std::mem::take(&mut self.taken), std::mem::take(&mut self.joins));
+        Wrapped { opened, body, entered, taken, joins }
     }
 
     /// A row saying the caller's copy of that register is that far from the canonical frame

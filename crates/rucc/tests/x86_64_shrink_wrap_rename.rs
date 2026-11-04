@@ -101,6 +101,65 @@ int main(void) {
 }
 ";
 
+/// The same with the kernel's entity and run queue, which is how `__update_load_avg_se` calls it.
+/// `cfs_rq->curr == se` is a comparison whose byte only the branch behind it reads, and the layout
+/// writes the two as a `cmpq` and a `jne`. The allocator gave that byte `%r11`, the one register a
+/// call clobbers that held nothing there, and the rename took the byte as written and so found no
+/// room for `%rbx` and `%rbp`.
+const JOINED: &str = "\
+struct se {
+    char pad[0x50];
+    unsigned long weight;
+    char on_rq;
+    char p3[0xb8 - 0x59];
+    void *my_q;
+    unsigned long runnable_weight;
+    char p5[0x100 - 0xc8];
+    struct sa avg;
+};
+struct cfs { char pad[0x50]; struct se *curr; };
+static unsigned long run(struct se *se) { return se->my_q ? se->runnable_weight : !!se->on_rq; }
+int upd_se(u64 now, struct cfs *cfs_rq, struct se *se) {
+    if (sum(now, &se->avg, !!se->on_rq, run(se), cfs_rq->curr == se)) {
+        struct sa *sa = &se->avg;
+        u32 d = 47742 + sa->period_contrib;
+        sa->load_avg = se->weight * sa->load_sum / d;
+        sa->runnable_avg = sa->runnable_sum / d;
+        sa->util_avg = sa->util_sum / d;
+        return 1;
+    }
+    return 0;
+}
+";
+
+/// A run of [`JOINED`] over two entities, one of them the current one, that prints what it leaves
+/// behind.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+const JOINED_MAIN: &str = "\
+#include <stdio.h>
+int main(void) {
+    static struct se ses[2];
+    struct cfs cfs = { { 0 }, &ses[0] };
+    unsigned long long now = 4000;
+    int ups = 0;
+    for (int i = 0; i < 4000; i++) {
+        struct se *se = &ses[i % 2];
+        se->weight = 1024 + i % 5;
+        se->on_rq = (char)(i % 3 != 0);
+        se->my_q = i % 4 == 0 ? se : 0;
+        se->runnable_weight = 3 + i % 7;
+        now += (unsigned long long)(i * 7919 % 300000) - (i % 11 == 0 ? 900000 : 0);
+        ups += upd_se(now, &cfs, se);
+        if (i % 97 == 0)
+            printf(\"%llu %llu %llu %u %u %lu %lu %lu\\n\", se->avg.last, se->avg.load_sum,
+                   se->avg.runnable_sum, se->avg.util_sum, se->avg.period_contrib,
+                   se->avg.load_avg, se->avg.runnable_avg, se->avg.util_avg);
+    }
+    printf(\"%d\\n\", ups);
+    return 0;
+}
+";
+
 /// The shape of `rcu_preempt_deferred_qs_irqrestore` in kernel/rcu/tree_plugin.h. The task
 /// pointer is copied in the entry and first read after a join, and the function spills further in,
 /// so the allocator holds `%r10` and `%r11` back as scratch. The rename put the task pointer in
@@ -239,6 +298,42 @@ fn the_early_returns_push_nothing() {
     let rets = body[..first].iter().filter(|line| *line == "ret").count();
     let branches = body[..first].iter().filter(|line| line.starts_with('j')).count();
     assert!(rets >= 1 && branches >= 2, "{text}");
+}
+
+#[test]
+fn a_joined_comparison_leaves_its_byte_free() {
+    let text = listing_of(&format!("{SOURCE}{JOINED}"));
+    let body = lines(&text, "upd_se");
+    let first = body.iter().position(|line| line.starts_with("push")).expect("a prologue");
+    let rets = body[..first].iter().filter(|line| *line == "ret").count();
+    assert!(rets >= 1, "{text}");
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn the_joined_comparison_works_out_what_it_did_before() {
+    let dir = scratch();
+    let source = dir.join("joined.c");
+    let text = format!("{SOURCE}{JOINED}{JOINED_MAIN}");
+    std::fs::write(&source, text).expect("the fixture can be written");
+    let mut said = Vec::new();
+    for level in ["-O0", "-O2"] {
+        let program = dir.join(level);
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .arg(level)
+            .arg("-o")
+            .arg(&program)
+            .arg(&source)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the compiler refused the fixture at {level}:\n{err}");
+        let run = Command::new(&program).output().expect("the program runs");
+        assert!(run.status.success(), "the program failed at {level}");
+        said.push(String::from_utf8(run.stdout).expect("the output is text"));
+    }
+    assert_eq!(said[0], said[1]);
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// Read in the order of the listing, as the unwinder reads them, the distance to the return
