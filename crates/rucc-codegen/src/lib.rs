@@ -195,6 +195,7 @@ pub mod pads;
 pub mod pairs;
 pub mod pipeline;
 pub mod pressure;
+pub mod product;
 pub mod quad;
 pub mod retry;
 pub mod rolled;
