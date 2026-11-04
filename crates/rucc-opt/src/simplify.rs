@@ -1805,6 +1805,11 @@ fn narrowed_shift(func: &Func, inst: Inst) -> Option<Rewrite> {
 /// same one. An addition or a subtraction only goes through a left shift, because a right shift
 /// drops the bits a carry or a borrow would have come out of.
 /// The two amounts can be one value or one constant written twice.
+///
+/// `(y op (a << s)) op (b << s)` is `y op ((a op b) << s)` as well, for an `op` other than a
+/// subtraction, which is what a run of `v |= ...` leaves. The shift built for one of those is read
+/// by the instruction it was built for and nothing else, so a value newer than the count of
+/// readers counts as read once, and the next `|=` in the run goes into the same shift.
 fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     let data = &func[inst];
     let ty = func[data.first_result?].ty;
@@ -1813,10 +1818,46 @@ fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     }
     let op = data.opcode;
     let [lhs, rhs] = func[data.args] else { return None };
-    let alone = |value: Value| uses.get(value.index()) == Some(&1);
+    let alone = |value: Value| uses.get(value.index()).is_none_or(|&n| n == 1);
     if lhs == rhs || !alone(lhs) || !alone(rhs) {
         return None;
     }
+    if let Some((shift, inner, s)) = shifted_pair(func, op, lhs, rhs) {
+        return Some(Rewrite::Built {
+            opcode: shift,
+            pred: None,
+            lhs: Operand::Built(Box::new(inner)),
+            rhs: Operand::Value(s),
+        });
+    }
+    let (outer, [y, z]) = producer(func, lhs)?;
+    if outer != op || op == Opcode::Sub {
+        return None;
+    }
+    let (y, (shift, inner, s)) = [(y, z), (z, y)]
+        .into_iter()
+        .filter(|&(_, shifted)| shifted != rhs && alone(shifted))
+        .find_map(|(y, shifted)| Some((y, shifted_pair(func, op, shifted, rhs)?)))?;
+    let bits = ty.bits();
+    let args = vec![Operand::Built(Box::new(inner)), Operand::Value(s)];
+    let moved = Nested { opcode: shift, pred: None, bits, args };
+    Some(Rewrite::Built {
+        opcode: op,
+        pred: None,
+        lhs: Operand::Value(y),
+        rhs: Operand::Built(Box::new(moved)),
+    })
+}
+
+/// The shift, the `a op b` and the amount of `(a << s) op (b << s)`, for the `op`s and the shifts
+/// [`distributed_shift`] says. Two masks of one value by constants are one mask of it already.
+fn shifted_pair(
+    func: &Func,
+    op: Opcode,
+    lhs: Value,
+    rhs: Value,
+) -> Option<(Opcode, Nested, Value)> {
+    let ty = func[lhs].ty;
     let (shift, [a, s]) = producer(func, lhs)?;
     let (other, [b, t]) = producer(func, rhs)?;
     let fits = match op {
@@ -1830,18 +1871,28 @@ fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     if !fits || other != shift || !same || func[a].ty != ty {
         return None;
     }
-    let inner = Nested {
-        opcode: op,
-        pred: None,
-        bits: ty.bits(),
-        args: vec![Operand::Value(a), Operand::Value(b)],
+    let bits = ty.bits();
+    if let Some((x, number)) = shared_mask(func, op, a, b) {
+        let args = vec![Operand::Value(x), Operand::Constant { number, bits }];
+        return Some((shift, Nested { opcode: Opcode::And, pred: None, bits, args }, s));
+    }
+    let args = vec![Operand::Value(a), Operand::Value(b)];
+    Some((shift, Nested { opcode: op, pred: None, bits, args }, s))
+}
+
+/// The value and the one constant of `(x & c) op (x & d)`, for an `op` of `&`, `|` or `^`, which
+/// is `x & (c op d)` since a mask goes through each of the three.
+fn shared_mask(func: &Func, op: Opcode, a: Value, b: Value) -> Option<(Value, i128)> {
+    let (Opcode::And, [x, c]) = producer(func, a)? else { return None };
+    let (Opcode::And, [y, d]) = producer(func, b)? else { return None };
+    let (c, d) = (constant(func, c)?, constant(func, d)?);
+    let number = match op {
+        Opcode::And => c & d,
+        Opcode::Or => c | d,
+        Opcode::Xor => c ^ d,
+        _ => return None,
     };
-    Some(Rewrite::Built {
-        opcode: shift,
-        pred: None,
-        lhs: Operand::Built(Box::new(inner)),
-        rhs: Operand::Value(s),
-    })
+    (x == y).then_some((x, number))
 }
 
 /// `(a & m) op (b & m)` as `(a op b) & m`, for an `op` of `&`, `|` or `^` and two masks nothing
@@ -1863,6 +1914,14 @@ fn distributed_mask(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     }
     let (Opcode::And, [a, m]) = producer(func, lhs)? else { return None };
     let (Opcode::And, [b, n]) = producer(func, rhs)? else { return None };
+    if let Some((x, number)) = shared_mask(func, op, lhs, rhs) {
+        return Some(Rewrite::Built {
+            opcode: Opcode::And,
+            pred: None,
+            lhs: Operand::Value(x),
+            rhs: Operand::Constant { number, bits: ty.bits() },
+        });
+    }
     let same = m == n || constant(func, m).is_some_and(|c| constant(func, n) == Some(c));
     if !same || func[a].ty != ty {
         return None;
@@ -2008,6 +2067,9 @@ fn tested_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
 /// `(x & 2^k) != 0 ? 2^m : 0` as `x & 2^k` shifted to bit `m`, and `(x & 2^k) != 0 ? v op 2^m : v`
 /// as `v op` that, for an `op` of `|` or `^`. For `==` the two arms trade places. The mask is
 /// widened first when it is narrower than the choice, and one wider than it is left alone.
+///
+/// When `v` is itself `y op ((x & a) << s)` by the same shift, which is what the one before it in
+/// a run of `if (x & bit) v |= other` leaves, the two bits go into that one mask and shift.
 fn moved_bit(func: &Func, inst: Inst) -> Option<Rewrite> {
     let data = &func[inst];
     if data.opcode != Opcode::Select {
@@ -2025,7 +2087,7 @@ fn moved_bit(func: &Func, inst: Inst) -> Option<Rewrite> {
     if func[test].opcode != Opcode::ICmp || constant(func, zero) != Some(0) {
         return None;
     }
-    let (Opcode::And, [_, k]) = producer(func, masked)? else { return None };
+    let (Opcode::And, [x, k]) = producer(func, masked)? else { return None };
     let narrow = func[masked].ty;
     if !narrow.is_int() || !narrow.is_scalar() || narrow.bits() > bits {
         return None;
@@ -2075,11 +2137,40 @@ fn moved_bit(func: &Func, inst: Inst) -> Option<Rewrite> {
             None => Rewrite::Value(masked),
         });
     };
+    let mut base = v;
     if let Some((opcode, by)) = shift {
+        if let Some((y, a)) = shifted_in(func, op, v, x, opcode, by).filter(|_| !widen) {
+            let number = if op == Opcode::Or { low(a, bits) | k } else { low(a, bits) ^ k };
+            let args = vec![Operand::Value(x), Operand::Constant { number, bits }];
+            let both = Nested { opcode: Opcode::And, pred: None, bits, args };
+            moved = Operand::Built(Box::new(both));
+            base = y;
+        }
         let args = vec![moved, Operand::Constant { number: by, bits }];
         moved = Operand::Built(Box::new(Nested { opcode, pred: None, bits, args }));
     }
-    Some(Rewrite::Built { opcode: op, pred: None, lhs: Operand::Value(v), rhs: moved })
+    Some(Rewrite::Built { opcode: op, pred: None, lhs: Operand::Value(base), rhs: moved })
+}
+
+/// The `y` and the constant `a` of a `v` that is `y op ((x & a) shift by)`, either way round.
+fn shifted_in(
+    func: &Func,
+    op: Opcode,
+    v: Value,
+    x: Value,
+    shift: Opcode,
+    by: i128,
+) -> Option<(Value, i128)> {
+    let (outer, [p, q]) = producer(func, v)?;
+    if outer != op {
+        return None;
+    }
+    [(p, q), (q, p)].into_iter().find_map(|(y, z)| {
+        let (opcode, [w, t]) = producer(func, z)?;
+        let (Opcode::And, [from, a]) = producer(func, w)? else { return None };
+        let fits = opcode == shift && constant(func, t) == Some(by) && from == x;
+        fits.then_some((y, constant(func, a)?))
+    })
 }
 
 /// Whether anything other than `inst` reads `value` and is not itself dead. A rewrite earlier in
@@ -3842,6 +3933,61 @@ mod tests {
         }
     }
 
+    /// `(x & c) op (x & d)` is `x & (c op d)`, since a mask goes through each of the three.
+    #[test]
+    fn an_operation_on_two_masks_of_one_value_is_one_mask() {
+        for (op, both) in [(Opcode::And, 0x10), (Opcode::Or, 0x7f), (Opcode::Xor, 0x6f)] {
+            let ty = Type::int(64);
+            let (_, mut func, block) = one_block(ty);
+            let x = func.append_param(block, ty);
+            let mut build = Builder::new(&mut func, block);
+            let c = build.iconst(ty, 0x70);
+            let left = build.binary(Opcode::And, x, c, Flags::NONE);
+            let d = build.iconst(ty, 0x1f);
+            let right = build.binary(Opcode::And, x, d, Flags::NONE);
+            let out = build.binary(op, left, right, Flags::NONE);
+            build.ret(&[out]);
+            assert!(simplify(&mut func), "{op:?}");
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, Opcode::And, "{op:?}");
+            let args = operands(&func, result);
+            assert_eq!(args[0], x);
+            assert_eq!(number(&func, args[1]), both, "{op:?}");
+        }
+    }
+
+    /// The protection key bits of `vm_get_page_prot`, four `v |= (x & bit) << 27` in a row with
+    /// the amount written each time, are one mask of the four bits and one shift, or'ed in once.
+    #[test]
+    fn a_run_of_bits_or_ed_in_by_one_shift_is_one_mask_and_one_shift() {
+        let ty = Type::int(64);
+        let (_, mut func, block) = one_block(ty);
+        let x = func.append_param(block, ty);
+        let v = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let mut out = v;
+        for k in 32..36 {
+            let bit = build.iconst(ty, 1 << k);
+            let masked = build.binary(Opcode::And, x, bit, Flags::NONE);
+            let by = build.iconst(ty, 27);
+            let moved = build.binary(Opcode::Shl, masked, by, Flags::NONE);
+            out = build.binary(Opcode::Or, out, moved, Flags::NONE);
+        }
+        build.ret(&[out]);
+        assert!(simplify(&mut func));
+        let result = returned(&func, block);
+        assert_eq!(came_from(&func, result).0, Opcode::Or);
+        let args = operands(&func, result);
+        assert_eq!(args[0], v);
+        assert_eq!(came_from(&func, args[1]).0, Opcode::Shl);
+        let shifted = operands(&func, args[1]);
+        assert_eq!(number(&func, shifted[1]), 27);
+        assert_eq!(came_from(&func, shifted[0]).0, Opcode::And);
+        let masked = operands(&func, shifted[0]);
+        assert_eq!(masked[0], x);
+        assert_eq!(number(&func, masked[1]), 0xf << 32);
+    }
+
     /// `(x & c) op (~x & d)` returned from a function of `x` at 64 bits.
     fn flipped_outside(op: Opcode, c: i128, d: i128) -> (Func, Block, Value) {
         let ty = Type::int(64);
@@ -4005,6 +4151,39 @@ mod tests {
             let masked = operands(&func, args[1])[0];
             assert_eq!(operands(&func, masked)[0], x);
         }
+    }
+
+    /// `vm_get_page_prot` or's in four protection key bits, each on a bit of the flags, and the
+    /// four come out as one mask of the flags and one shift.
+    #[test]
+    fn a_run_of_bits_chosen_on_other_bits_is_one_mask_and_one_shift() {
+        let ty = Type::int(64);
+        let (_, mut func, block) = one_block(ty);
+        let x = func.append_param(block, ty);
+        let v = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let mut out = v;
+        for k in 32..36 {
+            let bit = build.iconst(ty, 1 << k);
+            let masked = build.binary(Opcode::And, x, bit, Flags::NONE);
+            let zero = build.iconst(ty, 0);
+            let cond = build.icmp(IntPred::Ne, masked, zero);
+            let m = build.iconst(ty, 1 << (k + 27));
+            let set = build.binary(Opcode::Or, out, m, Flags::NONE);
+            out = build.select(cond, set, out);
+        }
+        build.ret(&[out]);
+        assert!(simplify(&mut func));
+        let result = returned(&func, block);
+        assert_eq!(came_from(&func, result).0, Opcode::Or);
+        let args = operands(&func, result);
+        assert_eq!(args[0], v);
+        assert_eq!(came_from(&func, args[1]).0, Opcode::Shl);
+        let shifted = operands(&func, args[1]);
+        assert_eq!(number(&func, shifted[1]), 27);
+        let masked = operands(&func, shifted[0]);
+        assert_eq!(masked[0], x);
+        assert_eq!(number(&func, masked[1]), 0xf << 32);
     }
 
     /// `(x & c) & d` with the inner mask read by something else too, returned from a function of
