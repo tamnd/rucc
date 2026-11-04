@@ -111,7 +111,7 @@ int main(void) {{
     struct phdr ph[8];
     int bad = 0;
     for (unsigned p = 0; p < 8; p++) {{
-        int want = (p & 4 ? 1 : 0) | (p & 2 ? 2 : 0) | (p & 1 ? 4 : 0);
+        int want = (p & 4 ? 1 : 0) | (p & 2 ? 6 : 0) | (p & 1 ? 12 : 0);
         if (one(p, 0) != want) bad++;
         ph[p].type = 1;
         ph[p].flags = p;
