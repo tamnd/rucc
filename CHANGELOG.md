@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A branch on whether two numbers are equal that no other predictor decides is guessed to find them not equal, at gcc's 66 percent, so code that tests a state against one value after another falls through the tests it does not take instead of jumping past each one (#4041)
 - The pass that writes shorter instructions on x86-64 writes `andq $-256` on a register whose condition state nobody reads as an exclusive or of its low byte with itself, which is 2 or 3 bytes instead of 7 and what gcc writes for the maple tree clearing the low bits of a node pointer (#4044)
 - The simplifier turns a choice of one bit on another bit into a shift, so `(x & 2^k) ? 2^m : 0` is `x & 2^k` shifted by `m - k` and `if (x & 2^k) v |= 2^m` is `v` or'ed with that, where rucc loaded two 64 bit constants and wrote a test and a conditional move. The kernel writes this in `calc_vm_prot_bits` and `vm_get_page_prot`. Two shifts by the same constant written twice are now also merged into one. (#4053)
+- The simplifier puts a run of `if (x & bit) v |= other` that all move their bit the same distance into one mask and one shift, and folds `(x & c) | (x & d)` into `x & (c | d)`, with the same for `&` and `^`. The four protection key bits in the kernel's `vm_get_page_prot` are 7 instructions where gcc writes 15. (#4057)
 
 ### Fixed
 
