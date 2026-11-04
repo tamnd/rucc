@@ -694,7 +694,9 @@ mod tests {
     ];
 
     /// The multiply that keeps both halves of its product and the division that reads both halves
-    /// of its dividend, which a template asks for and nothing else does.
+    /// of its dividend, which a template asks for and no rule does. The multiply is also what
+    /// [`crate::product`] writes after selection, when the two halves of one product were selected
+    /// one at a time.
     ///
     /// A third reason again, and the plainest of the three. A search is unselected because its
     /// answer depends on the processor and a reversal because a choice was made to build one out of
