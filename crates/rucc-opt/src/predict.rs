@@ -66,7 +66,8 @@
 //! the condition is true for next, so code that tests a state against one value after another, as
 //! the maple tree in the Linux kernel does on every walk, jumped past each test it was not going to
 //! take and took a branch per test where gcc's layout falls through. Asked last, it only decides a
-//! branch that was even before it.
+//! branch that was even before it. A byte tested against zero is not one it decides, because that
+//! is a flag being read and a flag says nothing about which way it is set.
 
 use std::cell::OnceCell;
 
@@ -719,6 +720,12 @@ fn pointer_null(func: &Func, cond: Value) -> Option<Probability> {
 /// Numbers and not pointers. Two pointers tested for equal are as often asking whether this is the
 /// object it should be, as the kernel's `WARN_ON(fpu != owner)` does on every return to user space,
 /// and there the guess would lay out the warning next.
+///
+/// And not a byte or a half tested against zero, which is a flag being read, `if (tl->acquired)`
+/// in the slab fast path, and there is nothing to say about which way a flag is usually set. gcc
+/// leaves every test against zero alone for that reason, and this does not go that far: a word
+/// against zero is as often a state, `if (type == maple_dense)` in the maple tree, and there the
+/// guess is what keeps the layout falling through.
 fn nonequal(func: &Func, cond: Value) -> Option<Probability> {
     let Def::Result { inst, .. } = func[cond].def else { return None };
     let data = &func[inst];
@@ -726,6 +733,11 @@ fn nonequal(func: &Func, cond: Value) -> Option<Probability> {
         return None;
     }
     if func[data.args].iter().any(|&arg| func[arg].ty.is_ptr()) {
+        return None;
+    }
+    let zero = |arg: Value| constant(func, arg).is_some_and(|(value, ty)| value.signed(ty) == 0);
+    let narrow = |arg: Value| func[arg].ty.bits() < 32;
+    if func[data.args].iter().any(|&arg| zero(arg) && narrow(arg)) {
         return None;
     }
     match data.extra {
@@ -1122,11 +1134,11 @@ mod tests {
 
     /// A branch on whether `left` and `right` are equal, into two arms that return zero, which
     /// none of the predictors in front of the last one has anything to say about.
-    fn compared(pred: IntPred, left: i128, right: i128) -> (Func, Vec<Block>) {
+    fn compared(ty: Type, pred: IntPred, left: i128, right: i128) -> (Func, Vec<Block>) {
         let (_, mut func, at) = blank(3);
         let mut build = Builder::new(&mut func, at[0]);
-        let left = build.iconst(Type::int(32), left);
-        let right = build.iconst(Type::int(32), right);
+        let left = build.iconst(ty, left);
+        let right = build.iconst(ty, right);
         let cond = build.icmp(pred, left, right);
         build.br_if(cond, at[1], &[], at[2], &[]);
         returns(&mut func, &[(at[1], 0, false), (at[2], 0, false)]);
@@ -1135,13 +1147,13 @@ mod tests {
 
     #[test]
     fn two_numbers_tested_for_equal_are_predicted_not_equal() {
-        let (func, at) = compared(IntPred::Eq, 3, 4);
+        let (func, at) = compared(Type::int(32), IntPred::Eq, 3, 4);
         let (seen, _) = predict(&func);
         assert_eq!(seen.by(at[0]), Predictor::NonEqual);
         // The arm taken when they are equal, which is the one not run most of the time.
         assert_eq!(seen.taken(at[0], 0), Probability::percent(66, Quality::Guessed).complement());
 
-        let (func, at) = compared(IntPred::Ne, 3, 4);
+        let (func, at) = compared(Type::int(32), IntPred::Ne, 3, 4);
         let (seen, _) = predict(&func);
         assert_eq!(seen.by(at[0]), Predictor::NonEqual);
         assert_eq!(seen.taken(at[0], 0), Probability::percent(66, Quality::Guessed));
@@ -1164,8 +1176,24 @@ mod tests {
     }
 
     #[test]
+    fn a_word_tested_against_zero_is_predicted_not_equal() {
+        let (func, at) = compared(Type::int(32), IntPred::Eq, 3, 0);
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::NonEqual);
+    }
+
+    #[test]
+    fn a_byte_tested_against_zero_is_still_even() {
+        for pred in [IntPred::Eq, IntPred::Ne] {
+            let (func, at) = compared(Type::int(8), pred, 3, 0);
+            let (seen, _) = predict(&func);
+            assert_eq!(seen.by(at[0]), Predictor::Nothing, "{pred:?}");
+        }
+    }
+
+    #[test]
     fn a_number_tested_for_less_is_still_even() {
-        let (func, at) = compared(IntPred::Slt, 3, 4);
+        let (func, at) = compared(Type::int(32), IntPred::Slt, 3, 4);
         let (seen, _) = predict(&func);
         assert_eq!(seen.by(at[0]), Predictor::Nothing);
         assert_eq!(seen.taken(at[0], 0), Probability::even());
