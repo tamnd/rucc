@@ -261,10 +261,10 @@ struct Solver<'a> {
     /// Whether each block is reachable, by [`Block::index`].
     reached: Vec<bool>,
     /// The instructions that read each value as one of their own arguments.
-    readers: Vec<Vec<Inst>>,
+    readers: Lists<Inst>,
     /// Where each value is passed to a block, as the branch, the arm by position and the
     /// parameter that takes it.
-    edges: Vec<Vec<(Inst, usize, Value)>>,
+    edges: Lists<(Inst, usize, Value)>,
     /// Which arms of each terminator have been taken, by position.
     taken: Set<(Inst, usize)>,
     /// The branches on an undefined value that were given every edge.
@@ -275,28 +275,72 @@ struct Solver<'a> {
     values: Vec<Value>,
 }
 
+/// A list of entries for each value, kept end to end in one list rather than one list each.
+///
+/// Most values have one or two readers, and a list each was an allocation and a free for every
+/// value read, in each of the many times the pass runs. tamnd/rucc-kernel#109.
+struct Lists<T> {
+    /// Where the list of each value starts in `all`, by value number, and one more where the last
+    /// one ends.
+    starts: Vec<usize>,
+    all: Vec<T>,
+}
+
+impl<T: Copy> Lists<T> {
+    /// Lays the lists out end to end from pairs of a value and one entry in its list, in the
+    /// order the pairs come in.
+    fn gather(values: usize, pairs: &[(Value, T)]) -> Self {
+        let mut starts = vec![0; values + 1];
+        for &(value, _) in pairs {
+            starts[value.index()] += 1;
+        }
+        let mut sum = 0;
+        for start in &mut starts {
+            let count = *start;
+            *start = sum;
+            sum += count;
+        }
+        let mut next = starts.clone();
+        let mut all = Vec::with_capacity(pairs.len());
+        // Each slot is written once below, so what the list starts full of is never read.
+        if let Some(&(_, first)) = pairs.first() {
+            all.resize(pairs.len(), first);
+        }
+        for &(value, entry) in pairs {
+            all[next[value.index()]] = entry;
+            next[value.index()] += 1;
+        }
+        Self { starts, all }
+    }
+
+    /// Where the list of the value is in `all`.
+    fn span(&self, value: Value) -> std::ops::Range<usize> {
+        self.starts[value.index()]..self.starts[value.index() + 1]
+    }
+}
+
 impl<'a> Solver<'a> {
     /// Runs the fixpoint over the function, or nothing for a declaration.
     fn solve(func: &'a Func, outside: &'a Outside, stats: &mut Stats) -> Option<Solved> {
         let entry = func.entry()?;
         let counts = func.counts();
-        let mut readers = vec![Vec::new(); counts.values];
-        let mut edges = vec![Vec::new(); counts.values];
+        let mut readers = Vec::new();
+        let mut edges = Vec::new();
         // A value passed to a block goes to the one parameter that takes it rather than to the
         // whole branch. A computed goto passes the same values to every one of its arms, and
         // looking at the branch again for each change would walk every arm each time, and once
         // for each arm the value was passed to as well, tamnd/rucc#2857.
         for block in func.blocks() {
             for inst in func.insts(block) {
-                for &value in &func[func[inst].args] {
-                    let list = &mut readers[value.index()];
-                    if list.last() != Some(&inst) {
-                        list.push(inst);
+                let args = &func[func[inst].args];
+                for (at, &value) in args.iter().enumerate() {
+                    if !args[..at].contains(&value) {
+                        readers.push((value, inst));
                     }
                 }
                 for (arm, call) in func.successors(inst).enumerate() {
                     for (&param, &value) in func[call.block].params.iter().zip(&func[call.args]) {
-                        edges[value.index()].push((inst, arm, param));
+                        edges.push((value, (inst, arm, param)));
                     }
                 }
             }
@@ -306,8 +350,8 @@ impl<'a> Solver<'a> {
             outside,
             facts: vec![Fact::Undefined; counts.values],
             reached: vec![false; counts.blocks],
-            readers,
-            edges,
+            readers: Lists::gather(counts.values, &readers),
+            edges: Lists::gather(counts.values, &edges),
             taken: Set::default(),
             forced: Set::default(),
             blocks: Vec::new(),
@@ -345,16 +389,16 @@ impl<'a> Solver<'a> {
                 continue;
             }
             let Some(value) = self.values.pop() else { return };
-            for index in 0..self.readers[value.index()].len() {
-                let inst = self.readers[value.index()][index];
+            for index in self.readers.span(value) {
+                let inst = self.readers.all[index];
                 let reached =
                     self.func.block_of(inst).is_some_and(|block| self.reached[block.index()]);
                 if reached {
                     self.visit(inst);
                 }
             }
-            for index in 0..self.edges[value.index()].len() {
-                let (term, arm, param) = self.edges[value.index()][index];
+            for index in self.edges.span(value) {
+                let (term, arm, param) = self.edges.all[index];
                 if self.taken.contains(&(term, arm)) {
                     self.pass(param, value);
                 }
