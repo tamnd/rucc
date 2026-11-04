@@ -70,8 +70,8 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_mir::{
-    Block, BlockCall, CfiOp, Flags, Func, Inst, InstData, Mem, Opcode, Operand, Patch, Reg, Role,
-    Weight,
+    Block, BlockCall, CfiOp, Constraint, Flags, Func, Inst, InstData, Mem, Opcode, Operand, Patch,
+    Reg, Role, Weight,
 };
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
@@ -704,12 +704,24 @@ fn region(
             })
     };
     // A template and the address of a block are both somewhere this cannot see past.
+    //
+    // A register the text of a template names, or one an operand is pinned to, is that register
+    // and no other, so it is never loose. A template kept as text has no flag, and `put_user` in
+    // the kernel is one: it calls `__put_user_4` with `%ebx` in its clobbers, the rename handed
+    // the first two of the three in `getresgid` a spare register for it, and the prologue went in
+    // front of the third. Every LTP test after that one died on the pointer to the registers the
+    // syscall entry keeps in `%rbx`. Every target spells the opcode `template`.
     let needs = |inst: Inst, loose: &[PhysReg]| {
         let data = &func[inst];
+        let name = names.resolve(data.opcode.name());
+        let text = machine.bare(name) == x86_64::TEMPLATE;
+        let pinned = |operand: &Operand| matches!(operand.constraint, Constraint::Fixed(_));
         data.flags.contains(Flags::TEMPLATE)
-            || machine.calls(names.resolve(data.opcode.name()))
+            || machine.calls(name)
             || data.mem.is_some_and(|mem| func[mem].block.is_some())
-            || func[data.operands].iter().any(|operand| touches(operand, loose))
+            || func[data.operands]
+                .iter()
+                .any(|operand| touches(operand, if text || pinned(operand) { &[] } else { loose }))
     };
     let wants = |inst: Inst| needs(inst, &[]);
     let (idom, number) = dominators(func, entry);
