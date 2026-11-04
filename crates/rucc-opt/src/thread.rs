@@ -162,7 +162,9 @@
 use rucc_base::Idx;
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
-use rucc_ir::{Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, Value, ValueList};
+use rucc_ir::{
+    Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, Type, Value, ValueList,
+};
 
 use crate::header_copy::{clone_into, repeatable};
 use crate::loops::{LoopId, Spare};
@@ -1390,6 +1392,10 @@ fn goes(
 
 /// Where `term`, a `br_if`, goes when control came along edge `at` out of `from` and `from` ends
 /// in a `br_if` on the same condition, which that edge says the value of.
+///
+/// A condition and its `!` are the same test with the arms the other way round. `try_cmpxchg`
+/// returns whether the exchange happened and its caller loops on the `!` of that, so the way out
+/// of the loop branches on one and the test after it on the other.
 fn implied(
     func: &Func,
     term: Inst,
@@ -1407,14 +1413,39 @@ fn implied(
         return None;
     }
     let held = func.target_list(before).iter().position(|it| it == at)? == 0;
-    let known = *func[func[before].args].first()?;
+    let (known, flipped) = negation(func, *func[func[before].args].first()?);
     let asked = *func[func[term].args].first()?;
+    let (asked, turned) = negation(func, subst.get(&asked).copied().unwrap_or(asked));
     let asked = subst.get(&asked).copied().unwrap_or(asked);
+    let held = held ^ flipped ^ turned;
     if !same_test(func, asked, known, subst) {
         return None;
     }
     let Extra::Targets(targets) = func[term].extra else { return None };
     func[targets].get(usize::from(!held)).copied()
+}
+
+/// The bit `value` is the `!` of, and whether it is one, which is an `xor` of a bit with all ones.
+fn negation(func: &Func, value: Value) -> (Value, bool) {
+    let Def::Result { inst, .. } = func[value].def else { return (value, false) };
+    let [x, y] = func[func[inst].args] else { return (value, false) };
+    let ones = |value: Value| match func[value].def {
+        Def::Result { inst, .. } => match func[inst].extra {
+            Extra::Imm(imm) => func[inst].opcode == Opcode::IConst && func[imm].bits() == 1,
+            _ => false,
+        },
+        Def::Param { .. } => false,
+    };
+    if func[inst].opcode != Opcode::Xor || func[value].ty != Type::I1 {
+        return (value, false);
+    }
+    if ones(y) {
+        (x, true)
+    } else if ones(x) {
+        (y, true)
+    } else {
+        (value, false)
+    }
 }
 
 /// How many blocks with one way in [`above`] walks back through before giving up.
@@ -2085,6 +2116,45 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
         assert_eq!(goes_to(&func, 0), vec![1, 5]);
         assert_eq!(goes_to(&func, 2), vec![4]);
+        assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn a_join_that_tests_the_bit_a_branch_above_it_tested_the_not_of_is_threaded() {
+        // `if (!x) { a(); } if (x) b();`, the shape a loop on `!try_cmpxchg(..)` leaves behind
+        // it, where the first branch is on the `!` and the second on the bit itself.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(64)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let x = func.append_param(entry, Type::int(64));
+        let first = func.create_block();
+        let second = func.create_block();
+        let join = func.create_block();
+        let yes = func.create_block();
+        let no = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(64), 0);
+        let set = build.icmp(IntPred::Ne, x, zero);
+        let ones = build.iconst(Type::int(1), -1);
+        let not = build.binary(Opcode::Xor, set, ones, Flags::default());
+        build.br_if(not, first, &[], join, &[]);
+        let mut build = Builder::new(&mut func, first);
+        build.jump(second, &[]);
+        let mut build = Builder::new(&mut func, second);
+        build.jump(join, &[]);
+        let mut build = Builder::new(&mut func, join);
+        build.br_if(set, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut func, block);
+            build.ret(&[]);
+        }
+
+        let stats = copying_with(&FREE, &mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 2);
+        assert_eq!(goes_to(&func, 0), vec![1, 4]);
+        assert_eq!(goes_to(&func, 2), vec![5]);
         assert_eq!(blocks(&func), vec![0, 1, 2, 4, 5]);
     }
 
