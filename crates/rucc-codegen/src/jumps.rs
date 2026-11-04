@@ -30,6 +30,17 @@
 //! and the comparison for `a` goes down to the branch, so each comparison sits in front of the
 //! jump that reads it.
 //!
+//! # Two tests against zero
+//!
+//! Before any of that, gcc's `fold_truth_andor` has already put two tests of the same kind against
+//! zero into one test of an or or an and of the values, and the expander finds one comparison and
+//! nothing to take apart. `a < 0 || b < 0` is `(a | b) < 0`, `a >= 0 && b >= 0` is `(a | b) >= 0`,
+//! `a != 0 || b != 0` is `(a | b) != 0` and `a == 0 && b == 0` is `(a | b) == 0`, and the two
+//! signed ones the other way round take an and. Each is one `or` and one jump on the flags it
+//! sets, where two branches are two tests and two jumps. `__refcount_add_not_zero` asks
+//! `old < 0 || old + i < 0` after every reference it takes, and the `vma` lock takes one each time
+//! a mapping is written.
+//!
 //! # The weights
 //!
 //! A hint on the old branch is shared out the way `do_jump_1` in `gcc/dojump.cc` shares it. For an
@@ -38,7 +49,7 @@
 
 use rucc_base::hash::Map;
 use rucc_ir::{
-    Block, BlockCall, Builder, Def, Extra, Func, Hint, Inst, IntPred, Opcode, Type, Value,
+    Block, BlockCall, Builder, Def, Extra, Func, Hint, Inst, InstData, IntPred, Opcode, Type, Value,
 };
 
 /// Every branch on an and or an or of two bits in the function, as two branches.
@@ -83,6 +94,9 @@ fn split(func: &mut Func, head: Block, uses: &Map<Value, u32>) -> Option<Block> 
     let opcode = func[joined].opcode;
     let bits = matches!(opcode, Opcode::And | Opcode::Or) && func[cond].ty == Type::I1;
     if !bits || pair(func, joined) {
+        return None;
+    }
+    if merged(func, head, term, joined, uses) {
         return None;
     }
     let [left, right] = func[func[joined].args] else { return None };
@@ -139,6 +153,79 @@ fn split(func: &mut Func, head: Block, uses: &Map<Value, u32>) -> Option<Block> 
         func.set_block_call(at, BlockCall { hint, ..call });
     }
     Some(rest)
+}
+
+/// Which side of zero a comparison of a value against a constant asks about, when it asks about one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Zero,
+    NotZero,
+    Negative,
+    NotNegative,
+}
+
+/// The comparison of a value against zero that `value` is, with the instruction and the value it
+/// compares, when it is one [`movable`] says can go.
+fn against_zero(
+    func: &Func,
+    head: Block,
+    value: Value,
+    uses: &Map<Value, u32>,
+) -> Option<(Inst, Side, Value)> {
+    let inst = movable(func, head, value, uses)?;
+    let Extra::IntPred(pred) = func[inst].extra else { return None };
+    let [x, k] = func[func[inst].args] else { return None };
+    let ty = func[x].ty;
+    if func[inst].opcode != Opcode::ICmp || !ty.is_int() || ty.lanes() != 1 || ty.bits() > 64 {
+        return None;
+    }
+    let Def::Result { inst: at, .. } = func[k].def else { return None };
+    let Extra::Imm(imm) = func[at].extra else { return None };
+    if func[at].opcode != Opcode::IConst || x == k {
+        return None;
+    }
+    let side = match (pred, func[imm].signed(ty)) {
+        (IntPred::Eq, 0) => Side::Zero,
+        (IntPred::Ne, 0) => Side::NotZero,
+        (IntPred::Slt, 0) | (IntPred::Sle, -1) => Side::Negative,
+        (IntPred::Sge, 0) | (IntPred::Sgt, -1) => Side::NotNegative,
+        _ => return None,
+    };
+    Some((inst, side, x))
+}
+
+/// A branch on two tests of one kind against zero, as one test of the two values put together.
+/// See the module documentation. The first comparison is kept and reads the new or or and, and
+/// the second goes.
+fn merged(func: &mut Func, head: Block, term: Inst, joined: Inst, uses: &Map<Value, u32>) -> bool {
+    let [left, right] = func[func[joined].args] else { return false };
+    let Some(cond) = func[joined].first_result else { return false };
+    let Some((first, side, a)) = against_zero(func, head, left, uses) else { return false };
+    let Some((second, other, b)) = against_zero(func, head, right, uses) else { return false };
+    let ty = func[a].ty;
+    if side != other || func[b].ty != ty {
+        return false;
+    }
+    let either = func[joined].opcode == Opcode::Or;
+    let inner = match (side, either) {
+        (Side::NotZero | Side::Negative, true) | (Side::Zero | Side::NotNegative, false) => {
+            Opcode::Or
+        }
+        (Side::Negative, false) | (Side::NotNegative, true) => Opcode::And,
+        _ => return false,
+    };
+    let span = func.span(joined);
+    let args = func.push_values(&[a, b]);
+    let both = func.create_inst(InstData { args, ..InstData::new(inner) }, &[ty], span);
+    func.insert_before(both, term);
+    let both = func[both].first_result.expect("one result was asked for");
+    func.remove_inst(joined);
+    func.remove_inst(second);
+    func.remove_inst(first);
+    func.insert_before(first, term);
+    func.rewrite(func[first].args, |value| if value == a { both } else { value });
+    func.rewrite(func[term].args, |value| if value == cond { left } else { value });
+    true
 }
 
 /// Whether `inst` is the `(p ? q) | (p == q & r ? s)` that [`crate::wide`] writes for an ordered
@@ -235,6 +322,48 @@ mod tests {
     /// What a block holds, in order.
     fn opcodes(func: &Func, block: rucc_ir::Block) -> Vec<Opcode> {
         func.insts(block).map(|inst| func[inst].opcode).collect()
+    }
+
+    /// `void f(int a, int b) { if (a < 0 || b ? 0) g(); }`, with the second test against zero
+    /// made with `pred`.
+    fn signs(pred: IntPred) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let i32 = Type::int(32);
+        let signature = Signature::new().with_params(&[i32, i32]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let yes = func.create_block();
+        let done = func.create_block();
+        let a = func.append_param(entry, i32);
+        let b = func.append_param(entry, i32);
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(i32, 0);
+        let left = build.icmp(IntPred::Slt, a, zero);
+        let right = build.icmp(pred, b, zero);
+        let either = build.binary(Opcode::Or, left, right, Flags::NONE);
+        build.br_if(either, yes, &[], done, &[]);
+        Builder::new(&mut func, yes).jump(done, &[]);
+        Builder::new(&mut func, done).ret(&[]);
+        (names, func)
+    }
+
+    #[test]
+    fn a_branch_on_either_of_two_values_being_negative_is_one_test_of_their_or() {
+        let (mut names, mut func) = signs(IntPred::Slt);
+        super::branches(&mut func);
+        let blocks: Vec<_> = func.blocks().collect();
+        assert_eq!(blocks.len(), 3);
+        let head = [Opcode::IConst, Opcode::Or, Opcode::ICmp, Opcode::BrIf];
+        assert_eq!(opcodes(&func, blocks[0]), head);
+        check(&mut names, &func);
+    }
+
+    #[test]
+    fn two_tests_against_zero_of_different_kinds_are_two_branches() {
+        let (mut names, mut func) = signs(IntPred::Ne);
+        super::branches(&mut func);
+        assert_eq!(func.blocks().count(), 4);
+        check(&mut names, &func);
     }
 
     #[test]
