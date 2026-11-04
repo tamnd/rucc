@@ -73,6 +73,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The shrink wrap rename from #4031 is back, and a register it moves a saved value into is no longer taken for a scratch register by the copy passes behind it, which deleted the copy into `%r10` in `rcu_preempt_deferred_qs_irqrestore` and stopped the kernel booting (#4036)
 - The pass that writes shorter instructions on x86-64 works out where the condition state is live across blocks, rather than turning down every function with a block that reads a state its predecessor set, which kept `movl $0` instead of `xorl` and the `lea` and `inc` forms out of 35 functions in lib/maple_tree.c (#4040)
 - The stack protector check says the arm that calls `__stack_chk_fail` never runs, so the layout puts the epilogue right after the compare and the call out of the way, as gcc does, instead of jumping over the call on every return (#4045)
+- The not-equal branch guess leaves a byte or a half tested against zero alone, which is a flag being read, so the slab fast path in the Linux kernel no longer lays out the locked arm of `local_trylock` next and jumps to the path that runs (#4048)
 
 ## 0.30.15
 
