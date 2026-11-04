@@ -1430,8 +1430,11 @@ fn settle(
             grown = frame(&module[id], module.datalayout);
             grown
         });
+        // The callee does not change from here to the splice, so its locals are found once for
+        // the frame and the copy both.
+        let scalar = crate::sroa::scalarizable(&module[callee], module.datalayout, None);
         if kind != Kind::Always {
-            let body = pool.growth(&module[callee], call, module.datalayout);
+            let body = pool.growth(&module[callee], &scalar, call);
             if !fits(own, grown, body, how.growth) {
                 grown = frame(&module[id], module.datalayout);
                 if !fits(own, grown, body, how.growth) {
@@ -1463,7 +1466,7 @@ fn settle(
             let growth = whole.saturating_sub(cost);
             left = (growth * (calls + 1) > how.early as usize).then_some(growth);
         }
-        match splice(module, id, call, callee, how.convention, kind, &mut pool) {
+        match splice(module, id, call, callee, how.convention, kind, Some(scalar), &mut pool) {
             Ok(()) => {
                 spliced = true;
                 let added = left.unwrap_or(late);
@@ -2548,8 +2551,9 @@ impl Pool {
     }
 
     /// How many bytes splicing `callee` in place of `call` would add to the caller's frame, which
-    /// is its [`frame`] less the slots it would take over.
-    fn growth(&self, callee: &Func, call: Inst, layout: DataLayout) -> u64 {
+    /// is its [`frame`] less the slots it would take over. `scalar` is the locals of `callee` that
+    /// scalar replacement takes out, see [`gone`].
+    fn growth(&self, callee: &Func, scalar: &Set<Value>, call: Inst) -> u64 {
         let around = self.around(call);
         let mut free: Vec<u64> = if self.on {
             self.slots
@@ -2561,12 +2565,13 @@ impl Pool {
             Vec::new()
         };
         let mut grows = 0;
-        let unread = gone(callee, layout);
+        let mut gone = unread(callee);
+        gone.extend(scalar.iter().copied());
         for inst in callee.blocks().flat_map(|block| callee.insts(block)) {
             if callee[inst].opcode != Opcode::Alloca || !callee[inst].args.is_empty() {
                 continue;
             }
-            if callee[inst].first_result.is_some_and(|value| unread.contains(&value)) {
+            if callee[inst].first_result.is_some_and(|value| gone.contains(&value)) {
                 continue;
             }
             let Extra::Mem(mem) = callee[inst].extra else { continue };
@@ -2763,6 +2768,9 @@ fn fits(own: u64, now: u64, body: u64, growth: Growth) -> bool {
 }
 
 /// Inlines one call, or says why not and leaves the caller as it was.
+///
+/// `scalar` is [`crate::sroa::scalarizable`] of the callee, when the caller has found it already.
+#[expect(clippy::too_many_arguments, reason = "the one splice every caller goes through")]
 fn splice(
     module: &mut Module,
     caller: FuncId,
@@ -2770,6 +2778,7 @@ fn splice(
     callee: FuncId,
     convention: Convention,
     kind: Kind,
+    scalar: Option<Set<Value>>,
     pool: &mut Pool,
 ) -> Result<(), InlineFailure> {
     // Out of the module for the length of the splice, so that the callee can be read while the
@@ -2778,7 +2787,8 @@ fn splice(
     let stand_in = Func::new(module[caller].name, Signature::new());
     let mut func = std::mem::replace(&mut module[caller], stand_in);
     let mut copies = std::mem::take(&mut module.copies);
-    let scalar = crate::sroa::scalarizable(&module[callee], module.datalayout, None);
+    let scalar = scalar
+        .unwrap_or_else(|| crate::sroa::scalarizable(&module[callee], module.datalayout, None));
     let result = check(&func, call, &module[callee], convention, kind).map(|plan| {
         copy(&mut func, call, &module[callee], &plan, pool, &scalar, &mut copies);
     });
