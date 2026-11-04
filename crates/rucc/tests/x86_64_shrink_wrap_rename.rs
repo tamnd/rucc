@@ -166,6 +166,35 @@ int main(void) {
 }
 ";
 
+/// The shape of `getresgid` in kernel/sys.c, with the kernel's `put_user`. Its template is kept as
+/// text because of the `%c`, and it says `%ebx` is clobbered, since `__put_user_4` uses it. The
+/// rename took that for a register it could swap in the first two, and the prologue went in front
+/// of the third, so the first two wrote over the caller's `%rbx`.
+const PUT: &str = "\
+register unsigned long current_stack_pointer asm(\"rsp\");
+#define put(x, ptr) ({ \\
+    int ret; void *at = (ptr); register int val asm(\"%eax\") = (x); \\
+    asm volatile(\"call __put_user_%c[size]\" : \"=c\"(ret), \"+r\"(current_stack_pointer) \\
+                 : \"0\"(at), \"r\"(val), [size] \"i\"(4) : \"ebx\"); \\
+    __builtin_expect(ret, 0); })
+struct regs { long pad[12]; long dx, si, di; };
+struct cred { int a, b, c, gid, d, sgid, e, egid; };
+extern int overflowgid;
+extern struct cred *cur;
+static int munge(int v) { return v == -1 ? overflowgid : v; }
+long res(struct regs *regs) {
+    struct cred *cred = cur;
+    int x = munge(cred->gid), y = munge(cred->egid), z = munge(cred->sgid);
+    int r = put(x, (int *)regs->di);
+    if (!r) {
+        r = put(y, (int *)regs->si);
+        if (!r)
+            r = put(z, (int *)regs->dx);
+    }
+    return r;
+}
+";
+
 fn scratch() -> std::path::PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -298,4 +327,14 @@ fn the_kept_value_works_out_what_it_did_before() {
     }
     assert_eq!(said[0], said[1]);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `%rbx` is saved before the first template that clobbers it runs.
+#[test]
+fn a_register_a_template_clobbers_is_saved_before_it() {
+    let text = listing_of(PUT);
+    let body = lines(&text, "res");
+    let push = body.iter().position(|line| line.starts_with("pushq\t%rbx")).expect("a prologue");
+    let call = body.iter().position(|line| line.starts_with("call")).expect("a call");
+    assert!(push < call, "{text}");
 }
