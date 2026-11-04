@@ -200,9 +200,12 @@ impl Pass for Image {
 /// since gcc's early passes have folded these by the time it decides what to inline.
 pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &mut Stats) {
     let blocks: Vec<Block> = func.blocks().collect();
+    // One list of instructions, filled again for each block, not one list made for each block.
+    let mut insts: Vec<Inst> = Vec::new();
     for &block in &blocks {
-        let insts: Vec<Inst> = func.insts(block).collect();
-        for inst in insts {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
             let Some(found) = answer(func, inst, images) else { continue };
             if !fuel.take() {
                 // Out of fuel, which is a request to stop transforming rather than to stop
@@ -248,8 +251,9 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
         }
     }
     for &block in &blocks {
-        let insts: Vec<Inst> = func.insts(block).collect();
-        for inst in insts {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
             let bodies = &images.bodies;
             let Some(answer) = crate::fold::against_null(func, inst, |name| bodies.contains(&name))
             else {
@@ -264,8 +268,9 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
         }
     }
     for &block in &blocks {
-        let insts: Vec<Inst> = func.insts(block).collect();
-        for inst in insts {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
             let Some(writes) = spelled(func, inst, images) else { continue };
             if !fuel.take() {
                 stats.missed(NO_FUEL);
@@ -276,8 +281,9 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
         }
     }
     for &block in &blocks {
-        let insts: Vec<Inst> = func.insts(block).collect();
-        for inst in insts {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
             let Some(name) = direct(func, inst, images) else { continue };
             if !fuel.take() {
                 stats.missed(NO_FUEL);

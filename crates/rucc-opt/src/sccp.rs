@@ -698,6 +698,8 @@ fn replace(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats)
     let blocks: Vec<Block> = func.blocks().filter(|block| solved.reached[block.index()]).collect();
     let mut forward = Map::default();
     let zero = zero(func);
+    // One list of instructions, filled again for each block, not one list made for each block.
+    let mut insts: Vec<Inst> = Vec::new();
     for block in blocks {
         let params = func[block].params.clone();
         for param in params {
@@ -729,8 +731,9 @@ fn replace(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats)
             forward.insert(param, result);
             stats.optimized(REPLACED);
         }
-        let insts: Vec<Inst> = func.insts(block).collect();
-        for inst in insts {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
             let data = func[inst];
             if !reads(data.opcode) && data.opcode != Opcode::Select {
                 continue;
@@ -806,9 +809,12 @@ fn low_sum(a: Bits, b: Bits, width: u32) -> Bits {
 /// settled when it was written. A bulk operation takes the smaller of its two addresses.
 fn align(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats) {
     let blocks: Vec<Block> = func.blocks().filter(|block| solved.reached[block.index()]).collect();
+    // One list of instructions, filled again for each block, not one list made for each block.
+    let mut insts: Vec<Inst> = Vec::new();
     for block in blocks {
-        let insts: Vec<Inst> = func.insts(block).collect();
-        for inst in insts {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
             let Extra::Mem(mem) = func[inst].extra else { continue };
             let info = func[mem];
             if info.order != MemOrder::NotAtomic {
