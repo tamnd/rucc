@@ -419,18 +419,19 @@ pub fn run(
     // can only be one function, is a call to that function by the time gcc decides what to inline,
     // since its early passes have folded the load and the call. So it is here too, before any of
     // the calls are counted. See [`crate::image`].
-    if limit.is_some() {
-        let images = crate::image::Images::of(module, pic);
-        if !images.is_empty() {
-            for id in module.funcs().collect::<Vec<FuncId>>() {
-                if !module[id].is_declaration() {
-                    let mut stats = Stats::new();
-                    let mut fuel = crate::Fuel::unlimited();
-                    crate::image::settle(&mut module[id], &images, &mut fuel, &mut stats);
-                }
+    let images = limit.map(|_| crate::image::Images::of(module, pic));
+    let images = images.filter(|images| !images.is_empty());
+    let direct = |module: &mut Module| {
+        let Some(images) = &images else { return };
+        for id in module.funcs().collect::<Vec<FuncId>>() {
+            if !module[id].is_declaration() {
+                let mut stats = Stats::new();
+                let mut fuel = crate::Fuel::unlimited();
+                crate::image::settle(&mut module[id], images, &mut fuel, &mut stats);
             }
         }
-    }
+    };
+    direct(module);
     // Which kind of call each function is inlined by, given the names called once.
     let classify = |module: &Module, once: &Set<Symbol>| -> Map<Symbol, (FuncId, Kind)> {
         module
@@ -551,6 +552,12 @@ pub fn run(
     let mut small = wanted.clone();
     small.retain(|_, &mut (_, kind)| matches!(kind, Kind::Small | Kind::Always));
     round(module, &small, &mut done, None);
+    // Again once the early round is in, since a table handed to an `always_inline` body is a
+    // member of a `static const` table only in the copy. `__rb_erase_augmented` calls
+    // `augment->propagate` and `augment->copy`, and once it is in `anon_vma_interval_tree_remove`
+    // those are the two `static inline` callbacks of mm/interval_tree.c, which gcc inlines. Left
+    // to `crate::image` they were made direct after the last round and stayed calls.
+    direct(module);
     let mut wanted = small;
     wanted.extend(classify(module, &Set::default()));
     // gcc's second inliner comes after its early one and before the called once rule, and weighs
