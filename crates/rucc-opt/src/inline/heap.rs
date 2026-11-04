@@ -840,7 +840,8 @@ impl Heap<'_> {
 
     /// Why a call that was weighed is not inlined, if it is not, and otherwise how many bytes the
     /// copy adds to the caller's frame, the locals of the callee that are still in memory once it
-    /// has been cleaned up and that no slot the pool holds can take.
+    /// has been cleaned up and that no slot the pool holds can take. With the bytes come the
+    /// locals scalar replacement takes out of the callee, which the splice needs as well.
     fn refused(
         &mut self,
         module: &Module,
@@ -848,7 +849,7 @@ impl Heap<'_> {
         call: Inst,
         weighed: &Weighed,
         pool: &Pool,
-    ) -> Result<u64, InlineFailure> {
+    ) -> Result<(u64, Set<Value>), InlineFailure> {
         if !self.wants(weighed) && !self.wants_cleaned(module, caller, call, weighed) {
             return Err(InlineFailure::TooLarge);
         }
@@ -895,7 +896,8 @@ impl Heap<'_> {
         }
         let layout = module.datalayout;
         let own = self.own.get(&caller).copied().unwrap_or_else(|| frame(func, layout));
-        let body = pool.growth(target, call, layout);
+        let scalar = crate::sroa::scalarizable(target, layout, None);
+        let body = pool.growth(target, &scalar, call);
         let bound = self.frames.get(&caller).copied();
         if !bound.is_some_and(|now| fits(own, now, body, self.how.growth)) {
             let now = frame(func, layout);
@@ -904,7 +906,7 @@ impl Heap<'_> {
                 return Err(InlineFailure::Frame);
             }
         }
-        Ok(body)
+        Ok((body, scalar))
     }
 
     /// Inlines a call that came off the heap, or says why not, and puts what the copy brought on
@@ -926,7 +928,7 @@ impl Heap<'_> {
         let mut body = 0;
         let outcome = match self.refused(module, caller, call, &weighed, &pool) {
             Err(failure) => Err(failure),
-            Ok(bytes) => {
+            Ok((bytes, scalar)) => {
                 body = bytes;
                 splice(
                     module,
@@ -935,6 +937,7 @@ impl Heap<'_> {
                     weighed.callee,
                     self.how.convention,
                     weighed.kind,
+                    Some(scalar),
                     &mut pool,
                 )
             }
@@ -974,6 +977,7 @@ impl Heap<'_> {
                             callee,
                             self.how.convention,
                             Kind::Always,
+                            None,
                             &mut pool,
                         )
                     };
