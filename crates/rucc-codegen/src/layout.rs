@@ -988,6 +988,13 @@ fn rotate(
 /// none, and only then does the next trace in round order start a new run. The rounds still decide
 /// which trace is hot and comes first, and this decides what falls in behind it. A trace that
 /// is cold is never put behind one that is not, or the other way, for the reason [`along`] says.
+///
+/// Two arms taken equally often go to the longer of the two traces, as `connect_better_edge_p` in
+/// gcc has it. The shape this is for is `if (p && p->x) { ... }` with nothing to predict `p->x`
+/// by: the trace stops at the test, the block both arms join at is hot enough to start a trace of
+/// its own in the same round, and the body only starts one in the next. Going by round order the
+/// test falls into the join and the body pays a jump there and another one back. The body is the
+/// longer trace, and put next it falls into the join, so the arm that skips it pays the one jump.
 fn connect(func: &mir::Func, traces: Vec<Vec<mir::Block>>) -> Vec<mir::Block> {
     // Which trace each block starts, for the blocks that start one. A trace may only be joined at
     // its first block, because joining it anywhere else would mean cutting it in half and the
@@ -1010,21 +1017,20 @@ fn connect(func: &mir::Func, traces: Vec<Vec<mir::Block>>) -> Vec<mir::Block> {
             used[at] = true;
             order.extend_from_slice(&traces[at]);
             let Some(&last) = traces[at].last() else { break };
-            let mut best: Option<(u64, usize)> = None;
+            let mut best: Option<(u64, usize, Reverse<usize>)> = None;
             for call in &func[last].succs {
                 let to = head[call.block.index()];
                 if to == usize::MAX || used[to] || func[call.block].cold != func[last].cold {
                     continue;
                 }
-                let weight = call.weight.raw();
-                // Ties go to the trace found first, which is the hotter of the two, because the
-                // rounds laid the traces down hottest first.
-                if best.is_none_or(|(found, over)| weight > found || (weight == found && to < over))
-                {
-                    best = Some((weight, to));
+                // Ties go to the longer trace and then to the trace found first, which is the
+                // hotter of the two, because the rounds laid the traces down hottest first.
+                let key = (call.weight.raw(), traces[to].len(), Reverse(to));
+                if best.is_none_or(|found| key > found) {
+                    best = Some(key);
                 }
             }
-            let Some((_, next)) = best else { break };
+            let Some((_, _, Reverse(next))) = best else { break };
             at = next;
         }
     }
@@ -2875,6 +2881,31 @@ mod tests {
         traced(&mut func, &mut names);
 
         assert_eq!(order_of(&func), [0, 2, 4, 1, 3]);
+    }
+
+    /// The body of an `if` nothing predicts falls into the block after it, as in gcc.
+    ///
+    /// `if (p && p->x) { two blocks } rest`, where the pointer test is likely and the test of
+    /// `p->x` is even. The trace from the entry stops at the second test because neither arm is
+    /// hot enough for the first round, the rest of the function is and starts the next trace, and
+    /// the body only starts one in the second round. The two arms of the test are even, and the
+    /// body is the longer of the two traces, so it goes next and falls into the rest.
+    #[test]
+    fn an_even_branch_falls_into_the_longer_trace() {
+        let (mut names, mut func, made) = blank(5);
+        branch(&mut func, &mut names, made[0], &[made[1], made[3]]);
+        branch(&mut func, &mut names, made[1], &[made[2], made[3]]);
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[4])];
+        *func.succs_mut(made[4]) = vec![BlockCall::to(made[3])];
+        runs(&mut func, made[0], 10_000, &[9_000, 1_000]);
+        runs(&mut func, made[1], 9_000, &[4_500, 4_500]);
+        runs(&mut func, made[2], 4_500, &[4_500]);
+        runs(&mut func, made[4], 4_500, &[4_500]);
+        runs(&mut func, made[3], 10_000, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 1, 2, 4, 3]);
     }
 
     /// The head of a loop is the block its back edge runs to, and a function with no loop has none.

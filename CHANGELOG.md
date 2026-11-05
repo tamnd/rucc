@@ -92,6 +92,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - rucc-opt: a `__builtin_expect` under a `!`, as in `if (!likely(x))` and every kernel `while (!try_cmpxchg(...))` loop, now weights its branch, so `percpu_counter_add_batch` lays out as one straight loop like gcc. (#4069)
 - rucc-opt: a `__builtin_expect` an inline function returns, as in the kernel's `atomic_try_cmpxchg`, now weights the branch in its caller, where the hint stopped at the parameter of the block the call returned to. (#4070)
 - rucc-opt: phiopt now turns a choice between two pointers into a select on every target, so `cond ? p : NULL` is a cmov as gcc writes it, where native targets kept the branch. (#4071)
+- rucc-codegen: when a branch nothing predicts goes two ways equally often, the layout now falls into the longer of the two traces, as gcc does, so the body of `if (p && p->x)` falls into the code after it rather than sitting behind it with a jump each way. (#4072)
 
 ## 0.30.15
 
