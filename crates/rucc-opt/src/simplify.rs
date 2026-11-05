@@ -295,6 +295,12 @@
 //! because the constant it builds is the two worked out together, which no pattern in the rule
 //! tables can name.
 //!
+//! An `or` after an `and` is the other case it takes. `(x & c) | d` is `x | d` when `d` sets every
+//! bit `c` clears, since each of those bits comes out set either way and every other bit comes
+//! through both. That is what storing a one to a bit field leaves: the field is cleared and then
+//! set, `p->freed_tables = 1` in `__zap_vma_range` was a load, an `and`, an `or` and a store,
+//! and gcc writes one `orb` to memory.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -1985,8 +1991,8 @@ fn flipped(func: &Func, value: Value) -> Option<Value> {
     (constant(func, ones) == Some(-1)).then_some(x)
 }
 
-/// `(x & c) & d` as `x & (c & d)`, and the same for `|` and `^`. See the module documentation for
-/// when it fires.
+/// `(x & c) & d` as `x & (c & d)`, and the same for `|` and `^`, and `(x & c) | d` as `x | d` when
+/// `d` sets every bit `c` clears. See the module documentation for when it fires.
 fn merged_constants(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     let data = &func[inst];
     let op = data.opcode;
@@ -2000,10 +2006,26 @@ fn merged_constants(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
     let [inner, d] = func[data.args] else { return None };
     let d = constant(func, d)?;
     let (inner_op, [x, c]) = producer(func, inner)?;
-    if inner_op != op || constant(func, x).is_some() {
+    if constant(func, x).is_some() {
         return None;
     }
     let c = constant(func, c)?;
+    // `(x & c) | d` where `d` sets every bit `c` clears is `x | d`, which is what storing a one
+    // to a bit field leaves.
+    if inner_op == Opcode::And && op == Opcode::Or && ty.bits() <= 64 {
+        let ones = (1i128 << ty.bits()) - 1;
+        if (c | d) & ones == ones {
+            return Some(Rewrite::Built {
+                opcode: op,
+                pred: None,
+                lhs: Operand::Value(x),
+                rhs: Operand::Constant { number: d, bits: ty.bits() },
+            });
+        }
+    }
+    if inner_op != op {
+        return None;
+    }
     let number = match op {
         Opcode::And => c & d,
         Opcode::Or => c | d,
@@ -4220,6 +4242,47 @@ mod tests {
             assert_eq!(args[0], x, "{op:?}");
             assert_eq!(number(&func, args[1]), both, "{op:?}");
         }
+    }
+
+    /// Storing a one to a bit field clears the field and then sets it, and the clearing is gone.
+    #[test]
+    fn an_or_that_sets_every_bit_a_mask_cleared_skips_the_mask() {
+        for (c, d) in [(-17, 16), (-19, 18), (-256, 255)] {
+            let (mut func, block, x) = masked_and_set(c, d);
+            assert!(simplify(&mut func), "{c} {d}");
+            let set = operands(&func, returned(&func, block))[0];
+            assert_eq!(came_from(&func, set).0, Opcode::Or);
+            let args = operands(&func, set);
+            assert_eq!(args[0], x, "{c} {d}");
+            assert_eq!(number(&func, args[1]), d, "{c} {d}");
+        }
+    }
+
+    /// An `or` that leaves a bit the mask cleared still clear keeps the mask.
+    #[test]
+    fn an_or_that_misses_a_bit_a_mask_cleared_keeps_it() {
+        let (mut func, block, _) = masked_and_set(-49, 16);
+        simplify(&mut func);
+        let set = operands(&func, returned(&func, block))[0];
+        assert_eq!(came_from(&func, set).0, Opcode::Or);
+        let masked = operands(&func, set)[0];
+        assert_eq!(came_from(&func, masked).0, Opcode::And);
+    }
+
+    /// `(x & c) | d` at 32 bits, returned as `((x & c) | d) * x` so that the result is read by
+    /// something the test can look under.
+    fn masked_and_set(c: i128, d: i128) -> (Func, Block, Value) {
+        let ty = Type::int(32);
+        let (_, mut func, block) = one_block(ty);
+        let x = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let c = build.iconst(ty, c);
+        let masked = build.binary(Opcode::And, x, c, Flags::NONE);
+        let d = build.iconst(ty, d);
+        let set = build.binary(Opcode::Or, masked, d, Flags::NONE);
+        let product = build.binary(Opcode::Mul, set, x, Flags::NONE);
+        build.ret(&[product]);
+        (func, block, x)
     }
 
     /// A second mask that keeps every bit the first one kept is the first one, and two constants

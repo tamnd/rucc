@@ -88,6 +88,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - rucc-opt: an indirect call that reads a callback from a `static const` table is made direct between the early `always_inline` round and the rest of inlining, so the callback can be inlined. `vma_interval_tree_remove` goes from five calls to one, as with gcc. (#4065)
 - rucc-opt: a null pointer passed to a function counts as a constant when the inliner weighs the copy, so the arms that test it are left out. `init_multi_vma_prep` in mm/vma.c is inlined into `__split_vma`, `vma_shrink` and `commit_merge`, as gcc does. (#4066)
 - rucc-codegen: a test against zero after a shift by a constant is taken out, and a `jl` or `jge` against zero after arithmetic becomes `js` or `jns` so its test goes too. The scheduler's `__update_load_avg_cfs_rq` loses both kinds, and kernel/sched/build_policy.o goes from 74 such tests to none. (#4067)
+- rucc-opt: `(x & c) | d` is `x | d` when `d` sets every bit `c` clears, so storing a one to a bit field is one `orb` to memory as with gcc, where it was a load, an `and`, an `or` and a store. (#4068)
 
 ## 0.30.15
 
