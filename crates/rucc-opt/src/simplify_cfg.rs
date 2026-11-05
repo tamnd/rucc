@@ -624,7 +624,9 @@ fn emit_before(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value
 /// [`crate::dce`], because `-O0` runs this pass and nothing after it. A negation something else
 /// reads too is left alone, since turning the branch round would keep the `xor` and save nothing.
 /// The arms carry their hints with them, so what `__builtin_expect` said about each arm is still
-/// said about the same arm.
+/// said about the same arm, and the arm an inlined early return was on is turned round with them.
+/// `if (!delta) return 0;` in the scheduler's `___update_load_sum` is one, and when the flag stayed
+/// put the inlined body was guessed to return early and its work was the cold path.
 fn unnegate(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     // Counted at the first branch on a negation, since most functions have none and the count
     // walks every instruction. Nothing is rewritten before that branch, so the count is the same.
@@ -650,6 +652,7 @@ fn unnegate(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
         func.rewrite(args, |_| negated);
         let turned = func.push_block_calls(&[otherwise, then]);
         func[term].extra = Extra::Targets(turned);
+        func[term].flags = func[term].flags.turned();
         func.remove_inst(not);
         stats.optimized(UNNEGATED);
         changed = true;
@@ -2120,6 +2123,17 @@ block2:
         assert_eq!(arms, [(2, Some(1_000)), (1, Some(9_000))]);
         let xor = func.insts(Block::from_usize(0)).any(|it| func[it].opcode == Opcode::Xor);
         assert!(!xor, "the negation nothing else read is still there");
+    }
+
+    #[test]
+    fn the_arm_an_inlined_early_return_was_on_turns_round_with_the_branch() {
+        let (mut func, _) = negated(false);
+        let term = func.terminator(Block::from_usize(0)).expect("the entry branches");
+        func[term].flags = Flags::EARLY_THEN;
+        simplify(&mut func);
+        let term = func.terminator(Block::from_usize(0)).expect("the entry still branches");
+        assert_eq!(goes_to(&func, 0), [2, 1]);
+        assert_eq!(func[term].flags, Flags::EARLY_ELSE);
     }
 
     #[test]

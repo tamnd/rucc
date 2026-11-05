@@ -314,6 +314,21 @@ impl Flags {
         Self(self.0 & !other.0)
     }
 
+    /// The flags of a `br_if` once its two arms are the other way round, which is
+    /// [`Self::EARLY_THEN`] and [`Self::EARLY_ELSE`] swapped and the rest kept.
+    #[must_use]
+    pub const fn turned(self) -> Self {
+        let arms = Self::EARLY_THEN.union(Self::EARLY_ELSE);
+        let mut out = self.without(arms);
+        if self.contains(Self::EARLY_THEN) {
+            out = out.union(Self::EARLY_ELSE);
+        }
+        if self.contains(Self::EARLY_ELSE) {
+            out = out.union(Self::EARLY_THEN);
+        }
+        out
+    }
+
     /// The flags that mean anything on that opcode.
     ///
     /// Anything outside this is a verifier failure rather than something ignored, because a
@@ -975,6 +990,15 @@ mod tests {
         }
         assert_eq!(Flags::from_name("early_else"), Some(Flags::EARLY_ELSE));
         assert_eq!(Flags::EARLY_THEN.to_string(), ".early_then");
+    }
+
+    #[test]
+    fn turning_a_branch_round_swaps_the_arm_its_early_return_was_on() {
+        assert_eq!(Flags::EARLY_THEN.turned(), Flags::EARLY_ELSE);
+        assert_eq!(Flags::EARLY_ELSE.turned(), Flags::EARLY_THEN);
+        let both = Flags::EARLY_THEN.union(Flags::EARLY_ELSE);
+        assert_eq!(both.turned(), both);
+        assert_eq!(Flags::NONE.turned(), Flags::NONE);
     }
 
     #[test]

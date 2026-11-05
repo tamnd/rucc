@@ -1,6 +1,7 @@
 //! `__builtin_mul_overflow` on a `long` takes the high half of the product from the one widening
 //! multiply x86 has, on i386 and on x86-64. It used to be split into halves and multiplied out
-//! long hand, about 30 instructions where gcc writes two.
+//! long hand, about 30 instructions where gcc writes two. The low half is the one that multiply
+//! leaves in the other register, so there is one multiply in each function, as with gcc.
 
 use std::process::Command;
 
@@ -34,7 +35,7 @@ fn a_checked_multiply_of_a_long_takes_the_high_half_in_one_instruction() {
             .filter(|line| line.starts_with('\t') && !line.starts_with("\t."))
             .collect();
         let multiplies = code.iter().filter(|line| line.contains("mul")).count();
-        assert_eq!(multiplies, 4, "{target}: a low and a high multiply in each function\n{text}");
+        assert_eq!(multiplies, 2, "{target}: one widening multiply in each function\n{text}");
         assert!(
             !code.iter().any(|line| line.contains("shr")),
             "{target}: no halves are taken\n{text}"
