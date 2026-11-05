@@ -1130,8 +1130,13 @@ fn identity(
                 Some(rewrite) if nests(&rewrite) && func[result].ty.is_vector() => continue,
                 // Nor one that would rewrite a `ptr_add`. What it writes is an integer
                 // instruction, and swapping `null + x` round to `x + null` makes an add that says
-                // it produces a pointer out of a pointer on the right.
-                Some(_) if func[inst].opcode == Opcode::PtrAdd => continue,
+                // it produces a pointer out of a pointer on the right. The same goes for anything
+                // else that gives back a pointer: `c ? p + 1 : p` is a `select.ptr` matched as one
+                // at the address width, and `p + zext c` would be an add of a pointer and an
+                // integer. `parse_slub_debug_flags` in mm/slub.c steps past a comma like that.
+                Some(_) if func[inst].opcode == Opcode::PtrAdd || func[result].ty.is_ptr() => {
+                    continue;
+                }
                 Some(rewrite) => rewrite,
                 // Any other shape, which no rule in the file has. A test below says so, because a
                 // rule that fell through here would be a rule that never fires and nothing would
@@ -4844,6 +4849,31 @@ mod tests {
         let bound = operands(&func, answer)[1];
         assert_eq!(func[bound].ty, Type::PTR);
         assert_eq!(came_from(&func, bound).0, Opcode::IntToPtr);
+        module.add_func(func);
+        rucc_ir::verify(&module, &names).expect("the pass left the function verifiable");
+    }
+
+    #[test]
+    fn a_choice_between_a_pointer_and_one_byte_on_stays_a_choice() {
+        // The rule that makes `c ? x + 1 : x` into `x + zext c` matches this one at the address
+        // width, and what it would write is an add that gives back a pointer.
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let signature =
+            Signature::new().with_params(&[Type::PTR, Type::int(1)]).with_returns(&[Type::PTR]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let p = func.append_param(block, Type::PTR);
+        let c = func.append_param(block, Type::int(1));
+        let mut build = Builder::new(&mut func, block);
+        let one = build.iconst(Type::int(64), 1);
+        let on = build.binary(Opcode::PtrAdd, p, one, Flags::NONE);
+        let chosen = build.select(c, on, p);
+        build.ret(&[chosen]);
+        simplify(&mut func);
+        assert_eq!(came_from(&func, returned(&func, block)).0, Opcode::Select);
         module.add_func(func);
         rucc_ir::verify(&module, &names).expect("the pass left the function verifiable");
     }
