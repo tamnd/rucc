@@ -66,7 +66,12 @@ fn ir(target: &str) -> String {
 fn callbacks_from_a_const_table_are_inlined() {
     for target in ["i686-linux-gnu", "x86_64-linux-gnu"] {
         let text = ir(target);
-        let calls = text.lines().filter(|line| line.contains(" call ")).collect::<Vec<_>>();
+        let calls = text.lines().filter(|line| calls(line)).collect::<Vec<_>>();
         assert!(calls.is_empty(), "{target}: {calls:?}\n{text}");
     }
+}
+
+/// Whether a line of IR is a call, whatever attributes it has, as in `call.nofree`.
+fn calls(line: &str) -> bool {
+    line.split_whitespace().any(|word| word == "call" || word.starts_with("call."))
 }

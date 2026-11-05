@@ -758,7 +758,7 @@ fn running(func: &Func) -> Set<Block> {
             let args = &func[data.args];
             let found = {
                 let operand = |arg: Value| {
-                    values.get(&arg).copied().or_else(|| crate::fold::constant(func, arg))
+                    values.get(&arg).copied().or_else(|| crate::fold::known(func, arg))
                 };
                 let known = data.opcode != Opcode::IsConstant
                     && args.iter().all(|&arg| operand(arg).is_some());
@@ -775,7 +775,7 @@ fn running(func: &Func) -> Set<Block> {
                 continue;
             }
             let operand =
-                |arg: Value| values.get(&arg).copied().or_else(|| crate::fold::constant(func, arg));
+                |arg: Value| values.get(&arg).copied().or_else(|| crate::fold::known(func, arg));
             let decided = args
                 .first()
                 .and_then(|&arg| operand(arg))
@@ -1739,7 +1739,8 @@ fn passed(func: &Func, call: Inst, callee: &Func) -> Map<Value, (Imm, Type)> {
 /// to go in where gcc puts it in.
 fn argument(func: &Func, arg: Value) -> Option<(Imm, Type)> {
     let Def::Param { block, index } = func[arg].def else {
-        return crate::fold::evaluated(func, arg, ASKED_DEPTH);
+        return crate::fold::evaluated(func, arg, ASKED_DEPTH)
+            .or_else(|| crate::fold::known(func, arg));
     };
     let index = usize::try_from(index).ok()?;
     if func.entry() == Some(block) {
@@ -1756,7 +1757,8 @@ fn argument(func: &Func, arg: Value) -> Option<(Imm, Type)> {
             if passed == arg {
                 return None;
             }
-            let value = crate::fold::evaluated(func, passed, ASKED_DEPTH)?;
+            let value = crate::fold::evaluated(func, passed, ASKED_DEPTH)
+                .or_else(|| crate::fold::known(func, passed))?;
             if found.is_some_and(|seen| seen != value) {
                 return None;
             }
@@ -1847,9 +1849,17 @@ fn cleaned(callee: &Func, values: &Map<Value, (Imm, Type)>, threads: bool) -> Op
         let span = copy.span(first);
         let inst = copy.create_inst(data, &[ty], span);
         copy.insert_before(inst, first);
-        if let Some(result) = copy[inst].results().next() {
-            forward.insert(param, result);
+        let Some(mut result) = copy[inst].results().next() else { continue };
+        // A pointer is known by the integer it was cast from, which is cast again here.
+        if copy[param].ty != ty {
+            let args = copy.push_values(&[result]);
+            let data = InstData { args, ..InstData::new(Opcode::IntToPtr) };
+            let cast = copy.create_inst(data, &[copy[param].ty], span);
+            copy.insert_before(cast, first);
+            let Some(pointer) = copy[cast].results().next() else { continue };
+            result = pointer;
         }
+        forward.insert(param, result);
     }
     crate::uses::substitute(&mut copy, &forward);
     let mut an = crate::Analyses::new(crate::machine::Machine::unknown());
@@ -2118,7 +2128,7 @@ fn folded_as<const N: usize>(
             let folds = args.iter().all(|arg| known.contains(arg));
             if let (true, Some(result)) = (folds, data.results().next()) {
                 let operand = |arg: Value| {
-                    values.get(&arg).copied().or_else(|| crate::fold::constant(func, arg))
+                    values.get(&arg).copied().or_else(|| crate::fold::known(func, arg))
                 };
                 if let Some(found) = computed(func, inst, &operand) {
                     values.insert(result, found);
@@ -3406,7 +3416,7 @@ fn copy(
         }
     }
     let constants: Vec<Option<(Imm, Type)>> =
-        passed.iter().map(|&arg| crate::fold::constant(func, arg)).collect();
+        passed.iter().map(|&arg| crate::fold::known(func, arg)).collect();
     let (live, decided) = reached(callee, start, &constants);
     let mut blocks = Map::default();
     let mut values = Map::default();
@@ -3729,7 +3739,7 @@ fn reached(
                     data.results().next().filter(|_| data.opcode != Opcode::IsConstant)
                 {
                     let operand = |arg: Value| {
-                        values.get(&arg).copied().or_else(|| crate::fold::constant(callee, arg))
+                        values.get(&arg).copied().or_else(|| crate::fold::known(callee, arg))
                     };
                     if let Some(found) = computed(callee, inst, &operand) {
                         values.insert(result, found);
