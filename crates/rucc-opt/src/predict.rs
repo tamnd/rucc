@@ -62,7 +62,7 @@
 //! and the profile is guessed after the early inliner has run. The kernel's `might_alloc` returns
 //! early when the task is reclaiming, and gcc keeps the rest of it on the straight path through
 //! every allocator it is inlined into. Here the `return` is a jump once it is inlined, so the
-//! inliner asks [`early_arms`] which arms of the callee's branches it would have guessed against
+//! inliner asks `early_arms` which arms of the callee's branches it would have guessed against
 //! and puts the answer on the copies, as [`Flags::EARLY_THEN`] and [`Flags::EARLY_ELSE`], and this
 //! reads those as it reads the marked `return`.
 //!
