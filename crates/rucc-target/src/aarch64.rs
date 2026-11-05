@@ -519,6 +519,8 @@ pub static FLAGS: FlagInsts = FlagInsts {
     readers: &READERS,
     compares_itself,
     zeroing: &[],
+    shifts: &[],
+    signs: &[],
 };
 
 /// The shorter spellings AArch64 has for the same answer, which is none.

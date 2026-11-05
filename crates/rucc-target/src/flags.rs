@@ -61,7 +61,9 @@
 //! # What is not a [`Zeroing`]
 //!
 //! A shift, because a shift by zero leaves the condition state exactly as it found it, and the
-//! count is in a register often enough that the compiler cannot tell. A multiply, because the
+//! count is in a register often enough that the compiler cannot tell. A shift by a constant is in
+//! [`FlagInsts::shifts`] instead, where the pass reads the constant before it believes the entry.
+//! A multiply, because the
 //! machine leaves the zero bit undefined after one. An increment and a decrement, because they
 //! leave carry alone rather than clearing it. None of those is a shape a program runs into often,
 //! and each of them is a way to be quietly wrong, so the table says nothing about them and the
@@ -99,6 +101,31 @@ pub struct FlagInsts {
     pub readers: &'static [Reader],
     /// Every instruction that leaves what a comparison of what it wrote against zero would leave.
     pub zeroing: &'static [Zeroing],
+    /// Every shift by a constant that leaves what [`Self::zeroing`] says, when the constant is not
+    /// zero.
+    ///
+    /// A shift by zero leaves the condition state as it found it, so the entry holds only once the
+    /// count has been read. `shrq $10` and a test of what it wrote is how the scheduler turns
+    /// nanoseconds into periods, and gcc writes the shift and the jump with nothing between.
+    pub shifts: &'static [Zeroing],
+    /// Every jump on a signed condition against zero that asks the sign alone, and the jump that
+    /// asks it without the overflow.
+    ///
+    /// A comparison against zero clears the overflow, so `x < 0` after one is the sign and nothing
+    /// else, and every entry in [`Self::zeroing`] and [`Self::shifts`] sets the sign from what it
+    /// wrote. The overflow it leaves is its own, which is why the jump has to stop reading it.
+    /// `(s64)(now - last) < 0` is a subtraction and a test of what it wrote, and gcc writes `js`
+    /// straight off the subtraction.
+    pub signs: &'static [Sign],
+}
+
+/// One jump on a signed condition against zero, and the jump on the sign it comes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sign {
+    /// The jump on the signed condition, `jl` or `jge`.
+    pub name: &'static str,
+    /// The jump on the sign alone, `js` or `jns`.
+    pub sign: &'static str,
 }
 
 /// One comparison, and what is left of it when the machine has already made it.
@@ -210,6 +237,19 @@ impl FlagInsts {
     #[must_use]
     pub fn zeroed(&self, name: &str) -> Option<&'static Zeroing> {
         self.zeroing.iter().find(|entry| entry.name == name)
+    }
+
+    /// The entry for the shift of that name, if it leaves a comparison against zero when its
+    /// count is not zero.
+    #[must_use]
+    pub fn shifted(&self, name: &str) -> Option<&'static Zeroing> {
+        self.shifts.iter().find(|entry| entry.name == name)
+    }
+
+    /// The jump on the sign alone that the jump of that name comes to against zero, if it has one.
+    #[must_use]
+    pub fn sign(&self, name: &str) -> Option<&'static str> {
+        self.signs.iter().find(|entry| entry.name == name).map(|entry| entry.sign)
     }
 }
 

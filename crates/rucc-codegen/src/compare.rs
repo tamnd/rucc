@@ -126,6 +126,7 @@ pub fn redundant(
         .compares
         .iter()
         .filter_map(|entry| entry.kept)
+        .chain(insts.signs.iter().map(|entry| entry.sign))
         .map(|kept| (kept, mir::Opcode::new(names.join(insts.prefix, kept))))
         .collect();
     let names = &*names;
@@ -151,12 +152,15 @@ pub fn redundant(
                 Does::Compares(entry) => {
                     let already = left
                         .as_ref()
-                        .is_some_and(|had| had.answers(func, insts, names, &sequence, at, entry));
+                        .and_then(|had| had.answers(func, insts, names, &sequence, at, entry));
                     // What the earlier instruction left comes to this one's answer, and it is
                     // worked out here rather than after the rewrite because one of the answers to
                     // what is left of an instruction is that there is nothing left of it.
                     let after = stale(func, inst, left);
-                    if already && took(func, &opcodes, &mut counts, machine, names, inst, entry) {
+                    let taken = already.is_some_and(|signs| {
+                        took(func, &opcodes, &mut counts, machine, names, inst, entry, &signs)
+                    });
+                    if taken {
                         gone += 1;
                         after
                     } else {
@@ -167,6 +171,14 @@ pub fn redundant(
                     }
                 }
                 Does::Zeroes(name, zeroing) => Left::zeroed(func, insts, name, zeroing, inst),
+                // A shift by nothing leaves the condition state as it found it. The machine reads
+                // five bits of the count at every width but the widest, so a count is nothing when
+                // those five are, and a 64-bit shift by 32 is turned down with the rest.
+                Does::Shifts(name, zeroing) => {
+                    let count = func[inst].imm.map(|at| func[at].0);
+                    let counted = count.is_some_and(|count| count & 31 != 0);
+                    counted.then(|| Left::zeroed(func, insts, name, zeroing, inst)).flatten()
+                }
                 Does::Writes => None,
                 Does::Neither => stale(func, inst, left),
             };
@@ -212,6 +224,8 @@ enum Does<'a> {
     /// whether it writes the condition state, because every one of these does and this is what it
     /// wrote there.
     Zeroes(&'a str, &'static Zeroing),
+    /// It is a shift by a constant that leaves the same when the constant is not zero.
+    Shifts(&'a str, &'static Zeroing),
     /// It writes the condition state with nothing this pass can use.
     Writes,
     /// It leaves the condition state alone.
@@ -225,6 +239,8 @@ impl<'a> Does<'a> {
             Self::Compares(entry)
         } else if let Some(zeroing) = insts.zeroed(name) {
             Self::Zeroes(name, zeroing)
+        } else if let Some(zeroing) = insts.shifted(name) {
+            Self::Shifts(name, zeroing)
         } else if (insts.writes)(name) {
             Self::Writes
         } else {
@@ -297,7 +313,8 @@ impl Left {
         Some(Self { how: How::Zeroed { width, covers: *zeroing }, about: vec![def] })
     }
 
-    /// Whether this comparison is one the condition state already answers.
+    /// Whether this comparison is one the condition state already answers, and if it is, the
+    /// jumps behind it that have to ask the sign alone for that to hold, each with what it becomes.
     fn answers(
         &self,
         func: &mir::Func,
@@ -306,7 +323,7 @@ impl Left {
         sequence: &[mir::Inst],
         at: usize,
         entry: &Compare,
-    ) -> bool {
+    ) -> Option<Vec<(mir::Inst, &'static str)>> {
         let inst = sequence[at];
         let asked: Vec<Place> = reads(func, inst).into_iter().map(|(_, place)| place).collect();
         let against = func[inst].imm.map(|at| func[at].0);
@@ -314,7 +331,7 @@ impl Left {
             // The same question about the same values, so every bit of the answer is the bit that
             // is already there and what reads it is not something anyone has to ask.
             How::Made { asks, read, imm } => {
-                *asks == entry.asks && *read == asked && *imm == against
+                (*asks == entry.asks && *read == asked && *imm == against).then(Vec::new)
             }
             // A comparison with one register and no constant is a test of the register against
             // itself, which is how the layout writes a branch on a byte, and it asks what a
@@ -322,21 +339,38 @@ impl Left {
             How::Zeroed { width, covers } => {
                 let zero = against == Some(0) || (against.is_none() && asked.len() == 1);
                 if !zero || self.about != asked {
-                    return false;
+                    return None;
                 }
-                let [(index, _)] = reads(func, inst)[..] else { return false };
-                let Some(name) = opcode(func, insts, names, inst) else { return false };
+                let [(index, _)] = reads(func, inst)[..] else { return None };
+                let name = opcode(func, insts, names, inst)?;
                 if (insts.width)(name, index) != Some(*width) {
-                    return false;
+                    return None;
                 }
                 let conditions = conditions(func, insts, names, sequence, at);
-                !conditions.is_empty() && conditions.iter().all(|&reads| covers.covers(reads))
+                if conditions.is_empty() {
+                    return None;
+                }
+                // A signed condition the arithmetic did not leave right may still be a jump that
+                // asks the sign alone, which it did, once the jump stops reading the overflow. The
+                // comparison's own condition is not a jump, so it has to be covered as it is.
+                let mut signs = Vec::new();
+                for (reader, reads) in conditions {
+                    if covers.covers(reads) {
+                        continue;
+                    }
+                    let name = (reads == Reads::Signed && reader != inst)
+                        .then(|| opcode(func, insts, names, reader))
+                        .flatten()?;
+                    signs.push((reader, insts.sign(name)?));
+                }
+                Some(signs)
             }
         }
     }
 }
 
-/// The conditions that read what an instruction leaves in the condition state.
+/// The conditions that read what an instruction leaves in the condition state, each with the
+/// instruction that reads it.
 ///
 /// Its own first, which is where a comparison that keeps a byte carries the condition it is about,
 /// and then the ones behind it as far as whatever writes the condition state next. Both halves
@@ -349,17 +383,17 @@ fn conditions(
     names: &Interner,
     sequence: &[mir::Inst],
     at: usize,
-) -> Vec<Reads> {
+) -> Vec<(mir::Inst, Reads)> {
     let mut found = Vec::new();
     let Some(name) = opcode(func, insts, names, sequence[at]) else { return found };
-    found.extend(insts.reads(name));
+    found.extend(insts.reads(name).map(|reads| (sequence[at], reads)));
     for &inst in &sequence[at + 1..] {
         let Some(name) = opcode(func, insts, names, inst) else { break };
         // What it reads before whether it writes, because an instruction can do both and the read
         // it does is a read of what is there now. An add with carry is the one that does, and
         // asking the questions the other way round would count it as the end of the walk and never
         // count the carry it took off the comparison this is about to remove.
-        found.extend(insts.reads(name));
+        found.extend(insts.reads(name).map(|reads| (inst, reads)));
         if (insts.writes)(name) {
             break;
         }
@@ -397,7 +431,8 @@ fn picked(func: &mir::Func, inst: mir::Inst, role: Role) -> Vec<(u8, Place)> {
 }
 
 /// Turns a comparison into what is left of it, which is a byte or nothing at all, and says whether
-/// that was a change the target had.
+/// that was a change the target had. The jumps that have to ask the sign alone are turned in the
+/// same set, since a comparison taken out from under a `jl` that still reads the overflow is wrong.
 ///
 /// The byte keeps the register it was going to and the constant goes, because what the constant
 /// was for was the comparison and the comparison is the part that is not happening. Nothing else
@@ -408,6 +443,7 @@ fn picked(func: &mir::Func, inst: mir::Inst, role: Role) -> Vec<(u8, Place)> {
 /// before it came to. What the set is for here is the other half of [`crate::changes`], which is
 /// the shape: the instruction the byte is left as is one this target has to have, and this is where
 /// that is asked rather than believed.
+#[allow(clippy::too_many_arguments)]
 fn took(
     func: &mut mir::Func,
     opcodes: &Map<&str, mir::Opcode>,
@@ -416,8 +452,13 @@ fn took(
     names: &Interner,
     inst: mir::Inst,
     entry: &Compare,
+    signs: &[(mir::Inst, &str)],
 ) -> bool {
     let mut set = Changes::new();
+    for &(jump, sign) in signs {
+        let Some(&opcode) = opcodes.get(sign) else { return false };
+        set.rewrite(jump, Plan { opcode, ..Plan::of(func, jump) });
+    }
     match entry.kept {
         None => set.remove(inst),
         Some(kept) => {
@@ -654,7 +695,7 @@ mod tests {
 
     /// The same three instructions with a subtraction in front. The condition is behind the
     /// comparison rather than on it, so finding it means looking at what reads what the comparison
-    /// would have left, and a signed `<` is not something a subtraction answers.
+    /// would have left, and a signed `<=` is not something a subtraction answers.
     #[test]
     fn a_comparison_that_keeps_nothing_is_refused_on_the_condition_behind_it() {
         let (mut names, mut func, block) = empty();
@@ -662,13 +703,72 @@ mod tests {
         let other = func.new_vreg(GPR);
         let sub = op(&mut names, "sub_rr_32");
         let cmp = op(&mut names, "cmp_ri_32");
-        let jump = op(&mut names, "jcc_l");
+        let jump = op(&mut names, "jcc_le");
         func.build(block, sub).def(value, GPR).uses(value, GPR).uses(other, GPR).finish();
         func.build(block, cmp).uses(value, GPR).imm(0).finish();
         func.build(block, jump).finish();
 
         assert_eq!(takes(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// A signed `<` or `>=` against zero behind a subtraction, which is `(s64)(now - last) < 0`.
+    /// The comparison cleared the overflow, so the jump was asking the sign, which the subtraction
+    /// set from what it wrote. It goes and the jump asks the sign alone, as gcc writes it.
+    #[test]
+    fn a_signed_jump_against_zero_after_a_subtraction_asks_the_sign() {
+        for (jump, sign) in [("jcc_l", "jcc_s"), ("jcc_ge", "jcc_ns")] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let other = func.new_vreg(GPR);
+            let sub = op(&mut names, "sub_rr_64");
+            let cmp = op(&mut names, "cmp_ri_64");
+            let branch = op(&mut names, jump);
+            func.build(block, sub).def(value, GPR).uses(value, GPR).uses(other, GPR).finish();
+            func.build(block, cmp).uses(value, GPR).imm(0).finish();
+            func.build(block, branch).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{jump}");
+            assert_eq!(shape(&func, &names, block), ["sub_rr_64", sign]);
+        }
+    }
+
+    /// A shift by a constant and a test of what it wrote, which is how the scheduler turns
+    /// nanoseconds into periods. The shift set the zero from what it wrote, so the test goes.
+    #[test]
+    fn a_comparison_against_zero_after_a_shift_by_a_constant_goes() {
+        for shift in ["shr_ri_64", "sar_ri_32", "shl_ri_64"] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let shifted = op(&mut names, shift);
+            let width = shift.rsplit('_').next().unwrap_or("");
+            let cmp = op(&mut names, &format!("cmp_ri_{width}"));
+            let jump = op(&mut names, "jcc_e");
+            func.build(block, shifted).def(value, GPR).uses(value, GPR).imm(10).finish();
+            func.build(block, cmp).uses(value, GPR).imm(0).finish();
+            func.build(block, jump).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{shift}");
+            assert_eq!(shape(&func, &names, block), [shift, "jcc_e"]);
+        }
+    }
+
+    /// A shift by a count the machine reads as nothing leaves the condition state as it found it,
+    /// so what is there is not about the value it wrote and the comparison stays.
+    #[test]
+    fn a_comparison_after_a_shift_by_nothing_stays() {
+        for count in [0, 32] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let shift = op(&mut names, "shr_ri_32");
+            let cmp = op(&mut names, "cmp_ri_32");
+            let jump = op(&mut names, "jcc_e");
+            func.build(block, shift).def(value, GPR).uses(value, GPR).imm(count).finish();
+            func.build(block, cmp).uses(value, GPR).imm(0).finish();
+            func.build(block, jump).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 0, "{count}");
+        }
     }
 
     /// Arithmetic that wrote half of what the comparison is asking about. The upper half is zero

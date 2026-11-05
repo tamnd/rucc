@@ -73,7 +73,7 @@ pub use crate::abi::{
 pub use crate::bits::BitInsts;
 pub use crate::branch::{Bit, BranchInsts, Fusion, Move, Reading, Zero};
 pub use crate::counts::{BitCount, CountInst};
-pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
+pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Sign, Zeroing};
 pub use crate::frame::{
     Canary, ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, SpillMove, Targets, Through, Thunks,
 };
