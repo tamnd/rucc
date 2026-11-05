@@ -90,6 +90,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - rucc-codegen: a test against zero after a shift by a constant is taken out, and a `jl` or `jge` against zero after arithmetic becomes `js` or `jns` so its test goes too. The scheduler's `__update_load_avg_cfs_rq` loses both kinds, and kernel/sched/build_policy.o goes from 74 such tests to none. (#4067)
 - rucc-opt: `(x & c) | d` is `x | d` when `d` sets every bit `c` clears, so storing a one to a bit field is one `orb` to memory as with gcc, where it was a load, an `and`, an `or` and a store. (#4068)
 - rucc-opt: a `__builtin_expect` under a `!`, as in `if (!likely(x))` and every kernel `while (!try_cmpxchg(...))` loop, now weights its branch, so `percpu_counter_add_batch` lays out as one straight loop like gcc. (#4069)
+- rucc-opt: a `__builtin_expect` an inline function returns, as in the kernel's `atomic_try_cmpxchg`, now weights the branch in its caller, where the hint stopped at the parameter of the block the call returned to. (#4070)
 
 ## 0.30.15
 

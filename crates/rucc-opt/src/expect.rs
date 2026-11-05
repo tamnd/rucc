@@ -101,10 +101,11 @@ impl Pass for Expect {
             return stats;
         }
 
+        let passed = passed(func);
         let mut placed = 0;
         for block in func.blocks().collect::<Vec<Block>>() {
             let Some(term) = func.terminator(block) else { continue };
-            let Some(hints) = claims(func, term) else { continue };
+            let Some(hints) = claims_given(func, term, &passed) else { continue };
             if !fuel.take() {
                 stats.missed(NO_FUEL);
                 break;
@@ -137,12 +138,40 @@ impl Pass for Expect {
     }
 }
 
+/// Each block parameter that is handed the same value on every edge into its block, and that
+/// value.
+///
+/// An inline function that returns `likely(ok)` returns it to a block the call was split at, so a
+/// branch on what it gave back is a branch on that block's parameter. The kernel's
+/// `atomic_try_cmpxchg` is that, and every `while (!atomic_try_cmpxchg(...))` lost its hint at the
+/// parameter.
+fn passed(func: &Func) -> Map<Value, Value> {
+    let mut seen: Map<Value, Option<Value>> = Map::default();
+    for block in func.blocks() {
+        let Some(term) = func.terminator(block) else { continue };
+        for to in func.successors(term) {
+            for (&param, &arg) in func[to.block].params.iter().zip(func[to.args].iter()) {
+                let one = seen.entry(param).or_insert(Some(arg));
+                if *one != Some(arg) {
+                    *one = None;
+                }
+            }
+        }
+    }
+    seen.into_iter().filter_map(|(param, arg)| Some((param, arg?))).collect()
+}
+
 /// What the hint behind this terminator says about each of its arms, in the order the arms are in.
 pub(crate) fn claims(func: &Func, term: Inst) -> Option<Vec<Hint>> {
+    claims_given(func, term, &Map::default())
+}
+
+/// The same, looking through the block parameters `passed` names to the value each is handed.
+fn claims_given(func: &Func, term: Inst, passed: &Map<Value, Value>) -> Option<Vec<Hint>> {
     let &value = func[func[term].args].first()?;
     match func[term].opcode {
         Opcode::BrIf => {
-            let (inst, sense) = through(func, value)?;
+            let (inst, sense) = through(func, value, passed)?;
             let hint = Hint::parts(claim(func, inst, sense)?);
             Some(vec![hint, hint.complement()])
         }
@@ -230,12 +259,23 @@ fn expected(func: &Func, value: Value) -> Option<(Inst, Vec<Step>)> {
 /// A narrowing is taken only when what it narrows was widened from no wider than it narrows to, so
 /// it cannot drop a bit that was set. `int ok = likely(x)` is that: the `long` the `expect` gives is
 /// a `bool` widened, and the `int` it is stored in still holds all of it.
-fn through(func: &Func, cond: Value) -> Option<(Inst, bool)> {
+fn through(func: &Func, cond: Value, passed: &Map<Value, Value>) -> Option<(Inst, bool)> {
     let mut value = cond;
     let mut sense = true;
     // Bounded, because a chain this walks is a chain of instructions the function has and each step
-    // moves to the operand of the one before it.
+    // moves to the operand of the one before it. A parameter is the one step that does not, and a
+    // loop of parameters handing each other the same value is a loop nothing enters, so the walk
+    // gives up once it has gone through more parameters than there are.
+    let mut hops = 0;
     loop {
+        if let Some(&arg) = passed.get(&value) {
+            hops += 1;
+            if hops > passed.len() {
+                return None;
+            }
+            value = arg;
+            continue;
+        }
         let Def::Result { inst, .. } = func[value].def else { return None };
         let data = &func[inst];
         match data.opcode {
@@ -356,7 +396,7 @@ pub(crate) fn place(func: &mut Func, gone: &[Inst]) {
         let Some(term) = func.terminator(block) else { continue };
         let Some(&value) = func[func[term].args].first() else { continue };
         let behind = match func[term].opcode {
-            Opcode::BrIf => through(func, value).map(|(inst, _)| inst),
+            Opcode::BrIf => through(func, value, &Map::default()).map(|(inst, _)| inst),
             Opcode::Switch => expected(func, value).map(|(inst, _)| inst),
             _ => None,
         };
@@ -648,6 +688,35 @@ mod tests {
 
         run(&mut func);
         assert_eq!(arms(&func, at[0]), [Some(1_000), Some(9_000)]);
+    }
+
+    /// An inline function's `return likely(x)` arrives as the parameter of the block the call
+    /// returned to, and the branch on that parameter is a branch on the hint.
+    #[test]
+    fn a_hint_handed_to_a_block_parameter_is_still_a_hint() {
+        let (_, mut func, at) = blank(4);
+        let i64_ = Type::int(64);
+        let value = func.append_param(at[0], i64_);
+        let back = func.append_param(at[1], Type::I1);
+        let mut build = Builder::new(&mut func, at[0]);
+        let hint = build.iconst(i64_, 1);
+        let args = build.func().push_values(&[value, hint]);
+        let wrapped = build.value(InstData { args, ..InstData::new(Opcode::Expect) }, i64_);
+        let zero = build.iconst(i64_, 0);
+        let met = build.icmp(IntPred::Ne, wrapped, zero);
+        build.jump(at[1], &[met]);
+        let mut build = Builder::new(&mut func, at[1]);
+        let ones = build.iconst(Type::I1, -1);
+        let cond = build.binary(Opcode::Xor, back, ones, rucc_ir::Flags::NONE);
+        build.br_if(cond, at[2], &[], at[3], &[]);
+        for block in [at[2], at[3]] {
+            let mut build = Builder::new(&mut func, block);
+            let answer = build.iconst(Type::int(32), 0);
+            build.ret(&[answer]);
+        }
+
+        run(&mut func);
+        assert_eq!(arms(&func, at[1]), [Some(1_000), Some(9_000)]);
     }
 
     /// A hint about a value nothing branches on is dropped, and the instruction still goes.
