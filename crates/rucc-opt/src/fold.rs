@@ -353,6 +353,16 @@ pub(crate) fn defined(module: &Module, name: Symbol) -> bool {
     }
 }
 
+/// The integer constant this value is, or the one a pointer was cast from, with the integer's type.
+///
+/// For what works out what a constant argument does to a body, where a null pointer is an
+/// `inttoptr` of a zero. `init_vma_prep` in mm/vma.c passes `NULL` for the `vmg` that every branch
+/// in `init_multi_vma_prep` but two tests, and weighed without it the body was too large to go in
+/// where gcc puts it in.
+pub(crate) fn known(func: &Func, value: Value) -> Option<(Imm, Type)> {
+    constant(func, value).or_else(|| cast(func, value))
+}
+
 /// The integer constant this pointer was cast from, with its type, if it was cast from one.
 fn cast(func: &Func, value: Value) -> Option<(Imm, Type)> {
     let Def::Result { inst, .. } = func[value].def else { return None };
