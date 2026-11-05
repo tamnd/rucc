@@ -95,6 +95,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - rucc-codegen: when a branch nothing predicts goes two ways equally often, the layout now falls into the longer of the two traces, as gcc does, so the body of `if (p && p->x)` falls into the code after it rather than sitting behind it with a jump each way. (#4072)
 - rucc-codegen: a jump to a block that only returns is now the return itself, as gcc writes it, so a trap that carries on ends in `ud2; ret` (#4073)
 - rucc-codegen: the layout test for a lone return calls the pass and not the test helper of the same name, so the crate tests build again (#4074)
+- rucc-opt: a `return` guessed not taken keeps that guess once it is inlined, so `might_alloc` stays on the straight path through `kmem_cache_alloc` as with gcc (#4075)
 
 ## 0.30.15
 

@@ -247,6 +247,15 @@ impl Flags {
     /// never on the same statement.
     pub const READMEM: Self = Self(1 << 27);
 
+    /// The first arm of a `br_if` goes where a `return` marked [`Self::EARLY`] went before the
+    /// function it was in was inlined. gcc's guess outlives the inlining, since the statement that
+    /// carries it is copied with the body, and here the `return` is a jump by then and is soon gone,
+    /// so the branch carries it. A guess like `EARLY` and nothing more. Legal on a `br_if` alone.
+    pub const EARLY_THEN: Self = Self(1 << 28);
+
+    /// [`Self::EARLY_THEN`] for the second arm.
+    pub const EARLY_ELSE: Self = Self(1 << 29);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -376,6 +385,7 @@ impl Flags {
             // end put the offset in the offset field of a load or a store.
             Opcode::PtrAdd => Self::NOALIAS.union(Self::NUW).union(Self::COUNTED),
             Opcode::Return => Self::EARLY,
+            Opcode::BrIf => Self::EARLY_THEN.union(Self::EARLY_ELSE),
             _ => Self::NONE,
         }
     }
@@ -456,6 +466,8 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::EARLY, "early"),
     (Flags::LIBRARY, "library"),
     (Flags::READMEM, "readmem"),
+    (Flags::EARLY_THEN, "early_then"),
+    (Flags::EARLY_ELSE, "early_else"),
 ];
 
 /// The maths functions that [`Flags::LIBRARY`] is about, each with its `float` form. A
@@ -952,6 +964,17 @@ mod tests {
         }
         assert_eq!(Flags::from_name("early"), Some(Flags::EARLY));
         assert_eq!(Flags::EARLY.to_string(), ".early");
+    }
+
+    #[test]
+    fn an_inlined_early_return_is_said_on_the_branch_and_nowhere_else() {
+        for opcode in Opcode::all() {
+            let legal = Flags::legal_on(opcode);
+            assert_eq!(legal.contains(Flags::EARLY_THEN), opcode == Opcode::BrIf, "{opcode}");
+            assert_eq!(legal.contains(Flags::EARLY_ELSE), opcode == Opcode::BrIf, "{opcode}");
+        }
+        assert_eq!(Flags::from_name("early_else"), Some(Flags::EARLY_ELSE));
+        assert_eq!(Flags::EARLY_THEN.to_string(), ".early_then");
     }
 
     #[test]
