@@ -533,6 +533,8 @@ pub static FLAGS: FlagInsts = FlagInsts {
     readers: &[],
     compares_itself,
     zeroing: &[],
+    shifts: &[],
+    signs: &[],
 };
 
 /// Whether the instruction of that name compares and keeps the answer in one opcode.

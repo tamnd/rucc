@@ -60,7 +60,7 @@ pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move, Reading};
 use crate::counts::{BitCount, CountInst};
-use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
+use crate::flags::{Compare, FlagInsts, Reader, Reads, Sign, Zeroing};
 use crate::frame::{ClassMoves, FrameInsts, Probe, SpillMove, Through, Thunks};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
@@ -758,6 +758,8 @@ pub static FLAGS: FlagInsts = FlagInsts {
     compares_itself,
     readers: &READERS,
     zeroing: &ZEROING,
+    shifts: &SHIFTS,
+    signs: &SIGNS,
 };
 
 /// The shorter spellings x86-64 has for the same answer.
@@ -1540,6 +1542,31 @@ static ZEROING: [Zeroing; 64] = [
     Zeroing { name: "sub_rm_32", signed: false, unsigned: false },
     Zeroing { name: "sub_rm_64", signed: false, unsigned: false },
 ];
+
+/// Every shift by a constant that leaves what a comparison of what it wrote against zero leaves,
+/// when the constant is not zero.
+///
+/// The zero and the sign come from what it wrote. The carry is the last bit shifted out and the
+/// overflow is undefined past a count of one, so only the conditions about the zero may read them,
+/// as after an addition.
+static SHIFTS: [Zeroing; 12] = [
+    Zeroing { name: "shl_ri_8", signed: false, unsigned: false },
+    Zeroing { name: "shl_ri_16", signed: false, unsigned: false },
+    Zeroing { name: "shl_ri_32", signed: false, unsigned: false },
+    Zeroing { name: "shl_ri_64", signed: false, unsigned: false },
+    Zeroing { name: "shr_ri_8", signed: false, unsigned: false },
+    Zeroing { name: "shr_ri_16", signed: false, unsigned: false },
+    Zeroing { name: "shr_ri_32", signed: false, unsigned: false },
+    Zeroing { name: "shr_ri_64", signed: false, unsigned: false },
+    Zeroing { name: "sar_ri_8", signed: false, unsigned: false },
+    Zeroing { name: "sar_ri_16", signed: false, unsigned: false },
+    Zeroing { name: "sar_ri_32", signed: false, unsigned: false },
+    Zeroing { name: "sar_ri_64", signed: false, unsigned: false },
+];
+
+/// The two jumps on a signed condition against zero that ask the sign alone.
+static SIGNS: [Sign; 2] =
+    [Sign { name: "jcc_l", sign: "jcc_s" }, Sign { name: "jcc_ge", sign: "jcc_ns" }];
 
 static SYSV_INT_ARGS: [PhysReg; 6] = [RDI, RSI, RDX, RCX, R8, R9];
 static SYSV_SSE_ARGS: [PhysReg; 8] =
