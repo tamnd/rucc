@@ -167,8 +167,8 @@ use std::collections::VecDeque;
 use rucc_base::Idx;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Block, BlockCall, Def, Extra, Func, Hint, Imm, Inst, InstData, IntPred, Opcode, SwitchInfo,
-    Type, Value,
+    Block, BlockCall, Def, Extra, Flags, Func, Hint, Imm, Inst, InstData, IntPred, Opcode,
+    SwitchInfo, Type, Value,
 };
 
 use crate::copy::addressed;
@@ -804,7 +804,8 @@ fn one_place(func: &Func, calls: &[BlockCall]) -> Option<BlockCall> {
 /// Rewrites the terminator as a jump to that one of its targets.
 ///
 /// In place, and the target keeps the arguments it already had, because the arguments belong to
-/// the edge and the edge is the one that survives.
+/// the edge and the edge is the one that survives. A flag only a branch has, such as the arm an
+/// inlined early return was on, goes with the branch.
 pub(crate) fn jump_to(func: &mut Func, term: Inst, call: BlockCall) {
     let targets = func.push_block_calls(&[call]);
     let args = func.push_values(&[]);
@@ -812,6 +813,7 @@ pub(crate) fn jump_to(func: &mut Func, term: Inst, call: BlockCall) {
     data.opcode = Opcode::Jump;
     data.args = args;
     data.extra = Extra::Targets(targets);
+    data.flags = data.flags.intersection(Flags::legal_on(Opcode::Jump));
 }
 
 /// Takes every block the entry does not reach out of the function.
@@ -2134,6 +2136,17 @@ block2:
         let term = func.terminator(Block::from_usize(0)).expect("the entry still branches");
         assert_eq!(goes_to(&func, 0), [2, 1]);
         assert_eq!(func[term].flags, Flags::EARLY_ELSE);
+    }
+
+    #[test]
+    fn a_branch_made_a_jump_keeps_no_flag_a_jump_cannot_have() {
+        let (mut func, _) = negated(false);
+        let term = func.terminator(Block::from_usize(0)).expect("the entry branches");
+        func[term].flags = Flags::EARLY_THEN;
+        let call = func.successors(term).next().expect("a branch has arms");
+        super::jump_to(&mut func, term, call);
+        assert_eq!(func[term].opcode, Opcode::Jump);
+        assert_eq!(func[term].flags, Flags::NONE);
     }
 
     #[test]
