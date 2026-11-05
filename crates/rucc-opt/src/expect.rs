@@ -138,19 +138,28 @@ impl Pass for Expect {
     }
 }
 
-/// Each block parameter that is handed the same value on every edge into its block, and that
-/// value.
+/// Each block parameter that is handed the same value on every edge into its block that does not
+/// hand it a constant, and that value.
 ///
 /// An inline function that returns `likely(ok)` returns it to a block the call was split at, so a
 /// branch on what it gave back is a branch on that block's parameter. The kernel's
 /// `atomic_try_cmpxchg` is that, and every `while (!atomic_try_cmpxchg(...))` lost its hint at the
 /// parameter.
+///
+/// An edge that hands a constant is left out, because the branch is already decided on that edge
+/// and `thread` takes it straight to its arm. What is left of the branch is the one on the value.
+/// `if (!file || unlikely(file->f_mode & mask))` in the kernel's `__fget_light` is that: the `||`
+/// is a parameter handed `true` when there is no file and the hint when there is one, and without
+/// this the hint was dropped and the likely way out was laid out as a jump on every read and write.
 fn passed(func: &Func) -> Map<Value, Value> {
     let mut seen: Map<Value, Option<Value>> = Map::default();
     for block in func.blocks() {
         let Some(term) = func.terminator(block) else { continue };
         for to in func.successors(term) {
             for (&param, &arg) in func[to.block].params.iter().zip(func[to.args].iter()) {
+                if constant(func, arg).is_some() {
+                    continue;
+                }
                 let one = seen.entry(param).or_insert(Some(arg));
                 if *one != Some(arg) {
                     *one = None;
@@ -717,6 +726,37 @@ mod tests {
 
         run(&mut func);
         assert_eq!(arms(&func, at[1]), [Some(1_000), Some(9_000)]);
+    }
+
+    /// `if (!p || unlikely(x))` hands the block the `||` joins at `true` from the test of `p` and
+    /// the hint from the other side, and the branch there is the branch on the hint.
+    #[test]
+    fn a_constant_handed_to_the_parameter_does_not_hide_the_hint() {
+        let (_, mut func, at) = blank(5);
+        let i64_ = Type::int(64);
+        let first = func.append_param(at[0], Type::I1);
+        let value = func.append_param(at[0], i64_);
+        let either = func.append_param(at[2], Type::I1);
+        let mut build = Builder::new(&mut func, at[0]);
+        let yes = build.iconst(Type::I1, -1);
+        build.br_if(first, at[2], &[yes], at[1], &[]);
+        let mut build = Builder::new(&mut func, at[1]);
+        let hint = build.iconst(i64_, 0);
+        let args = build.func().push_values(&[value, hint]);
+        let wrapped = build.value(InstData { args, ..InstData::new(Opcode::Expect) }, i64_);
+        let zero = build.iconst(i64_, 0);
+        let met = build.icmp(IntPred::Ne, wrapped, zero);
+        build.jump(at[2], &[met]);
+        let mut build = Builder::new(&mut func, at[2]);
+        build.br_if(either, at[3], &[], at[4], &[]);
+        for block in [at[3], at[4]] {
+            let mut build = Builder::new(&mut func, block);
+            let answer = build.iconst(Type::int(32), 0);
+            build.ret(&[answer]);
+        }
+
+        run(&mut func);
+        assert_eq!(arms(&func, at[2]), [Some(1_000), Some(9_000)]);
     }
 
     /// A hint about a value nothing branches on is dropped, and the instruction still goes.
