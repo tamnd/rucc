@@ -301,7 +301,13 @@ impl Read<'_> {
                     self.consumed.push(inst);
                 }
                 self.compares += 1;
-                Some((value, compare(pred, number, ty)))
+                let mut value = value;
+                let mut set = compare(pred, number, ty);
+                while let Some((under, by)) = self.moved(value) {
+                    set = shift(&set, by.wrapping_neg(), max(ty));
+                    value = under;
+                }
+                Some((value, set))
             }
             Opcode::And | Opcode::Or if only => {
                 let (left, one) = self.set(args[0])?;
@@ -320,6 +326,34 @@ impl Read<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The value under an `add` or a `sub` of a constant, and the constant the sum is that value
+    /// plus, so that a comparison of `x - 1` is read as one of `x`. The arithmetic wraps, so the
+    /// set moves around the ends of the range, and `x - 1 < 0` is `x` from the smallest number
+    /// past it up to zero. That is what lets the kernel's `old <= 0 || old - 1 < 0` in
+    /// `__refcount_sub_and_test` be the one test `old <= 0`.
+    fn moved(&mut self, value: Value) -> Option<(Value, u64)> {
+        let func = self.func;
+        let Def::Result { inst, .. } = func[value].def else { return None };
+        let data = &func[inst];
+        let args = &func[data.args];
+        if !matches!(data.opcode, Opcode::Add | Opcode::Sub) || args.len() != 2 {
+            return None;
+        }
+        let (under, by) = match (data.opcode, integer(func, args[0]), integer(func, args[1])) {
+            (Opcode::Add, None, Some(number)) => (args[0], number),
+            (Opcode::Add, Some(number), None) => (args[1], number),
+            (Opcode::Sub, None, Some(number)) => (args[0], number.wrapping_neg()),
+            _ => return None,
+        };
+        if func[under].ty != func[value].ty {
+            return None;
+        }
+        if self.uses[value.index()] == 1 {
+            self.consumed.push(inst);
+        }
+        Some((under, by as u64))
     }
 }
 
@@ -365,18 +399,26 @@ impl Group {
             }
             return Some(Form::Bits { base: lo, span: hi - lo, word });
         }
-        let (negated, intervals) = if outside.len() < self.set.len() {
-            (true, outside)
-        } else {
-            (false, self.set.clone())
-        };
-        let cost = intervals
-            .iter()
-            .map(|&(from, to)| 1 + u32::from(from != 0 && to != top && from != to))
-            .sum::<u32>()
-            + intervals.len() as u32
-            - 1;
-        (cost < had).then_some(Form::Intervals { negated, intervals })
+        // The set is read the unsigned way and the signed way, where the sign bit is flipped so
+        // that the negative numbers come first, and the cheaper reading is taken. `x <= 0` is two
+        // intervals the unsigned way, zero and the top half, and one the signed way.
+        let mut best: Option<(u32, Form)> = None;
+        for flip in [0, top ^ (top >> 1)] {
+            let set = flipped(&self.set, flip, top);
+            let outside = complement(&set, top);
+            let (negated, intervals) =
+                if outside.len() < set.len() { (true, outside) } else { (false, set) };
+            let cost = intervals
+                .iter()
+                .map(|&(from, to)| 1 + u32::from(from != 0 && to != top && from != to))
+                .sum::<u32>()
+                + intervals.len() as u32
+                - 1;
+            if best.as_ref().is_none_or(|(least, _)| cost < *least) {
+                best = Some((cost, Form::Intervals { negated, flip, intervals }));
+            }
+        }
+        best.filter(|(cost, _)| *cost < had).map(|(_, form)| form)
     }
 }
 
@@ -384,8 +426,10 @@ impl Group {
 enum Form {
     /// Always this.
     Constant(bool),
-    /// In one of these intervals, or with `negated`, in none of them.
-    Intervals { negated: bool, intervals: Vec<(u64, u64)> },
+    /// In one of these intervals, or with `negated`, in none of them. The intervals are of the
+    /// value with the bits of `flip` flipped, which is the sign bit for a signed reading and
+    /// nothing for an unsigned one.
+    Intervals { negated: bool, flip: u64, intervals: Vec<(u64, u64)> },
     /// Within `span` of `base`, and the bit of `word` at the distance from `base` is set.
     Bits { base: u64, span: u64, word: u64 },
 }
@@ -431,11 +475,11 @@ impl Form {
 fn test(func: &mut Func, before: Inst, value: Value, ty: Type, form: &Form) -> Value {
     match form {
         Form::Constant(yes) => constant(func, before, Type::I1, i128::from(*yes)),
-        Form::Intervals { negated, intervals } => {
+        Form::Intervals { negated, flip, intervals } => {
             let join = if *negated { Opcode::And } else { Opcode::Or };
             let mut acc: Option<Value> = None;
-            for &(from, to) in intervals {
-                let test = interval(func, before, value, ty, from, to, *negated);
+            for &ends in intervals {
+                let test = interval(func, before, value, ty, ends, *negated, *flip);
                 acc = Some(match acc {
                     None => test,
                     Some(had) => binary(func, before, join, had, test, Type::I1),
@@ -654,25 +698,29 @@ fn link(
     Some(Link { set, compares: read.compares, other: edges[1 - at] })
 }
 
-/// Whether `value` is in `[from, to]`, or with `negated`, whether it is not.
+/// Whether `value` with the bits of `flip` flipped is in `[from, to]`, or with `negated`, whether
+/// it is not. With the sign bit flipped an interval at an end is a signed comparison, and one in
+/// the middle is the same subtract as ever, since flipping the top bit is adding it.
 fn interval(
     func: &mut Func,
     before: Inst,
     value: Value,
     ty: Type,
-    from: u64,
-    to: u64,
+    (from, to): (u64, u64),
     negated: bool,
+    flip: u64,
 ) -> Value {
     let top = max(ty);
+    let (below, above) =
+        if flip == 0 { (IntPred::Ule, IntPred::Uge) } else { (IntPred::Sle, IntPred::Sge) };
     let (pred, lhs, number) = if from == to {
-        (IntPred::Eq, value, from)
+        (IntPred::Eq, value, from ^ flip)
     } else if from == 0 {
-        (IntPred::Ule, value, to)
+        (below, value, to ^ flip)
     } else if to == top {
-        (IntPred::Uge, value, from)
+        (above, value, from ^ flip)
     } else {
-        let base = constant(func, before, ty, i128::from(from));
+        let base = constant(func, before, ty, i128::from(from ^ flip));
         let moved = binary(func, before, Opcode::Sub, value, base, ty);
         (IntPred::Ule, moved, to - from)
     };
@@ -763,6 +811,38 @@ fn signed_interval(from: i128, to: i128, ty: Type) -> Vec<(u64, u64)> {
     }
 }
 
+/// The set of `x + by` for each `x` in the set, wrapping at `top`.
+fn shift(set: &[(u64, u64)], by: u64, top: u64) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    for &(from, to) in set {
+        let (from, to) = (from.wrapping_add(by) & top, to.wrapping_add(by) & top);
+        if from <= to {
+            out.push((from, to));
+        } else {
+            out.push((from, top));
+            out.push((0, to));
+        }
+    }
+    union(&out, &[])
+}
+
+/// The set of `x ^ flip` for each `x` in the set, where `flip` is nothing or the top bit.
+fn flipped(set: &[(u64, u64)], flip: u64, top: u64) -> Vec<(u64, u64)> {
+    if flip == 0 {
+        return set.to_vec();
+    }
+    let mut out = Vec::new();
+    for &(from, to) in set {
+        if from & flip == to & flip {
+            out.push((from ^ flip, to ^ flip));
+        } else {
+            out.push((from ^ flip, top));
+            out.push((0, to ^ flip));
+        }
+    }
+    union(&out, &[])
+}
+
 /// The intervals sorted, with the ones that overlap or touch made one.
 fn union(one: &[(u64, u64)], two: &[(u64, u64)]) -> Vec<(u64, u64)> {
     let mut all: Vec<(u64, u64)> = one.iter().chain(two).copied().collect();
@@ -835,7 +915,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::Type;
 
-    use super::{RangeTest, compare, complement, intersect, union};
+    use super::{RangeTest, compare, complement, flipped, intersect, shift, union};
     use crate::{Fuel, Pass};
 
     const HEAD: &str = r#"; ModuleID = 't.c'
@@ -1124,6 +1204,70 @@ block0(%0: i32):
 "#;
         let out = cleaned(body);
         assert!(out.contains("%5 = or %2, %4"), "{out}");
+    }
+
+    /// Moving a set by a constant and flipping its sign bit agree with the arithmetic, over every
+    /// set of one interval of four bits.
+    #[test]
+    fn a_moved_or_flipped_set_is_the_values_it_stands_for() {
+        let top = 15u64;
+        let has = |set: &[(u64, u64)], x: u64| set.iter().any(|&(from, to)| from <= x && x <= to);
+        for a in 0..=top {
+            for b in a..=top {
+                let set = [(a, b)];
+                for by in 0..=top {
+                    let moved = shift(&set, by, top);
+                    for x in 0..=top {
+                        assert_eq!(has(&moved, (x + by) & top), has(&set, x), "{set:?} {by}");
+                    }
+                }
+                let signed = flipped(&set, 8, top);
+                for x in 0..=top {
+                    assert_eq!(has(&signed, x ^ 8), has(&set, x), "{set:?}");
+                }
+            }
+        }
+    }
+
+    /// `old <= 0 || old - 1 < 0` from `__refcount_sub_and_test` is the one signed test `old <= 0`,
+    /// since the wrapping `old - 1` is negative only for `old` from past the smallest number up to
+    /// zero.
+    #[test]
+    fn a_comparison_of_a_value_moved_by_a_constant_is_one_of_the_value() {
+        let out = cleaned(
+            r#"
+func @f(i32) -> i1, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp sle %0, %1
+    %3 = iconst.i32 1
+    %4 = sub %0, %3
+    %5 = icmp slt %4, %1
+    %6 = or %2, %5
+    return %6
+}
+
+func @g(i32) -> i1, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 5
+    %2 = add %0, %1
+    %3 = iconst.i32 3
+    %4 = icmp ult %2, %3
+    %5 = iconst.i32 -2
+    %6 = icmp eq %0, %5
+    %7 = or %4, %6
+    return %7
+}
+"#,
+        );
+        let f = out.split("func @g").next().expect("two functions");
+        assert_eq!(count(f, "icmp"), 1, "{out}");
+        assert!(f.contains("icmp sle %0"), "{out}");
+        assert_eq!(count(f, "sub"), 0, "{out}");
+        // `x + 5 < 3` is `x` in `[-5, -3]` and `x == -2` touches it, so `x + 5 <= 3`.
+        let g = out.split("func @g").nth(1).expect("two functions");
+        assert_eq!(count(g, "icmp"), 1, "{out}");
+        assert_eq!(count(g, "or"), 0, "{out}");
     }
 
     /// `x == 1 || x == 2 || x == 3` at `-O1`, once `simplify-cfg` has merged what `thread` left: three
