@@ -97,6 +97,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - rucc-codegen: the layout test for a lone return calls the pass and not the test helper of the same name, so the crate tests build again (#4074)
 - rucc-opt: a `return` guessed not taken keeps that guess once it is inlined, so `might_alloc` stays on the straight path through `kmem_cache_alloc` as with gcc (#4075)
 - rucc-opt: a branch on a negation that is turned round turns the arm its inlined early return was on with it, so the work of an inlined body is no longer guessed cold (#4076)
+- A branch that simplify_cfg makes a jump, or that rangeswitch makes a switch, and a return that phiopt makes a jump, keep no flag the new opcode cannot have, so `-Zverify-each` and debug builds no longer reject the early return flags on them (#4077)
 
 ## 0.30.15
 

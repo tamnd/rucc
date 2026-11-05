@@ -31,7 +31,7 @@
 //! ...`, those are the cases instead and they go to the arm taken when the tree is false.
 
 use rucc_cost::heuristics::{RANGE_SWITCH_CASES, RANGE_TEST_BIT_INTERVALS};
-use rucc_ir::{Block, BlockCall, Extra, Func, Hint, Imm, Inst, Opcode, SwitchInfo, Value};
+use rucc_ir::{Block, BlockCall, Extra, Flags, Func, Hint, Imm, Inst, Opcode, SwitchInfo, Value};
 
 use crate::rangetest::{Read, complement, max, sweep};
 use crate::uses::count;
@@ -156,7 +156,8 @@ impl Plan {
         Some(Self { value, cases, taken, default, consumed: read.consumed })
     }
 
-    /// Writes the `switch` over the branch.
+    /// Writes the `switch` over the branch. A flag only a branch has, such as the arm an inlined
+    /// early return was on, does not say anything about a switch and goes with the branch.
     fn build(&self, func: &mut Func, term: Inst) {
         let ty = func[self.value].ty;
         let mut calls = vec![self.default];
@@ -171,6 +172,7 @@ impl Plan {
         data.opcode = Opcode::Switch;
         data.args = args;
         data.extra = Extra::Switch(info);
+        data.flags = data.flags.intersection(Flags::legal_on(Opcode::Switch));
     }
 }
 
@@ -322,6 +324,14 @@ block2:
         assert!(cases.iter().all(|case| case.1 == "block1"), "{out}");
         assert!(!out.contains("icmp"), "the comparisons go with the branch\n{out}");
         assert!(!out.contains("br_if"), "{out}");
+    }
+
+    #[test]
+    fn the_switch_keeps_no_flag_only_a_branch_has() {
+        let body = chain("eq", "or", &SHARED).replace("br_if %", "br_if.early_then %");
+        let out = run(&body);
+        assert!(switch(&out).is_some(), "{out}");
+        assert!(!out.contains("early_then"), "{out}");
     }
 
     #[test]

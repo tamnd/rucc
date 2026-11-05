@@ -658,7 +658,8 @@ fn two_returns(func: &Func, cfg: &Cfg, head: Block) -> Option<[Inst; 2]> {
 }
 
 /// Points the two returns at one new block that returns what they did, and answers what to put
-/// back if the diamond that makes is refused.
+/// back if the diamond that makes is refused. The jumps that were returns keep no flag a jump
+/// cannot have, such as `early`.
 fn join_returns(func: &mut Func, ends: [Inst; 2]) -> Joined {
     let span = func.span(ends[0]);
     let join = func.create_block();
@@ -675,6 +676,7 @@ fn join_returns(func: &mut Func, ends: [Inst; 2]) -> Joined {
         data.opcode = Opcode::Jump;
         data.args = empty;
         data.extra = Extra::Targets(targets);
+        data.flags = data.flags.intersection(Flags::legal_on(Opcode::Jump));
     }
     Joined { join, ends: saved }
 }
