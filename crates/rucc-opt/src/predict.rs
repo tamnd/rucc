@@ -58,6 +58,14 @@
 //! part, which is the branch whose arm returns and not the branches inside that arm, and two arms
 //! that each reach a marked `return` of their own cancel out.
 //!
+//! gcc's guess outlives inlining, because the statement that carries it is copied with the body
+//! and the profile is guessed after the early inliner has run. The kernel's `might_alloc` returns
+//! early when the task is reclaiming, and gcc keeps the rest of it on the straight path through
+//! every allocator it is inlined into. Here the `return` is a jump once it is inlined, so the
+//! inliner asks [`early_arms`] which arms of the callee's branches it would have guessed against
+//! and puts the answer on the copies, as [`Flags::EARLY_THEN`] and [`Flags::EARLY_ELSE`], and this
+//! reads those as it reads the marked `return`.
+//!
 //! # Two numbers not equal
 //!
 //! The twelfth, asked last, and it is gcc's `PRED_OPCODE_NONEQUAL` at sixty six percent: a test of
@@ -461,12 +469,12 @@ fn branch(
         );
     }
 
-    let ends = |at: Block| ends(at, block);
-    if ends(first) != ends(second) {
-        return (
-            toward(!ends(first), rucc_cost::param!(PREDICT_EARLY_RETURN)),
-            Predictor::EarlyReturn,
-        );
+    // An arm a marked `return` here post-dominates, or one an inlined `return` was on.
+    let flags = func[term].flags;
+    let then = ends(first, block) || flags.contains(Flags::EARLY_THEN);
+    let other = ends(second, block) || flags.contains(Flags::EARLY_ELSE);
+    if then != other {
+        return (toward(!then, rucc_cost::param!(PREDICT_EARLY_RETURN)), Predictor::EarlyReturn);
     }
 
     if let Some(taken) = nonequal(func, cond) {
@@ -474,6 +482,31 @@ fn branch(
     }
 
     (Probability::even(), Predictor::Nothing)
+}
+
+/// The flag each two armed branch of a function is to carry once the function is inlined, for the
+/// branches the early return predictor has an answer for. See the module documentation.
+///
+/// Nothing at all for a function with no marked `return` and no branch that already carries one,
+/// which costs no post-dominator tree.
+pub(crate) fn early_arms(func: &Func) -> Map<Inst, Flags> {
+    let mut arms = Map::default();
+    let cfg = Cfg::new(func);
+    let early = Early::of(func, &cfg);
+    for &block in cfg.postorder() {
+        let Some(term) = func.terminator(block) else { continue };
+        let succs = cfg.successors(block);
+        if func[term].opcode != Opcode::BrIf || succs.len() != 2 || succs[0] == succs[1] {
+            continue;
+        }
+        let flags = func[term].flags;
+        let then = early.ends(succs[0], block) || flags.contains(Flags::EARLY_THEN);
+        let other = early.ends(succs[1], block) || flags.contains(Flags::EARLY_ELSE);
+        if then != other {
+            arms.insert(term, if then { Flags::EARLY_THEN } else { Flags::EARLY_ELSE });
+        }
+    }
+    arms
 }
 
 /// Whether the block ends in a `return` the front end marked [`Flags::EARLY`].
@@ -1517,6 +1550,25 @@ mod tests {
         assert_eq!(seen.by(at[0]), Predictor::EarlyReturn);
         assert_eq!(seen.taken(at[0], 0), Probability::percent(66, Quality::Guessed).complement());
         assert_eq!(seen.taken(at[0], 1), Probability::percent(66, Quality::Guessed));
+    }
+
+    #[test]
+    fn an_arm_an_inlined_early_return_was_on_is_the_one_not_taken() {
+        // What `if (x) return 1; return 2;` leaves when it was inlined: neither `return` is
+        // marked, and the branch says which of its arms was.
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let cond = build.iconst(Type::int(1), 1);
+        let branch = build.br_if(cond, at[1], &[], at[2], &[]);
+        returns(&mut func, &[(at[1], 1, true), (at[2], 2, false)]);
+        assert_eq!(super::early_arms(&func).get(&branch), Some(&Flags::EARLY_THEN));
+        let ret = func.terminator(at[1]).expect("the arm returns");
+        func[ret].flags = Flags::NONE;
+        func[branch].flags |= Flags::EARLY_THEN;
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::EarlyReturn);
+        assert_eq!(seen.taken(at[0], 0), Probability::percent(66, Quality::Guessed).complement());
     }
 
     #[test]

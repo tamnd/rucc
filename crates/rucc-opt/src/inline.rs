@@ -3467,6 +3467,9 @@ fn copy(
             begun.push(slot);
         }
     }
+    // The branches the callee's early returns are guessed against, said on the copies, since the
+    // returns are jumps here. See `predict::early_arms`.
+    let early = crate::predict::early_arms(callee);
     let mut exits = Vec::new();
     let mut made = Vec::new();
     pool.enter(call);
@@ -3488,7 +3491,8 @@ fn copy(
             let types: Vec<Type> = data.results().map(|value| callee[value].ty).collect();
             // A `return` that becomes a jump keeps nothing, since the flags it carries are about
             // leaving the function, and this one no longer does.
-            let flags = data.flags.without(dropped).intersection(Flags::legal_on(opcode));
+            let flags = data.flags.union(early.get(&inst).copied().unwrap_or(Flags::NONE));
+            let flags = flags.without(dropped).intersection(Flags::legal_on(opcode));
             let shell = InstData { flags, ..InstData::new(opcode) };
             let fixed = opcode == Opcode::Alloca && data.args.is_empty();
             let shared = fixed && !data.first_result.is_some_and(|value| scalar.contains(&value));
