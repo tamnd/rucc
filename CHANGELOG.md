@@ -100,6 +100,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - A branch that simplify_cfg makes a jump, or that rangeswitch makes a switch, and a return that phiopt makes a jump, keep no flag the new opcode cannot have, so `-Zverify-each` and debug builds no longer reject the early return flags on them (#4077)
 - simplify no longer rewrites a choice between pointers with an integer rule, so `c ? p + 1 : p` stays a `select.ptr` rather than becoming an add of a pointer and an integer that `-Zverify-each` rejects (#4078)
 - The predict module docs name `early_arms` without linking it, since it is private and the docs job failed on the link (#4079)
+- Range tests now read a comparison of x plus or minus a constant as a comparison of x, and can test a signed range with one signed compare, so `old - 1 < 0 || old == 1` in the refcount put folds into one `old <= 0` test (#4080)
 
 ## 0.30.15
 
