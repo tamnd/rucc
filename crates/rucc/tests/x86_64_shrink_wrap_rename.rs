@@ -290,14 +290,21 @@ fn lines(text: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether some `ret` in the body comes right after something other than a `pop`, which is a way
+/// out that never took the frame. The early returns are guessed not taken, as gcc guesses them, so
+/// they are laid out after the rest of the function rather than in front of the prologue.
+fn returns_bare(body: &[String]) -> bool {
+    let code: Vec<&String> = body.iter().filter(|line| !line.starts_with('.')).collect();
+    code.windows(2).any(|pair| pair[1] == "ret" && !pair[0].starts_with("pop"))
+}
+
 #[test]
 fn the_early_returns_push_nothing() {
     let text = listing();
     let body = lines(&text, "upd");
     let first = body.iter().position(|line| line.starts_with("push")).expect("a prologue");
-    let rets = body[..first].iter().filter(|line| *line == "ret").count();
     let branches = body[..first].iter().filter(|line| line.starts_with('j')).count();
-    assert!(rets >= 1 && branches >= 2, "{text}");
+    assert!(returns_bare(&body) && branches >= 2, "{text}");
 }
 
 #[test]
@@ -305,8 +312,8 @@ fn a_joined_comparison_leaves_its_byte_free() {
     let text = listing_of(&format!("{SOURCE}{JOINED}"));
     let body = lines(&text, "upd_se");
     let first = body.iter().position(|line| line.starts_with("push")).expect("a prologue");
-    let rets = body[..first].iter().filter(|line| *line == "ret").count();
-    assert!(rets >= 1, "{text}");
+    let branches = body[..first].iter().filter(|line| line.starts_with('j')).count();
+    assert!(returns_bare(&body) && branches >= 2, "{text}");
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
