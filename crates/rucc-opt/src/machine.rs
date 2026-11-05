@@ -42,7 +42,7 @@ pub struct Machine {
     isa: Isa,
     /// The bit counts the target has one instruction for, which the code generator reads too.
     counts: &'static [CountInst],
-    /// Whether a `select` of a pointer or a float is lowered. See `TargetInfo::selects_any`.
+    /// Whether a `select` of a float is lowered. See `TargetInfo::selects_any`.
     selects_any: bool,
     /// How many bits a pointer has, which is also how wide the index of an address is.
     pointer_bits: u32,
@@ -108,9 +108,10 @@ impl Machine {
     /// Whether the code generator lowers a `select` of a value of this type.
     ///
     /// Every target lowers one of an integer of 8, 16, 32 or 64 bits, which are the four widths
-    /// `crates/rucc-ir/src/term.rs` names a `select` at. A target whose `TargetInfo::selects_any`
-    /// is true also lowers one of a pointer, a `float` and a `double`. A wider integer, a wider
-    /// float, a bit and a vector have no lowering on any target.
+    /// `crates/rucc-ir/src/term.rs` names a `select` at, and one of a pointer, which that file
+    /// names at the width of an address, so the rule it reaches is the integer one at that width.
+    /// A target whose `TargetInfo::selects_any` is true also lowers one of a `float` and a
+    /// `double`. A wider integer, a wider float, a bit and a vector have no lowering on any target.
     #[must_use]
     pub fn selects(self, ty: Type) -> bool {
         if !ty.is_scalar() {
@@ -119,7 +120,7 @@ impl Machine {
         if ty.is_int() {
             return matches!(ty.bits(), 8 | 16 | 32 | 64);
         }
-        self.selects_any && (ty == Type::PTR || (ty.is_float() && matches!(ty.bits(), 32 | 64)))
+        ty == Type::PTR || (self.selects_any && ty.is_float() && matches!(ty.bits(), 32 | 64))
     }
 
     /// The machine for costs already in hand.

@@ -1965,16 +1965,19 @@ mod tests {
         converted
     }
 
-    /// wasm has one `select` for every number type and a pointer is an `i32` there, so a choice
-    /// of two pointers or two doubles is a `select`. A native target lowers a `select` only at the
-    /// four integer widths and keeps the branch. A quad has no `select` on any target.
+    /// wasm has one `select` for every number type, so a choice of two doubles is a `select`. A
+    /// native target lowers a `select` only at the four integer widths and keeps the branch. A
+    /// pointer is an integer as wide as an address everywhere, as gcc's `cmov` for
+    /// `cond ? p : NULL` is, and a quad has no `select` on any target.
     #[test]
-    fn a_pointer_or_a_float_is_selected_only_where_the_machine_lowers_it() {
+    fn a_float_is_selected_only_where_the_machine_lowers_it() {
         let double = Type::float(Float::F64);
-        for ty in [Type::PTR, Type::float(Float::F32), double] {
+        for ty in [Type::float(Float::F32), double] {
             assert!(converts(ty, true), "{ty}");
             assert!(!converts(ty, false), "{ty}");
         }
+        assert!(converts(Type::PTR, true));
+        assert!(converts(Type::PTR, false));
         assert!(!converts(Type::float(Float::F128), true));
         assert!(converts(Type::int(64), false));
     }
@@ -2735,26 +2738,26 @@ mod tests {
         assert!(opcodes(&func, 0).contains(&Opcode::SDiv));
     }
 
-    /// Nothing chooses between two pointers, so the shape is matched and then left alone.
+    /// Nothing native chooses between two doubles, so the shape is matched and then left alone.
     #[test]
     fn a_value_no_select_is_lowered_for_keeps_its_branch() {
         let mut names = Interner::new();
+        let double = Type::float(Float::F64);
         let signature = Signature::new().with_params(&[Type::int(32)]);
         let mut func = Func::new(names.intern("f"), signature);
         let head = func.create_block();
         let outside = func.append_param(head, Type::int(32));
         let arms = [func.create_block(), func.create_block()];
         let join = func.create_block();
-        func.append_param(join, Type::PTR);
+        func.append_param(join, double);
 
         let mut build = Builder::new(&mut func, head);
         let zero = build.iconst(Type::int(32), 0);
         let test = build.icmp(IntPred::Slt, outside, zero);
         build.br_if(test, arms[0], &[], arms[1], &[]);
-        for (arm, value) in arms.iter().zip([16, 32]) {
+        for (arm, bits) in arms.iter().zip([0x3ff0_u128 << 48, 0x4000_u128 << 48]) {
             let mut build = Builder::new(&mut func, *arm);
-            let it = build.iconst(Type::int(64), value);
-            let it = build.unary(Opcode::IntToPtr, it, Type::PTR);
+            let it = build.fconst(double, bits);
             build.jump(join, &[it]);
         }
         let mut build = Builder::new(&mut func, join);
@@ -2767,7 +2770,7 @@ mod tests {
 
     /// And nothing chooses between two floats either, at any format.
     ///
-    /// Worth its own test although the answer is the pointer one's, because this is the pass that
+    /// Worth its own test although the answer is the double one's, because this is the pass that
     /// decides it for every float in the language and `crates/rucc-codegen/src/quad.rs` says so in
     /// its own documentation: a conditional expression over two quads is a branch and a phi and
     /// stays one, so the back end never sees a `select` at that format and needs no lowering for

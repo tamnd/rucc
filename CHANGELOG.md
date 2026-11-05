@@ -91,6 +91,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - rucc-opt: `(x & c) | d` is `x | d` when `d` sets every bit `c` clears, so storing a one to a bit field is one `orb` to memory as with gcc, where it was a load, an `and`, an `or` and a store. (#4068)
 - rucc-opt: a `__builtin_expect` under a `!`, as in `if (!likely(x))` and every kernel `while (!try_cmpxchg(...))` loop, now weights its branch, so `percpu_counter_add_batch` lays out as one straight loop like gcc. (#4069)
 - rucc-opt: a `__builtin_expect` an inline function returns, as in the kernel's `atomic_try_cmpxchg`, now weights the branch in its caller, where the hint stopped at the parameter of the block the call returned to. (#4070)
+- rucc-opt: phiopt now turns a choice between two pointers into a select on every target, so `cond ? p : NULL` is a cmov as gcc writes it, where native targets kept the branch. (#4071)
 
 ## 0.30.15
 

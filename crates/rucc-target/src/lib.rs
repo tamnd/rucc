@@ -1130,13 +1130,14 @@ pub struct TargetInfo {
     /// The code generator writes a count that is not here out as arithmetic, so a pass that would
     /// put one where there was none reads this first. See [`CountInst`].
     pub counts: &'static [CountInst],
-    /// Whether the code generator lowers a `select` of a pointer, a `float` or a `double`, and not
-    /// only of an integer of 8, 16, 32 or 64 bits.
+    /// Whether the code generator lowers a `select` of a `float` or a `double`, and not only of an
+    /// integer of 8, 16, 32 or 64 bits or of a pointer.
     ///
-    /// True only on wasm, where one `select` instruction takes two operands of any number type and
-    /// a pointer is an `i32`. The native rule set names a `select` only at the four integer widths,
-    /// so there a choice between two pointers stays a branch. If-conversion reads this before it
-    /// writes a `select`, because a `select` that no rule lowers fails at instruction selection.
+    /// True only on wasm, where one `select` instruction takes two operands of any number type.
+    /// The native rule set names a `select` only at the four integer widths, and a pointer reaches
+    /// the one at the width of an address, so there a choice between two floats stays a branch.
+    /// If-conversion reads this before it writes a `select`, because a `select` that no rule lowers
+    /// fails at instruction selection.
     pub selects_any: bool,
     /// Whether the second inliner treats a call in a loop as hinted when its callee goes away with
     /// it: the callee is `static`, every call to it is in this caller, and the caller is not
