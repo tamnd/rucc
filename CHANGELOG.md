@@ -102,6 +102,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - The predict module docs name `early_arms` without linking it, since it is private and the docs job failed on the link (#4079)
 - Range tests now read a comparison of x plus or minus a constant as a comparison of x, and can test a signed range with one signed compare, so `old - 1 < 0 || old == 1` in the refcount put folds into one `old <= 0` test (#4080)
 - The expect pass now keeps a `__builtin_expect` hint behind a `||` that was lowered to a block parameter, by skipping constant edges when it looks for the value handed to the parameter, so the likely path of `__fget_light` falls through again (#4081)
+- Branch prediction no longer guesses "not equal" for a count stepped by a constant and tested against zero, so `--nesting == 0` in `__rcu_read_unlock` falls through to the common path as it does with gcc (#4082)
 
 ## 0.30.15
 
