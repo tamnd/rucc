@@ -1918,12 +1918,12 @@ mod tests {
         let text = laid_out(&mut func, &mut names);
         assert_eq!(order_of(&func), [0, 2, 1, 3]);
         assert!(text.iter().any(|line| line.starts_with("x64.jmp")), "{text:?}");
-        assert_eq!(returns(&mut func, &BRANCH, "ret", &mut names), 1);
+        assert_eq!(super::returns(&mut func, &BRANCH, "ret", &mut names), 1);
 
         assert!(func[made[2]].succs.is_empty());
         let last = func.terminator(made[2]).map(|inst| func[inst].opcode);
         assert_eq!(last, Some(ret));
-        assert_eq!(returns(&mut func, &BRANCH, "ret", &mut names), 0);
+        assert_eq!(super::returns(&mut func, &BRANCH, "ret", &mut names), 0);
     }
 
     /// The blocks in layout order, by the number each was made with.
