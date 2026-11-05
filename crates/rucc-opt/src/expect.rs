@@ -221,6 +221,15 @@ fn expected(func: &Func, value: Value) -> Option<(Inst, Vec<Step>)> {
 /// comparison against zero, and what the peephole writes for `!x` is the same comparison the other
 /// way round, so the chain is comparisons against zero and widenings that do not change whether a
 /// value is zero.
+///
+/// The `!` of a whole condition is different. `if (!likely(x))` is the comparison above with a
+/// `not` of the one bit on top, which is an `xor` with all ones, and the kernel writes every
+/// `try_cmpxchg` loop as `while (!try_cmpxchg(...))` on a `likely` inside. Without this the hint on
+/// all of them was dropped, and the loop was laid out as if the exchange failed nine times in ten.
+///
+/// A narrowing is taken only when what it narrows was widened from no wider than it narrows to, so
+/// it cannot drop a bit that was set. `int ok = likely(x)` is that: the `long` the `expect` gives is
+/// a `bool` widened, and the `int` it is stored in still holds all of it.
 fn through(func: &Func, cond: Value) -> Option<(Inst, bool)> {
     let mut value = cond;
     let mut sense = true;
@@ -233,6 +242,23 @@ fn through(func: &Func, cond: Value) -> Option<(Inst, bool)> {
             Opcode::Expect => return Some((inst, sense)),
             // A widening keeps a value zero and keeps it non-zero, whichever bit pattern it makes.
             Opcode::ZExt | Opcode::SExt => value = *func[data.args].first()?,
+            Opcode::Trunc => {
+                let from = *func[data.args].first()?;
+                if !fits(func, from, func[value].ty.bits()) {
+                    return None;
+                }
+                value = from;
+            }
+            Opcode::Xor if func[value].ty == Type::I1 => {
+                let args = &func[data.args];
+                let (lhs, rhs) = (*args.first()?, *args.get(1)?);
+                value = match (literal(func, lhs), literal(func, rhs)) {
+                    (_, Some(-1)) => lhs,
+                    (Some(-1), _) => rhs,
+                    _ => return None,
+                };
+                sense = !sense;
+            }
             Opcode::ICmp => {
                 let Extra::IntPred(pred) = data.extra else { return None };
                 let args = &func[data.args];
@@ -249,6 +275,22 @@ fn through(func: &Func, cond: Value) -> Option<(Inst, bool)> {
                 value = lhs;
             }
             _ => return None,
+        }
+    }
+}
+
+/// Whether a value going into a narrowing to `bits` was widened from no wider than that, through
+/// the `expect` it may be behind.
+fn fits(func: &Func, value: Value, bits: u32) -> bool {
+    let mut value = value;
+    loop {
+        let Def::Result { inst, .. } = func[value].def else { return false };
+        let data = &func[inst];
+        let Some(&from) = func[data.args].first() else { return false };
+        match data.opcode {
+            Opcode::Expect => value = from,
+            Opcode::ZExt | Opcode::SExt => return func[from].ty.bits() <= bits,
+            _ => return false,
         }
     }
 }
@@ -547,6 +589,60 @@ mod tests {
         for block in [at[1], at[2]] {
             let mut build = Builder::new(&mut func, block);
             let answer = build.iconst(Type::int(32), 0);
+            build.ret(&[answer]);
+        }
+
+        run(&mut func);
+        assert_eq!(arms(&func, at[0]), [Some(1_000), Some(9_000)]);
+    }
+
+    /// A `!` on the whole condition is an `xor` of the bit with all ones, and is the same claim
+    /// about the other arm.
+    #[test]
+    fn a_condition_with_a_not_on_top_flips_the_arms() {
+        let (_, mut func, at) = blank(3);
+        let i64_ = Type::int(64);
+        let value = func.append_param(at[0], i64_);
+        let mut build = Builder::new(&mut func, at[0]);
+        let hint = build.iconst(i64_, 1);
+        let args = build.func().push_values(&[value, hint]);
+        let wrapped = build.value(InstData { args, ..InstData::new(Opcode::Expect) }, i64_);
+        let zero = build.iconst(i64_, 0);
+        let met = build.icmp(IntPred::Ne, wrapped, zero);
+        let ones = build.iconst(Type::I1, -1);
+        let cond = build.binary(Opcode::Xor, met, ones, rucc_ir::Flags::NONE);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        for block in [at[1], at[2]] {
+            let mut build = Builder::new(&mut func, block);
+            let answer = build.iconst(Type::int(32), 0);
+            build.ret(&[answer]);
+        }
+
+        run(&mut func);
+        assert_eq!(arms(&func, at[0]), [Some(1_000), Some(9_000)]);
+    }
+
+    /// `int ok = likely(x); if (!ok)` narrows the `long` the hint gave back to the `int`, which
+    /// loses nothing when the `long` was a `bool` widened.
+    #[test]
+    fn a_narrowing_of_a_widened_bit_keeps_the_hint() {
+        let (_, mut func, at) = blank(3);
+        let (int, long) = (Type::int(32), Type::int(64));
+        let value = func.append_param(at[0], long);
+        let mut build = Builder::new(&mut func, at[0]);
+        let zero = build.iconst(long, 0);
+        let bit = build.icmp(IntPred::Ne, value, zero);
+        let wide = build.unary(Opcode::ZExt, bit, long);
+        let hint = build.iconst(long, 1);
+        let args = build.func().push_values(&[wide, hint]);
+        let wrapped = build.value(InstData { args, ..InstData::new(Opcode::Expect) }, long);
+        let ok = build.unary(Opcode::Trunc, wrapped, int);
+        let none = build.iconst(int, 0);
+        let cond = build.icmp(IntPred::Eq, ok, none);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        for block in [at[1], at[2]] {
+            let mut build = Builder::new(&mut func, block);
+            let answer = build.iconst(int, 0);
             build.ret(&[answer]);
         }
 

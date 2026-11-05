@@ -658,9 +658,16 @@ fn hand_out(budget: u64, weight: &[u64], gone: &[bool], side: bool, parts: &mut 
 /// an instruction still standing behind the branch is read for what it will write. gcc has moved
 /// the hint by then, and without it a put under `unlikely` in `vma_start_read` looked as likely as
 /// the path through, and was counted against the body where gcc does not.
+///
+/// A pass that rebuilds one arm of a branch can leave the hint on the other arm only, and the
+/// other arm still says it. `percpu_counter_add_batch` came out with the hint on the arm back into
+/// its `try_cmpxchg` loop and none on the way out, and the loop was laid out as if it went round
+/// nine times in ten.
 fn claimed(func: &Func, term: Inst) -> Option<Probability> {
-    let at = func.target_list(term).iter().next()?;
-    let parts = match func[at].hint.taken() {
+    let mut arms = func.target_list(term).iter();
+    let at = arms.next()?;
+    let other = arms.next().and_then(|other| func[other].hint.complement().taken());
+    let parts = match func[at].hint.taken().or(other) {
         Some(parts) => parts,
         None => crate::expect::claims(func, term)?.first()?.taken()?,
     };
