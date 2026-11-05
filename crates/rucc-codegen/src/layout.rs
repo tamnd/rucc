@@ -175,6 +175,67 @@ pub fn blocks(
     func.cold = split.map(|first| order[first]);
 }
 
+/// Writes a return in place of each jump to a block that does nothing but return, and gives back
+/// how many jumps it took out.
+///
+/// Run after [`blocks`], which wrote the jumps. A jump to a `ret` is two instructions where one
+/// does, and the second is a taken jump. gcc copies the return into the block for the same reason,
+/// so a `WARN_ON` that traps and carries on comes out as `ud2; ret` rather than as a jump back up
+/// to the return the other path fell into.
+///
+/// Only a block of one `ret` is copied, with no immediate, no memory operand and no unwind rows
+/// after it, which is what a function with no frame returns through. The rows are what make a
+/// longer epilogue unsafe to copy here, since each copy would want its own, and a return with none
+/// leaves the rules what the jump left them. The block it was copied from stays where it is, since
+/// another block may still fall into it.
+pub fn returns(
+    func: &mut mir::Func,
+    insts: &BranchInsts,
+    ret: &'static str,
+    names: &mut Interner,
+) -> usize {
+    let jump = mir::Opcode::new(names.join(insts.prefix, insts.jump));
+    let ret = mir::Opcode::new(names.join(insts.prefix, ret));
+    let order: Vec<mir::Block> = func.blocks().collect();
+    let mut copied = 0;
+    for block in order {
+        let Some(last) = func.terminator(block) else { continue };
+        if func[last].opcode != jump || func[block].succs.len() != 1 {
+            continue;
+        }
+        let to = func[block].succs[0].block;
+        if to == block || !only_returns(func, to, ret) || func.cfi_after(last).next().is_some() {
+            continue;
+        }
+        let Some(from) = func.terminator(to) else { continue };
+        let (flags, span) = (func[from].flags, func.span(from));
+        let operands = func[func[from].operands].to_vec();
+        func.remove_inst(last);
+        let mut copy = func.build(block, ret).flags(flags).at(span);
+        for operand in operands {
+            copy = copy.operand(operand);
+        }
+        copy.finish();
+        func.succs_mut(block).clear();
+        copied += 1;
+    }
+    copied
+}
+
+/// Whether the block is a lone `ret` that [`returns`] may copy.
+fn only_returns(func: &mir::Func, block: mir::Block, ret: mir::Opcode) -> bool {
+    let mut all = func.insts(block);
+    let (Some(inst), None) = (all.next(), all.next()) else { return false };
+    let (data, one) = (&func[block], &func[inst]);
+    data.succs.is_empty()
+        && data.params.is_empty()
+        && !data.dead_end
+        && one.opcode == ret
+        && one.imm.is_none()
+        && one.mem.is_none()
+        && func.cfi_after(inst).next().is_none()
+}
+
 /// Sends every arm that goes to a block with nothing in it on to where that block goes, and gives
 /// back how many arms it moved.
 ///
@@ -1839,6 +1900,30 @@ mod tests {
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
             .map(|line| line.trim().to_string())
             .collect()
+    }
+
+    #[test]
+    fn a_jump_to_a_lone_return_is_the_return() {
+        let (mut names, mut func, made) = blank(4);
+        // The shape a `WARN_ON` leaves: the check falls into the return, and the trap goes back to
+        // it, so laid out in front of the check the trap needs a jump.
+        branch(&mut func, &mut names, made[0], &[made[2], made[1]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[3])];
+        let ud2 = Opcode::new(names.intern("x64.ud2"));
+        func.build(made[2], ud2).finish();
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[3])];
+        let ret = Opcode::new(names.intern("x64.ret"));
+        func.build(made[3], ret).finish();
+
+        let text = laid_out(&mut func, &mut names);
+        assert_eq!(order_of(&func), [0, 2, 1, 3]);
+        assert!(text.iter().any(|line| line.starts_with("x64.jmp")), "{text:?}");
+        assert_eq!(returns(&mut func, &BRANCH, "ret", &mut names), 1);
+
+        assert!(func[made[2]].succs.is_empty());
+        let last = func.terminator(made[2]).map(|inst| func[inst].opcode);
+        assert_eq!(last, Some(ret));
+        assert_eq!(returns(&mut func, &BRANCH, "ret", &mut names), 0);
     }
 
     /// The blocks in layout order, by the number each was made with.

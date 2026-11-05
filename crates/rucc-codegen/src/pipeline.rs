@@ -1768,6 +1768,9 @@ pub fn compile_recording(
         }
     }
     layout::blocks(&mut func, machine.branch, &fused, names, &fusable, &loops, flags.reorder);
+    if flags.reorder {
+        layout::returns(&mut func, machine.branch, machine.insts.ret, names);
+    }
 
     // After the layout for the reason the branches wait for it: a select that reads what a
     // comparison left is a pair with nothing allowed between, and nothing past here puts anything
