@@ -770,6 +770,10 @@ fn pointer_null(func: &Func, cond: Value) -> Option<Probability> {
 /// Nor a count stepped by a constant and tested against zero, as `__rcu_read_unlock` does with
 /// `--t->rcu_read_lock_nesting == 0`. Nothing says which way such a count usually goes, and there
 /// it reaches zero on almost every call, so the guess put the common path behind a taken jump.
+///
+/// Nor one bit of a word tested against zero, `if (file->f_flags & O_NONBLOCK)`, which is a flag
+/// being read as much as a byte is. A mask of more than one bit is still guessed, since that is
+/// how the maple tree reads the type out of a node.
 fn nonequal(func: &Func, cond: Value) -> Option<Probability> {
     let Def::Result { inst, .. } = func[cond].def else { return None };
     let data = &func[inst];
@@ -785,7 +789,9 @@ fn nonequal(func: &Func, cond: Value) -> Option<Probability> {
         return None;
     }
     let args = &func[data.args];
-    if args.iter().any(|&arg| zero(arg)) && args.iter().any(|&arg| stepped(func, arg)) {
+    if args.iter().any(|&arg| zero(arg))
+        && args.iter().any(|&arg| stepped(func, arg) || bit(func, arg))
+    {
         return None;
     }
     match data.extra {
@@ -805,6 +811,16 @@ fn stepped(func: &Func, value: Value) -> bool {
     let data = &func[inst];
     matches!(data.opcode, Opcode::Add | Opcode::Sub)
         && func[data.args].iter().any(|&arg| constant(func, arg).is_some())
+}
+
+/// Whether this value is another one with every bit but one cleared.
+fn bit(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    let data = &func[inst];
+    data.opcode == Opcode::And
+        && func[data.args].iter().any(|&arg| {
+            constant(func, arg).is_some_and(|(value, _)| value.unsigned().count_ones() == 1)
+        })
 }
 
 /// Whether this value is a null pointer.
@@ -1255,6 +1271,26 @@ mod tests {
 
             let (seen, _) = predict(&func);
             assert_eq!(seen.by(at[0]), Predictor::Nothing, "{opcode:?}");
+        }
+    }
+
+    #[test]
+    fn one_bit_of_a_word_tested_against_zero_is_still_even() {
+        // `if (flags & 8)` stays even and `if ((flags & 15) == 0)` is still guessed.
+        for (mask, by) in [(8, Predictor::Nothing), (15, Predictor::NonEqual)] {
+            let (_, mut func, at) = blank(3);
+            let ty = Type::int(32);
+            let flags = func.append_param(at[0], ty);
+            let mut build = Builder::new(&mut func, at[0]);
+            let mask = build.iconst(ty, mask);
+            let left = build.binary(Opcode::And, flags, mask, Flags::NONE);
+            let zero = build.iconst(ty, 0);
+            let cond = build.icmp(IntPred::Ne, left, zero);
+            build.br_if(cond, at[1], &[], at[2], &[]);
+            returns(&mut func, &[(at[1], 0, false), (at[2], 0, false)]);
+
+            let (seen, _) = predict(&func);
+            assert_eq!(seen.by(at[0]), by, "{mask:?}");
         }
     }
 
