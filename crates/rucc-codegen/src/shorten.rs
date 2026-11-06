@@ -5,7 +5,7 @@
 //! about the back end never learning what it is compiling for, and names three of these as free
 //! before any of that is settled and one as waiting for it.
 //!
-//! Seven rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! Eight rewrites. A move of zero into a register becomes an exclusive or of the register with
 //! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
 //! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
 //! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
@@ -40,7 +40,7 @@
 //! index, and the stack pointer is the register this turns up on, because what makes it is taking
 //! the address of whichever local sits at the bottom of the frame.
 //!
-//! That fifth one is the only one here worth taking for something other than bytes. A move between
+//! That fifth one is also worth taking for something other than bytes. A move between
 //! registers is a thing the machine can do by renaming, so it is off the critical path, and an
 //! address computation is an addition however small the numbers in it are. gcc writes no address
 //! computation of that shape anywhere in the SQLite amalgamation and rucc wrote 444 of them.
@@ -59,10 +59,24 @@
 //! the bench objects where gcc wrote 321. The table says which constants leave the same state at
 //! both widths, so this is free the way the comparison against zero is.
 //!
-//! That fourth one is the only one here that is not free, and it is the only one that reads the
-//! goal. An addition writes the carry and an increment leaves the carry as it found it, so the
-//! machine has to merge what was left with what the next instruction writes, which costs a little
-//! where the code is hot and is worth a byte where the goal is size. gcc writes the addition at
+//! And a move of a number into a byte or a half word of a register becomes the move of that number
+//! into all of it. `movb $1, %al` writes the low byte and leaves the rest of `%rax` as it was, so
+//! the processor has to wait for whatever wrote the rest before it can say what `%rax` holds, and
+//! the move is not the start of a new value the way a move of the whole register is. `movl $1,
+//! %eax` has nothing to wait for. gcc writes the second one, and rucc wrote 121 of the first in
+//! `lib/maple_tree.c` where gcc wrote none. The kernel's mmap-munmap bench spends its time in that
+//! file, and on one machine it went from 1.043 of gcc to 1.028 with this and to 1.031 with three
+//! bytes of nothing put after each byte move instead. So most of what this buys there is where the
+//! code behind it falls, and the wait is the rest, which came out ahead in each of the three pairs.
+//!
+//! That fourth one and the eighth are the only ones here that are not free, and they are the only
+//! ones that read the goal. The eighth costs three bytes for each one it writes and is taken only
+//! where the goal is not size, which is the other way round from the fourth.
+//!
+//! The fourth one is the one with a reason that needs saying. An addition writes the carry and an
+//! increment leaves the carry as it found it, so the machine has to merge what was left with what
+//! the next instruction writes, which costs a little where the code is hot and is worth a byte
+//! where the goal is size. gcc writes the addition at
 //! `-O2` and the increment at `-Os`, and so does this. The goal arriving here at all is the first
 //! half of tamnd/rucc#741: before it, `-Os` was a shorter list of middle end passes and the back
 //! end compiled what came out of it exactly as `-O2` would have.
@@ -163,6 +177,11 @@
 //!
 //! Eight bits. `movb $0, %al` and `xorb %al, %al` are both two bytes, so the exchange buys nothing
 //! and would spend the condition state on it. The target's table is where that is written down.
+//! Where the goal is not size the move is first written over the whole register, and what is then
+//! a move of zero into all of it is one the first rewrite takes like any other.
+//!
+//! Write a move into part of a register over the whole of it when a template wrote the move. What
+//! is above the part may be what the program meant to keep there, and nothing here can tell.
 //!
 //! Write an increment at a level that asked for fast code. That is the goal doing its job rather
 //! than a limit, and it is why the same corpus compiled at `-O2` and at `-Os` now differs by
@@ -208,6 +227,7 @@ pub fn shorter(
     let wanted = short.zeroing.iter().map(|entry| entry.into);
     let wanted = wanted.chain(short.clearing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
+    let wanted = wanted.chain(short.whole.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.byte_testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.stepping.iter().map(|entry| entry.into));
@@ -248,6 +268,18 @@ pub fn shorter(
             // Asked again after each rewrite that is taken, since what stands there then is another
             // instruction and the questions below are about that one.
             let mut known = Known::of(&mut seen, func, short, flags, names, inst);
+            // A number put in part of a register, written as the move that writes all of it. That
+            // is longer, so it waits for a level that wanted fast code, and it is asked first
+            // because a zero written whole is a zero the exclusive or below can take.
+            if !small && known.whole {
+                let into = whole_form(func, short, names, &opcodes, inst);
+                if into.is_some_and(|(op, number)| {
+                    written_whole(func, &mut counts, machine, names, inst, op, number)
+                }) {
+                    took += 1;
+                    known = Known::of(&mut seen, func, short, flags, names, inst);
+                }
+            }
             if !live && known.zeroing {
                 let into = shorter_form(func, short, names, &opcodes, inst);
                 if into.is_some_and(|op| zeroed(func, &mut counts, machine, names, inst, op)) {
@@ -565,6 +597,8 @@ struct Known {
     clearing: bool,
     /// Whether it has a narrower instruction.
     narrowing: bool,
+    /// Whether it writes part of a register and has a move that writes all of it.
+    whole: bool,
     /// Whether it has a test of the low byte.
     byte_testing: bool,
     /// Whether it has a shorter way of comparing against zero.
@@ -605,6 +639,7 @@ impl Known {
                 zeroing: has(|short, bare| short.zeroed(bare).is_some()),
                 clearing: has(|short, bare| short.clearing.iter().any(|entry| entry.name == bare)),
                 narrowing: has(|short, bare| short.narrowed(bare).is_some()),
+                whole: has(|short, bare| short.whole(bare).is_some()),
                 byte_testing: has(|short, bare| short.byte_tested(bare).is_some()),
                 testing: has(|short, bare| short.tested(bare).is_some()),
                 splitting: bare.and_then(|bare| flags.compare(bare)).is_some_and(|entry| {
@@ -708,6 +743,55 @@ fn narrowed(
 ) -> bool {
     let mut set = Changes::new();
     set.rewrite(inst, Plan { opcode, ..Plan::of(func, inst) });
+    set.commit(func, counts, names, machine).is_ok()
+}
+
+/// The move that writes the whole register this one writes part of, and the number it carries then.
+///
+/// The number is cut to the bits this one writes. The bits above them are bits nothing reads, since
+/// what this one leaves there is whatever was there before, and zero is the one answer that is
+/// also what a widening of the part would have put there.
+///
+/// Not for a move a template wrote, where what is above the part may be exactly what the program
+/// meant to keep, and not for one whose register is read as well as written, which is the same
+/// thing said by the operands.
+fn whole_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> Option<(mir::Opcode, i64)> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let whole = short.whole(name)?;
+    let data = &func[inst];
+    let kept = func[data.operands].iter().any(|operand| !operand.role.is_def());
+    if data.mem.is_some() || kept || data.flags.contains(mir::Flags::TEMPLATE) {
+        return None;
+    }
+    if whole.writes >= u64::BITS - 1 {
+        return None;
+    }
+    let number = func[func[inst].imm?].0 & ((1i64 << whole.writes) - 1);
+    let opcode = opcodes.iter().find(|&&(at, _)| at == whole.into).map(|&(_, opcode)| opcode)?;
+    Some((opcode, number))
+}
+
+/// Rewrites the move into the move that writes the whole register, carrying that number.
+///
+/// The operands are the ones it had, a register it writes and nothing it reads, for the reason
+/// [`narrowed`] keeps them.
+fn written_whole(
+    func: &mut mir::Func,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    opcode: mir::Opcode,
+    number: i64,
+) -> bool {
+    let mut set = Changes::new();
+    set.rewrite(inst, Plan { opcode, imm: Some(number), ..Plan::of(func, inst) });
     set.commit(func, counts, names, machine).is_ok()
 }
 
@@ -1578,13 +1662,71 @@ mod tests {
     }
 
     /// Eight bits, where both spellings are two bytes. The target's table leaves it out and the pass
-    /// has nothing to look up, so the move stays and the condition state stays with it.
+    /// has nothing to look up, so at a level that wanted small code the move stays and the
+    /// condition state stays with it.
     #[test]
     fn eight_bits_buys_nothing_and_is_left_alone() {
         let (mut names, mut func, block) = empty();
         let into = func.new_vreg(GPR);
         let zero = op(&mut names, "mov_ri_8");
         func.build(block, zero).def(into, GPR).imm(0).finish();
+
+        assert_eq!(small(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["mov_ri_8"]);
+    }
+
+    /// A number put in a byte of a register is put in all of it at a level that wanted fast code,
+    /// so the move waits on nothing that wrote the rest of the register before it.
+    #[test]
+    fn a_byte_move_is_written_over_the_whole_register() {
+        let (mut names, mut func, block) = empty();
+        let into = func.new_vreg(GPR);
+        let one = op(&mut names, "mov_ri_8");
+        let at = func.build(block, one).def(into, GPR).imm(1).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["mov_ri_32"]);
+        assert_eq!(imm(&func, at), Some(1));
+        assert_eq!(regs(&func, at), [into]);
+    }
+
+    /// The number is cut to the byte, so minus one in a byte is all ones in the byte and zero above
+    /// it rather than all ones in the register, and the same for a half word.
+    #[test]
+    fn the_number_written_whole_is_the_part_it_was() {
+        for (name, number, whole) in [("mov_ri_8", -1, 0xff), ("mov_ri_16", -2, 0xfffe)] {
+            let (mut names, mut func, block) = empty();
+            let into = func.new_vreg(GPR);
+            let part = op(&mut names, name);
+            let at = func.build(block, part).def(into, GPR).imm(number).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{name}");
+            assert_eq!(shape(&func, &names, block), ["mov_ri_32"], "{name}");
+            assert_eq!(imm(&func, at), Some(whole), "{name}");
+        }
+    }
+
+    /// A zero in a byte written whole is a zero in the whole register, which the first rewrite then
+    /// takes where the condition state is free.
+    #[test]
+    fn a_zero_in_a_byte_becomes_the_exclusive_or() {
+        let (mut names, mut func, block) = empty();
+        let into = func.new_vreg(GPR);
+        let zero = op(&mut names, "mov_ri_8");
+        func.build(block, zero).def(into, GPR).imm(0).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 2);
+        assert_eq!(shape(&func, &names, block), ["xor_rr_32"]);
+    }
+
+    /// A byte move a template wrote stays a byte move. The program may be keeping something in the
+    /// rest of the register, and nothing here can tell whether it is.
+    #[test]
+    fn a_byte_move_a_template_wrote_stays() {
+        let (mut names, mut func, block) = empty();
+        let into = func.new_vreg(GPR);
+        let one = op(&mut names, "mov_ri_8");
+        func.build(block, one).flags(mir::Flags::TEMPLATE).def(into, GPR).imm(1).finish();
 
         assert_eq!(takes(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block), ["mov_ri_8"]);
