@@ -5169,8 +5169,9 @@ impl Reader {
             // sum is the one the instruction made two paragraphs up, which is the name minus the
             // end of the instruction, so the addend comes out the way it does for every other
             // rip-relative reference and is minus four. The pair of slots `__tls_get_addr` takes
-            // is the same, and gas marks the name it is for as thread-local the way the i386
-            // suffixes below do.
+            // is the same. gas marks the name either thread-local kind is for as thread-local, the
+            // way the i386 suffixes below do, and a linker refuses a link where one file says
+            // `STT_TLS` about a name and another does not.
             if matches!(fixup.reach, Reach::Table | Reach::Thread | Reach::Dynamic(_)) {
                 let [
                     Term { coeff: 1, what: What::Symbol(name) },
@@ -5183,16 +5184,16 @@ impl Reader {
                             .to_owned(),
                     ));
                 };
+                if matches!(fixup.reach, Reach::Thread | Reach::Dynamic(_)) {
+                    if let Some(&sym) = self.known.get(name) {
+                        if matches!(self.syms[sym].sort, Sort::Untyped | Sort::Object) {
+                            self.syms[sym].sort = Sort::Thread;
+                        }
+                    }
+                }
                 let kind = match fixup.reach {
                     Reach::Table => fixup.slot,
-                    Reach::Dynamic(tls) => {
-                        if let Some(&sym) = self.known.get(name) {
-                            if matches!(self.syms[sym].sort, Sort::Untyped | Sort::Object) {
-                                self.syms[sym].sort = Sort::Thread;
-                            }
-                        }
-                        Reference::Tls(tls)
-                    }
+                    Reach::Dynamic(tls) => Reference::Tls(tls),
                     _ => Reference::Thread,
                 };
                 self.parts[fixup.part].relocs.push(Reloc {
@@ -10203,6 +10204,18 @@ nop
         assert_eq!(name(&read, "ex").sort, Sort::Thread);
         // An i386 suffix that has no x86-64 relocation is still refused.
         assert!(refused("\tleaq x@ntpoff(%rax), %rax\n").why.contains("@ntpoff"));
+    }
+
+    /// A name read only through its thread-local slot is thread-local as well. gas writes it as
+    /// `STT_TLS` whether or not the file defines it, and `ld` refuses a link where one file says
+    /// that about a name and another does not. liburcu reads `urcu_memb_reader` this way in every
+    /// file that takes the read lock, so a file this assembler wrote stopped the link of the
+    /// first gcc object beside it that read the same name.
+    #[test]
+    fn a_name_read_only_through_its_thread_local_slot_is_thread_local() {
+        let read = assembled("\t.text\n\tmovq ex@GOTTPOFF(%rip), %rax\n\tmovl %fs:(%rax), %eax\n");
+        assert_eq!(relocs(&read, ".text"), [(3, "ex", Reference::Thread, -4)]);
+        assert_eq!(name(&read, "ex").sort, Sort::Thread);
     }
 
     /// The x86-64 call through a TLS descriptor, which gcc writes under `-mtls-dialect=gnu2`, with
