@@ -105,6 +105,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - Branch prediction no longer guesses "not equal" for a count stepped by a constant and tested against zero, so `--nesting == 0` in `__rcu_read_unlock` falls through to the common path as it does with gcc (#4082)
 - The assembler now writes a name reached only through `@GOTTPOFF` as thread-local, as gas does, so a file it assembled that reads an outside `__thread` variable such as liburcu's `urcu_memb_reader` links beside a gcc object that reads the same name instead of stopping `ld` with a TLS mismatch (#4083)
 - On x86-64 a move of a number into a byte or a half word of a register is now written as a `movl` into the whole register at `-O2`, as gcc does. `movb $1, %al` keeps the rest of `%rax`, so it has to wait for whatever wrote the register last, and `lib/maple_tree.c` had 121 of them where gcc had none. The kernel mmap-munmap bench went from 1.043 of gcc to 1.028 on one machine, where the same bytes spent on `nop` gave 1.031, so most of it is layout and the rest is the wait. A move an `asm` template wrote is left alone, and `-Os` keeps the shorter byte move. (#4084)
+- `cargo doc` builds again. A public field in `rucc-codegen` linked to a private method, which `-D warnings` turns into an error, so the documentation job had failed since #4064. (#4085)
 
 ## 0.30.15
 

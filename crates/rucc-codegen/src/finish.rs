@@ -220,7 +220,7 @@ pub struct Convention<'a> {
     pub sign: SignReturn,
     /// What the machine's instructions are, when the prologue may go further in than the top of
     /// the function, or `None` when it stays there, and the comparisons the layout may join with
-    /// the branch behind them. See `region` and [`Writer::rename`].
+    /// the branch behind them. See `region` and `Writer::rename`.
     pub wrap: Option<(&'a MachineInsts, &'a Set<Inst>)>,
 }
 
