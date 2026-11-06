@@ -109,6 +109,11 @@ pub struct ShortInsts {
     /// Every instruction that puts a constant in a register and has a narrower one that writes the
     /// same register and clears the rest of it.
     pub narrowing: &'static [Narrowed],
+    /// Every instruction that puts a constant in part of a register and leaves the rest of it as it
+    /// was, and the move that writes the whole register instead. [`Narrowed::writes`] is the part
+    /// the first one writes, and the number the second one carries is the first one's number cut
+    /// to that many bits.
+    pub whole: &'static [Narrowed],
     /// Every test of a register against a constant that has a test of the low byte asking the same
     /// thing, for a constant whose bits all sit below [`Narrowed::writes`]. Empty on a machine where
     /// some register has no low byte to name, since the pass rewriting these does not ask which
@@ -153,6 +158,12 @@ impl ShortInsts {
     #[must_use]
     pub fn narrowed(&self, name: &str) -> Option<Narrowed> {
         self.narrowing.iter().find(|entry| entry.name == name).copied()
+    }
+
+    /// The move that writes the whole register, for the instruction of that name.
+    #[must_use]
+    pub fn whole(&self, name: &str) -> Option<Narrowed> {
+        self.whole.iter().find(|entry| entry.name == name).copied()
     }
 
     /// The test of the low byte that asks what the instruction of that name asks.

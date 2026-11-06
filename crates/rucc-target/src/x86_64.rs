@@ -768,6 +768,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     zeroing: &SHORTER_ZEROS,
     clearing: &LOW_BYTE_CLEARS,
     narrowing: &NARROWER_MOVES,
+    whole: &WHOLE_MOVES,
     byte_testing: &BYTE_TESTS,
     testing: &ZERO_COMPARES,
     stepping: &STEPS,
@@ -833,6 +834,25 @@ static NARROWER_MOVES: [Narrowed; 5] = [
     Narrowed { name: "test_ri_64", into: "test_ri_32", writes: 31 },
     Narrowed { name: "test_set_e_ri_64", into: "test_set_e_ri_32", writes: 31 },
     Narrowed { name: "test_set_ne_ri_64", into: "test_set_ne_ri_32", writes: 31 },
+];
+
+/// Putting a number in a byte or a half word of a register by writing the whole register.
+///
+/// `movb $1, %al` writes the low byte and keeps the other fifty six bits, so the processor has to
+/// wait for whatever wrote `%rax` last before it can put the byte in, even though nothing will read
+/// those bits. AMD has never renamed the low byte apart from the rest and Intel stopped with
+/// Haswell, so the move depends on an instruction it has nothing to do with. `movl $1, %eax`
+/// writes all of it and waits on nothing.
+/// gcc never writes the byte move into a register and rucc wrote 121 of them in
+/// `lib/maple_tree.c`. See `rucc_codegen::shorten` for what writing them whole did to the kernel
+/// bench.
+///
+/// The number is cut to the bits the narrow move writes, so the bits above it come out zero rather
+/// than a copy of its sign. Nothing reads them, but a register whose top is zero is one the
+/// widening pass knows something about.
+static WHOLE_MOVES: [Narrowed; 2] = [
+    Narrowed { name: "mov_ri_8", into: "mov_ri_32", writes: 8 },
+    Narrowed { name: "mov_ri_16", into: "mov_ri_32", writes: 16 },
 ];
 
 /// Testing bits of a register in its low byte, when every bit the constant names is in that byte.
