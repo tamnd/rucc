@@ -37,6 +37,19 @@
 //!   to', from' = asm "rep movsq" to, from, size >> 3
 //! ```
 //!
+//! A size the program works out that is not a whole number of words is one `rep movsb` or
+//! `rep stosb` of all of it, where the size is known to be no larger than 8192 by the branches in
+//! front of it. gcc reads that off the range too and writes a loop or `rep movsq` with a tail.
+//! The library is a `rep movsb` itself on a machine with fast short strings, so the inline one is
+//! that without the call and the return thunk. `strscpy_pad` clears what is left of the buffer
+//! with `memset(to + n + 1, 0, size - n - 1)` behind `n < size`, and with `size` 32 that was a
+//! call in every `perf_trace_` and `trace_event_raw_event_` that copies a name, 24 in
+//! fs/fs-writeback.o where gcc has none. `sethostname` checks `len <= 64` before it copies and
+//! clears, and an SMBus block is no more than 32 bytes.
+//!
+//! The range only decides whether to write the instruction. The instruction moves exactly as many
+//! bytes as it is given, so a range that said too little would cost speed and not the answer.
+//!
 //! The string instruction is an `asm` statement rather than an instruction of its own, because a
 //! template already says everything about it the allocator has to know: which three registers it
 //! reads, which two it leaves changed, and that it writes memory.
@@ -58,6 +71,8 @@ use rucc_ir::{
     AsmInfo, AttrSet, BlockCallList, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo,
     MemOrder, Opcode, Restrict, Type, Value,
 };
+use rucc_opt::range::query::Ranges;
+use rucc_opt::{Cfg, Dominators};
 
 use crate::{expand, retry};
 
@@ -84,9 +99,11 @@ struct Roll {
     flags: Flags,
     /// The value a call answers, which is `to`.
     answer: Option<Value>,
-    /// How many bytes, where the program works the count out, which is then a whole number of
-    /// words.
+    /// How many bytes, where the program works the count out.
     length: Option<Value>,
+    /// Whether that count is not known to be a whole number of words, so that the instruction
+    /// moves a byte at a time.
+    bytes: bool,
 }
 
 /// Rewrites every copy and fill of a known size that [`expand::bulk`] would make a call of, and
@@ -106,24 +123,43 @@ pub fn loops(
         return;
     }
     let moves = (expand::copies(goal), expand::fills(goal));
-    let found: Vec<(Inst, Roll)> = func
-        .blocks()
-        .flat_map(|block| func.insts(block))
-        .filter_map(|inst| wanted(func, names, inst, moves, most).map(|roll| (inst, roll)))
-        .collect();
+    let mut found = Vec::new();
+    let mut unsure = Vec::new();
+    for inst in func.blocks().flat_map(|block| func.insts(block)) {
+        match wanted(func, names, inst, moves, most) {
+            Some((roll, true)) => found.push((inst, roll)),
+            Some((roll, false)) => unsure.push((inst, roll)),
+            None => {}
+        }
+    }
+    // The ones whose size the instructions in front of it did not bound, asked of the branches.
+    // Most functions have none, and they build no graph.
+    if !unsure.is_empty() {
+        let cfg = Cfg::new(func);
+        let dom = Dominators::new(&cfg);
+        let mut ranges = Ranges::new(func, &cfg, &dom);
+        for (inst, roll) in unsure {
+            let Some(length) = roll.length else { continue };
+            let bound = ranges.at_inst(length, inst).unsigned_bounds();
+            if bound.is_some_and(|(_, largest)| largest <= u128::from(most)) {
+                found.push((inst, roll));
+            }
+        }
+    }
     for (inst, roll) in found {
         rewrite(func, names, inst, &roll);
     }
 }
 
-/// The copy or fill an instruction is, where it is one this pass writes as a string instruction.
+/// The copy or fill an instruction is, where it is one this pass writes as a string instruction,
+/// and whether its size is known to be small enough. Where it is not, the branches are asked.
 fn wanted(
     func: &Func,
     names: &Interner,
     inst: Inst,
     moves: (usize, usize),
     most: u32,
-) -> Option<Roll> {
+) -> Option<(Roll, bool)> {
     let data = &func[inst];
     let (opcode, to, with, info, flags, answer) = match data.opcode {
         Opcode::Memcpy | Opcode::Memset => {
@@ -133,8 +169,9 @@ fn wanted(
                 return None;
             }
             if let Some(length) = bulk.length {
-                return worked_out(func, data.opcode, (bulk.to, bulk.with, length), most)
-                    .map(|roll| Roll { info: func[mem], flags: data.flags, ..roll });
+                let (roll, known) =
+                    worked_out(func, data.opcode, (bulk.to, bulk.with, length), most)?;
+                return Some((Roll { info: func[mem], flags: data.flags, ..roll }, known));
             }
             (data.opcode, bulk.to, bulk.with, func[mem], data.flags, None)
         }
@@ -150,7 +187,7 @@ fn wanted(
             let &[to, with, length] = &func[data.args] else { return None };
             let Some(size) = expand::number(func, length) else {
                 return worked_out(func, opcode, (to, with, length), most)
-                    .map(|roll| Roll { answer: data.first_result, ..roll });
+                    .map(|(roll, known)| (Roll { answer: data.first_result, ..roll }, known));
             };
             let size = u64::try_from(size).ok()?;
             let info = MemInfo {
@@ -185,22 +222,27 @@ fn wanted(
         return None;
     }
     let flags = flags.intersection(Flags::legal_on(Opcode::Store));
-    Some(Roll { opcode, to, with, byte, info, flags, answer, length: None })
+    let roll = Roll { opcode, to, with, byte, info, flags, answer, length: None, bytes: false };
+    Some((roll, true))
 }
 
-/// A copy or fill whose size the program works out, where that is a whole number of words and no
-/// more than `most` bytes.
+/// A copy or fill whose size the program works out, and whether the instructions that work it out
+/// say it is no more than `most` bytes.
+///
+/// It is a word at a time where they say the size is a whole number of words, and a byte at a
+/// time otherwise.
 fn worked_out(
     func: &Func,
     opcode: Opcode,
     (to, with, length): (Value, Value, Value),
     most: u32,
-) -> Option<Roll> {
-    let (largest, zeros) = bounded(func, length, DEPTH)?;
-    let words = largest <= u128::from(most) && zeros >= WORD.trailing_zeros();
-    if !words || func[length].ty.bits() > 64 {
+) -> Option<(Roll, bool)> {
+    if func[length].ty.bits() > 64 {
         return None;
     }
+    let (largest, zeros) = bounded(func, length, DEPTH).unwrap_or((u128::MAX, 0));
+    let known = largest <= u128::from(most);
+    let bytes = zeros < WORD.trailing_zeros();
     let byte = match opcode {
         Opcode::Memset => expand::literal(func, with)?,
         _ => 0,
@@ -214,7 +256,9 @@ fn worked_out(
         restrict: Restrict::NONE,
     };
     let length = Some(length);
-    Some(Roll { opcode, to, with, byte, info, flags: Flags::NONE, answer: None, length })
+    let flags = Flags::NONE;
+    let roll = Roll { opcode, to, with, byte, info, flags, answer: None, length, bytes };
+    Some((roll, known))
 }
 
 /// How far back through the instructions a size is followed.
@@ -292,8 +336,13 @@ fn rewrite(func: &mut Func, names: &mut Interner, inst: Inst, roll: &Roll) {
     let whole = roll.info.size / WORD * WORD;
     let rest = roll.info.size - whole;
     let copy = roll.opcode == Opcode::Memcpy;
-    let (template, constraints) =
-        if copy { ("rep movsq", "=D,=S,=c,0,1,2") } else { ("rep stosq", "=D,=c,0,1,a") };
+    let template = match (copy, roll.bytes) {
+        (true, false) => "rep movsq",
+        (true, true) => "rep movsb",
+        (false, false) => "rep stosq",
+        (false, true) => "rep stosb",
+    };
+    let constraints = if copy { "=D,=S,=c,0,1,2" } else { "=D,=c,0,1,a" };
     let info = AsmInfo {
         template: names.intern(template),
         constraints: names.intern(constraints),
@@ -304,6 +353,7 @@ fn rewrite(func: &mut Func, names: &mut Interner, inst: Inst, roll: &Roll) {
     let count = match roll.length {
         Some(length) => {
             let (number, apart) = match words(func, length) {
+                _ if roll.bytes => (length, false),
                 Some(number) => (number, false),
                 None => (length, true),
             };
