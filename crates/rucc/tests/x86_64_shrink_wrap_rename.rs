@@ -254,6 +254,68 @@ long res(struct regs *regs) {
 }
 ";
 
+/// `_parse_integer_limit` in lib/kstrtox.c of Linux 7.3, which takes the first value of the sum
+/// as an argument. The rename moved the digit out of `%rbx` into `%r10`, after which nothing wanted
+/// the frame and the prologue stayed at the top, and the copy of a hex digit into `%r10` was taken
+/// out as a copy into a scratch register nothing read. `ffff` came out as 0, and the kernel failed
+/// its scanf and cmdline tests.
+const PARSE: &str = "\
+#include <limits.h>
+#include <stddef.h>
+__attribute__((noinline)) unsigned int parse(const char *s, unsigned int base,
+                                             unsigned long long *p, size_t max,
+                                             unsigned long long init) {
+    unsigned int rv, overflow = 0;
+    unsigned long long res = init;
+    for (rv = 0; rv < max; rv++, s++) {
+        unsigned int c = *s;
+        unsigned int lc = (unsigned char)c | 0x20;
+        unsigned int val;
+        if ('0' <= c && c <= '9')
+            val = c - '0';
+        else if ('a' <= lc && lc <= 'f')
+            val = lc - 'a' + 10;
+        else
+            break;
+        if (val >= base)
+            break;
+        if (__builtin_expect(!!(res & (~0ull << 60)), 0)) {
+            if (__builtin_mul_overflow(res, base, &res) ||
+                __builtin_add_overflow(res, val, &res)) {
+                res = ULLONG_MAX;
+                overflow = 1u << 31;
+            }
+        } else {
+            res = res * base + val;
+        }
+    }
+    *p = res;
+    return rv | overflow;
+}
+";
+
+/// A run of [`PARSE`] over decimal and hex strings that prints what it read.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+const PARSE_MAIN: &str = "\
+#include <stdio.h>
+int main(void) {
+    const char *s[] = { \"123\", \"ffff\", \"7fffffff\", \"DeadBeef\", \"18446744073709551615\",
+                        \"99999999999999999999\", \"12x\", \"\" };
+    unsigned b[] = { 10, 16, 16, 16, 10, 10, 10, 10 };
+    for (int i = 0; i < 8; i++) {
+        unsigned long long r;
+        unsigned n = parse(s[i], b[i], &r, INT_MAX, 0);
+        printf(\"%u %llu\\n\", n, r);
+    }
+    unsigned long long r;
+    unsigned n = parse(\"a5\", 16, &r, INT_MAX, 7);
+    printf(\"%u %llu\\n\", n, r);
+    n = parse(\"abcdef\", 16, &r, 3, 0);
+    printf(\"%u %llu\\n\", n, r);
+    return 0;
+}
+";
+
 fn scratch() -> std::path::PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -439,4 +501,31 @@ fn a_register_a_template_clobbers_is_saved_before_it() {
     let push = body.iter().position(|line| line.starts_with("pushq\t%rbx")).expect("a prologue");
     let call = body.iter().position(|line| line.starts_with("call")).expect("a call");
     assert!(push < call, "{text}");
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn a_rename_kept_without_the_wrap_keeps_its_copies() {
+    let dir = scratch();
+    let source = dir.join("kstrtox.c");
+    std::fs::write(&source, format!("{PARSE}{PARSE_MAIN}")).expect("the fixture can be written");
+    let mut said = Vec::new();
+    for level in ["-O0", "-O2"] {
+        let program = dir.join(level);
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .arg(level)
+            .arg("-o")
+            .arg(&program)
+            .arg(&source)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the compiler refused the fixture at {level}:\n{err}");
+        let run = Command::new(&program).output().expect("the program runs");
+        assert!(run.status.success(), "the program failed at {level}");
+        said.push(String::from_utf8(run.stdout).expect("the output is text"));
+    }
+    assert!(said[0].starts_with("3 123\n4 65535\n8 2147483647\n"), "{}", said[0]);
+    assert_eq!(said[0], said[1]);
+    std::fs::remove_dir_all(&dir).ok();
 }
