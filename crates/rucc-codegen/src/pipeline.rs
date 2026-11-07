@@ -1614,11 +1614,12 @@ pub fn compile_recording(
         wrap: wraps.then_some((machine.shapes, &fusable)),
         ..Convention::new(machine.conv, machine.insts)
     };
-    let (moves, loops, checks, wrapped) =
+    let (moves, loops, checks, wrapped, renamed) =
         finish(&mut func, &allocation, &frame, &stack, convention, names);
     // Less any that a value was moved into so that the prologue could go further in, since that
-    // one holds the value from one block into the next. See `finish::Wrapped::taken`.
-    let taken = wrapped.as_ref().map_or(&[][..], finish::Wrapped::taken);
+    // one holds the value from one block into the next. See `finish::Renamed::taken`. Whether or
+    // not the prologue did go in, since the rename stays either way.
+    let taken = renamed.taken();
     let free: Vec<PhysReg> = held.iter().copied().filter(|reg| !taken.contains(reg)).collect();
     let held = &free[..];
     // The comparison in each loop that walks the stack and in each stack protector check is written
@@ -1638,7 +1639,7 @@ pub fn compile_recording(
     let joined = layout::joined(&func, machine.branch, &fused, &fusable, names);
     // The rename that moved the prologue further in took each of these as writing nothing, and
     // the assert after the cleanup keeps them joined from here on.
-    let joins = wrapped.as_ref().map_or(&[][..], finish::Wrapped::joins);
+    let joins = renamed.joins();
     assert!(
         joins.iter().all(|compare| joined.contains(compare)),
         "a comparison the rename took as joined was not"

@@ -300,7 +300,7 @@ pub fn finish(
     stack: &Stack,
     convention: Convention<'_>,
     names: &mut Interner,
-) -> (Moves, Vec<Inst>, Vec<Inst>, Option<Wrapped>) {
+) -> (Moves, Vec<Inst>, Vec<Inst>, Option<Wrapped>, Renamed) {
     let Convention { regs: conv, insts, protect, probe, landing, trace, pad, hooked, sign, wrap } =
         convention;
     let entry = func.entry().expect("a function with a block in it");
@@ -564,7 +564,11 @@ pub fn finish(
         writer.func.set_block_order(&order);
     }
     let wrapped = wrap.map(|_| writer.wrapped(&prologue, frame));
-    (moves, writer.loops, writer.checks, wrapped)
+    let renamed = Renamed {
+        taken: std::mem::take(&mut writer.taken),
+        joins: std::mem::take(&mut writer.joins),
+    };
+    (moves, writer.loops, writer.checks, wrapped, renamed)
 }
 
 /// One copy [`Writer::sink`] is taking out of the entry block.
@@ -651,13 +655,27 @@ pub struct Wrapped {
     /// The rules the function was entered under, which hold again after each epilogue. The first
     /// is the distance an epilogue ends on, which is how a block that holds one is known.
     entered: Vec<CfiOp>,
-    /// See [`Wrapped::taken`].
+}
+
+/// What [`Writer::rename`] did to the function, which stays done whether or not the prologue then
+/// goes further in.
+///
+/// The rename is asked for when no block but the entry will take the prologue, and after it the
+/// question is asked again. That second answer can still be no, and the swapped registers are in
+/// the function either way. `_parse_integer_limit` in lib/kstrtox.c of Linux 7.3 had nothing left
+/// that wanted the frame once `%rbx` became `%r10`, so the prologue stayed at the top and this was
+/// thrown away with the wrap. [`crate::copies::forward`] then took `%r10` for a scratch register
+/// and removed the copy of a hex digit into it, and every hex number the kernel parsed came out
+/// wrong.
+#[derive(Debug, Clone, Default)]
+pub struct Renamed {
+    /// See [`Renamed::taken`].
     taken: Vec<PhysReg>,
-    /// See [`Wrapped::joins`].
+    /// See [`Renamed::joins`].
     joins: Vec<Inst>,
 }
 
-impl Wrapped {
+impl Renamed {
     /// The registers a value was moved into in front of the prologue, so that the early returns
     /// save nothing. See `Writer::rename`.
     ///
@@ -1245,9 +1263,9 @@ struct Writer<'a> {
     /// gcc writes.
     failed: Option<Block>,
     /// The registers [`Writer::rename`] moved a value into, which hold it from one block into the
-    /// next. See [`Wrapped::taken`].
+    /// next. See [`Renamed::taken`].
     taken: Vec<PhysReg>,
-    /// See [`Wrapped::joins`].
+    /// See [`Renamed::joins`].
     joins: Vec<Inst>,
 }
 
@@ -2426,8 +2444,7 @@ impl Writer<'_> {
             entered.push(CfiOp::Restore(self.dwarf(int, reg)));
         }
         let opened = *prologue.last().expect("a function that wants a frame has a prologue");
-        let (taken, joins) = (std::mem::take(&mut self.taken), std::mem::take(&mut self.joins));
-        Wrapped { opened, body, entered, taken, joins }
+        Wrapped { opened, body, entered }
     }
 
     /// A row saying the caller's copy of that register is that far from the canonical frame
