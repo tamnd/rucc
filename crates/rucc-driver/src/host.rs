@@ -71,6 +71,30 @@ pub fn cannot_start(program: &str) -> Option<String> {
     WASM.then(|| format!("{NO_PROCESSES}, so it cannot run `{program}`"))
 }
 
+/// The release of the FreeBSD machine rucc runs on, as `(15, 1)`, or nothing on another host.
+///
+/// It is read once from `uname -r`, which says `15.1-RELEASE-p3`. The target keeps only the major
+/// release, because that is the value of `__FreeBSD__`. `-dumpmachine` prints the minor release
+/// too, as the base system's `cc` does.
+#[must_use]
+pub fn freebsd_release() -> Option<(u32, u32)> {
+    if !cfg!(target_os = "freebsd") {
+        return None;
+    }
+    static FOUND: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let output = std::process::Command::new("uname").arg("-r").output().ok()?;
+        release_of(&String::from_utf8_lossy(&output.stdout))
+    })
+}
+
+/// The major and minor release in what `uname -r` prints on FreeBSD.
+fn release_of(text: &str) -> Option<(u32, u32)> {
+    let number = text.trim().split('-').next()?;
+    let (major, minor) = number.split_once('.')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
 thread_local! {
     /// What this thread wrote to standard output and to standard error while [`capture`] runs.
     static CAPTURED: RefCell<Option<Captured>> = const { RefCell::new(None) };
@@ -179,5 +203,14 @@ mod tests {
         assert_eq!(temp_dir(), std::env::temp_dir());
         assert_eq!(id(), std::process::id());
         assert_eq!(cannot_start("ld"), None);
+    }
+
+    #[test]
+    fn the_freebsd_release_is_read_from_what_uname_prints() {
+        assert_eq!(release_of("15.1-RELEASE-p3\n"), Some((15, 1)));
+        assert_eq!(release_of("14.3-STABLE"), Some((14, 3)));
+        assert_eq!(release_of("16.0-CURRENT"), Some((16, 0)));
+        assert_eq!(release_of(""), None);
+        assert_eq!(release_of("15-RELEASE"), None);
     }
 }
