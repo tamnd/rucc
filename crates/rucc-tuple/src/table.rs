@@ -15,7 +15,7 @@
 use core::fmt;
 use core::str::FromStr;
 
-use crate::{Env, Error, TargetTuple};
+use crate::{Env, Error, Os, TargetTuple};
 
 /// What is known to be true about a target.
 ///
@@ -455,6 +455,8 @@ pub const TARGETS: &[TargetEntry] = &[
 /// A glibc version finds the row without it, so `x86_64-linux-gnu.2.28` has the tier of
 /// `x86_64-linux-gnu`. The stubs for an older glibc come from the same abilists and the link is
 /// the same, so the evidence for the row is evidence for the older version too. tamnd/rucc#3276.
+/// A FreeBSD release finds the row without it for the same reason: `x86_64-freebsd.15.1` is the
+/// `x86_64-freebsd` row with a different `__FreeBSD__`.
 pub fn lookup(target: &TargetTuple) -> Option<&'static TargetEntry> {
     let find = |tuple: &TargetTuple| {
         let canonical = tuple.to_canonical_string();
@@ -462,7 +464,8 @@ pub fn lookup(target: &TargetTuple) -> Option<&'static TargetEntry> {
     };
     find(target).or_else(|| {
         let glibc = target.env() == Env::Gnu && target.env_version().is_some();
-        glibc.then(|| find(&target.without_versions())).flatten()
+        let release = target.os() == Os::FreeBsd && target.os_version().is_some();
+        (glibc || release).then(|| find(&target.without_versions())).flatten()
     })
 }
 

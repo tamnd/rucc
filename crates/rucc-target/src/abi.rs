@@ -75,9 +75,11 @@ impl TargetInfo {
         };
         // Under `-freg-struct-return` the descriptions are the ones the unit's registers carry,
         // since the table of conventions says nothing about the flag, and so is `stdcall` under
-        // `-mregparm=`, which has the unit's registers.
+        // `-mregparm=`, which has the unit's registers. A target that returns structures in
+        // registers by default reads its registers too, so that `-fpcc-struct-return` is seen.
         let stdcall_with_registers = convention == Convention::Stdcall && self.regparm > 0;
-        if self.reg_struct_return || stdcall_with_registers {
+        let by_default = crate::reg_struct_return(self.tuple);
+        if self.reg_struct_return || by_default || stdcall_with_registers {
             return self.call_regs?.under(convention).map(|regs| regs.abi.call());
         }
         if convention == Convention::Target {

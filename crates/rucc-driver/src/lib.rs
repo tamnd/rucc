@@ -1060,8 +1060,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // that the table's answer is the one given. See `kbuild`.
             // Where a structure of one, two, four or eight bytes comes back, which only i386
             // System V has a choice about. The kernel builds every 32 bit unit with the first.
-            "-freg-struct-return" => opts.reg_struct_return = true,
-            "-fpcc-struct-return" => opts.reg_struct_return = false,
+            "-freg-struct-return" => opts.reg_struct_return = Some(true),
+            "-fpcc-struct-return" => opts.reg_struct_return = Some(false),
             // A vector register kept out of the allocator on AArch64, which the kernel's AEGIS
             // code asks for so that the S-box its `asm` loads into `v16` to `v31` stays there.
             _ if aarch64 && fixed_vector(arg).is_some() => {

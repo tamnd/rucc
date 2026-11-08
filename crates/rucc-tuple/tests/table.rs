@@ -51,6 +51,8 @@ fn a_glibc_version_has_the_tier_of_the_row_without_it() {
     for (versioned, row) in [
         ("x86_64-linux-gnu.2.28", "x86_64-linux-gnu"),
         ("aarch64-linux-gnu.2.31", "aarch64-linux-gnu"),
+        ("x86_64-freebsd.15.1", "x86_64-freebsd"),
+        ("aarch64-unknown-freebsd14", "aarch64-freebsd"),
     ] {
         let tuple = TargetTuple::from_str(versioned).expect("parses");
         assert_eq!(lookup(&tuple).map(|e| e.tuple), Some(row), "{versioned}");

@@ -52,6 +52,32 @@ fn a_vendor_is_skipped_only_when_the_next_component_is_an_os() {
 }
 
 #[test]
+fn the_bsds_are_read_in_the_spellings_their_toolchains_use() {
+    // NetBSD's `build.sh` leaves the vendor empty and its i386 gcc says `netbsdelf`. FreeBSD keeps
+    // its release, because gcc defines `__FreeBSD__` from it. The other releases are dropped.
+    for (spelling, os, canonical) in [
+        ("x86_64-unknown-freebsd15.1", Os::FreeBsd, "x86_64-freebsd.15.1"),
+        ("aarch64-unknown-freebsd15.0", Os::FreeBsd, "aarch64-freebsd.15.0"),
+        ("x86_64-freebsd", Os::FreeBsd, "x86_64-freebsd"),
+        ("x86_64--netbsd", Os::NetBsd, "x86_64-netbsd"),
+        ("x86_64-unknown-netbsd11.1", Os::NetBsd, "x86_64-netbsd"),
+        ("i486--netbsdelf", Os::NetBsd, "i686-netbsd"),
+        ("x86_64-unknown-openbsd7.8", Os::OpenBsd, "x86_64-openbsd"),
+        ("x86_64-unknown-dragonfly", Os::DragonFly, "x86_64-dragonfly"),
+    ] {
+        let tuple = parse(spelling);
+        assert_eq!(tuple.os(), os, "{spelling}");
+        assert!(tuple.os().is_bsd(), "{spelling}");
+        assert_eq!(tuple.env(), Env::None, "{spelling}");
+        assert_eq!(tuple.object_format(), ObjectFormat::Elf, "{spelling}");
+        assert_eq!(tuple.to_canonical_string(), canonical, "{spelling}");
+        assert_eq!(parse(canonical), tuple, "{spelling}");
+    }
+    assert_eq!(parse("x86_64-unknown-freebsd15.1").to_llvm_string(), "x86_64-unknown-freebsd15.1");
+    assert_eq!(parse("x86_64-unknown-dragonfly").to_llvm_string(), "x86_64-unknown-dragonfly");
+}
+
+#[test]
 fn windows_is_llp64_and_everything_else_is_not() {
     assert_eq!(parse("x86_64-windows-gnu").data_model(), DataModel::Llp64);
     assert_eq!(parse("aarch64-windows-msvc").data_model(), DataModel::Llp64);

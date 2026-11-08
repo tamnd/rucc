@@ -883,6 +883,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             }
             windows_spellings(d, opts);
         }
+        // Every BSD is ELF. The macros that name the system and its release are not here yet,
+        // so a header that tests for one takes its generic path.
+        Os::FreeBsd(_) | Os::NetBsd | Os::OpenBsd | Os::DragonFly => d.flag("__ELF__"),
         Os::None => {
             // Freestanding. `__ELF__` still holds, because the object format is a property of
             // the target rather than of having an operating system under it, and a wasm module

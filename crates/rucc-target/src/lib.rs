@@ -164,6 +164,17 @@ pub enum Os {
     Darwin,
     /// Windows.
     Windows,
+    /// FreeBSD, at a major release. GCC defines `__FreeBSD__` to that number and reads it from the
+    /// triple, so `x86_64-unknown-freebsd15.1` and `x86_64-unknown-freebsd14.3` are two answers to
+    /// one preprocessor question and the same target in every other respect.
+    FreeBsd(u32),
+    /// NetBSD. Its release is not the compiler's business: GCC defines `__NetBSD__` to one and the
+    /// headers read the release from `<sys/param.h>`.
+    NetBsd,
+    /// OpenBSD, which `__OpenBSD__` names without a release, like NetBSD.
+    OpenBsd,
+    /// DragonFly BSD, on x86-64, which is the one machine it runs on.
+    DragonFly,
     /// No operating system, which is what `-ffreestanding` kernel work looks like.
     None,
     /// The WebAssembly System Interface, at one of its previews.
@@ -195,27 +206,97 @@ impl Preview {
 }
 
 impl Os {
-    /// Every operating system, in the order of the enumeration.
-    pub const ALL: [Os; 7] = [
+    /// The FreeBSD release a triple that names none is for, which is 14.
+    ///
+    /// GCC refuses such a triple, because its configure script needs the number for
+    /// `__FreeBSD__`, and clang falls back to 8. This is the oldest release `rucc-tuple` says the
+    /// target supports, so a header that tests `__FreeBSD__` takes the branch that works on every
+    /// supported release.
+    pub const FREEBSD_RELEASE: u32 = 14;
+
+    /// Every operating system, in the order of the enumeration. FreeBSD is here once, at
+    /// [`Os::FREEBSD_RELEASE`], because its releases are one target.
+    pub const ALL: [Os; 11] = [
         Os::Linux,
         Os::Darwin,
         Os::Windows,
+        Os::FreeBsd(Os::FREEBSD_RELEASE),
+        Os::NetBsd,
+        Os::OpenBsd,
+        Os::DragonFly,
         Os::None,
         Os::Wasi(Preview::P1),
         Os::Wasi(Preview::P2),
         Os::Wasi(Preview::P3),
     ];
 
-    /// The name as it appears in a triple.
+    /// The name as it appears in a triple, without a FreeBSD release.
     pub const fn as_str(self) -> &'static str {
         match self {
             Os::Linux => "linux",
             Os::Darwin => "darwin",
             Os::Windows => "windows",
+            Os::FreeBsd(_) => "freebsd",
+            Os::NetBsd => "netbsd",
+            Os::OpenBsd => "openbsd",
+            Os::DragonFly => "dragonfly",
             Os::None => "none",
             Os::Wasi(Preview::P1) => "wasip1",
             Os::Wasi(Preview::P2) => "wasip2",
             Os::Wasi(Preview::P3) => "wasip3",
+        }
+    }
+
+    /// Whether this is one of the BSDs. Each of them is ELF and System V on every machine it
+    /// runs on, as Linux is, and differs from Linux in its macros, its types and its link line.
+    #[must_use]
+    pub const fn is_bsd(self) -> bool {
+        matches!(self, Os::FreeBsd(_) | Os::NetBsd | Os::OpenBsd | Os::DragonFly)
+    }
+
+    /// The same system with the FreeBSD release set to [`Os::FREEBSD_RELEASE`], for a question
+    /// whose answer does not depend on the release, such as whether two triples are one system.
+    #[must_use]
+    pub const fn without_release(self) -> Os {
+        match self {
+            Os::FreeBsd(_) => Os::FreeBsd(Os::FREEBSD_RELEASE),
+            os => os,
+        }
+    }
+
+    /// The system a triple names with `part`, such as `freebsd15.1`, `netbsdelf` or `openbsd7.8`,
+    /// if it names a BSD at all.
+    ///
+    /// A release is read after the name, with or without a dot, and kept only for FreeBSD. A
+    /// release that is not one, two or three numbers is an error and not a different system.
+    fn bsd(part: &str) -> Option<Result<Os, &'static str>> {
+        // `netbsdelf` before `netbsd`, or the `elf` would be read as a release.
+        let names = ["freebsd", "netbsdelf", "netbsd", "openbsd", "dragonfly"];
+        let (name, release) =
+            names.into_iter().find_map(|name| Some((name, part.strip_prefix(name)?)))?;
+        let release = release.strip_prefix('.').unwrap_or(release);
+        let release = match release {
+            "" => None,
+            text => match tuple::Version::parse(text) {
+                Some(version) => Some(version.major_part()),
+                None => return Some(Err("unknown release, which is one to three numbers")),
+            },
+        };
+        Some(Ok(match name {
+            "freebsd" => Os::FreeBsd(release.unwrap_or(Os::FREEBSD_RELEASE)),
+            "openbsd" => Os::OpenBsd,
+            "dragonfly" => Os::DragonFly,
+            _ => Os::NetBsd,
+        }))
+    }
+}
+
+impl fmt::Display for Os {
+    /// The name as [`Os::as_str`] gives it, with the release after a FreeBSD one.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Os::FreeBsd(release) => write!(f, "freebsd{release}"),
+            os => f.write_str(os.as_str()),
         }
     }
 }
@@ -601,13 +682,16 @@ impl Triple {
     }
 
     /// Whether the architecture runs on the operating system. wasm runs on WASI or on nothing,
-    /// and WASI runs nothing but wasm. Every other pair is a machine.
+    /// WASI runs nothing but wasm, and DragonFly runs nothing but x86-64. Every other pair is a
+    /// machine.
     #[must_use]
     pub const fn pairs(arch: Arch, os: Os) -> bool {
         match (arch, os) {
-            (Arch::Wasm32, Os::Linux | Os::Darwin | Os::Windows) => false,
             (Arch::Wasm32, Os::None | Os::Wasi(_)) => true,
+            (Arch::Wasm32, _) => false,
             (_, Os::Wasi(_)) => false,
+            (Arch::X86_64, Os::DragonFly) => true,
+            (_, Os::DragonFly) => false,
             _ => true,
         }
     }
@@ -620,7 +704,10 @@ impl Triple {
     pub const fn object_format(self) -> ObjectFormat {
         match (self.os, self.arch) {
             (Os::Wasi(_), _) | (Os::None, Arch::Wasm32) => ObjectFormat::Wasm,
-            (Os::Linux | Os::None, _) => ObjectFormat::Elf,
+            (
+                Os::Linux | Os::FreeBsd(_) | Os::NetBsd | Os::OpenBsd | Os::DragonFly | Os::None,
+                _,
+            ) => ObjectFormat::Elf,
             (Os::Darwin, _) => ObjectFormat::MachO,
             (Os::Windows, _) => ObjectFormat::Coff,
         }
@@ -661,6 +748,10 @@ impl Triple {
             // this compiler is hosted on the one and not on the other.
             Os::Darwin => tuple::Os::MacOs,
             Os::Windows => tuple::Os::Windows,
+            Os::FreeBsd(_) => tuple::Os::FreeBsd,
+            Os::NetBsd => tuple::Os::NetBsd,
+            Os::OpenBsd => tuple::Os::OpenBsd,
+            Os::DragonFly => tuple::Os::DragonFly,
             Os::None => tuple::Os::None,
             Os::Wasi(_) => tuple::Os::Wasi,
         };
@@ -671,13 +762,28 @@ impl Triple {
             // narrowing, because it has a different `long double` from MSVC on the same OS.
             (Os::Windows, Env::Gnu) => tuple::Env::Gnu,
             (Os::Windows, _) => tuple::Env::Msvc,
-            // Darwin and freestanding have no libc to name, and WASI has one libc, wasi-libc.
-            (Os::Darwin | Os::None | Os::Wasi(_), _) => tuple::Env::None,
+            // Darwin and freestanding have no libc to name, WASI has one libc, wasi-libc, and each
+            // BSD has its own, which is part of the system and not a choice.
+            (
+                Os::Darwin
+                | Os::FreeBsd(_)
+                | Os::NetBsd
+                | Os::OpenBsd
+                | Os::DragonFly
+                | Os::None
+                | Os::Wasi(_),
+                _,
+            ) => tuple::Env::None,
         };
         let mut builder = TargetTuple::builder(arch, os).env(env);
-        // The tuple keeps the preview as the version of the operating system.
-        if let Os::Wasi(preview) = self.os {
-            builder = builder.os_version(tuple::Version::major(preview.number()));
+        // The tuple keeps the preview and the FreeBSD release as the version of the operating
+        // system.
+        match self.os {
+            Os::Wasi(preview) => {
+                builder = builder.os_version(tuple::Version::major(preview.number()))
+            }
+            Os::FreeBsd(release) => builder = builder.os_version(tuple::Version::major(release)),
+            _ => {}
         }
         builder.build().expect("every triple this type can hold describes a machine")
     }
@@ -702,14 +808,24 @@ impl Triple {
     /// `aarch64-macos.13` is the Darwin triple rather than a miss.
     #[must_use]
     pub fn from_tuple(target: TargetTuple) -> Option<Triple> {
-        // The preview is the one version that names a different target, so it stays.
-        let target = match (target.os(), target.os_version()) {
-            (tuple::Os::Wasi, Some(preview)) => TargetTuple::builder(target.arch(), target.os())
+        // The preview is the one version that names a different target, so it stays. A FreeBSD
+        // release is kept too, as its major number, and a tuple without one is the default.
+        let freebsd = match (target.os(), target.os_version()) {
+            (tuple::Os::FreeBsd, Some(release)) => release.major_part(),
+            _ => Os::FREEBSD_RELEASE,
+        };
+        let major = match (target.os(), target.os_version()) {
+            (tuple::Os::Wasi, Some(preview)) => Some(preview.major_part()),
+            (tuple::Os::FreeBsd, _) => Some(freebsd),
+            _ => None,
+        };
+        let target = match major {
+            Some(major) => TargetTuple::builder(target.arch(), target.os())
                 .env(target.env())
-                .os_version(tuple::Version::major(preview.major_part()))
+                .os_version(tuple::Version::major(major))
                 .build()
                 .ok()?,
-            _ => target.without_versions(),
+            None => target.without_versions(),
         };
         // A triple has no float ABI, so RISC-V `-mabi=lp64` is still the triple it was given.
         let target = target.with_abi(tuple::Abi::Default);
@@ -720,6 +836,10 @@ impl Triple {
         let mut fallback = None;
         for arch in Arch::ALL {
             for os in Os::ALL {
+                let os = match os {
+                    Os::FreeBsd(_) => Os::FreeBsd(freebsd),
+                    os => os,
+                };
                 for env in Env::ALL {
                     if !Triple::pairs(arch, os) {
                         continue;
@@ -774,10 +894,29 @@ impl Triple {
             "linux" => (Os::Linux, linux_libc(arch).unwrap_or(built)),
             "macos" => (Os::Darwin, Env::None),
             "windows" => (Os::Windows, Env::Gnu),
+            "freebsd" => (Os::FreeBsd(freebsd_release()), Env::None),
+            "netbsd" => (Os::NetBsd, Env::None),
+            "openbsd" => (Os::OpenBsd, Env::None),
+            "dragonfly" => (Os::DragonFly, Env::None),
             _ => return None,
         };
         Some(Self::new(arch, os, env))
     }
+}
+
+/// The major release of this FreeBSD machine, read once from `uname -r`, which says `15.1-RELEASE`.
+///
+/// The release is the value of `__FreeBSD__`, and the system headers test it. The default
+/// release is the answer when `uname` gives nothing that can be read.
+fn freebsd_release() -> u32 {
+    static FOUND: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let output = std::process::Command::new("uname").arg("-r").output().ok();
+        let text = output.map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+        text.as_deref()
+            .and_then(|text| text.split(['.', '-']).next()?.trim().parse().ok())
+            .unwrap_or(Os::FREEBSD_RELEASE)
+    })
 }
 
 /// The C library of this Linux machine, read once from the files that are on it.
@@ -811,7 +950,7 @@ impl fmt::Display for Triple {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Always four fields, always the same spelling, because this string ends up in
         // `--print-config` output that people diff.
-        write!(f, "{}-unknown-{}-{}", self.arch.as_str(), self.os.as_str(), self.env.as_str())
+        write!(f, "{}-unknown-{}-{}", self.arch.as_str(), self.os, self.env.as_str())
     }
 }
 
@@ -879,7 +1018,11 @@ impl FromStr for Triple {
                     return Err(err("unknown WASI preview, which is wasip1, wasip2 or wasip3"));
                 }
                 "threads" => return Err(err("the threads variant of WASI is not supported")),
-                _ => {}
+                part => {
+                    if let Some(bsd) = Os::bsd(part) {
+                        os = Some(bsd.map_err(err)?);
+                    }
+                }
             }
         }
 
@@ -889,10 +1032,10 @@ impl FromStr for Triple {
         }
         let os = os.ok_or_else(|| err("unknown operating system"))?;
         if !Triple::pairs(arch, os) {
-            return Err(err(if arch.is_wasm() {
-                "wasm32 runs on WASI or with no operating system"
-            } else {
-                "WASI is an operating system for wasm32 only"
+            return Err(err(match os {
+                _ if arch.is_wasm() => "wasm32 runs on WASI or with no operating system",
+                Os::DragonFly => "DragonFly runs on x86_64 only",
+                _ => "WASI is an operating system for wasm32 only",
             }));
         }
         // The same defaults as `rucc_tuple::Os::default_env`, so that `x86_64-pc-windows` means
@@ -900,7 +1043,13 @@ impl FromStr for Triple {
         // that is the one a fresh machine can link for.
         let env = env.unwrap_or(match os {
             Os::Linux | Os::Windows => Env::Gnu,
-            Os::Darwin | Os::None | Os::Wasi(_) => Env::None,
+            Os::Darwin
+            | Os::FreeBsd(_)
+            | Os::NetBsd
+            | Os::OpenBsd
+            | Os::DragonFly
+            | Os::None
+            | Os::Wasi(_) => Env::None,
         });
         Ok(Self::new(arch, os, env))
     }
@@ -1430,7 +1579,7 @@ impl TargetInfo {
             // position independent is a flag and not the target.
             (tuple::Arch::X86, tuple::Os::Windows, tuple::Env::Msvc) => Some(&x86::MSVC32),
             (tuple::Arch::X86, tuple::Os::Windows, _) => Some(&x86::MINGW32),
-            (tuple::Arch::X86, _, _) => Some(&x86::SYSV),
+            (tuple::Arch::X86, _, _) => x86::regparm(0, reg_struct_return(target)),
             (tuple::Arch::Riscv64, _, _) => Some(&riscv64::LP64D),
             _ => None,
         };
@@ -1483,7 +1632,7 @@ impl TargetInfo {
             regs,
             call_regs,
             regparm: 0,
-            reg_struct_return: false,
+            reg_struct_return: reg_struct_return(target),
             timing,
             counts: match target.arch() {
                 tuple::Arch::X86_64 => x86_64::COUNTS,
@@ -1630,6 +1779,17 @@ fn has_float128(target: TargetTuple) -> bool {
         // machine is wider than a `double` and neither reference offers a type that is.
         tuple::Arch::Arm | tuple::Arch::Wasm32 => false,
     }
+}
+
+/// Whether a small structure comes back in registers on this target when no flag says, which
+/// is gcc's `DEFAULT_PCC_STRUCT_RETURN` set to zero.
+///
+/// i386 FreeBSD and OpenBSD set it to zero in gcc's `i386/freebsd.h` and `i386/openbsdelf.h`.
+/// Every other System V i386 target keeps the psABI rule, which returns every structure through
+/// memory, and on every other machine the ABI decides and the flag changes nothing.
+pub(crate) fn reg_struct_return(target: TargetTuple) -> bool {
+    target.arch() == tuple::Arch::X86
+        && matches!(target.os(), tuple::Os::FreeBsd | tuple::Os::OpenBsd)
 }
 
 /// The granule a `_BitInt` wider than 64 bits is laid out in, in bits.
@@ -1805,6 +1965,102 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_bsd_spellings() {
+        let freebsd = |release| Os::FreeBsd(release);
+        for (spelling, arch, os) in [
+            ("x86_64-unknown-freebsd15.1", Arch::X86_64, freebsd(15)),
+            ("x86_64-freebsd", Arch::X86_64, freebsd(14)),
+            ("amd64-unknown-freebsd", Arch::X86_64, freebsd(14)),
+            ("aarch64-unknown-freebsd15.0", Arch::Aarch64, freebsd(15)),
+            ("riscv64-unknown-freebsd", Arch::Riscv64, freebsd(14)),
+            ("i386-unknown-freebsd14.5", Arch::X86, freebsd(14)),
+            ("x86_64-portbld-freebsd13", Arch::X86_64, freebsd(13)),
+            ("x86_64--netbsd", Arch::X86_64, Os::NetBsd),
+            ("x86_64-unknown-netbsd11.1", Arch::X86_64, Os::NetBsd),
+            ("aarch64--netbsd", Arch::Aarch64, Os::NetBsd),
+            ("riscv64--netbsd", Arch::Riscv64, Os::NetBsd),
+            ("i486--netbsdelf", Arch::X86, Os::NetBsd),
+            ("x86_64-unknown-dragonfly", Arch::X86_64, Os::DragonFly),
+            ("x86_64-unknown-dragonfly6.4", Arch::X86_64, Os::DragonFly),
+            ("x86_64-unknown-openbsd7.8", Arch::X86_64, Os::OpenBsd),
+            ("i386-unknown-openbsd", Arch::X86, Os::OpenBsd),
+        ] {
+            let t: Triple = spelling.parse().unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            assert_eq!((t.arch, t.os, t.env), (arch, os, Env::None), "{spelling}");
+            assert_eq!(t.object_format(), ObjectFormat::Elf, "{spelling}");
+            assert!(t.os.is_bsd(), "{spelling}");
+            // The release survives the trip to the tuple and back, and only FreeBSD has one.
+            assert_eq!(Triple::from_tuple(t.tuple()), Some(t), "{spelling}");
+            assert_eq!(t.to_string().parse::<Triple>(), Ok(t), "{spelling}");
+        }
+        let t: Triple = "x86_64-unknown-freebsd15.1".parse().unwrap();
+        assert_eq!(t.to_string(), "x86_64-unknown-freebsd15-none");
+        assert_eq!(t.tuple().to_canonical_string(), "x86_64-freebsd.15");
+        let t: Triple = "i486--netbsdelf".parse().unwrap();
+        assert_eq!(t.tuple().to_canonical_string(), "i686-netbsd");
+    }
+
+    #[test]
+    fn refuses_the_bsd_rows_it_does_not_have() {
+        for (spelling, reason) in [
+            ("aarch64-unknown-dragonfly", "DragonFly runs on x86_64 only"),
+            ("wasm32-unknown-freebsd", "wasm32 runs on WASI or with no operating system"),
+            ("x86_64-unknown-freebsd15.x", "unknown release, which is one to three numbers"),
+            ("x86_64-unknown-openbsd7.8.1.2", "unknown release, which is one to three numbers"),
+        ] {
+            let e = spelling.parse::<Triple>().unwrap_err();
+            assert_eq!(e.reason, reason, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_bsd_is_elf_and_system_v_on_every_machine_it_runs_on() {
+        for (spelling, like) in [
+            ("x86_64-freebsd", "x86_64-linux-gnu"),
+            ("aarch64-netbsd", "aarch64-linux-gnu"),
+            ("riscv64-freebsd", "riscv64-linux-gnu"),
+            ("x86_64-openbsd", "x86_64-linux-gnu"),
+            ("x86_64-dragonfly", "x86_64-linux-gnu"),
+        ] {
+            let bsd = TargetInfo::new(spelling.parse().unwrap());
+            let linux = TargetInfo::new(like.parse().unwrap());
+            assert_eq!(bsd.call_regs, linux.call_regs, "{spelling}");
+            assert_eq!(bsd.va_list, linux.va_list, "{spelling}");
+            assert_eq!(bsd.long_double_format, linux.long_double_format, "{spelling}");
+            assert_eq!(bsd.object_format, ObjectFormat::Elf, "{spelling}");
+            assert!(!bsd.has_decimal_float, "{spelling}");
+        }
+        // NetBSD keeps `wchar_t` signed on AArch64, where Linux and FreeBSD make it unsigned.
+        let netbsd = TargetInfo::new("aarch64--netbsd".parse().unwrap());
+        assert_eq!((netbsd.wchar_width, netbsd.wchar_is_signed), (32, true));
+        let freebsd = TargetInfo::new("aarch64-unknown-freebsd".parse().unwrap());
+        assert_eq!((freebsd.wchar_width, freebsd.wchar_is_signed), (32, false));
+    }
+
+    #[test]
+    fn i386_freebsd_and_openbsd_return_a_small_structure_in_registers() {
+        // gcc sets `DEFAULT_PCC_STRUCT_RETURN` to zero in `i386/freebsd.h` and
+        // `i386/openbsdelf.h`. NetBSD and Linux keep the psABI rule.
+        for (spelling, in_registers) in [
+            ("i386-unknown-freebsd14.5", true),
+            ("i386-unknown-openbsd", true),
+            ("i486--netbsdelf", false),
+            ("i686-unknown-linux-gnu", false),
+            ("x86_64-unknown-freebsd", false),
+        ] {
+            let target = TargetInfo::new(spelling.parse().unwrap());
+            assert_eq!(target.reg_struct_return, in_registers, "{spelling}");
+            let name = target.call_under(Convention::Target).map(|call| call.abi().name);
+            assert_eq!(name == Some("i386 SysV -freg-struct-return"), in_registers, "{spelling}");
+        }
+        // `-fpcc-struct-return` takes it back to memory.
+        let freebsd = TargetInfo::new("i386-unknown-freebsd".parse().unwrap());
+        let pcc = freebsd.with_reg_struct_return(false);
+        let name = pcc.call_under(Convention::Target).map(|call| call.abi().name);
+        assert_eq!(name, Some(rucc_abi::abis::I386_SYSV.name));
+    }
+
+    #[test]
     fn displays_in_a_normalised_form() {
         let t: Triple = "amd64-linux-gnu".parse().unwrap();
         assert_eq!(t.to_string(), "x86_64-unknown-linux-gnu");
@@ -1885,7 +2141,7 @@ mod tests {
     #[test]
     fn every_triple_describes_a_machine() {
         // `Triple::tuple` panics on a pair that is not a machine and this is what says there is
-        // no such pair. All eighty combinations whose architecture pairs with the operating
+        // no such pair. All 132 combinations whose architecture pairs with the operating
         // system, including the ones the parser will produce from a string somebody can type and
         // no machine has, such as a Darwin target claiming glibc.
         let mut built = 0;
@@ -1908,7 +2164,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, 80);
+        assert_eq!(built, 132);
     }
 
     #[test]
@@ -1969,7 +2225,7 @@ mod tests {
             "x86_64-linux-gnux32",
             "aarch64-linux-android",
             "aarch64-ios",
-            "x86_64-freebsd",
+            "aarch64-dragonfly",
         ] {
             let target = tuple.parse().unwrap();
             assert_eq!(Triple::from_tuple(target), None, "{tuple}");

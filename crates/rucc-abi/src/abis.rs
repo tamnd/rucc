@@ -970,6 +970,9 @@ pub fn for_target(target: TargetTuple) -> Option<&'static AbiDescription> {
         // for rather than the target's.
         (Arch::X86, Os::Windows) if target.env() == Env::Msvc => &I386_MSVC,
         (Arch::X86, Os::Windows) => &I386_MINGW,
+        // gcc for i386 FreeBSD and OpenBSD sets `DEFAULT_PCC_STRUCT_RETURN` to zero, so a small
+        // structure comes back in registers there with no flag. NetBSD keeps the System V rule.
+        (Arch::X86, Os::FreeBsd | Os::OpenBsd) => &I386_SYSV_REG_STRUCT,
         (Arch::X86, _) => &I386_SYSV,
         (Arch::Aarch64, os) if os.is_darwin() => &DARWIN_ARM64,
         // AAPCS64 with a different variadic rule, per section 6.1, and not AAPCS64 itself, which

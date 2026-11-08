@@ -12,7 +12,10 @@ use crate::{
 };
 
 /// Vendor components, which carry no information and exist to be skipped.
+///
+/// The empty one is NetBSD's: its `build.sh` names its own targets `x86_64--netbsd`.
 const VENDORS: &[&str] = &[
+    "",
     "unknown",
     "pc",
     "apple",
@@ -208,9 +211,13 @@ fn parse_os(s: &str) -> Option<(Os, Option<Version>, Option<Env>)> {
         // scale exists inside the tuple, which is the one users of `-mmacosx-version-min` type.
         "darwin" => Some((Os::MacOs, version.and_then(darwin_to_macos), None)),
         "ios" | "iphoneos" => Some((Os::IOs, version, None)),
-        "freebsd" => Some((Os::FreeBsd, None, None)),
-        "netbsd" => Some((Os::NetBsd, None, None)),
+        // FreeBSD keeps its release, which GCC defines `__FreeBSD__` from. NetBSD and OpenBSD
+        // drop theirs, because the compiler defines `__NetBSD__` and `__OpenBSD__` to one and the
+        // release comes from `<sys/param.h>`. `netbsdelf` is the name NetBSD's i386 port uses.
+        "freebsd" => Some((Os::FreeBsd, version, None)),
+        "netbsd" | "netbsdelf" => Some((Os::NetBsd, None, None)),
         "openbsd" => Some((Os::OpenBsd, None, None)),
+        "dragonfly" => Some((Os::DragonFly, None, None)),
         "illumos" => Some((Os::Illumos, None, None)),
         _ => None,
     }
