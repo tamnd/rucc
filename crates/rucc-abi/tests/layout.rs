@@ -281,7 +281,7 @@ fn every_target_in_the_table_has_a_layout_that_makes_sense() {
 }
 
 #[test]
-fn the_pointer_sized_integer_is_long_on_wasm32_and_int_on_the_other_ilp32_rows() {
+fn the_pointer_sized_integer_is_long_on_wasm32_and_i386_openbsd_and_int_elsewhere() {
     // The same size on all of them, so only the name differs, and the name is what wasi-libc's
     // `typedef unsigned _Addr size_t;` and glibc's `typedef unsigned int size_t;` disagree on.
     for tuple in ["wasm32-wasip1", "wasm32-wasip2", "wasm32-wasip3", "wasm32-none"] {
@@ -290,6 +290,11 @@ fn the_pointer_sized_integer_is_long_on_wasm32_and_int_on_the_other_ilp32_rows()
         assert!(layout.pointer_int_is_long, "{tuple}");
     }
     for tuple in ["i686-linux-gnu", "armv7-linux-gnueabihf", "x86_64-linux-gnu"] {
+        assert!(!layout(tuple).pointer_int_is_long, "{tuple}");
+    }
+    // i386 OpenBSD says `long` too, and the other i386 BSDs say `int` as Linux does.
+    assert!(layout("i386-unknown-openbsd").pointer_int_is_long);
+    for tuple in ["i386-unknown-freebsd", "i486--netbsdelf"] {
         assert!(!layout(tuple).pointer_int_is_long, "{tuple}");
     }
 }
