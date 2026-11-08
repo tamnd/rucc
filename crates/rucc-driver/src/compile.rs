@@ -5606,8 +5606,9 @@ decl #0 x : int object external static defined
     }
 
     /// The format archetypes gcc knows, which on Windows include the `ms_` ones mingw-w64's
-    /// headers write through `__MINGW_PRINTF_FORMAT`. gcc on Linux does not know those and says
-    /// so, and a name no target knows is warned about everywhere.
+    /// headers write through `__MINGW_PRINTF_FORMAT` and on FreeBSD the two the FreeBSD ports'
+    /// gcc adds. gcc on Linux does not know those and says so, and a name no target knows is
+    /// warned about everywhere.
     #[test]
     fn format_takes_the_archetypes_gcc_knows_on_the_target() {
         let source = concat!(
@@ -5639,6 +5640,20 @@ decl #0 x : int object external static defined
         );
         assert!(linux[1].contains("'ms_scanf'"), "{linux:?}");
         assert!(linux[2].contains("'ms_strftime'"), "{linux:?}");
+
+        // The FreeBSD ports' gcc knows FreeBSD's two, and stock gcc on Linux does not.
+        let freebsd = concat!(
+            "int i(const char *, ...) __attribute__((format(__freebsd_kprintf__, 1, 2)));\n",
+            "int j(const char *, ...) __attribute__((format(printf0, 1, 2)));\n",
+        );
+        let mut bsd = options();
+        bsd.named_warnings.flag("format");
+        bsd.target = "x86_64-unknown-freebsd14".parse::<Triple>().unwrap();
+        assert_eq!(run(&bsd, freebsd).messages, Vec::<String>::new());
+        let linux = run(&asked, freebsd).messages;
+        assert_eq!(linux.len(), 2, "{linux:?}");
+        assert!(linux[0].contains("'freebsd_kprintf' is an unrecognized format"), "{linux:?}");
+        assert!(linux[1].contains("'printf0' is an unrecognized format"), "{linux:?}");
 
         let bogus = "int h(const char *, ...) __attribute__((format(bogus, 1, 2)));\n";
         let messages = run(&opts, bogus).messages;

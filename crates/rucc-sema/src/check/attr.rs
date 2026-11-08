@@ -144,6 +144,14 @@ const FORMAT_ARCHETYPES: [&str; 16] = [
 /// There is no `ms_strfmon`, because Windows has no `strfmon`, and mingw-w64 gcc warns about one.
 const WINDOWS_ARCHETYPES: [&str; 3] = ["ms_printf", "ms_scanf", "ms_strftime"];
 
+/// The archetypes the FreeBSD ports' gcc knows beyond gcc's, which a FreeBSD target takes because
+/// that gcc is the reference there.
+///
+/// The kernel's build writes `-D__printf__=__freebsd_kprintf__`, so every `__printflike` in it
+/// names the second, and `<sys/cdefs.h>` writes `__printf0like` with the first. Stock gcc knows
+/// neither and warns about both, which is what happens on every other target here.
+const FREEBSD_ARCHETYPES: [&str; 2] = ["printf0", "freebsd_kprintf"];
+
 /// The archetypes clang knows beyond gcc's, which a Darwin target takes because clang is the
 /// reference there.
 const DARWIN_ARCHETYPES: [&str; 10] = [
@@ -663,11 +671,12 @@ impl Checker<'_> {
     /// `scanf`, `strftime` and `strfmon` are the same as their `gnu_` names on every target. gcc
     /// on Linux does not know the `ms_` names and warns about them, which is what happens here as
     /// well. The Darwin targets take clang's names as well as gcc's, because clang is the
-    /// reference there and Apple's headers write `os_log` and `CFString`.
+    /// reference there and Apple's headers write `os_log` and `CFString`. The FreeBSD targets take
+    /// `printf0` and `freebsd_kprintf`, which the gcc of the FreeBSD ports knows.
     ///
     /// The format strings themselves are read by `check/format.rs`, under `-Wformat`, for the
-    /// `printf`, `scanf` and `strftime` archetypes and their `gnu_` names. The others are accepted
-    /// and read no further.
+    /// `printf`, `scanf` and `strftime` archetypes and their `gnu_` names, and on FreeBSD for its
+    /// two. The others are accepted and read no further.
     pub(in crate::check) fn format_archetypes(&mut self, attrs: AttrList) {
         let ast = self.ast;
         let written = &ast[attrs];
@@ -691,7 +700,8 @@ impl Checker<'_> {
         }
     }
 
-    /// Whether `name` is a format archetype gcc knows on this target, or clang on a Darwin one.
+    /// Whether `name` is a format archetype gcc knows on this target, or clang on a Darwin one, or
+    /// the FreeBSD ports' gcc on a FreeBSD one.
     fn knows_archetype(&self, name: &str) -> bool {
         let tuple = self.cx.target.tuple;
         if FORMAT_ARCHETYPES.contains(&name) {
@@ -699,6 +709,7 @@ impl Checker<'_> {
         }
         match tuple.os().as_str() {
             "windows" => WINDOWS_ARCHETYPES.contains(&name),
+            "freebsd" => FREEBSD_ARCHETYPES.contains(&name),
             _ if tuple.os().is_darwin() => DARWIN_ARCHETYPES.contains(&name),
             _ => false,
         }
