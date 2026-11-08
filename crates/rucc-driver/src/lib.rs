@@ -5651,16 +5651,23 @@ pub fn run_as(program: &str, args: &[String]) -> i32 {
 /// that point meson reads the version from `__GNUC__` and asks the preprocessor everything else,
 /// so the line decides the path and nothing more. It says what is true, that rucc speaks the
 /// dialect of that GCC release. `spec/04-driver-and-cli.md` section 4.5 has the rest.
+///
+/// FreeBSD's `share/mk/bsd.compiler.mk` reads the version from this text too. It takes every word
+/// that matches `[1-9]*.[0-9]*`, joins them with spaces and gives the line to
+/// `awk -F. '{print $1 * 10000 + $2 * 100 + $3}'`. So exactly one word here looks like a version,
+/// and it is the claimed release in all three numbers: the last word of the first line under a
+/// claim, and the release the second line names when there is no claim. The licence names its
+/// version in words for the same reason, since "2.0." used to be the only such word and FreeBSD
+/// read this compiler as GCC 2.0.0. tamnd/rucc#4091.
 fn banner(opts: &Options) -> String {
     let gnuc = opts.gnuc;
-    let first = if opts.gnuc_given {
-        format!("gcc (rucc {VERSION}, GNU C persona {gnuc}) {gnuc}")
+    let (first, dialect) = if opts.gnuc_given {
+        (format!("gcc (rucc {VERSION}) {gnuc}"), gnuc.major.to_string())
     } else {
-        format!("rucc {VERSION}")
+        (format!("rucc {VERSION}"), gnuc.to_string())
     };
     format!(
-        "{first}\nA C compiler for the GNU C dialect of GCC {} from the Free Software Foundation.\nThis is free software under the Apache License 2.0. There is NO warranty.",
-        gnuc.major
+        "{first}\nA C compiler for the GNU C dialect of GCC {dialect} from the Free Software Foundation.\nThis is free software under version 2 of the Apache License. There is NO warranty."
     )
 }
 
@@ -9729,17 +9736,68 @@ mod tests {
     fn a_claimed_release_puts_gcc_and_its_version_on_the_first_line() {
         let text = printed(&["-fgnuc-version=14.2.0", "--version"]);
         let first = text.lines().next().unwrap_or_default();
-        assert_eq!(first, format!("gcc (rucc {VERSION}, GNU C persona 14.2.0) 14.2.0"));
+        assert_eq!(first, format!("gcc (rucc {VERSION}) 14.2.0"));
         assert!(text.contains("GCC 14 from the Free Software Foundation"), "{text}");
         assert_eq!(text.lines().count(), 3, "{text}");
 
         // The claim can come after the flag, since it is answered once the line has been read,
         // and a short claim is printed in all three numbers, as GCC prints its own.
         let text = printed(&["--version", "-fgnuc-version=4.9"]);
-        assert!(text.starts_with(&format!("gcc (rucc {VERSION}, GNU C persona 4.9.0) 4.9.0\n")));
+        assert!(text.starts_with(&format!("gcc (rucc {VERSION}) 4.9.0\n")));
 
         // A command line gcc would refuse is refused rather than answered.
         assert!(refused(&["--version", "-fgnuc-version=4.x"]).contains("not a number"));
+    }
+
+    /// What FreeBSD's `share/mk/bsd.compiler.mk` makes of a `--version` text, as
+    /// `(COMPILER_TYPE, COMPILER_VERSION)`. The make variable splits the text into words. The type
+    /// is gcc for a word `gcc` or `(GCC)` or one that ends in `GNU`, and clang for a word `clang`.
+    /// The version is every word that matches `[1-9]*.[0-9]*`, joined with spaces and given to
+    /// `awk -F. '{print $1 * 10000 + $2 * 100 + $3}'`, where awk reads each field as the number
+    /// its leading digits make.
+    fn freebsd_reads(text: &str) -> (Option<&'static str>, u64) {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let kind = if words.iter().any(|w| *w == "gcc" || *w == "(GCC)" || w.ends_with("GNU")) {
+            Some("gcc")
+        } else if words.contains(&"clang") {
+            Some("clang")
+        } else {
+            None
+        };
+        let looks_like_a_version = |w: &&&str| {
+            let b = w.as_bytes();
+            matches!(b.first(), Some(b'1'..=b'9'))
+                && b.windows(2).skip(1).any(|p| p[0] == b'.' && p[1].is_ascii_digit())
+        };
+        let line = words.iter().filter(looks_like_a_version).copied().collect::<Vec<_>>().join(" ");
+        let field = |n: usize| -> u64 {
+            let f = line.split('.').nth(n).unwrap_or("").trim_start();
+            f.bytes().take_while(u8::is_ascii_digit).fold(0, |v, d| v * 10 + u64::from(d - b'0'))
+        };
+        (kind, field(0) * 10000 + field(1) * 100 + field(2))
+    }
+
+    /// FreeBSD reads the compiler type and the GCC release from `--version`, and the release then
+    /// picks its warning sets and `kern.mk`'s format checker. "Apache License 2.0." made rucc read
+    /// as GCC 2.0.0, so exactly one word may look like a version and it must be the claim.
+    /// tamnd/rucc#4091.
+    #[test]
+    fn freebsd_reads_the_claimed_gcc_release_from_the_version_banner() {
+        assert_eq!(freebsd_reads(&printed(&["--version"])), (Some("gcc"), 160000));
+        for (claim, number) in
+            [("15.2.0", 150200), ("14.2", 140200), ("12.5.0", 120500), ("4.2.1", 40201)]
+        {
+            let flag = format!("-fgnuc-version={claim}");
+            let text = printed(&[&flag, "--version"]);
+            assert_eq!(freebsd_reads(&text), (Some("gcc"), number), "{text}");
+        }
+        // One word and no more, so the answer does not depend on how awk reads `0) 15`.
+        for text in [printed(&["--version"]), printed(&["-fgnuc-version=15.2.0", "--version"])] {
+            let versions = text
+                .split_whitespace()
+                .filter(|w| w.starts_with(|c: char| ('1'..='9').contains(&c)) && w.contains('.'));
+            assert_eq!(versions.count(), 1, "{text}");
+        }
     }
 
     /// Before GCC 7 `-dumpversion` was the whole version. From 7 it is the major number the way
