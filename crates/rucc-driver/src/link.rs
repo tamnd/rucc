@@ -85,6 +85,8 @@ use rucc_sysroot::{Chip, Crt, LinkMode, argv};
 use rucc_target::{Arch, Env, Os, Preview, Triple};
 use rucc_tuple::TargetTuple;
 
+mod bsd;
+
 /// What the command line said about linking.
 ///
 /// Kept apart from `Options` because none of it reaches the compilation. A flag here changes what
@@ -565,6 +567,9 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
     if is_msvc(target) {
         return vec!["lld-link".to_owned(), "link.exe".to_owned()];
     }
+    if target.os.is_bsd() {
+        return bsd::order(target, Triple::host());
+    }
     if cross_sysroot(target, opts).is_some() {
         let mut names = cross_order(target);
         // The mingw-w64 sysroot this release fetches has import libraries that GNU ld cannot link
@@ -1028,6 +1033,9 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     if is_msvc(target) {
         return msvc_preflight(target, opts);
     }
+    if target.os.is_bsd() {
+        return bsd_preflight(target, opts);
+    }
     let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_tree(target, opts)) else {
         return Ok(());
     };
@@ -1053,6 +1061,26 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     // And now the whole line, which is the sysroot's files plus ours, so that a missing runtime is
     // said here rather than by the linker after everything has been compiled.
     cross_line(target, opts, &[], "a.out", &sysroot)?;
+    Ok(())
+}
+
+/// [`preflight`] for a BSD, which is whether there is a line and whether the tree `--sysroot`
+/// named has a library directory.
+fn bsd_preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
+    bsd::line(target, opts, &[], "a.out", Triple::host())?;
+    if let Some(root) = &opts.sysroot {
+        let lib = under(Some(root), "/usr/lib");
+        if !lib.is_dir() {
+            return Err(Error::Cross {
+                why: format!(
+                    "--sysroot={} is not the root of a copy of {}, because it has no usr/lib \
+                     in it",
+                    root.display(),
+                    target.tuple().to_canonical_string()
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1510,12 +1538,13 @@ fn executable(path: &Path) -> bool {
 /// Two lines and [`cross_sysroot`] picks which: the one above for this machine, and
 /// [`rucc_sysroot::argv`]'s for any other. Nothing about the machine is read on the second path, so
 /// `-###` prints the same line on every host and prints it whether the sysroot has been built or
-/// not, which is what makes it worth printing.
+/// not, which is what makes it worth printing. A BSD has a line of its own, the one its GCC writes,
+/// which is in the `bsd` module.
 ///
 /// # Errors
 ///
-/// [`Error::Target`] for a platform there is no native line for yet, which is every one but Linux,
-/// and [`Error::Cross`] for a cross link that cannot be produced at all.
+/// [`Error::Target`] for a platform there is no native line for yet, and [`Error::Cross`] for a
+/// cross link that cannot be produced at all.
 pub fn line(
     target: Triple,
     opts: &LinkOptions,
@@ -1553,6 +1582,9 @@ fn line_for(
     }
     if is_msvc(target) {
         return cross_line(target, opts, items, output, &msvc_sysroot(target, opts)?);
+    }
+    if target.os.is_bsd() {
+        return bsd::line(target, opts, items, output, Triple::host());
     }
     if let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_tree(target, opts)) {
         return cross_line(target, opts, items, output, &sysroot);
@@ -1695,7 +1727,7 @@ fn line_for(
 /// The line for `-r`, which is the objects and the machine and nothing else.
 ///
 /// No sysroot is read, because a relocatable link takes nothing from the C library, so this is the
-/// same line for this machine and for any other Linux target. The `-L` directories the command
+/// same line for this machine and for any other Linux or BSD target. The `-L` directories the command
 /// line gave are kept for a `-l` written on it, which the linker still resolves against archives.
 fn relocatable_line(
     target: Triple,
@@ -1719,16 +1751,16 @@ fn relocatable_line(
         push_items(&mut args, items);
         return Ok(args);
     }
-    if target.os != Os::Linux {
+    let mut args = vec!["-o".to_owned(), output.to_owned()];
+    if target.os.is_bsd() {
+        // The `-m` of the BSD's own line, which is none on most of them, as GCC passes it.
+        args.extend(bsd::emulation(target));
+    } else if target.os == Os::Linux {
+        args.extend(["-m".to_owned(), emulation(target).to_owned()]);
+    } else {
         return Err(Error::Target { triple: target.to_string() });
     }
-    let mut args = vec![
-        "-o".to_owned(),
-        output.to_owned(),
-        "-m".to_owned(),
-        emulation(target).to_owned(),
-        "-r".to_owned(),
-    ];
+    args.push("-r".to_owned());
     if opts.strip {
         args.push("-s".to_owned());
     }
@@ -2337,6 +2369,11 @@ fn library_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 #[must_use]
 pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
     let mut dirs = link.search.clone();
+    // A BSD is linked against `/usr/lib` of the tree `--sysroot` named, or of this machine.
+    if target.os.is_bsd() {
+        dirs.extend(bsd::dirs(target, link.sysroot.as_deref()));
+        return dirs;
+    }
     // A cross link searches the sysroot's directory and, for a libc that is a stub, the one its
     // stubs are written to, so this is those and not the machine's. What `-print-search-dirs` says is what a build
     // system pastes into a link line of its own, and an answer that named `/usr/lib` for a target
@@ -4176,5 +4213,78 @@ mod tests {
         assert!(mingw_libgcc(target, &cached(), None).is_none());
         assert!(mingw_libgcc(linux(), &opts, None).is_none());
         let _ = fs::remove_dir_all(&usr);
+    }
+
+    fn freebsd() -> Triple {
+        Triple::new(Arch::X86_64, Os::FreeBsd(14), Env::None)
+    }
+
+    /// Whether this test runs on a BSD, where a BSD target with no sysroot is this machine.
+    fn on_a_bsd() -> bool {
+        Triple::host().is_some_and(|host| host.os.is_bsd())
+    }
+
+    #[test]
+    fn a_bsd_is_linked_by_its_own_line_and_not_by_the_one_of_the_cache() {
+        let root = a_machine("bsd-line", &["usr/lib/crt1.o"]);
+        let opts = LinkOptions { sysroot: Some(root.clone()), ..cached() };
+        let args = line(freebsd(), &opts, &one("a.o"), "a.out").expect("a FreeBSD line");
+        assert_eq!(args[0], format!("--sysroot={}", root.display()));
+        assert!(args.windows(2).any(|pair| pair == ["-m", "elf_x86_64_fbsd"]), "{args:?}");
+        assert!(args.contains(&"/libexec/ld-elf.so.1".to_owned()), "{args:?}");
+        if !on_a_bsd() {
+            // Not the cache's line, which is a Linux one, and not a tree that is not there.
+            let Err(Error::Cross { why }) = line(freebsd(), &cached(), &one("a.o"), "a.out") else {
+                panic!("a FreeBSD link with no sysroot was not refused");
+            };
+            assert!(why.contains("--sysroot=<dir>"), "{why}");
+            assert!(order(freebsd(), &cached()).iter().all(|name| name.contains("lld")));
+        }
+    }
+
+    #[test]
+    fn a_bsd_preflight_says_when_the_sysroot_is_not_a_bsd_tree() {
+        let root = a_machine("bsd-empty", &["etc/motd"]);
+        let opts = LinkOptions { sysroot: Some(root.clone()), ..cached() };
+        let Err(Error::Cross { why }) = preflight(freebsd(), &opts) else {
+            panic!("a sysroot with no usr/lib was taken");
+        };
+        assert!(why.contains("no usr/lib"), "{why}");
+        let full = a_machine("bsd-full", &["usr/lib/crt1.o"]);
+        assert_eq!(preflight(freebsd(), &LinkOptions { sysroot: Some(full), ..cached() }), Ok(()));
+        let fixed =
+            LinkOptions { is_static: true, pie: Some(true), sysroot: Some(root), ..cached() };
+        assert!(matches!(preflight(freebsd(), &fixed), Err(Error::Cross { .. })));
+    }
+
+    #[test]
+    fn a_relocatable_bsd_link_names_the_machine_of_its_line() {
+        let opts = LinkOptions { relocatable: true, ..LinkOptions::default() };
+        let args = line(freebsd(), &opts, &one("a.o"), "b.o").expect("a relocatable line");
+        assert_eq!(args, ["-o", "b.o", "-m", "elf_x86_64_fbsd", "-r", "a.o"]);
+        let netbsd = Triple::new(Arch::Aarch64, Os::NetBsd, Env::None);
+        let args = line(netbsd, &opts, &one("a.o"), "b.o").expect("a relocatable line");
+        assert_eq!(args, ["-o", "b.o", "-r", "a.o"]);
+    }
+
+    #[test]
+    fn a_bsd_searches_usr_lib_of_its_tree() {
+        let root = a_machine("bsd-search", &["usr/lib/gcc80/libgcc.a"]);
+        let link = LinkOptions {
+            sysroot: Some(root.clone()),
+            search: vec![PathBuf::from("/opt/lib")],
+            ..cached()
+        };
+        let dragonfly = Triple::new(Arch::X86_64, Os::DragonFly, Env::None);
+        let gcc80 = root.join("usr/lib/gcc80");
+        assert_eq!(
+            search_dirs(&link, dragonfly),
+            [PathBuf::from("/opt/lib"), gcc80.clone(), root.join("usr/lib")]
+        );
+        assert_eq!(find_in_search(&link, dragonfly, "libgcc.a"), Some(gcc80.join("libgcc.a")));
+        assert_eq!(
+            search_dirs(&link, freebsd()),
+            [PathBuf::from("/opt/lib"), root.join("usr/lib")]
+        );
     }
 }
