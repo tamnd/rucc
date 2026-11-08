@@ -1,0 +1,121 @@
+# rucc on a FreeBSD host, which is tamnd/rucc#4089. A FreeBSD that rucc builds must later build
+# itself with rucc, so the compiler has to build, pass its tests and link a program there.
+#
+# GitHub has no FreeBSD runner. The job boots FreeBSD 15.1 under QEMU on an Ubuntu runner and runs
+# the same build and tests as the test matrix in ci.yml. The action is pinned by commit, because it
+# runs a VM image that it downloads, and a moved tag would change that image without a commit here.
+# The steps after the one that starts the VM run inside it, through the shell that the action
+# installs.
+#
+# A separate workflow rather than a row in ci.yml, because the VM takes minutes to boot and the run
+# is slower than any host in the matrix. It runs on the pull requests that change the compiler, not
+# on every one.
+
+name: freebsd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "crates/**"
+      - "runtime/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".github/workflows/freebsd.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test on freebsd 15.1 amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # The VM gets every CPU of the runner and all of its memory except 2 GiB, which QEMU and the
+      # runner itself need. The numbers are read here, so a larger runner gives a larger VM.
+      - name: size the VM
+        id: size
+        run: |
+          set -euo pipefail
+          echo "cpu=$(nproc)" >> "$GITHUB_OUTPUT"
+          total=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+          echo "mem=$((total - 2048))" >> "$GITHUB_OUTPUT"
+      # rustup rather than the rust package, because the package is the release that the ports tree
+      # has and rust-toolchain.toml pins another one. rustup reads that file, so the VM builds with
+      # the same compiler as every other job. gcc and binutils are the reference compiler and the
+      # object readers that some tests compare against, as on Linux. The environment is in a file
+      # that each later step reads, because each step is a new shell in the VM.
+      - name: start FreeBSD
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "15.1"
+          cpu: ${{ steps.size.outputs.cpu }}
+          mem: ${{ steps.size.outputs.mem }}
+          prepare: |
+            set -e
+            pkg install -y bash curl git gcc binutils
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            cat > /root/ci.env <<'EOF'
+            . /root/.cargo/env
+            export CARGO_TERM_COLOR=always
+            export CARGO_INCREMENTAL=0
+            export RUSTFLAGS="-D warnings"
+            export CARGO_TARGET_DIR=/var/tmp/target
+            EOF
+      # The target directory is outside the checkout, so the action does not copy it back to the
+      # runner after each step. That copy would take longer than the tests.
+      - name: the machine and the toolchain
+        shell: freebsd {0}
+        run: |
+          set -e
+          . /root/ci.env
+          uname -a
+          freebsd-version
+          sysctl -n hw.ncpu hw.physmem
+          rustup show active-toolchain || rustup toolchain install
+          rustc -vV
+      - name: cargo build
+        shell: freebsd {0}
+        run: |
+          set -e
+          . /root/ci.env
+          cargo build --workspace --all-features
+      - name: cargo test
+        shell: freebsd {0}
+        run: |
+          set -e
+          . /root/ci.env
+          cargo test --workspace --all-features --no-fail-fast
+      - name: rucc --print-config
+        if: always()
+        shell: freebsd {0}
+        run: |
+          set -e
+          . /root/ci.env
+          rucc=$CARGO_TARGET_DIR/debug/rucc
+          "$rucc" --print-config
+          "$rucc" --version
+          "$rucc" -dumpmachine
+      # The milestone is a program that rucc compiles, the system's ld links and the system's
+      # loader runs, with no flag that names a directory.
+      - name: hello world with the system's ld
+        if: always()
+        shell: freebsd {0}
+        run: |
+          set -e
+          . /root/ci.env
+          rucc=$CARGO_TARGET_DIR/debug/rucc
+          cd /var/tmp
+          printf '#include <stdio.h>\nint main(void) { puts("hello"); return 0; }\n' > hello.c
+          "$rucc" -v hello.c -o hello
+          file hello
+          ./hello | grep -q '^hello$'
