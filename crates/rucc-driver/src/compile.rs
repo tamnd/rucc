@@ -564,6 +564,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 .toplevel_reorder
                                 .unwrap_or_else(|| opts.opt_level.runs_optimizer())
                                 && sess.target.object_format != rucc_target::ObjectFormat::MachO,
+                            asm_reader: opts.asm_reader,
                             for_size: opts.opt_level.is_size(),
                             isa: opts.isa,
                             vector: opts.vector,
