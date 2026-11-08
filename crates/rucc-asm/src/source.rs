@@ -3761,10 +3761,16 @@ impl Reader {
     }
 
     /// `.globl` and the two others that say who can see a name.
+    ///
+    /// A `.weak` is not undone by a `.globl` or a `.local` after it. gas keeps the name weak and
+    /// says nothing, and a C file depends on this: `asm(".weak f")` at file scope goes into the
+    /// listing ahead of the `.globl f` the compiler writes for the definition of `f`.
     fn bind(&mut self, args: &[String], binding: Binding) -> Result<(), Trouble> {
         for arg in args {
             let sym = self.sym(arg.trim());
-            self.syms[sym].binding = binding;
+            if self.syms[sym].binding != Binding::Weak {
+                self.syms[sym].binding = binding;
+            }
         }
         Ok(())
     }
@@ -8703,6 +8709,20 @@ _tls$tlv$init:
         assert_eq!(name(&out, "seen").binding, Binding::Global);
         assert_eq!(name(&out, "maybe").binding, Binding::Weak);
         assert_eq!(name(&out, "inside").visibility, Visibility::Hidden);
+    }
+
+    /// gas keeps a name weak when a `.globl` or a `.local` comes after the `.weak`, in either
+    /// order. A `.weak` in an `asm` at file scope goes into the listing ahead of the `.globl` the
+    /// compiler writes for the C definition, so this order is the one a C file makes.
+    #[test]
+    fn a_weak_name_stays_weak_whatever_is_said_of_it_after() {
+        let out = assembled(
+            "\t.text\n\t.weak first\n\t.globl first\n\t.weak second\n\t.local second\n\t.globl \
+             third\n\t.weak third\nfirst:\nsecond:\nthird:\n\t.byte 0\n",
+        );
+        for which in ["first", "second", "third"] {
+            assert_eq!(name(&out, which).binding, Binding::Weak, "{which}");
+        }
     }
 
     #[test]

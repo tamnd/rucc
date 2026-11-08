@@ -758,10 +758,12 @@ fn switches(args: &[String]) -> Vec<String> {
     // The `-f` flags that name a path or that are about the diagnostics, as prefixes. The trace
     // names a file, and the fuel is there to find the pass that broke an object by comparing it
     // with the object built without the fuel, which only works if the fuel leaves no mark of its own.
+    // The switch for the reader of `asm` at file scope is there to show that both paths give the
+    // same object, which needs the same thing.
     const NOT_RECORDED: &str = "-ffile-prefix-map= -fdebug-prefix-map= -fmacro-prefix-map= \
         -fprofile-prefix-map= -fdiagnostics- -fno-diagnostics- -fmessage-length= -fmax-errors= \
         -fdump- -fopt-info -fuse-ld= -fcolor-diagnostics -fno-color-diagnostics -frucc-trace= \
-        -fpass-fuel";
+        -fpass-fuel -frucc-asm-reader=";
     let mut out = Vec::new();
     let mut words = args.iter();
     while let Some(arg) = words.next() {
@@ -2518,6 +2520,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     return Err(err("-frucc-trace= needs a file to write to"));
                 }
                 opts.trace = Some(path.to_owned());
+            }
+            "-frucc-asm-reader=on" => opts.asm_reader = true,
+            "-frucc-asm-reader=off" => opts.asm_reader = false,
+            _ if arg.starts_with("-frucc-asm-reader=") => {
+                let value = &arg["-frucc-asm-reader=".len()..];
+                return Err(err(format!("-frucc-asm-reader= takes `on` or `off`, not `{value}`")));
             }
             // Everything from `-fopt-info` to the end of the argument, which is optional
             // keywords joined by hyphens and an optional `=<file>`. Checked here rather than

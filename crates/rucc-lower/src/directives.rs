@@ -146,6 +146,14 @@ pub(crate) struct Assembled {
     pub pieces: Vec<Piece>,
     /// The names a `.set` gave to something else, in the order they were written.
     pub sets: Vec<Set>,
+    /// The first thing in the template this reading does not give the way gas gives it, and
+    /// nothing when the reading is exact.
+    ///
+    /// The reading is still made, because a target with no assembler path has nothing better to
+    /// use. On ELF a block with one of these goes to the assembler instead, and so does every
+    /// other block of the file. See `crate::unit`, and section 07.3 of the plan in tamnd/rucc-bsd,
+    /// which says a block is translated here only when the translation is exact.
+    pub inexact: Option<String>,
 }
 
 /// One global a template defines, which is one label and everything written under it.
@@ -321,6 +329,8 @@ struct Assembler<'a> {
     sizes: Map<String, i64>,
     /// What the last alignment directive asked for and nothing has been aligned to yet.
     pending: u32,
+    /// The first thing read that this reading does not give exactly. See [`Assembled::inexact`].
+    inexact: Option<String>,
     /// Where the bytes of a file come from.
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
 }
@@ -342,6 +352,7 @@ impl<'a> Assembler<'a> {
             visibility: Map::default(),
             sizes: Map::default(),
             pending: 1,
+            inexact: None,
             read,
         }
     }
@@ -418,12 +429,16 @@ impl<'a> Assembler<'a> {
             ".text" => self.section(Section::Text),
             ".data" => self.section(Section::Data),
             ".bss" => self.section(Section::Bss),
-            ".section" => self.section(self.named(operands)),
+            ".section" => {
+                let section = self.named(operands);
+                self.section(section);
+            }
             // The same directive with a stack behind it, which is how a template writes something
             // into another section without having to know which section it was standing in.
             ".pushsection" => {
                 self.stack.push(self.current);
-                self.section(self.named(operands));
+                let section = self.named(operands);
+                self.section(section);
             }
             ".popsection" => {
                 let Some(back) = self.stack.pop() else {
@@ -439,7 +454,12 @@ impl<'a> Assembler<'a> {
             // What a name is is recorded by the object writer from what the global holds, so
             // there is nothing here to keep. It is accepted because every exported symbol in
             // real assembly is written with one and refusing it would refuse the whole file.
-            ".type" | ".ident" | ".file" | ".cfi_sections" => {}
+            ".type" | ".file" | ".cfi_sections" => {}
+            // gas adds the string to `.comment`, ahead of the line naming the compiler. Nothing
+            // here can put a string there, so the reading leaves it out and says so. On ELF the
+            // assembler then reads the block, which is how NetBSD's `__RCSID` and the `__IDSTRING`
+            // of other systems reach `.comment`.
+            ".ident" => self.inexact(format!("the '.ident' {}", operands.trim())),
             ".set" | ".equ" => self.equate(operands)?,
             ".symver" => self.symver(operands)?,
             ".size" => self.size(operands)?,
@@ -467,9 +487,24 @@ impl<'a> Assembler<'a> {
     }
 
     /// Which section a directive's operands named, which is the first of them.
-    fn named(&self, operands: &str) -> Section {
-        let named = split(operands).into_iter().next().unwrap_or_default();
-        section_named(named.trim_matches('"'))
+    ///
+    /// The flags, the type and anything after them are not carried into the reading. A global goes
+    /// in a named section with the flags of a writable one, and gas gives a named section what its
+    /// name and its operands ask for. So the reading is exact only for the sections [`exact_section`]
+    /// lists. NetBSD's `__RCSID` is `.pushsection .ident,"MS",@progbits,1`, which the
+    /// reading would make writable and not mergeable.
+    fn named(&mut self, operands: &str) -> Section {
+        let parts = split(operands);
+        let named = parts.first().map_or("", |part| part.trim().trim_matches('"'));
+        if !exact_section(named, parts.get(1..).unwrap_or_default()) {
+            self.inexact(format!("the section '{}'", operands.trim()));
+        }
+        section_named(named)
+    }
+
+    /// Records that the reading is not exact, and why, if nothing has been recorded yet.
+    fn inexact(&mut self, what: String) {
+        self.inexact.get_or_insert(what);
     }
 
     /// Moves to a section, which closes whatever was being written to the last one.
@@ -826,6 +861,25 @@ impl<'a> Assembler<'a> {
                 first.align = largest;
             }
         }
+        // A name a directive gave a binding or a reach to and that this block does not define is a
+        // name the reading has nowhere to put that on. gas puts it on the symbol whoever defines
+        // it, a later block, an earlier one or the C code, so `.weak alias` in one block and
+        // `.equ alias, real` in the next make a weak `alias`. FreeBSD's `__weak_reference` is
+        // written that way.
+        let mut undefined: Vec<&String> = self
+            .linkage
+            .keys()
+            .chain(self.visibility.keys())
+            .filter(|name| {
+                !self.pieces.iter().any(|piece| piece.name.as_ref() == Some(*name))
+                    && !self.sets.iter().any(|(set, _, _)| set == *name)
+            })
+            .collect();
+        undefined.sort();
+        if let Some(name) = undefined.first() {
+            let what = format!("a binding of '{name}', which this block does not define");
+            self.inexact.get_or_insert(what);
+        }
         // A name a `.set` gave takes what the directives said about it from the same two maps the
         // labels take theirs from, since `.weak name` says the same thing about a name whichever
         // of the two ways the name came to stand for something.
@@ -840,7 +894,7 @@ impl<'a> Assembler<'a> {
                 versioned: *versioned,
             })
             .collect();
-        Ok(Assembled { pieces: self.pieces, sets })
+        Ok(Assembled { pieces: self.pieces, sets, inexact: self.inexact })
     }
 
     /// What one expression works out to.
@@ -1130,6 +1184,39 @@ fn section_named(name: &str) -> Section {
         ".rodata" | ".const_data" | ".const" => Section::ReadOnly,
         ".bss" => Section::Bss,
         _ => Section::Named(name.to_owned()),
+    }
+}
+
+/// Whether a section directive naming `name`, with `rest` after the name, is read exactly.
+///
+/// Only one of the four sections the object writer has answers of its own for, or a `.data.`
+/// section, and only with the flags and the type gas gives that section when nothing is said. A
+/// global in a named section is written with the flags of a writable one, which is what gas gives
+/// a name starting `.data.`. `.const` and `.const_data` are read as `.rodata` because they are its
+/// Mach-O names, and on ELF they are sections of their own.
+fn exact_section(name: &str, rest: &[String]) -> bool {
+    let (flags, kind) = match name {
+        ".text" => ("ax", "progbits"),
+        ".data" => ("aw", "progbits"),
+        _ if name.starts_with(".data.") => ("aw", "progbits"),
+        ".rodata" => ("a", "progbits"),
+        ".bss" => ("aw", "nobits"),
+        _ => return false,
+    };
+    let same_flags = |given: &str| {
+        let mut given: Vec<char> = given.trim().trim_matches('"').chars().collect();
+        let mut wanted: Vec<char> = flags.chars().collect();
+        given.sort_unstable();
+        wanted.sort_unstable();
+        given == wanted
+    };
+    let same_kind =
+        |given: &str| given.trim().trim_matches('"').trim_start_matches(['@', '%']) == kind;
+    match rest {
+        [] => true,
+        [given] => same_flags(given),
+        [given, ty] => same_flags(given) && same_kind(ty),
+        _ => false,
     }
 }
 
@@ -1706,5 +1793,69 @@ gSize:
         for template in ["", "\n\t\n", ".text\n"] {
             assert!(read(template).expect("read").is_empty(), "{template:?}");
         }
+    }
+
+    /// Whether the template is read exactly, which is what decides whether ELF reads it here.
+    fn exact(template: &str) -> bool {
+        all_of(template).expect("the template is read").inexact.is_none()
+    }
+
+    /// NetBSD's `__RCSID` and the note its start files brand a program with. gas makes the first
+    /// `PROGBITS` with the merge and string flags and the second `SHT_NOTE` and not writable, and
+    /// the reading would make both writable `PROGBITS`. See tamnd/rucc#4090.
+    #[test]
+    fn a_section_with_flags_or_a_type_the_reading_cannot_keep_is_not_exact() {
+        for template in [
+            ".pushsection .ident,\"MS\",@progbits,1\n.asciz \"$NetBSD: x.c,v 1.1 $\"\n.popsection",
+            ".pushsection .note.netbsd.ident,\"a\",@note\n.long 7\n.popsection",
+            ".section .note.netbsd.ident,\"a\",%note\n.long 7\n",
+            ".section .rodata,\"aw\"\nx:\n.byte 1\n",
+            ".section .data,\"aw\",@nobits\nx:\n.byte 1\n",
+            // gas gives a section it does not know by name no flags at all.
+            ".pushsection .foo\nx:\n.byte 1\n.popsection",
+            ".section .const\nx:\n.byte 1\n",
+            ".section .bss.x\nx:\n.zero 4\n",
+        ] {
+            assert!(!exact(template), "{template:?}");
+        }
+    }
+
+    /// The four sections the object writer has answers of its own for and a `.data.` section,
+    /// said with nothing after the name or with what gas gives them anyway.
+    #[test]
+    fn a_section_the_object_writer_makes_the_way_gas_does_is_exact() {
+        for template in [
+            ".data\nx:\n.byte 1\n",
+            ".section .rodata\nx:\n.byte 1\n",
+            ".section .rodata,\"a\"\nx:\n.byte 1\n",
+            ".pushsection .data,\"wa\",@progbits\nx:\n.byte 1\n.popsection",
+            ".section .bss,\"aw\",@nobits\nx:\n.zero 4\n",
+            ".pushsection .data.ignore\nx:\n.byte 7\n.popsection",
+        ] {
+            assert!(exact(template), "{template:?}");
+        }
+    }
+
+    /// gas writes the string of an `.ident` into `.comment`, which nothing here can do.
+    #[test]
+    fn an_ident_is_not_exact() {
+        assert!(!exact(".ident \"$FreeBSD: x $\""));
+    }
+
+    /// FreeBSD's `__weak_reference` is `.weak alias` in one block and `.equ alias, real` in the
+    /// next. gas puts the binding on whatever defines the name, and the reading of the first block
+    /// has nothing to put it on. The same is true of a name the C code defines.
+    #[test]
+    fn a_binding_of_a_name_the_block_does_not_define_is_not_exact() {
+        for template in
+            [".weak alias", ".globl real", ".local real", ".hidden real", ".protected real"]
+        {
+            let read = all_of(template).expect("read");
+            assert!(read.inexact.is_some(), "{template:?}");
+            assert!(read.pieces.is_empty() && read.sets.is_empty(), "{template:?}");
+        }
+        // Inside one block the reading puts it on the label or the `.set` it defines.
+        assert!(exact(".weak alias\n.equ alias, real\n"));
+        assert!(exact(".data\n.globl x\n.hidden x\nx:\n.byte 1\n"));
     }
 }

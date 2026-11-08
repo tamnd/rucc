@@ -349,6 +349,12 @@ pub struct Context<'a> {
     /// Whether the objects are laid out newest first, which is what gcc does when it optimizes.
     /// See `Module::reverse_globals`.
     pub reorder: bool,
+    /// Whether an `asm` at file scope made of directives may be read into globals here rather
+    /// than handed to the assembler, which `-frucc-asm-reader=off` turns off.
+    ///
+    /// Only read on ELF, the one format with an assembler path to hand a block to. The switch is
+    /// for tests: the object has to be the same either way. See `Unit::file_asms`.
+    pub asm_reader: bool,
     /// Whether the build optimizes for size, which is `-Os` and `-Oz`. gcc then gives an object
     /// on AArch64 no more alignment than its type asks for. See `repr::static_align`.
     pub for_size: bool,
@@ -403,6 +409,7 @@ impl fmt::Debug for Context<'_> {
             .field("fixed_x18", &self.fixed_x18)
             .field("tls_model", &self.tls_model)
             .field("reorder", &self.reorder)
+            .field("asm_reader", &self.asm_reader)
             .field("for_size", &self.for_size)
             .field("isa", &self.isa)
             .field("vector", &self.vector)
@@ -489,6 +496,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         fixed_x18,
         tls_model,
         reorder,
+        asm_reader,
         for_size,
         isa,
         vector,
@@ -530,6 +538,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         fixed_x18,
         tls_model,
         reorder,
+        asm_reader,
         for_size,
         isa,
         vector,
@@ -630,6 +639,8 @@ pub(crate) struct Unit<'a> {
     tls_model: TlsModel,
     /// Whether the objects are laid out newest first. See [`Context::reorder`].
     reorder: bool,
+    /// Whether an `asm` at file scope may be read here. See [`Context::asm_reader`].
+    asm_reader: bool,
     /// Whether the build optimizes for size. See [`Context::for_size`].
     for_size: bool,
     /// The extensions the command line builds for. See [`Context::isa`].
@@ -880,6 +891,12 @@ impl Unit<'_> {
     /// are that shape: each id is a block of its own, and the block that ends the set measures the
     /// set as the distance from its start label to where the section has got to. So once one block
     /// has to be text, every block is, and the assembler sees them in the order they were written.
+    ///
+    /// A block the reader can read only near enough is text on ELF for the same reason. The
+    /// assembler shares one symbol table and one section stack across every block and the C code,
+    /// so a `.weak` in one block reaches a name defined in another, and it keeps every flag and
+    /// type a section directive gives. See [`directives::Assembled::inexact`]. Under
+    /// `-frucc-asm-reader=off` every block is text on ELF, which is how the two paths are compared.
     fn file_asms(&mut self) {
         let mut blocks = Vec::new();
         for index in 0..self.tast.file_asms().len() {
@@ -890,12 +907,14 @@ impl Unit<'_> {
         }
         let elf = self.target.object_format == ObjectFormat::Elf;
         let as_text = elf
-            && blocks.iter().any(|(_, _, read)| {
-                matches!(
-                    read,
-                    Err(directives::Failed::Unsupported(_) | directives::Failed::Instruction(_))
-                )
-            });
+            && (!self.asm_reader
+                || blocks.iter().any(|(_, _, read)| match read {
+                    Ok(read) => read.inexact.is_some(),
+                    Err(directives::Failed::Missing(..)) => false,
+                    Err(
+                        directives::Failed::Unsupported(_) | directives::Failed::Instruction(_),
+                    ) => true,
+                }));
         for (asm, template, read) in blocks {
             if as_text && !matches!(read, Err(directives::Failed::Missing(..))) {
                 self.module.add_file_asm(template);
