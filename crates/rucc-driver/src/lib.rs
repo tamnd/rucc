@@ -7158,8 +7158,10 @@ mod tests {
 
     #[test]
     fn the_pic_and_pie_families_are_settled_the_way_gcc_settles_them() {
+        // For a Linux target, because a BSD makes no position independent executable when the
+        // line says nothing, and the host of the test can be a BSD.
         let pic = |line: &[&str]| {
-            let mut line = line.to_vec();
+            let mut line = [&[LINUX], line].concat();
             line.push("a.c");
             compile(&line).0.pic
         };

@@ -489,8 +489,14 @@ mod tests {
         let Ok(mut gzip) = gzip else {
             return None;
         };
-        gzip.stdin.take().expect("a pipe that was asked for").write_all(bytes).expect("writes");
+        // From another thread, because gzip writes while it reads. When its output fills the pipe
+        // it stops reading, and a write here of all the input before any read waits for ever. A
+        // pipe holds 64 KiB on Linux and 16 KiB on FreeBSD.
+        let mut stdin = gzip.stdin.take().expect("a pipe that was asked for");
+        let input = bytes.to_vec();
+        let writer = std::thread::spawn(move || stdin.write_all(&input));
         let out = gzip.wait_with_output().expect("gzip finishes");
+        writer.join().expect("the writer finishes").expect("writes");
         assert!(out.status.success(), "gzip {level} failed");
         // Ten bytes of header, then the deflate stream, then four bytes of crc and four of length.
         let body = out.stdout.get(10..out.stdout.len() - 8).expect("a member with a header on it");

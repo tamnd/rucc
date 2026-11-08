@@ -89,7 +89,10 @@ jobs:
           set -e
           . /root/ci.env
           cargo build --workspace --all-features
+      # A step limit as well as the job limit, so that a test that hangs ends this step and the
+      # steps after it still run. On Linux the tests take about five minutes.
       - name: cargo test
+        timeout-minutes: 60
         shell: freebsd {0}
         run: |
           set -e
