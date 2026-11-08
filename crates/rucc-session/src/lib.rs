@@ -369,6 +369,21 @@ impl Sanitize {
         "unreachable",
     ];
 
+    /// Whether any of the checks is on.
+    pub fn any(&self) -> bool {
+        [
+            self.divide,
+            self.shift_exponent,
+            self.shift_base,
+            self.boolean,
+            self.enumeration,
+            self.bounds_strict,
+            self.unreachable,
+        ]
+        .iter()
+        .any(|check| *check != Check::Off)
+    }
+
     /// The check for one of [`Self::NAMES`].
     pub fn check_mut(&mut self, name: &str) -> Option<&mut Check> {
         match name {

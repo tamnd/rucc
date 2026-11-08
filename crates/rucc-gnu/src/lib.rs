@@ -16,10 +16,14 @@
 //! against it fails the build.
 //!
 //! ```
-//! use rucc_gnu::{Kind, Status, Target};
+//! use rucc_gnu::{Kind, Mode, Status, Target};
 //!
 //! let linux = Target::new("x86_64", "linux");
-//! assert_eq!(rucc_gnu::has_feature("__has_include", linux, 16), 1);
+//! let c11 = Mode { c11: true, ..Mode::default() };
+//! assert_eq!(rucc_gnu::has_feature("c_atomic", linux, 16, c11), 1);
+//! assert_eq!(rucc_gnu::has_feature("c_atomic", linux, 16, Mode::default()), 0);
+//! assert_eq!(rucc_gnu::has_extension("c_atomic", linux, 16, Mode::default()), 1);
+//! assert_eq!(rucc_gnu::has_feature("__has_include", linux, 16, c11), 0);
 //! assert_eq!(rucc_gnu::has_attribute("cleanup", linux, 16), 1);
 //! assert_eq!(rucc_gnu::has_attribute("transparent_union", linux, 16), 1);
 //! assert_eq!(rucc_gnu::has_attribute("no_such_attribute", linux, 16), 0);
@@ -84,6 +88,63 @@ impl Status {
     /// Whether the `__has_*` family answers yes for a row at this status.
     pub const fn is_available(self) -> bool {
         matches!(self, Status::Implemented)
+    }
+}
+
+/// The modes a feature row is a feature in, where `__has_feature` answers for it.
+///
+/// GCC registers each name `__has_feature` knows with one flag, which says whether it is a
+/// feature or only an extension. Some of the flags are read from the command line. `c_atomic` is
+/// a feature under C11 and only an extension under C99, and `address_sanitizer` is not there at
+/// all without the sanitizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum When {
+    /// In every mode.
+    Always,
+    /// Under C11 or a later standard. An earlier one has it as an extension only.
+    C11,
+    /// Under C23 or a later standard. An earlier one has it as an extension only.
+    C23,
+    /// Only when `-fsanitize=address` or `-fsanitize=kernel-address` is on, and absent otherwise.
+    Address,
+    /// Only when a check of `-fsanitize=undefined` is on, and absent otherwise.
+    Undefined,
+}
+
+/// What `__has_feature` and `__has_extension` read from how the unit is compiled.
+///
+/// The default is C89 or C99 with no sanitizer and no `-pedantic-errors`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Mode {
+    /// Whether the standard is C11 or later, which is gcc's `flag_isoc11`.
+    pub c11: bool,
+    /// Whether the standard is C23 or later, which is gcc's `flag_isoc23`.
+    pub c23: bool,
+    /// Whether `-pedantic-errors` is on. `__has_extension` then answers as `__has_feature` does.
+    pub pedantic_errors: bool,
+    /// Whether `-fsanitize=address` or `-fsanitize=kernel-address` is on.
+    pub address: bool,
+    /// Whether any check of `-fsanitize=undefined` is on.
+    pub undefined: bool,
+}
+
+impl Mode {
+    /// Whether a row that says this is there at all in this mode.
+    fn has(self, when: When) -> bool {
+        match when {
+            When::Address => self.address,
+            When::Undefined => self.undefined,
+            When::Always | When::C11 | When::C23 => true,
+        }
+    }
+
+    /// Whether a row that says this is a feature in this mode rather than only an extension.
+    fn is_feature(self, when: When) -> bool {
+        match when {
+            When::C11 => self.c11,
+            When::C23 => self.c23,
+            When::Always | When::Address | When::Undefined => self.has(when),
+        }
     }
 }
 
@@ -213,6 +274,8 @@ pub struct Feature {
     /// it gets from gcc is the one it has to be able to live with, so the row keeps its status,
     /// which says what the compiler does, and answers what gcc answers.
     pub value: u32,
+    /// The modes a feature row is a feature in. [`When::Always`] for every other row.
+    pub when: When,
     /// The places the row answers on, or none for a row that answers the same everywhere.
     ///
     /// On a target that is none of them the `__has_*` operators answer zero, whatever the status
@@ -299,17 +362,32 @@ pub fn has_builtin(name: &str, target: Target, gnuc: u32) -> u32 {
 }
 
 /// What `__has_feature(name)` answers.
-pub fn has_feature(name: &str, target: Target, gnuc: u32) -> u32 {
-    answer(Kind::Feature, name, target, gnuc)
+///
+/// The answer is gcc 14's, which knows a short list of names. Some of them are features only in
+/// some modes, so `c_atomic` is one under `-std=c11` and zero under `-std=gnu99`.
+pub fn has_feature(name: &str, target: Target, gnuc: u32, mode: Mode) -> u32 {
+    match lookup(Kind::Feature, name) {
+        Some(row) if mode.is_feature(row.when) => answer(Kind::Feature, name, target, gnuc),
+        _ => 0,
+    }
 }
 
 /// What `__has_extension(name)` answers.
 ///
-/// GCC treats the two as the same question and so do we: a feature that is available is
-/// available whether or not the mode it is asked in makes it standard.
-pub fn has_extension(name: &str, target: Target, gnuc: u32) -> u32 {
+/// gcc answers one for every name `__has_feature` knows in this mode, whether it is a feature or
+/// only an extension. Under `-pedantic-errors` gcc answers as `__has_feature` does.
+pub fn has_extension(name: &str, target: Target, gnuc: u32, mode: Mode) -> u32 {
+    if mode.pedantic_errors {
+        return has_feature(name, target, gnuc, mode);
+    }
     let extension = answer(Kind::Extension, name, target, gnuc);
-    if extension == 0 { answer(Kind::Feature, name, target, gnuc) } else { extension }
+    if extension != 0 {
+        return extension;
+    }
+    match lookup(Kind::Feature, name) {
+        Some(row) if mode.has(row.when) => answer(Kind::Feature, name, target, gnuc),
+        _ => 0,
+    }
 }
 
 fn answer(kind: Kind, name: &str, target: Target, gnuc: u32) -> u32 {
@@ -374,7 +452,7 @@ mod tests {
     fn a_name_that_is_not_in_the_matrix_answers_no() {
         assert_eq!(has_attribute("nonesuch", LINUX, GCC), 0);
         assert_eq!(has_builtin("__builtin_nonesuch", LINUX, GCC), 0);
-        assert_eq!(has_feature("nonesuch", LINUX, GCC), 0);
+        assert_eq!(has_feature("nonesuch", LINUX, GCC, Mode::default()), 0);
         assert_eq!(lookup(Kind::Attribute, "nonesuch"), None);
     }
 
@@ -420,7 +498,11 @@ mod tests {
         }
         let ranges = lookup(Kind::Extension, "case_ranges").expect("in the table");
         assert_eq!(ranges.status, Status::Implemented);
-        assert_eq!(has_extension("case_ranges", LINUX, GCC), 0, "gcc 16 does not know the name");
+        assert_eq!(
+            has_extension("case_ranges", LINUX, GCC, Mode::default()),
+            0,
+            "gcc 16 does not know the name"
+        );
     }
 
     #[test]
@@ -556,10 +638,79 @@ mod tests {
         let nested = lookup(Kind::Extension, "nested_functions").expect("in the table");
         assert_eq!(nested.status, Status::Implemented);
         assert_eq!(
-            has_extension("nested_functions", Target::new("x86_64", "linux"), GCC),
+            has_extension("nested_functions", Target::new("x86_64", "linux"), GCC, Mode::default()),
             0,
             "gcc 16 answers 0 for the name"
         );
+    }
+
+    /// gcc 14 to 16 know the same eleven names, and probes of all three give these answers.
+    #[test]
+    fn has_feature_knows_gcc_s_names_and_reads_the_mode() {
+        let gnu99 = Mode::default();
+        let c11 = Mode { c11: true, ..Mode::default() };
+        let c23 = Mode { c11: true, c23: true, ..Mode::default() };
+        let feature = |name, mode| has_feature(name, LINUX, GCC, mode);
+        let extension = |name, mode| has_extension(name, LINUX, GCC, mode);
+        for name in ["tls", "enumerator_attributes", "attribute_deprecated_with_message"] {
+            for mode in [gnu99, c11, c23] {
+                assert_eq!((feature(name, mode), extension(name, mode)), (1, 1), "{name}");
+            }
+        }
+        assert_eq!(feature("__attribute_unavailable_with_message__", gnu99), 1);
+        assert_eq!(feature("__tls", gnu99), 0, "half the armour is not a name");
+        for name in ["gnu_asm_goto_with_outputs", "gnu_asm_goto_with_outputs_full"] {
+            assert_eq!((feature(name, c23), extension(name, c23)), (0, 1), "{name}");
+        }
+        for name in ["c_alignas", "c_alignof", "c_atomic", "c_generic_selections"] {
+            assert_eq!((feature(name, gnu99), extension(name, gnu99)), (0, 1), "{name}");
+            assert_eq!((feature(name, c11), extension(name, c11)), (1, 1), "{name}");
+        }
+        for name in ["c_static_assert", "c_thread_local"] {
+            assert_eq!((feature(name, gnu99), feature(name, c11)), (0, 1), "{name}");
+        }
+        assert_eq!(
+            (feature("cxx_binary_literals", c11), extension("cxx_binary_literals", c11)),
+            (0, 1)
+        );
+        assert_eq!(feature("cxx_binary_literals", c23), 1);
+        // Names gcc does not know, including the operators themselves and clang's own.
+        for name in ["__has_include", "__has_feature", "modules", "c_static_assert_no_message"] {
+            assert_eq!((feature(name, c23), extension(name, c23)), (0, 0), "{name}");
+        }
+    }
+
+    #[test]
+    fn pedantic_errors_makes_has_extension_ask_what_has_feature_asks() {
+        let strict = Mode { pedantic_errors: true, ..Mode::default() };
+        assert_eq!(has_extension("c_atomic", LINUX, GCC, strict), 0);
+        assert_eq!(has_extension("gnu_asm_goto_with_outputs", LINUX, GCC, strict), 0);
+        assert_eq!(has_extension("tls", LINUX, GCC, strict), 1);
+        let strict = Mode { c11: true, ..strict };
+        assert_eq!(has_extension("c_atomic", LINUX, GCC, strict), 1);
+    }
+
+    /// gcc registers a sanitizer's name only when the sanitizer is on. This compiler has the
+    /// shadow checks of `kernel-address` and some checks of `undefined`, and refuses the rest.
+    #[test]
+    fn a_sanitizer_is_a_feature_only_while_it_is_on() {
+        let off = Mode::default();
+        let on = Mode { address: true, undefined: true, ..Mode::default() };
+        for name in ["address_sanitizer", "undefined_behavior_sanitizer"] {
+            assert_eq!(
+                (has_feature(name, LINUX, GCC, off), has_extension(name, LINUX, GCC, off)),
+                (0, 0)
+            );
+            assert_eq!(
+                (has_feature(name, LINUX, GCC, on), has_extension(name, LINUX, GCC, on)),
+                (1, 1)
+            );
+        }
+        for name in ["thread_sanitizer", "leak_sanitizer", "hwaddress_sanitizer"] {
+            assert_eq!(has_extension(name, LINUX, GCC, on), 0, "{name}");
+            let row = lookup(Kind::Feature, name).expect("in the table");
+            assert_eq!(row.status, Status::Unimplemented, "{name}");
+        }
     }
 
     #[test]

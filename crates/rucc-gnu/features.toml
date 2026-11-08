@@ -15,6 +15,7 @@
 #   status       unimplemented, partial, implemented or rejected
 #   answer       what to answer when the status is not `implemented`, see below
 #   value        what `__has_c_attribute` returns, which the standard fixes per attribute
+#   when         c11, c23, address or undefined, for a feature that is one only in that mode
 #   targets      x86-64, x86, aarch64 or windows, where a row answers only on some targets
 #   used_by      projects known to need it, from the corpus in spec/15-testing.md
 #   tests        the tests that prove the status, named as `crate::test` or as a file path
@@ -35,70 +36,80 @@ name = "__has_include"
 kind = "feature"
 gcc_version = "5.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc", "sqlite", "systemd"]
 tests = ["rucc-pp::has_include_answers_from_the_search_path"]
-notes = "C23 standard as well as a GNU extension. Answered against the same search path an `#include` on the same line would use."
+notes = "C23 standard as well as a GNU extension. Answered against the same search path an `#include` on the same line would use. `__has_feature` and `__has_extension` answer 0 for the name. gcc 14 to 16 read it as the start of a call of the operator and stop with an error."
 
 [[feature]]
 name = "__has_include_next"
 kind = "feature"
 gcc_version = "5.0"
 status = "implemented"
+value = "0"
 used_by = ["glibc"]
 tests = ["rucc-pp::has_include_next_starts_where_include_next_would"]
+notes = "`__has_feature` and `__has_extension` answer 0 for the name. gcc 14 to 16 read it as the start of a call of the operator and stop with an error."
 
 [[feature]]
 name = "__has_embed"
 kind = "feature"
 gcc_version = "15.0"
 status = "implemented"
+value = "0"
 used_by = []
 tests = ["rucc-pp::has_embed_tells_missing_from_present_from_empty"]
-notes = "Three answers rather than two, because a resource that exists and is empty needs different code from one that is missing."
+notes = "Three answers rather than two, because a resource that exists and is empty needs different code from one that is missing. `__has_feature` and `__has_extension` answer 0 for the name. gcc 14 to 16 read it as the start of a call of the operator and stop with an error."
 
 [[feature]]
 name = "__has_attribute"
 kind = "feature"
 gcc_version = "5.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc", "systemd", "curl"]
 tests = ["rucc-pp::has_attribute_answers_out_of_the_matrix"]
-notes = "The operator works. What it answers about is this table, so almost every attribute answers no until the parser lands."
+notes = "The operator works. What it answers about is this table, so almost every attribute answers no until the parser lands. `__has_feature` and `__has_extension` answer 0 for the name. gcc 14 to 16 read it as the start of a call of the operator and stop with an error."
 
 [[feature]]
 name = "__has_c_attribute"
 kind = "feature"
 gcc_version = "11.0"
 status = "implemented"
+value = "0"
 used_by = ["systemd"]
 tests = ["rucc-pp::the_scoped_spelling_of_an_attribute_is_the_same_question"]
-notes = "Answers with the value the standard gives the attribute rather than with one, which is why the table carries a value column."
+notes = "Answers with the value the standard gives the attribute rather than with one, which is why the table carries a value column. `__has_feature` and `__has_extension` answer 0 for the name. gcc 14 to 16 read it as the start of a call of the operator and stop with an error."
 
 [[feature]]
 name = "__has_builtin"
 kind = "feature"
 gcc_version = "10.0"
 status = "implemented"
+value = "0"
 used_by = ["linux", "glibc", "ffmpeg"]
 tests = ["rucc-pp::has_builtin_answers_no_until_the_builtin_is_real"]
+notes = "`__has_feature` and `__has_extension` answer 0 for the name. gcc 14 to 16 read it as the start of a call of the operator and stop with an error."
 
 [[feature]]
 name = "__has_feature"
 kind = "feature"
 gcc_version = "14.0"
 status = "implemented"
+value = "0"
 used_by = ["llvm"]
-tests = ["rucc-pp::has_feature_and_has_extension_read_the_same_table"]
-notes = "A Clang operator that GCC took, and headers ask it before asking anything else."
+tests = ["rucc-pp::has_feature_and_has_extension_answer_what_gcc_14_answers", "rucc-pp::has_feature_and_has_extension_are_not_there_before_gcc_14", "rucc::has_feature_answers_for_the_standard_the_unit_is_compiled_under"]
+notes = "A Clang operator that GCC took in gcc 14. Under an older persona it is not there, so `#ifdef __has_feature` is false and a header can define it. It answers from the rows below with gcc_version 14.0. `__has_feature` and `__has_extension` answer 0 for the name. gcc 14 to 16 read it as the start of a call of the operator and stop with an error."
 
 [[feature]]
 name = "__has_extension"
 kind = "feature"
 gcc_version = "14.0"
 status = "implemented"
+value = "0"
 used_by = ["llvm"]
-tests = ["rucc-pp::has_feature_and_has_extension_read_the_same_table"]
-notes = "Answers yes wherever `__has_feature` does, because a feature that is available is available whatever mode it is asked in."
+tests = ["rucc-pp::has_feature_and_has_extension_answer_what_gcc_14_answers", "rucc-pp::has_feature_and_has_extension_are_not_there_before_gcc_14", "rucc-gnu::pedantic_errors_makes_has_extension_ask_what_has_feature_asks"]
+notes = "Came in gcc 14 with `__has_feature`. It answers 1 for every name `__has_feature` knows in the mode, also for a name that is only an extension there. Under `-pedantic-errors` it answers as `__has_feature` does. `__has_feature` and `__has_extension` answer 0 for the name. gcc 14 to 16 read it as the start of a call of the operator and stop with an error."
 
 [[feature]]
 name = "pragma_once"
@@ -199,6 +210,177 @@ value = "0"
 used_by = []
 tests = ["rucc-pp::embed_writes_the_bytes_of_the_resource"]
 notes = "C23, with `limit`, `prefix`, `suffix`, `if_empty` and `gnu::offset`. The bytes become real tokens for now. The fast path that fills an initializer without making them needs the parser. gcc 16 answers 0 for this name, as it does for every clang style feature and extension name it does not know, so `__has_feature` and `__has_extension` answer 0 here too although the thing itself works."
+
+# The names gcc 14 added `__has_feature` and `__has_extension` with, from `has_feature_table` in
+# gcc/c-family/c-common.cc and `c_feature_table` in gcc/c/c-objc-common.cc. gcc 15 and 16 have
+# the same list. A name gcc registers as an extension only is a row of kind extension here.
+
+[[feature]]
+name = "address_sanitizer"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "address"
+used_by = ["freebsd", "linux"]
+tests = ["rucc-gnu::a_sanitizer_is_a_feature_only_while_it_is_on", "rucc::a_sanitizer_is_a_feature_only_while_it_is_on"]
+notes = "gcc registers the name only while `-fsanitize=address` or `-fsanitize=kernel-address` is on. This compiler has the second, and refuses the first on the command line."
+
+[[feature]]
+name = "attribute_deprecated_with_message"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::a_name_marked_deprecated_is_said_at_every_use_in_gcc_s_words"]
+
+[[feature]]
+name = "attribute_unavailable_with_message"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::a_name_marked_unavailable_is_refused_at_every_use_in_gcc_s_words"]
+
+[[feature]]
+name = "c_alignas"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "c11"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::has_feature_answers_for_the_standard_the_unit_is_compiled_under"]
+notes = "A feature under C11 and later, and an extension only before C11."
+
+[[feature]]
+name = "c_alignof"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "c11"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::has_feature_answers_for_the_standard_the_unit_is_compiled_under"]
+notes = "A feature under C11 and later, and an extension only before C11."
+
+[[feature]]
+name = "c_atomic"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "c11"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::has_feature_answers_for_the_standard_the_unit_is_compiled_under"]
+notes = "A feature under C11 and later, and an extension only before C11. FreeBSD's sys/cdefs.h asks it to decide how to write `_Atomic`."
+
+[[feature]]
+name = "c_generic_selections"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "c11"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::has_feature_answers_for_the_standard_the_unit_is_compiled_under"]
+notes = "A feature under C11 and later, and an extension only before C11. FreeBSD's sys/cdefs.h asks `__has_extension` about it to decide whether to write `_Generic`."
+
+[[feature]]
+name = "c_static_assert"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "c11"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::has_feature_answers_for_the_standard_the_unit_is_compiled_under"]
+notes = "A feature under C11 and later, and an extension only before C11."
+
+[[feature]]
+name = "c_thread_local"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "c11"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::has_feature_answers_for_the_standard_the_unit_is_compiled_under"]
+notes = "A feature under C11 and later, and an extension only before C11."
+
+[[feature]]
+name = "cxx_binary_literals"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "c23"
+used_by = []
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::has_feature_answers_for_the_standard_the_unit_is_compiled_under"]
+notes = "A feature under C23 and later, and an extension only before C23. gcc gives the C++ name in C too."
+
+[[feature]]
+name = "enumerator_attributes"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::a_use_of_a_deprecated_type_tag_member_or_enumerator_is_warned_about_the_way_gcc_does"]
+
+[[feature]]
+name = "hwaddress_sanitizer"
+kind = "feature"
+gcc_version = "14.0"
+status = "unimplemented"
+used_by = []
+tests = ["rucc-gnu::a_sanitizer_is_a_feature_only_while_it_is_on"]
+notes = "gcc registers the name only while `-fsanitize=hwaddress` or `-fsanitize=kernel-hwaddress` is on. This compiler refuses both on the command line, so the answer is 0."
+
+[[feature]]
+name = "leak_sanitizer"
+kind = "feature"
+gcc_version = "14.0"
+status = "unimplemented"
+used_by = []
+tests = ["rucc-gnu::a_sanitizer_is_a_feature_only_while_it_is_on"]
+notes = "gcc registers the name only while `-fsanitize=leak` is on. This compiler refuses it on the command line, so the answer is 0."
+
+[[feature]]
+name = "thread_sanitizer"
+kind = "feature"
+gcc_version = "14.0"
+status = "unimplemented"
+used_by = []
+tests = ["rucc-gnu::a_sanitizer_is_a_feature_only_while_it_is_on"]
+notes = "gcc registers the name only while `-fsanitize=thread` is on. This compiler refuses it on the command line, so the answer is 0."
+
+[[feature]]
+name = "tls"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+used_by = ["freebsd"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::a_thread_local_written_initial_exec_is_reached_through_the_initial_exec_sequence"]
+
+[[feature]]
+name = "undefined_behavior_sanitizer"
+kind = "feature"
+gcc_version = "14.0"
+status = "implemented"
+when = "undefined"
+used_by = []
+tests = ["rucc-gnu::a_sanitizer_is_a_feature_only_while_it_is_on", "rucc::a_sanitizer_is_a_feature_only_while_it_is_on"]
+notes = "gcc registers the name while any check of `-fsanitize=undefined` is on, `bounds-strict` too. This compiler has seven of the checks and refuses `-fsanitize=undefined` itself."
+
+[[feature]]
+name = "gnu_asm_goto_with_outputs"
+kind = "extension"
+gcc_version = "14.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc::an_asm_goto_with_an_output_an_array_or_a_handler_gives_the_right_answers"]
+notes = "An extension only, so `__has_feature` answers 0 and `__has_extension` answers 1."
+
+[[feature]]
+name = "gnu_asm_goto_with_outputs_full"
+kind = "extension"
+gcc_version = "14.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc-gnu::has_feature_knows_gcc_s_names_and_reads_the_mode", "rucc-driver::an_asm_goto_writes_its_outputs_on_every_edge"]
+notes = "The outputs have their values on the paths to the labels too, and not only on the path that falls through. An extension only, as the row above."
 
 # Statement and expression extensions, from section 13.3. None of these can work before the
 # parser lands in M2, and every one of them is in the kernel.

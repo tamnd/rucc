@@ -237,6 +237,12 @@ impl Named {
         self.pedantic_errors = true;
     }
 
+    /// Whether `-pedantic-errors` was given. `__has_extension` reads it, because gcc then answers
+    /// it as it answers `__has_feature`.
+    pub fn has_pedantic_errors(&self) -> bool {
+        self.pedantic_errors
+    }
+
     /// Applies what the command line said to one of the rules in `PERMERRORS` raised as an
     /// error, and says whether there is anything left of it to report. Any other diagnostic is
     /// left as it is and kept.

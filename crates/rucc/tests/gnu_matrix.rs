@@ -1039,3 +1039,92 @@ fn a_const_object_is_an_enumerator_in_a_body_when_optimizing() {
         "the warnings are wrong:\n{said}"
     );
 }
+
+/// What `rucc -E -P` makes of a source under these flags, with the lines joined by spaces.
+fn preprocessed(what: &str, flags: &[&str], source: &str) -> String {
+    let mut all = vec!["-E", "-P"];
+    all.extend_from_slice(flags);
+    let out = compile(what, &all, source);
+    assert!(
+        out.status.success(),
+        "the compiler refused the fixture:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The C11 names are features from C11 on and extensions before it, and `cxx_binary_literals` is a
+/// feature from C23 on. Each answer is the one gcc 14 and gcc 16 give under the same `-std=`. The
+/// program uses each thing it asks about, so a yes is also a claim that the thing compiles.
+#[test]
+fn has_feature_answers_for_the_standard_the_unit_is_compiled_under() {
+    let asked = "F __has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) \
+                 __has_feature(c_generic_selections) __has_feature(c_static_assert) \
+                 __has_feature(c_thread_local) __has_feature(cxx_binary_literals)\n\
+                 E __has_extension(c_alignas) __has_extension(c_thread_local) \
+                 __has_extension(cxx_binary_literals)\n";
+    for (std, answer) in [
+        ("-std=gnu99", "F 0 0 0 0 0 0 0 E 1 1 1"),
+        ("-std=c11", "F 1 1 1 1 1 1 0 E 1 1 1"),
+        ("-std=gnu17", "F 1 1 1 1 1 1 0 E 1 1 1"),
+        ("-std=c23", "F 1 1 1 1 1 1 1 E 1 1 1"),
+    ] {
+        assert_eq!(preprocessed("has-feature-std", &[std], asked), answer, "{std}");
+    }
+    let used = "#if !__has_feature(c_alignas) || !__has_feature(c_alignof) || !__has_feature(c_atomic)\n\
+                #error\n\
+                #endif\n\
+                #if !__has_feature(c_generic_selections) || !__has_feature(c_static_assert)\n\
+                #error\n\
+                #endif\n\
+                #if !__has_feature(c_thread_local) || !__has_feature(cxx_binary_literals)\n\
+                #error\n\
+                #endif\n\
+                _Alignas(16) char buffer[4];\n\
+                _Static_assert(_Alignof(buffer) == 16, \"aligned\");\n\
+                _Atomic int counter;\n\
+                _Thread_local int mine = 0b101;\n\
+                int pick(long x) { return _Generic(x, long: 1, default: 0); }\n";
+    ir("has-feature-used", &["-std=c23"], used);
+}
+
+/// FreeBSD's `sys/cdefs.h` asks `#ifndef __has_feature` and defines it as zero when gcc is too old
+/// to have it, which gcc 13 is.
+#[test]
+fn has_feature_is_not_there_under_a_gcc_13_persona() {
+    let asked = "#ifdef __has_feature\nF\n#endif\n\
+                 #ifndef __has_extension\n#define __has_extension(x) 0\n#endif\n\
+                 X __has_extension(tls)\n";
+    let got = preprocessed("has-feature-13", &["-fgnuc-version=13.2.0"], asked);
+    assert_eq!(got, "X 0");
+    let got = preprocessed("has-feature-14", &["-fgnuc-version=14.2.0"], asked);
+    assert_eq!(got, "F X 1");
+}
+
+/// gcc knows a sanitizer's name only while the sanitizer is on, and then it is a feature.
+#[test]
+fn a_sanitizer_is_a_feature_only_while_it_is_on() {
+    let asked = "__has_feature(address_sanitizer) __has_extension(address_sanitizer) \
+                 __has_feature(undefined_behavior_sanitizer) \
+                 __has_extension(undefined_behavior_sanitizer)\n";
+    for (flags, answer) in [
+        (&[][..], "0 0 0 0"),
+        (&["-fsanitize=kernel-address"][..], "1 1 0 0"),
+        (&["-fsanitize=bool"][..], "0 0 1 1"),
+        (&["-fsanitize=bounds-strict"][..], "0 0 1 1"),
+        (&["-fsanitize=bool", "-fno-sanitize=bool"][..], "0 0 0 0"),
+    ] {
+        assert_eq!(preprocessed("has-feature-sanitizer", flags, asked), answer, "{flags:?}");
+    }
+}
+
+/// gcc's `__has_extension` answers as `__has_feature` does under `-pedantic-errors`.
+#[test]
+fn pedantic_errors_takes_the_extensions_out_of_has_extension() {
+    let asked = "__has_extension(c_atomic) __has_extension(gnu_asm_goto_with_outputs) \
+                 __has_extension(tls)\n";
+    assert_eq!(preprocessed("has-extension", &["-std=gnu99"], asked), "1 1 1");
+    let strict = preprocessed("has-extension-strict", &["-std=gnu99", "-pedantic-errors"], asked);
+    assert_eq!(strict, "0 0 1");
+}
