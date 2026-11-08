@@ -1034,7 +1034,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut fp_ret_in_387 = true;
     // Where the stack protector's canary is, which is put together after the loop because the
     // four flags that say it may come in any order and gcc lets the later one win for each.
-    let mut guard_global = false;
+    let mut guard_global: Option<bool> = None;
     let mut guard_reg: Option<rucc_target::Segment> = None;
     let mut guard_offset: Option<i32> = None;
     let mut guard_symbol: Option<&str> = None;
@@ -2733,15 +2733,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // On AArch64 the default is the plain global, and `sysreg` is a distance past what a
             // system register holds, which only `sp_el0` is ever asked for.
             "-mstack-protector-guard=tls" if x86 => {
-                guard_global = false;
+                guard_global = Some(false);
             }
             "-mstack-protector-guard=global" if x86 || aarch64 || riscv => {
-                guard_global = true;
+                guard_global = Some(true);
                 guard_task = false;
                 guard_tls = false;
             }
             "-mstack-protector-guard=tls" if riscv => {
-                guard_global = false;
+                guard_global = Some(false);
                 guard_tls = true;
             }
             _ if riscv && arg.starts_with("-mstack-protector-guard-reg=") => {
@@ -2751,7 +2751,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 guard_tp = true;
             }
             "-mstack-protector-guard=sysreg" if aarch64 => {
-                guard_global = false;
+                guard_global = Some(false);
                 guard_task = true;
             }
             _ if aarch64 && arg.starts_with("-mstack-protector-guard-reg=") => {
@@ -3739,7 +3739,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // what `-fpie` means whatever the other family said, so `-fPIE -fno-pic` is still position
     // independent. A library needs `-fpic` and no `-fpie` after it, and anything else that said
     // no is the position dependent answer: `-fno-pie` alone, `-fno-pic` alone, or both.
+    // The BSDs are the exception to the first row. gcc builds a position independent executable
+    // by default only when it was configured with `--enable-default-pie`, and the FreeBSD ports
+    // gcc, NetBSD's own gcc and the upstream OpenBSD and DragonFly configurations are not.
+    let bsd = opts.target.os.is_bsd();
     opts.pic = match (pie, pic) {
+        (None, None) if bsd => Pic::Absolute,
         (Some(true), _) | (None, None) => Pic::Executable,
         (_, Some(true)) => Pic::Library,
         _ => Pic::Absolute,
@@ -3790,9 +3795,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // looks for. Under `-fPIC` a symbol is reached through the global offset table like any
     // other, which is also what gcc writes.
     let kernel = opts.code_model == rucc_target::CodeModel::Kernel;
+    let i386 = opts.target.arch == rucc_target::Arch::X86;
+    let x86 = i386 || opts.target.arch == rucc_target::Arch::X86_64;
+    // gcc reads the canary from the thread's block on x86 only where the C library says where it
+    // is, which is `TARGET_THREAD_SSP_OFFSET` in gcc's GNU/Linux headers `i386/gnu-user.h` and
+    // `i386/gnu-user64.h`. A BSD has no such offset, so its default is the global
+    // `__stack_chk_guard`, which its C library defines.
+    let bsd_guard = x86 && opts.target.os.is_bsd() && guard_global.is_none();
+    if bsd_guard && i386 && opts.pic != Pic::Absolute && opts.protector != Protector::None {
+        return Err(err(format!(
+            "the stack protector is not supported in i386 position independent code for {}, \
+             whose canary is the global __stack_chk_guard",
+            opts.target
+        )));
+    }
+    let guard_global = guard_global.unwrap_or(bsd_guard && !(i386 && opts.pic != Pic::Absolute));
     let moved =
         guard_global || guard_reg.is_some() || guard_offset.is_some() || guard_symbol.is_some();
-    let i386 = opts.target.arch == rucc_target::Arch::X86;
     // A global guard in i386 position independent code is reached through `%ebx`, which the check
     // in the epilogue runs after putting back. Nothing builds that, the kernel included, so it is
     // refused rather than written wrong. A symbol read through a segment is not: gcc writes its
@@ -7081,6 +7100,46 @@ mod tests {
         // A later yes in one family clears the other, as gcc's chain of negatives does.
         assert_eq!(pic(&["-fPIE", "-fPIC"]), Pic::Library);
         assert_eq!(pic(&["-fPIC", "-fPIE"]), Pic::Executable);
+    }
+
+    /// tamnd/rucc#4088. gcc for a BSD builds a position dependent executable when nothing says,
+    /// and on x86 it reads the canary from the global `__stack_chk_guard`, because only the
+    /// GNU/Linux headers give it a place in the thread's block.
+    #[test]
+    fn a_bsd_takes_gccs_defaults_for_the_position_and_the_canary() {
+        use rucc_target::{Guard, Segment};
+        let opts = |line: &[&str]| compile(&[line, &["-c", "a.c"]].concat()).0;
+        for target in ["--target=x86_64-unknown-freebsd15.1", "--target=aarch64--netbsd"] {
+            assert_eq!(opts(&[target]).pic, Pic::Absolute, "{target}");
+            assert_eq!(opts(&[target, "-fPIE"]).pic, Pic::Executable, "{target}");
+            assert_eq!(opts(&[target, "-fPIC"]).pic, Pic::Library, "{target}");
+        }
+        assert_eq!(opts(&["--target=x86_64-linux-gnu"]).pic, Pic::Executable);
+
+        let guard = |line: &[&str]| opts(&[line, &["-fstack-protector"]].concat()).guard;
+        let global = |table| Some(Guard::global("__stack_chk_guard", table));
+        for target in
+            ["--target=x86_64-freebsd", "--target=x86_64--netbsd", "--target=i386-freebsd"]
+        {
+            assert_eq!(guard(&[target]), global(false), "{target}");
+        }
+        assert_eq!(guard(&["--target=x86_64-openbsd", "-fPIC"]), global(true));
+        assert_eq!(guard(&["--target=x86_64-dragonfly", "-fPIE"]), global(false));
+        // `-mstack-protector-guard=tls` still asks for the thread's block, which is the target's
+        // own guard and so no guard here, as on Linux.
+        let tls = guard(&["--target=x86_64-freebsd", "-mstack-protector-guard=tls"]);
+        assert_eq!(tls, None);
+        assert_eq!(guard(&["--target=x86_64-linux-gnu"]), None);
+        // A register alone does not change the kind, as in gcc, so the guard stays the global.
+        let reg = guard(&["--target=x86_64-freebsd", "-mstack-protector-guard-reg=gs"]);
+        assert_eq!(reg, global(false));
+        let both = ["--target=x86_64-freebsd", "-mstack-protector-guard=tls"];
+        let moved = guard(&[&both[..], &["-mstack-protector-guard-reg=gs"]].concat());
+        assert_eq!(moved, Some(Guard::in_segment(Segment::Gs, 40)));
+        // i386 position independent code cannot reach the global guard, so the pair is refused.
+        let said = refused(&["--target=i386-freebsd", "-fPIC", "-fstack-protector", "-c", "a.c"]);
+        assert!(said.contains("not supported in i386 position independent code"), "{said}");
+        assert_eq!(opts(&["--target=i386-freebsd", "-fPIC"]).pic, Pic::Library);
     }
 
     #[test]
