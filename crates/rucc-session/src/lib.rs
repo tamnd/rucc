@@ -2880,10 +2880,11 @@ pub struct Options {
     /// 32 bit x86 has and the driver refuses anywhere else. See
     /// [`rucc_target::TargetInfo::with_regparm`].
     pub regparm: u8,
-    /// Whether a small structure comes back in registers, from `-freg-struct-return`, which only
-    /// changes anything on i386 System V. See
+    /// Whether a small structure comes back in registers, from `-freg-struct-return` or
+    /// `-fpcc-struct-return`, which only change anything on i386 System V. [`None`] is the
+    /// target's own rule, which is registers on i386 FreeBSD and OpenBSD and memory elsewhere. See
     /// [`rucc_target::TargetInfo::with_reg_struct_return`].
-    pub reg_struct_return: bool,
+    pub reg_struct_return: Option<bool>,
     /// Whether the object says what made it, which `-fno-ident` turns off. See
     /// `rucc_object::Output::ident`.
     pub ident: bool,
@@ -3190,7 +3191,7 @@ impl Options {
             asm_keep_slots: false,
             sixteen: false,
             regparm: 0,
-            reg_struct_return: false,
+            reg_struct_return: None,
             ident: true,
             msc: MscVersion::default(),
             ms_dll_runtime: false,
@@ -3307,8 +3308,8 @@ impl Session {
         } else {
             TargetInfo::new(opts.target)
         };
-        if opts.reg_struct_return {
-            target = target.with_reg_struct_return(true);
+        if let Some(in_registers) = opts.reg_struct_return {
+            target = target.with_reg_struct_return(in_registers);
         }
         if opts.regparm > 0 {
             // A count the target cannot take was refused by the driver.

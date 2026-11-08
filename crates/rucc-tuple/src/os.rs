@@ -22,13 +22,16 @@ pub enum Os {
     IOs,
     /// Windows, either environment.
     Windows,
-    /// FreeBSD 14 and later.
+    /// FreeBSD 14 and later. The release is the OS version, because GCC defines `__FreeBSD__` to
+    /// its major number and the triple is the only place GCC reads it from.
     FreeBsd,
     /// NetBSD 10.1 and later.
     NetBsd,
     /// OpenBSD. Dynamically linked libc only, because OpenBSD does not ship a static one and
     /// breaks its libc ABI on purpose at every release.
     OpenBsd,
+    /// DragonFly BSD, which split from FreeBSD 4 and kept its ELF ABI on x86-64 only.
+    DragonFly,
     /// illumos. In scope because it is open, which is the whole of the argument.
     Illumos,
     /// WASI. The preview number lives in the OS version, because `wasip1` and `wasip3` are
@@ -50,6 +53,7 @@ impl Os {
             Os::FreeBsd => "freebsd",
             Os::NetBsd => "netbsd",
             Os::OpenBsd => "openbsd",
+            Os::DragonFly => "dragonfly",
             Os::Illumos => "illumos",
             Os::Wasi => "wasi",
             Os::None => "none",
@@ -64,7 +68,7 @@ impl Os {
     /// target emits wasm and an aarch64 one emits ELF.
     pub const fn object_format(self) -> Option<ObjectFormat> {
         match self {
-            Os::Linux | Os::FreeBsd | Os::NetBsd | Os::OpenBsd | Os::Illumos => {
+            Os::Linux | Os::FreeBsd | Os::NetBsd | Os::OpenBsd | Os::DragonFly | Os::Illumos => {
                 Some(ObjectFormat::Elf)
             }
             Os::MacOs | Os::IOs => Some(ObjectFormat::MachO),
@@ -105,11 +109,18 @@ impl Os {
 
     /// Whether an OS version in the tuple means something here.
     ///
-    /// Darwin has a deployment target that decides which declarations exist, and WASI has a
-    /// preview number that decides the ABI. Everywhere else the version that matters belongs to
-    /// the libc and lives in the environment version instead.
+    /// Darwin has a deployment target that decides which declarations exist, WASI has a preview
+    /// number that decides the ABI, and FreeBSD has a release that GCC writes into `__FreeBSD__`.
+    /// Everywhere else the version that matters belongs to the libc and lives in the environment
+    /// version instead.
     pub const fn takes_version(self) -> bool {
-        matches!(self, Os::MacOs | Os::IOs | Os::Wasi)
+        matches!(self, Os::MacOs | Os::IOs | Os::Wasi | Os::FreeBsd)
+    }
+
+    /// Whether this is one of the BSD systems, which are ELF and System V on every architecture
+    /// and which link with their own start files and their own dynamic linker.
+    pub const fn is_bsd(self) -> bool {
+        matches!(self, Os::FreeBsd | Os::NetBsd | Os::OpenBsd | Os::DragonFly)
     }
 }
 

@@ -467,6 +467,8 @@ impl TargetTuple {
             (Os::MacOs, Some(v)) => format!("macosx{}", v.to_llvm_string()),
             (Os::MacOs, None) => "macosx".to_string(),
             (Os::IOs, Some(v)) => format!("ios{}", v.to_llvm_string()),
+            // FreeBSD's own spelling, `x86_64-unknown-freebsd15.0`, which is also clang's.
+            (Os::FreeBsd, Some(v)) => format!("freebsd{v}"),
             // `wasi` alone is the old name of preview 1, and clang 23 warns that it is deprecated.
             (Os::Wasi, Some(v)) => format!("wasip{}", v.major_part()),
             // LLVM has no `none` for wasm. A wasm module with no operating system is `unknown`.

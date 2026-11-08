@@ -69,7 +69,7 @@ pub fn candidates(target: Triple, machine: &Machine) -> Vec<PathBuf> {
     if machine.sysroot.is_none()
         && machine.sdk.is_none()
         && machine.include.is_none()
-        && machine.host.is_some_and(|host| host.os != target.os)
+        && machine.host.is_some_and(|host| host.os.without_release() != target.os.without_release())
     {
         return Vec::new();
     }
@@ -78,6 +78,7 @@ pub fn candidates(target: Triple, machine: &Machine) -> Vec<PathBuf> {
         Os::Linux => linux(target, root),
         Os::Darwin => darwin(machine.sdk.as_deref().or(root)),
         Os::Windows => windows(target.env, root, machine.include.as_deref()),
+        Os::FreeBsd(_) | Os::NetBsd | Os::OpenBsd | Os::DragonFly => bsd(target, root),
         // Freestanding. There is no library, so there are no headers of one, and the nine the
         // compiler ships are the whole of what a program may include.
         Os::None => Vec::new(),
@@ -115,6 +116,20 @@ fn linux(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
         .into_iter()
         .map(|dir| under(sysroot, &dir))
         .collect()
+}
+
+/// The directories gcc searches on a BSD, which is `/usr/include` and on two of them
+/// `/usr/local/include` before it.
+///
+/// NetBSD and OpenBSD build their gcc with the system and replace gcc's list with
+/// `/usr/include` alone, in `netbsd.h` and `openbsd.h`. FreeBSD's gcc comes from ports and
+/// DragonFly's keeps gcc's own list, and gcc's own list has `/usr/local/include` first.
+fn bsd(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let dirs: &[&str] = match target.os {
+        Os::NetBsd | Os::OpenBsd => &["/usr/include"],
+        _ => &["/usr/local/include", "/usr/include"],
+    };
+    dirs.iter().map(|dir| under(sysroot, dir)).collect()
 }
 
 /// The SDK, which on an Apple platform is the whole of it.
@@ -510,6 +525,22 @@ mod tests {
                 under("usr/include")
             ]
         );
+    }
+
+    #[test]
+    fn a_bsd_searches_what_its_gcc_searches() {
+        let dirs = |os| {
+            let dirs = candidates(triple(os, Env::None), &on(os));
+            dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(dirs(Os::FreeBsd(15)), ["/usr/local/include", "/usr/include"]);
+        assert_eq!(dirs(Os::DragonFly), ["/usr/local/include", "/usr/include"]);
+        assert_eq!(dirs(Os::NetBsd), ["/usr/include"]);
+        assert_eq!(dirs(Os::OpenBsd), ["/usr/include"]);
+        // A FreeBSD machine of one release builds for another with its own headers.
+        let machine = on(Os::FreeBsd(15));
+        assert_eq!(candidates(triple(Os::FreeBsd(14), Env::None), &machine).len(), 2);
+        assert!(candidates(triple(Os::NetBsd, Env::None), &machine).is_empty());
     }
 
     #[test]

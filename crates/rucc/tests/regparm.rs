@@ -149,3 +149,19 @@ fn a_one_word_structure_comes_back_in_eax_under_reg_struct_return() {
     let plain = bodies(&["-mregparm=3"]);
     assert!(body(&plain, "word").contains("(%eax)"), "{plain:?}");
 }
+
+/// i386 FreeBSD and OpenBSD return a one word structure in `eax` with no flag, because gcc sets
+/// `DEFAULT_PCC_STRUCT_RETURN` to zero there. `-fpcc-struct-return` takes it back to memory, and
+/// NetBSD keeps the psABI rule.
+#[test]
+fn i386_freebsd_and_openbsd_return_a_one_word_structure_in_eax() {
+    let word = |flags: &[&str]| body(&bodies(flags), "word").to_owned();
+    for target in ["--target=i386-unknown-freebsd14.5", "--target=i386-unknown-openbsd7.8"] {
+        let plain = word(&[target]);
+        assert!(!plain.contains("(%eax)") && !plain.contains("ret\t$"), "{target}: {plain}");
+        let pcc = word(&[target, "-fpcc-struct-return"]);
+        assert!(pcc.contains("(%eax)"), "{target}: {pcc}");
+    }
+    let netbsd = word(&["--target=i486--netbsdelf"]);
+    assert!(netbsd.contains("(%eax)"), "{netbsd}");
+}
