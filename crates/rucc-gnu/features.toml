@@ -1243,9 +1243,9 @@ name = "format"
 kind = "attribute"
 gcc_version = "2.0"
 status = "implemented"
-used_by = ["linux", "glibc", "systemd", "curl", "ffmpeg"]
-tests = ["rucc-driver::format_takes_the_archetypes_gcc_knows_on_the_target", "rucc::the_format_checks_are_quiet_until_wall_or_wformat_asks_for_them", "rucc::a_printf_format_is_checked_against_its_arguments_in_gcc_s_words", "rucc::a_scanf_format_is_checked_against_the_pointers_it_writes_through", "rucc::a_format_attribute_and_format_arg_are_followed_the_way_gcc_follows_them"]
-notes = "The archetype is checked against the ones gcc knows on the target, and a call to a function marked `printf`, `scanf` or `strftime`, or their `gnu_` names, has its literal format read against its promoted arguments under `-Wformat`, in gcc 16's words and under its four option names, as do the C library's own families without the attribute. Off until `-Wformat` or `-Wall`, as in gcc. The `ms_` archetypes, `strfmon` and what `-Wformat=2` adds are not read."
+used_by = ["linux", "glibc", "systemd", "curl", "ffmpeg", "freebsd"]
+tests = ["rucc-driver::format_takes_the_archetypes_gcc_knows_on_the_target", "rucc::the_format_checks_are_quiet_until_wall_or_wformat_asks_for_them", "rucc::a_printf_format_is_checked_against_its_arguments_in_gcc_s_words", "rucc::a_scanf_format_is_checked_against_the_pointers_it_writes_through", "rucc::a_format_attribute_and_format_arg_are_followed_the_way_gcc_follows_them", "rucc::the_freebsd_kernel_printf_takes_b_d_r_and_y_without_a_word", "rucc::the_freebsd_kernel_printf_is_checked_in_the_patched_gcc_s_words", "rucc::the_freebsd_archetypes_are_unknown_to_gcc_on_linux", "rucc::a_flag_used_with_the_wrong_conversion_names_the_conversion_alone", "rucc::the_netbsd_printf_and_syslog_forms_are_read_as_printf"]
+notes = "The archetype is checked against the ones gcc knows on the target, and a call to a function marked `printf`, `scanf` or `strftime`, or their `gnu_` names, has its literal format read against its promoted arguments under `-Wformat`, in gcc 16's words and under its four option names, as do the C library's own families without the attribute. Off until `-Wformat` or `-Wall`, as in gcc. On FreeBSD the two archetypes the FreeBSD ports' gcc adds are known and read: `printf0`, which is `printf`, and `freebsd_kprintf`, the kernel's, with `%b`, `%D`, `%r` and `%y` checked the way that gcc's table checks them. The `ms_` archetypes, `strfmon` and what `-Wformat=2` adds are not read."
 
 [[feature]]
 name = "format_arg"

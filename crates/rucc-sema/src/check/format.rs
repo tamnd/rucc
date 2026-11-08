@@ -32,6 +32,11 @@
 //!   because a program that passes one for the other is wrong on the targets where they are not.
 //! * The types are spelled the way gcc spells them, `long unsigned int` and not `unsigned long`,
 //!   with a typedef followed by what it stands for, so the message reads the same here as there.
+//! * On a FreeBSD target the two archetypes the FreeBSD ports add to gcc are read as well:
+//!   `printf0`, which is `printf` under its own name, and `freebsd_kprintf`, the kernel's, which
+//!   has `%b` and `%D` with a string argument after their own, `%r` and `%y`, no `%n`, `%m` or
+//!   `I` flag, and only the lengths `hh`, `h`, `l`, `ll`, `q`, `j`, `z` and `t`. Its conversions
+//!   that read through a pointer say so when it is null, as the patched gcc does.
 //!
 //! What is not here: the checks `-Wformat=2` adds, `-Wformat-overflow` and `-Wformat-truncation`,
 //! which need the values and not only the types, the `ms_` archetypes, `strfmon`, and the
@@ -64,6 +69,11 @@ const ZERO_LENGTH: &str = "E0788";
 pub(in crate::check) enum Family {
     /// `printf`'s.
     Printf,
+    /// FreeBSD's `printf0`, which is `printf`'s under another name.
+    Printf0,
+    /// The FreeBSD kernel's `printf`, `freebsd_kprintf`, which has `%b`, `%D`, `%r` and `%y` and
+    /// fewer length modifiers and flags.
+    Kprintf,
     /// `scanf`'s.
     Scanf,
     /// `strftime`'s, which reads no arguments.
@@ -71,10 +81,13 @@ pub(in crate::check) enum Family {
 }
 
 impl Family {
-    /// The archetype gcc names in a message, which on every target this checks is the `gnu_` one.
+    /// The archetype gcc names in a message, which is the `gnu_` one for the three standard
+    /// languages and the archetype's own name for FreeBSD's two.
     fn archetype(self) -> &'static str {
         match self {
             Family::Printf => "gnu_printf",
+            Family::Printf0 => "printf0",
+            Family::Kprintf => "freebsd_kprintf",
             Family::Scanf => "gnu_scanf",
             Family::Strftime => "gnu_strftime",
         }
@@ -144,6 +157,10 @@ enum Class {
     Pointer,
     Count,
     Errno,
+    /// The kernel's `%b`, an integer and then the string that names its bits.
+    Bits,
+    /// The kernel's `%D`, a pointer to the bytes and then the string between them.
+    Dump,
 }
 
 /// What an argument is matched against.
@@ -260,7 +277,9 @@ impl Checker<'_> {
         let args = self.ast[attr.args].to_vec();
         let [AttrArg::Ident(archetype), string, first] = args.as_slice() else { return None };
         let name = rucc_gnu::unarmour(self.text(*archetype));
-        let windows = self.cx.target.tuple.os().as_str() == "windows";
+        let os = self.cx.target.tuple.os().as_str();
+        let windows = os == "windows";
+        let freebsd = os == "freebsd";
         let family = match name {
             "gnu_printf" => Family::Printf,
             "gnu_scanf" => Family::Scanf,
@@ -268,6 +287,8 @@ impl Checker<'_> {
             "printf" if !windows => Family::Printf,
             "scanf" if !windows => Family::Scanf,
             "strftime" if !windows => Family::Strftime,
+            "printf0" if freebsd => Family::Printf0,
+            "freebsd_kprintf" if freebsd => Family::Kprintf,
             _ => return None,
         };
         let string = self.attribute_number(*string).filter(|&n| n > 0)?;
@@ -478,7 +499,9 @@ impl Checker<'_> {
                 continue;
             }
             let read = match reading.family {
-                Family::Printf => self.printf_directive(&text, at, reading),
+                Family::Printf | Family::Printf0 | Family::Kprintf => {
+                    self.printf_directive(&text, at, reading)
+                }
                 Family::Scanf => self.scanf_directive(&text, at, reading),
                 Family::Strftime => Ok(self.strftime_directive(&text, at)),
             };
@@ -616,8 +639,11 @@ impl Checker<'_> {
             at = end;
             number
         });
+        // The kernel's `printf` has no `I` flag, so there an `I` is the conversion.
+        let kernel = reading.family == Family::Kprintf;
+        let flag_chars = if kernel { "-+ #0'" } else { "-+ #0'I" };
         let mut flags: Vec<char> = Vec::new();
-        while let Some(flag) = text.get(at).filter(|c| "-+ #0'I".contains(*c)) {
+        while let Some(flag) = text.get(at).filter(|c| flag_chars.contains(*c)) {
             if flags.contains(&flag) {
                 let what = format!("repeated '{flag}' flag in format");
                 self.report(Diagnostic::warning(what, text.at(at)).with_code(FORMAT));
@@ -657,7 +683,7 @@ impl Checker<'_> {
             }
         }
         let length_at = at;
-        let length = printf_length(text, &mut at);
+        let length = printf_length(text, &mut at, kernel);
         let length_text: String = (length_at..at).filter_map(|i| text.get(i)).collect();
         let Some(conversion) = text.get(at) else {
             self.lacks_type(text, percent);
@@ -667,25 +693,28 @@ impl Checker<'_> {
             self.lacks_type(text, percent);
             return Ok(at);
         }
-        let Some((allowed, class)) = printf_conversion(conversion) else {
+        let found =
+            if kernel { kprintf_conversion(conversion) } else { printf_conversion(conversion) };
+        let Some((allowed, class)) = found else {
             self.unknown(text, at);
             return Ok(at + 1);
         };
         let directive = format!("%{length_text}{conversion}");
         let caret = text.at(at);
         let archetype = reading.family.archetype();
+        // gcc names the conversion alone in what it says about flags, `'%d'` for `%#ld`.
         for &flag in &flags {
             if !allowed.contains(flag) {
-                let what = format!("'{flag}' flag used with '{directive}' {archetype} format");
+                let what = format!("'{flag}' flag used with '%{conversion}' {archetype} format");
                 self.report(Diagnostic::warning(what, caret).with_code(FORMAT));
             }
         }
         if width.is_some() && !allowed.contains('w') {
-            let what = format!("field width used with '{directive}' {archetype} format");
+            let what = format!("field width used with '%{conversion}' {archetype} format");
             self.report(Diagnostic::warning(what, caret).with_code(FORMAT));
         }
         if precision.is_some() && !allowed.contains('p') {
-            let what = format!("precision used with '{directive}' {archetype} format");
+            let what = format!("precision used with '%{conversion}' {archetype} format");
             self.report(Diagnostic::warning(what, caret).with_code(FORMAT));
         }
         let has = |flag: char| flags.contains(&flag) && allowed.contains(flag);
@@ -697,10 +726,10 @@ impl Checker<'_> {
             let what = format!("'0' flag ignored with '-' flag in {archetype} format");
             self.report(Diagnostic::warning(what, text.literal).with_code(FORMAT));
         }
-        let integer = matches!(class, Class::Signed | Class::Unsigned);
+        let integer = matches!(class, Class::Signed | Class::Unsigned | Class::Bits);
         if has('0') && precision.is_some() && integer {
             let what =
-                format!("'0' flag ignored with precision and '{directive}' {archetype} format");
+                format!("'0' flag ignored with precision and '%{conversion}' {archetype} format");
             self.report(Diagnostic::warning(what, text.literal).with_code(FORMAT));
         }
         let want = self.printf_want(class, length);
@@ -748,7 +777,10 @@ impl Checker<'_> {
         }
         let taken = self.take(number, reading)?;
         let want = want.flatten();
-        match (taken, want) {
+        // The kernel's conversions that read through a pointer say so when it is null, which
+        // gcc leaves to the middle end for `printf`'s own.
+        let reads = kernel && matches!(class, Class::String | Class::WideString | Class::Dump);
+        match (taken, &want) {
             (None, Some(want)) => {
                 let what =
                     format!("format '{directive}' expects a matching '{}' argument", want.name);
@@ -758,11 +790,52 @@ impl Checker<'_> {
                 if class == Class::Count && self.written_badly(arg, index, reading.call) {
                     return Ok(at + 1);
                 }
-                self.judge(arg, index, &want, &directive, caret);
+                if reads {
+                    self.read_badly(arg, index, reading.call);
+                }
+                self.judge(arg, index, want, &directive, caret);
             }
             _ => {}
         }
+        if want.is_some() && matches!(class, Class::Bits | Class::Dump) {
+            self.chained(number, reading, &directive, caret);
+        }
         Ok(at + 1)
+    }
+
+    /// The string `%b` and `%D` read after their own argument, which is the bit names of `%b`
+    /// and the separator of `%D`.
+    ///
+    /// It is the argument after the directive's own, numbered or not, and gcc does not count it
+    /// as used in a numbered format. The patched gcc reads it with the directive's length, which
+    /// has no type for any length but none, and stops with an internal error at `%lb`. This
+    /// reads it as a `char *` whatever the length.
+    fn chained(
+        &mut self,
+        number: Option<usize>,
+        reading: &mut Reading<'_>,
+        directive: &str,
+        caret: Span,
+    ) {
+        let at = match number {
+            Some(number) => number,
+            None => {
+                reading.next += 1;
+                reading.next - 1
+            }
+        };
+        let want = Want { base: Base::AnyChar, depth: 1, name: "char *".to_owned() };
+        let Some(&arg) = reading.args.get(at) else {
+            let what = format!("format '{directive}' expects a matching 'char *' argument");
+            self.report(Diagnostic::warning(what, caret).with_code(FORMAT));
+            return;
+        };
+        if number.is_none() {
+            reading.used[at] = true;
+        }
+        let index = reading.base + at;
+        self.read_badly(arg, index, reading.call);
+        self.judge(arg, index, &want, directive, caret);
     }
 
     /// One `scanf` directive, from its `%`, as where the next one may start.
@@ -794,7 +867,7 @@ impl Checker<'_> {
             at += 1;
         }
         let length_at = at;
-        let length = printf_length(text, &mut at);
+        let length = printf_length(text, &mut at, false);
         let length_text: String = (length_at..at).filter_map(|i| text.get(i)).collect();
         let Some(conversion) = text.get(at) else {
             self.lacks_type(text, percent);
@@ -905,6 +978,15 @@ impl Checker<'_> {
         false
     }
 
+    /// Says that a conversion that reads through a pointer was handed a null one.
+    fn read_badly(&mut self, arg: ExprId, index: usize, call: Span) {
+        let ty = self.types.canonical(self.tast[arg].ty);
+        if matches!(self.types.kind(ty), TypeKind::Pointer(_)) && self.conv().is_zero_pointer(arg) {
+            let what = format!("reading through null pointer (argument {index})");
+            self.report(Diagnostic::warning(what, call).with_code(FORMAT));
+        }
+    }
+
     /// Says that an argument is not the type its directive reads, where it is not.
     fn judge(&mut self, arg: ExprId, index: usize, want: &Want, directive: &str, caret: Span) {
         if self.is_poisoned(arg) || self.fits(arg, want) {
@@ -956,6 +1038,12 @@ impl Checker<'_> {
     /// either no effect or undefined behaviour, and a want of nothing for one whose type is not
     /// read here.
     fn printf_want(&self, class: Class, length: Length) -> Option<Option<Want>> {
+        // `%b` reads its integer as `%d` does and `%D` its buffer as `%p` does.
+        let class = match class {
+            Class::Bits => Class::Signed,
+            Class::Dump => Class::Pointer,
+            class => class,
+        };
         let int = |name: &str, kind: IntKind| Some(Some(scalar(Base::Rank(rank(kind)), name)));
         let ptr =
             |base: Base, name: &str| Some(Some(Want { base, depth: 1, name: format!("{name} *") }));
@@ -1158,8 +1246,14 @@ fn scalar(base: Base, name: &str) -> Want {
 }
 
 /// The length modifier at `at`, moving `at` past it.
-fn printf_length(text: &Text, at: &mut usize) -> Length {
+///
+/// The kernel's `printf` has only `hh`, `h`, `l`, `ll`, `q`, `j`, `z` and `t`, so there `L`, `Z`,
+/// `H`, `D` and `w` are not lengths and are read as the conversion.
+fn printf_length(text: &Text, at: &mut usize, kernel: bool) -> Length {
     let next = |offset: usize| text.get(*at + offset);
+    if kernel && matches!(next(0), Some('L' | 'Z' | 'H' | 'D' | 'w')) {
+        return Length::None;
+    }
     let (length, width) = match (next(0), next(1)) {
         (Some('h'), Some('h')) => (Length::Hh, 2),
         (Some('h'), _) => (Length::H, 1),
@@ -1206,6 +1300,23 @@ fn printf_conversion(c: char) -> Option<(&'static str, Class)> {
         'n' => ("", Class::Count),
         'm' => ("-wp", Class::Errno),
         _ => return None,
+    })
+}
+
+/// The flags and the reading of a conversion of the FreeBSD kernel's `printf`, which is the
+/// table the FreeBSD ports add to gcc's `c-format.cc` (`devel/freebsd-gcc15`).
+///
+/// It is `printf`'s without `%n`, `%m` and C23's `%b` and `%B`, and with four of the kernel's
+/// own: `%b` and `%D`, which read a string after their own argument, `%r`, an unsigned integer in
+/// the radix `ddb` prints in, and `%y`, a signed integer in hex.
+fn kprintf_conversion(c: char) -> Option<(&'static str, Class)> {
+    Some(match c {
+        'b' => ("-wp#", Class::Bits),
+        'D' => ("-wp", Class::Dump),
+        'r' => ("-wp0# +'I", Class::Unsigned),
+        'y' => ("-wp0 +'I", Class::Signed),
+        'n' | 'm' | 'B' => return None,
+        _ => return printf_conversion(c),
     })
 }
 

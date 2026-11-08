@@ -422,6 +422,157 @@ fn a_conditional_format_is_judged_as_gcc_judges_it() {
     assert_eq!(lines_with(&got, "warning:").len(), 7, "{got}");
 }
 
+/// The FreeBSD kernel's build, with `-D__printf__=__freebsd_kprintf__` from `sys/conf/kern.mk`
+/// and its own `printf` declared the way `<sys/systm.h>` declares it.
+const KPRINTF: &[&str] =
+    &["--target=x86_64-unknown-freebsd14", "-ffreestanding", "-D__printf__=__freebsd_kprintf__"];
+
+/// The kernel's calls as `subr_prf.c` documents them, which the kernel builds `-Werror`, so
+/// nothing at all may be said about them.
+#[test]
+fn the_freebsd_kernel_printf_takes_b_d_r_and_y_without_a_word() {
+    let mut flags = KPRINTF.to_vec();
+    flags.push("-Wall");
+    let got = said_with(
+        "kprintf-quiet",
+        &flags,
+        "typedef unsigned char u_char;\n\
+         int printf(const char *, ...) __attribute__((__format__(__printf__, 1, 2)));\n\
+         int log0(const char *, ...) __attribute__((__format__(__printf0__, 1, 2)));\n\
+         void f(int reg, unsigned bits, u_char *ea, const u_char *buf, int len, long l) {\n\
+             printf(\"reg=%b\\n\", reg, \"\\20\\2BITTWO\\1BITONE\");\n\
+             printf(\"%#b %-8b\\n\", bits, \"\\20\\1A\", reg, \"\\10\\1B\");\n\
+             printf(\"%6D\\n\", ea, \":\");\n\
+             printf(\"%*D\\n\", len, buf, \" \");\n\
+             printf(\"%r %#lr %y %+ly %zr %jy %qy\\n\", reg, l, reg, l, l, l, 1LL);\n\
+             printf(\"%s %p %c %u %x %'d %%\\n\", \"s\", ea, 'c', bits, bits, reg);\n\
+             log0(\"%d\\n\", reg);\n\
+         }\n",
+    );
+    assert_eq!(got, "", "{got}");
+}
+
+/// What the patched gcc says about the kernel's own conversions, measured against the table the
+/// FreeBSD ports add to `c-format.cc`: `%b` and `%D` read a `char *` after their own argument,
+/// only eight lengths are lengths, and there is no `%n`, `%m` or `I` flag.
+#[test]
+fn the_freebsd_kernel_printf_is_checked_in_the_patched_gcc_s_words() {
+    let mut flags = KPRINTF.to_vec();
+    flags.push("-Wall");
+    let got = said_with(
+        "kprintf-said",
+        &flags,
+        "int printf(const char *, ...) __attribute__((__format__(__printf__, 1, 2)));\n\
+         int log0(const char *, ...) __attribute__((__format__(__printf0__, 1, 2)));\n\
+         void f(int v, unsigned char *p, long l, char *s, double d) {\n\
+         printf(\"%b\", v);\n\
+         printf(\"%b\", l, \"x\");\n\
+         printf(\"%b\", v, 1);\n\
+         printf(\"%D\", v, \":\");\n\
+         printf(\"%r %y\", l, s);\n\
+         printf(\"%Lf %Zd %Id %n %m\", d, v, v);\n\
+         printf(\"%+b %0D %#y\", v, \"\", p, \"\", v);\n\
+         printf(\"%s %D\", (char *)0, (void *)0, (char *)0);\n\
+         printf(\"%hD\", p, \":\");\n\
+         printf(\"%2$b %1$d\", v, v, \"x\");\n\
+         log0(\"%#ld\", l);\n\
+         log0(\"\");\n\
+         printf(\"\");\n\
+         }\n",
+    );
+    for line in [
+        ":4:10: warning: format '%b' expects a matching 'char *' argument [E0785]",
+        ":5:10: warning: format '%b' expects argument of type 'int', but argument 2 has type 'long \
+         int' [E0785]",
+        ":6:10: warning: format '%b' expects argument of type 'char *', but argument 3 has type \
+         'int' [E0785]",
+        ":7:10: warning: format '%D' expects argument of type 'void *', but argument 2 has type \
+         'int' [E0785]",
+        ":8:10: warning: format '%r' expects argument of type 'unsigned int', but argument 2 has \
+         type 'long int' [E0785]",
+        ":8:13: warning: format '%y' expects argument of type 'int', but argument 3 has type 'char \
+         *' [E0785]",
+        ":9:10: warning: unknown conversion type character 'L' in format [E0785]",
+        ":9:14: warning: unknown conversion type character 'Z' in format [E0785]",
+        ":9:18: warning: unknown conversion type character 'I' in format [E0785]",
+        ":9:22: warning: unknown conversion type character 'n' in format [E0785]",
+        ":9:25: warning: unknown conversion type character 'm' in format [E0785]",
+        ":9:8: warning: too many arguments for format [E0786]",
+        ":10:11: warning: '+' flag used with '%b' freebsd_kprintf format [E0785]",
+        ":10:15: warning: '0' flag used with '%D' freebsd_kprintf format [E0785]",
+        ":10:19: warning: '#' flag used with '%y' freebsd_kprintf format [E0785]",
+        ":11:1: warning: reading through null pointer (argument 2) [E0785]",
+        ":11:1: warning: reading through null pointer (argument 3) [E0785]",
+        ":11:1: warning: reading through null pointer (argument 4) [E0785]",
+        ":12:11: warning: use of 'h' length modifier with 'D' type character has either no effect \
+         or undefined behavior [E0785]",
+        ":12:8: warning: too many arguments for format [E0786]",
+        ":13:8: warning: unused arguments in '$'-style format [E0786]",
+        ":14:10: warning: '#' flag used with '%d' printf0 format [E0785]",
+        ":15:6: warning: zero-length printf0 format string [E0788]",
+        ":16:8: warning: zero-length freebsd_kprintf format string [E0788]",
+    ] {
+        assert_eq!(lines_with(&got, line).len(), 1, "{line}\n{got}");
+    }
+    assert_eq!(lines_with(&got, "warning:").len(), 24, "{got}");
+}
+
+/// Stock gcc has neither FreeBSD archetype and warns about both, so on Linux the attribute is
+/// dropped with that warning and the call is not checked against it.
+#[test]
+fn the_freebsd_archetypes_are_unknown_to_gcc_on_linux() {
+    let got = said_with(
+        "kprintf-linux",
+        &["-Wall", "-ffreestanding"],
+        "int kp(const char *, ...) __attribute__((format(freebsd_kprintf, 1, 2)));\n\
+         int p0(const char *, ...) __attribute__((format(printf0, 1, 2)));\n\
+         void f(int v) { kp(\"%b\", v, \"x\"); p0(\"%s\", v); }\n",
+    );
+    assert_eq!(
+        lines_with(&got, "warning: 'freebsd_kprintf' is an unrecognized format function type")
+            .len(),
+        1,
+        "{got}"
+    );
+    assert_eq!(
+        lines_with(&got, "warning: 'printf0' is an unrecognized format function type").len(),
+        1,
+        "{got}"
+    );
+    assert_eq!(lines_with(&got, "warning:").len(), 2, "{got}");
+}
+
+/// NetBSD's `cdefs.h` makes `__sysloglike` a `printf` format unless the compiler defines
+/// `__syslog_attribute__`, which rucc does not, so its `%m` is read as gnu_printf reads it.
+#[test]
+fn the_netbsd_printf_and_syslog_forms_are_read_as_printf() {
+    let got = said_with(
+        "kprintf-netbsd",
+        &["--target=x86_64--netbsd", "-Wall"],
+        "#ifndef __syslog_attribute__\n#define __syslog__ __printf__\n#endif\n\
+         #define __printflike(a, b) __attribute__((__format__(__printf__, a, b)))\n\
+         #define __sysloglike(a, b) __attribute__((__format__(__syslog__, a, b)))\n\
+         int printf(const char *, ...) __printflike(1, 2);\n\
+         void syslog(int, const char *, ...) __sysloglike(2, 3);\n\
+         void f(const char *s) { syslog(3, \"%m: %s\", s); printf(\"%s\\n\", s); printf(\"%d\", s); }\n",
+    );
+    assert_eq!(lines_with(&got, "format '%d' expects argument of type 'int'").len(), 1, "{got}");
+    assert_eq!(lines_with(&got, "warning:").len(), 1, "{got}");
+}
+
+/// gcc says what a flag was used with as the conversion alone, so `%#lx` is not `%lx` there.
+#[test]
+fn a_flag_used_with_the_wrong_conversion_names_the_conversion_alone() {
+    let got = said_with(
+        "format-flag-name",
+        &["-Wall"],
+        "int printf(const char *, ...);\nvoid f(long l) { printf(\"%#ld %+5lu\", l, l); }\n",
+    );
+    assert_eq!(lines_with(&got, "'#' flag used with '%d' gnu_printf format").len(), 1, "{got}");
+    assert_eq!(lines_with(&got, "'+' flag used with '%u' gnu_printf format").len(), 1, "{got}");
+    assert_eq!(lines_with(&got, "warning:").len(), 2, "{got}");
+}
+
 /// gcc says nothing about what evaluating an operand would do when nothing evaluates it, and
 /// s5k5baf counts its 16 bit values with `sizeof((char[]){ seq })`, which is `-Werror` built.
 #[test]
