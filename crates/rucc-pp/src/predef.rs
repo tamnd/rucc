@@ -446,7 +446,11 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // with the opposite sign.
     // wasm32 says none of them, as clang does there. wasi-libc has no `<stdc-predef.h>` to say them
     // for it, and its maths library does not give the whole of Annex F.
-    let iec = opts.math.iec_559(opts.trapping_math) && target.tuple.arch() != tuple::Arch::Wasm32;
+    // The BSDs say none of these five either. gcc defines none of them itself, and on GNU/Linux
+    // they come from the C library's `<stdc-predef.h>`, which gcc includes there and nowhere else.
+    let bsd = target.tuple.os().is_bsd();
+    let iec =
+        opts.math.iec_559(opts.trapping_math) && target.tuple.arch() != tuple::Arch::Wasm32 && !bsd;
     d.flag_if(iec, "__STDC_IEC_559__");
     d.flag_if(iec, "__STDC_IEC_559_COMPLEX__");
     // TS 18661-1's date, in every dialect, which is gcc 16's answer rather than the standard's.
@@ -472,7 +476,7 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // is not Unicode, and clang for Apple leaves the macro out for that reason. A program that
     // reads it to skip `mbstowcs` is the one that would be wrong.
     let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
-    d.set_if(!apple, "__STDC_ISO_10646__", "201706L");
+    d.set_if(!apple && !bsd, "__STDC_ISO_10646__", "201706L");
     // The type behind `char8_t`, which C23 added and no dialect before it has. It sits here
     // rather than next to `__CHAR16_TYPE__` and `__CHAR32_TYPE__` because those two are the
     // same in every dialect and this one is not, which is the whole reason a header can test
@@ -883,9 +887,42 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             }
             windows_spellings(d, opts);
         }
-        // Every BSD is ELF. The macros that name the system and its release are not here yet,
-        // so a header that tests for one takes its generic path.
-        Os::FreeBsd(_) | Os::NetBsd | Os::OpenBsd | Os::DragonFly => d.flag("__ELF__"),
+        // The BSDs say what gcc's `TARGET_OS_CPP_BUILTINS` says for each, and `__ELF__` from
+        // `elfos.h`. FreeBSD and DragonFly name `unix` with `builtin_define_std`, which gives
+        // `__unix` and `__unix__` and gives `unix` outside a strict mode. NetBSD and OpenBSD
+        // define `__unix__` alone. `__FreeBSD__` is the major release, which gcc takes from the
+        // triple it was configured for.
+        Os::FreeBsd(release) => {
+            d.set("__FreeBSD__", &release.to_string());
+            unix(d, opts);
+            d.flag("__KPRINTF_ATTRIBUTE__");
+            d.flag("__ELF__");
+        }
+        Os::DragonFly => {
+            d.flag("__DragonFly__");
+            unix(d, opts);
+            d.flag("__ELF__");
+        }
+        // NetBSD's own gcc, which is the compiler its build uses and the only one with a RISC-V
+        // port. It adds `__syslog_attribute__` to upstream's two names, and `<sys/cdefs.h>`
+        // reads it to write `__sysloglike` with the `syslog` format. On RISC-V it adds
+        // `__riscv__`, and `_SOFT_FLOAT` on a machine with no float registers.
+        Os::NetBsd => {
+            d.flag("__NetBSD__");
+            d.flag("__unix__");
+            d.flag("__syslog_attribute__");
+            if triple.arch == Arch::Riscv64 {
+                d.flag("__riscv__");
+                d.flag_if(!opts.vector, "_SOFT_FLOAT");
+            }
+            d.flag("__ELF__");
+        }
+        Os::OpenBsd => {
+            d.flag("__OpenBSD__");
+            d.flag("__unix__");
+            d.flag("__ANSI_COMPAT");
+            d.flag("__ELF__");
+        }
         Os::None => {
             // Freestanding. `__ELF__` still holds, because the object format is a property of
             // the target rather than of having an operating system under it, and a wasm module
@@ -971,6 +1008,14 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.set("__pie__", "2");
         }
     }
+}
+
+/// What gcc's `builtin_define_std ("unix")` defines: `__unix` and `__unix__`, and `unix` too
+/// unless a strict mode keeps the name for the program.
+fn unix(d: &mut Defs, opts: &Predef) {
+    d.flag("__unix");
+    d.flag("__unix__");
+    d.flag_if(opts.gnu_extensions, "unix");
 }
 
 /// The stack protector level and the control flow protection mode, with the values gcc 16 gives.
@@ -1919,6 +1964,55 @@ mod tests {
         names.sort_unstable();
         assert_eq!(names, ["__STDC_UTF_16__", "__STDC_UTF_32__", "__STDC_VERSION__",]);
         assert!(has(&asm, "#define __x86_64__ 1") && has(&asm, "#define __STDC__ 1"), "{asm}");
+    }
+
+    /// tamnd/rucc#4088. Each BSD names itself as gcc's `TARGET_OS_CPP_BUILTINS` does, and none
+    /// of them says what Linux or glibc's `<stdc-predef.h>` says.
+    #[test]
+    fn a_bsd_names_itself_as_its_gcc_does_and_says_nothing_of_linux() {
+        let cases: [(&str, &[&str]); 7] = [
+            (
+                "x86_64-unknown-freebsd15.1",
+                &["__FreeBSD__ 15", "__unix 1", "__unix__ 1", "unix 1", "__KPRINTF_ATTRIBUTE__ 1"],
+            ),
+            ("aarch64-unknown-freebsd", &["__FreeBSD__ 14", "__unix__ 1"]),
+            ("x86_64-unknown-dragonfly", &["__DragonFly__ 1", "__unix 1", "unix 1"]),
+            ("x86_64--netbsd", &["__NetBSD__ 1", "__unix__ 1", "__syslog_attribute__ 1"]),
+            ("riscv64--netbsd", &["__NetBSD__ 1", "__riscv__ 1"]),
+            ("i486--netbsdelf", &["__NetBSD__ 1", "__i386__ 1"]),
+            ("x86_64-unknown-openbsd7.8", &["__OpenBSD__ 1", "__unix__ 1", "__ANSI_COMPAT 1"]),
+        ];
+        for (triple, lines) in cases {
+            let set = set_for(triple);
+            for line in lines.iter().chain(&["__ELF__ 1"]) {
+                assert!(has(&set, &format!("#define {line}")), "{triple}: {line}");
+            }
+            for name in [
+                "__linux__",
+                "__linux",
+                "linux",
+                "__gnu_linux__",
+                "__GLIBC_MINOR__",
+                "__STDC_ISO_10646__",
+                "__STDC_IEC_559__",
+                "__STDC_IEC_559_COMPLEX__",
+                "__STDC_IEC_60559_BFP__",
+                "__STDC_IEC_60559_COMPLEX__",
+            ] {
+                assert!(!set.contains(&format!("#define {name} ")), "{triple}: {name}");
+            }
+        }
+        // NetBSD and OpenBSD name `__unix__` alone, and `__riscv__` is NetBSD's.
+        for triple in ["x86_64--netbsd", "x86_64-unknown-openbsd"] {
+            let set = set_for(triple);
+            assert!(!set.contains("#define __unix ") && !set.contains("#define unix "), "{triple}");
+        }
+        assert!(!set_for("riscv64-unknown-freebsd").contains("#define __riscv__ "));
+        // `unix` is not a reserved name, so a strict mode leaves it to the program.
+        let triple: Triple = "x86_64-unknown-freebsd".parse().unwrap();
+        let strict =
+            built_in(&TargetInfo::new(triple), &Predef { gnu_extensions: false, ..Predef::new() });
+        assert!(has(&strict, "#define __unix__ 1") && !strict.contains("#define unix "));
     }
 
     #[test]
