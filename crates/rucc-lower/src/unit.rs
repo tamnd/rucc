@@ -2658,14 +2658,22 @@ impl Unit<'_> {
         // give exactly that type, so the function is the type of its definition, `int f()` takes
         // nothing, and a call passes each promoted argument as a parameter. A call that does not
         // match the callee goes through the table, where the check traps when it runs.
+        //
+        // An i386 function whose callee pops, which is `stdcall` and every function under
+        // `-mrtd`, is the other one. gcc's callee takes off what its definition names and its
+        // caller counts what it pushed, so a call passes each argument as a parameter here too
+        // and is not variadic, and the caller then knows the callee took them. Such a call does
+        // not match the declaration's empty list, so it goes through the address, as on wasm32.
         let wasm = self.target.tuple.arch() == rucc_tuple::Arch::Wasm32;
-        let variadic = signature.variadic || (!signature.prototyped && !wasm);
+        let pops = signature.convention.callee_pops() && !signature.variadic;
+        let each = wasm || pops;
+        let variadic = signature.variadic || (!signature.prototyped && !each);
         let params = if at_call && !signature.prototyped {
             // An argument past the end of the list has no parameter to travel as, which is what
             // a call to an unprototyped function with more arguments than the definition takes
-            // is, so the list ends where the arguments do. On wasm32 each argument past the end
-            // is a parameter of its own type.
-            let past = if wasm { actual.get(signature.params.len()..).unwrap_or(&[]) } else { &[] };
+            // is, so the list ends where the arguments do. On wasm32 and for a callee that pops,
+            // each argument past the end is a parameter of its own type.
+            let past = if each { actual.get(signature.params.len()..).unwrap_or(&[]) } else { &[] };
             signature
                 .params
                 .iter()

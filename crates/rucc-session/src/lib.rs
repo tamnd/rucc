@@ -2880,6 +2880,14 @@ pub struct Options {
     /// 32 bit x86 has and the driver refuses anywhere else. See
     /// [`rucc_target::TargetInfo::with_regparm`].
     pub regparm: u8,
+    /// Whether a function with a fixed number of arguments takes them off the stack itself, from
+    /// `-mrtd`, which only 32 bit x86 outside Windows takes here. Such a function is `stdcall`
+    /// without the attribute, and `cdecl` written on one gives it back to the caller, as in gcc.
+    pub rtd: bool,
+    /// The smallest page size gcc's warnings assume, from `--param min-pagesize=`. gcc reads an
+    /// address below it as one made from a null pointer. This compiler has no warning that reads
+    /// it yet, so the value is kept and nothing else.
+    pub min_pagesize: u32,
     /// Whether a small structure comes back in registers, from `-freg-struct-return` or
     /// `-fpcc-struct-return`, which only change anything on i386 System V. [`None`] is the
     /// target's own rule, which is registers on i386 FreeBSD and OpenBSD and memory elsewhere. See
@@ -3196,6 +3204,8 @@ impl Options {
             asm_keep_slots: false,
             sixteen: false,
             regparm: 0,
+            rtd: false,
+            min_pagesize: 4096,
             reg_struct_return: None,
             ident: true,
             msc: MscVersion::default(),

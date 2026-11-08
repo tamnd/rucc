@@ -3072,6 +3072,22 @@ impl Checker<'_> {
         let Some((registers, span)) = regparm else { return asked };
         let own = registers == self.cx.target.regparm;
         match asked {
+            // A count that is the unit's own is the unit's convention, which under `-mrtd` is the
+            // one where the callee pops. Another count under `-mrtd` is a function that pops and
+            // takes another number of registers, which is a convention gcc has and this compiler
+            // does not yet, so it is refused rather than compiled as the wrong one.
+            None if own => Some((self.own_convention(false), "regparm".to_owned(), span)),
+            None if self.cx.rtd => {
+                let what = format!(
+                    "'regparm({registers})' under '-mrtd' in a unit whose count is {} is not \
+                     supported yet",
+                    self.cx.target.regparm
+                );
+                let note = "write 'cdecl' with it, or build the unit with the same '-mregparm='";
+                let refused = Diagnostic::error(what, span).with_code("E0519");
+                self.report(refused.note(note, span));
+                asked
+            }
             None | Some((Convention::Target, ..)) => {
                 let convention =
                     if own { Convention::Target } else { Convention::Regparm(registers) };
@@ -3099,6 +3115,18 @@ impl Checker<'_> {
             }
             Some(_) => asked,
         }
+    }
+
+    /// The convention a function type gets when no attribute names one.
+    ///
+    /// That is the target's own, except under `-mrtd`, where a function with a fixed number of
+    /// arguments pops them itself. gcc decides that in `ix86_return_pops_args` for every function
+    /// that is not variadic and has no `cdecl`, and an unprototyped one counts as fixed: its
+    /// caller pushes what it passes and the callee takes off what its definition names. That is
+    /// `stdcall` outside Windows, which is why the driver takes `-mrtd` only there. `cdecl` is
+    /// read as the target's own, so writing it gives the stack back to the caller.
+    pub(in crate::check) fn own_convention(&self, variadic: bool) -> Convention {
+        if self.cx.rtd && !variadic { Convention::Stdcall } else { Convention::Target }
     }
 
     /// The count a `regparm` attribute gives, or nothing where gcc warns and drops it: an

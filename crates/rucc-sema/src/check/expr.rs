@@ -317,12 +317,14 @@ impl Checker<'_> {
             }
             None => {
                 let ret = self.types.int(IntKind::Int);
+                // `int f()`, which `-mrtd` makes a function that pops what it is passed.
+                let convention = self.own_convention(false);
                 self.types.function(FunctionType {
                     ret,
                     params: Vec::new(),
                     variadic: false,
                     prototyped: false,
-                    convention: rucc_target::Convention::Target,
+                    convention,
                     nocf: false,
                     indirect_return: false,
                     return_pointer_popped: None,
