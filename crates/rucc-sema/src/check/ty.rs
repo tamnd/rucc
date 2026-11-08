@@ -1222,12 +1222,13 @@ impl Checker<'_> {
         // information for a pointer to it does, the way it does for a declaration.
         let keep =
             written.iter().zip(&params).any(|(one, &ty)| one.spelled.is_some() || one.ty != ty);
+        let convention = self.own_convention(variadic);
         let ty = self.types.function(FunctionType {
             ret,
             params,
             variadic,
             prototyped,
-            convention: rucc_target::Convention::Target,
+            convention,
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,

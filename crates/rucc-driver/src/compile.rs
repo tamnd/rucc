@@ -397,6 +397,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 x87: opts.x87,
                 gnuc: opts.gnuc.major,
                 landing_pads: opts.control.branch(),
+                rtd: opts.rtd,
             },
         );
         checker.check_unit();

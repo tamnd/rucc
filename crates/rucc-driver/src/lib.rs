@@ -469,6 +469,18 @@ fn asan_param(kasan: &mut rucc_session::Kasan, spec: &str) -> Result<bool, Strin
     Ok(true)
 }
 
+/// Reads one `--param` that only gcc's warnings read into `opts`, and says whether `spec` was one.
+///
+/// `min-pagesize` is the only one. gcc reads an address below it as one made from a null pointer,
+/// and FreeBSD's `boot2` lowers it to 1024 so that its BIOS pointers into the first page are not
+/// warned about. This compiler has no warning that reads it, so the value is checked and kept.
+fn warning_param(opts: &mut Options, spec: &str) -> Result<bool, String> {
+    let Some(("min-pagesize", value)) = spec.split_once('=') else { return Ok(false) };
+    opts.min_pagesize =
+        value.parse().map_err(|_| format!("invalid value '{value}' for --param min-pagesize"))?;
+    Ok(true)
+}
+
 /// The names one name in `-fsanitize=` and its relatives stands for.
 ///
 /// `shift` is the two shift checks together, as gcc has it, so `-fsanitize=shift
@@ -913,6 +925,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // What `-mregparm=` last said, weighed after the loop against the machine the word size and
     // `--target=` settle on.
     let mut regparm: Option<&str> = None;
+    // What `-mrtd` or `-mno-rtd` last said, weighed after the loop as `-mregparm=` is.
+    let mut rtd: Option<bool> = None;
+    // What `-finline-limit=` last said, which becomes two `--param` settings after the loop.
+    let mut inline_limit: Option<u32> = None;
     let mut min_version: Option<rucc_tuple::Version> = None;
     // The first flag that only an Apple linker understands, for the refusal after the loop when the
     // target is not Apple, and what `-arch` asked for, which is checked against the target there.
@@ -1149,17 +1165,36 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "--param" => {
                 let spec = args.get(i).ok_or_else(|| err("--param requires name=value"))?.clone();
                 i += 1;
-                if !asan_param(&mut opts.kasan, &spec).map_err(err)? {
+                if !asan_param(&mut opts.kasan, &spec).map_err(err)?
+                    && !warning_param(&mut opts, &spec).map_err(err)?
+                {
                     rucc_cost::heuristics::Param::new(&spec).map_err(|e| err(e.to_string()))?;
                     opts.params.push(spec);
                 }
             }
             _ if arg.starts_with("--param=") => {
                 let spec = &arg["--param=".len()..];
-                if !asan_param(&mut opts.kasan, spec).map_err(err)? {
+                if !asan_param(&mut opts.kasan, spec).map_err(err)?
+                    && !warning_param(&mut opts, spec).map_err(err)?
+                {
                     rucc_cost::heuristics::Param::new(spec).map_err(|e| err(e.to_string()))?;
                     opts.params.push(spec.to_owned());
                 }
+            }
+            // gcc's older way to set the two inlining limits at once. gcc sets
+            // `max-inline-insns-single` and `max-inline-insns-auto` to half of the number, unless
+            // a `--param` sets them, wherever on the line that is. Those are the rows of this
+            // compiler's inliner that go by the same names, so the flag does here what it does in
+            // gcc. The FreeBSD kernel passes `-finline-limit=8000` to gcc. `-finline-limit-N` is
+            // gcc's alias.
+            _ if arg.starts_with("-finline-limit=") || arg.starts_with("-finline-limit-") => {
+                let value = &arg["-finline-limit=".len()..];
+                let limit = value.parse::<u32>().map_err(|_| {
+                    err(format!(
+                        "argument to '-finline-limit=' should be a non-negative integer, not '{value}'"
+                    ))
+                })?;
+                inline_limit = Some(limit);
             }
             "-###" => print_plan = true,
             "-v" => verbose = true,
@@ -1880,6 +1915,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // about how the text looks.
             "-fdiagnostics-color" | "-fno-diagnostics-color" => {}
             _ if arg.starts_with("-fdiagnostics-color=") => {}
+            // gcc puts the option that controls a warning in brackets after it, and the negative
+            // spelling leaves the brackets out. A diagnostic here carries this compiler's own code
+            // in the brackets and names no option, so there is nothing for either one to change.
+            // The FreeBSD build passes the positive one, which has been gcc's default since 4.6.
+            "-fdiagnostics-show-option" | "-fno-diagnostics-show-option" => {}
             // The link flags. None of them changes the compilation, which is why they are
             // collected apart from `opts` and why `-lm` on a `-c` line is a note rather than an
             // error: it is a thing said to a linker that is not going to run.
@@ -3134,6 +3174,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // How many words of each function's arguments go in registers on 32 bit x86, which the
             // kernel builds every 32 bit unit with. See `rucc_target::TargetInfo::with_regparm`.
             _ if arg.starts_with("-mregparm=") => regparm = Some(arg),
+            // Whether a function with a fixed number of arguments pops them itself, which
+            // FreeBSD's `boot2` asks for with `-mregparm=3` to save the bytes of every caller's
+            // `add`. Weighed after the loop against the machine, like `-mregparm=`.
+            "-mrtd" => rtd = Some(true),
+            "-mno-rtd" => rtd = Some(false),
             // One extension of the x86-64 instruction set, on or off, which is `-msse4.2` and its
             // relatives. Only the ones this compiler has the intrinsics for may be turned on for a
             // whole unit, because what turning one on does here is define the macro, and a macro
@@ -3457,6 +3502,31 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             Arch::X86_64 => notes.push("-mregparm is ignored in 64 bit mode".to_owned()),
             _ => return Err(err(format!("{arg} is for x86, and {} is not", opts.target))),
         }
+    }
+
+    // The same for `-mrtd`. gcc takes it on 32 bit x86 and says it does nothing on x86-64. On
+    // 32 bit Windows gcc also gives the function the `@` suffix of `stdcall`, which this compiler
+    // does not do yet, so it is refused there rather than built without the suffix.
+    if rtd == Some(true) {
+        use rucc_target::Arch;
+        match opts.target.arch {
+            Arch::X86 if opts.target.os == rucc_target::Os::Windows => {
+                return Err(err(format!("-mrtd is not supported on {} yet", opts.target)));
+            }
+            Arch::X86 => opts.rtd = true,
+            Arch::X86_64 => notes.push("'-mrtd' is ignored in 64bit mode".to_owned()),
+            _ => return Err(err(format!("-mrtd is for x86, and {} is not", opts.target))),
+        }
+    }
+
+    // `-finline-limit=` sets the two limits only where no `--param` set them, so its settings go
+    // in front of every `--param`, which is then the one that holds. gcc's `opts.cc` sets both
+    // to half the number.
+    if let Some(limit) = inline_limit {
+        let half = limit / 2;
+        let set = ["max-inline-insns-single", "max-inline-insns-auto"]
+            .map(|name| format!("{name}={half}"));
+        opts.params.splice(0..0, set);
     }
 
     // The floor `-fmin-function-alignment=` put under every function, which `-falign-functions`
@@ -11342,5 +11412,61 @@ mod tests {
         let flag = "-Werror=unterminated-string-initialization";
         let why = format!("`{flag}`: no option `-Wunterminated-string-initialization`");
         assert_eq!(refused(&["-fgnuc-version=14", flag, "-c", "a.c"]), why);
+    }
+
+    /// `-finline-limit=N` sets the two limits gcc's `opts.cc` sets, to half of N, and an explicit
+    /// `--param` for either one holds whichever side of it it is written on (tamnd/rucc#4092).
+    #[test]
+    fn inline_limit_sets_the_two_inline_limits_under_any_param() {
+        let (opts, _) = compile(&["-c", "-finline-limit=600", "a.c"]);
+        assert_eq!(opts.params, ["max-inline-insns-single=300", "max-inline-insns-auto=300"]);
+        let (opts, _) = compile(&["-c", "-finline-limit-80", "a.c"]);
+        assert_eq!(opts.params, ["max-inline-insns-single=40", "max-inline-insns-auto=40"]);
+        let line = ["-c", "--param", "max-inline-insns-single=100", "-finline-limit=600", "a.c"];
+        let (opts, _) = compile(&line);
+        assert_eq!(opts.params.last().map(String::as_str), Some("max-inline-insns-single=100"));
+        let why = "argument to '-finline-limit=' should be a non-negative integer, not 'many'";
+        assert_eq!(refused(&["-c", "-finline-limit=many", "a.c"]), why);
+    }
+
+    /// gcc names the option of each warning by default, and the flag and its opposite are taken
+    /// and change nothing, since rucc puts its own codes there (tamnd/rucc#4092).
+    #[test]
+    fn diagnostics_show_option_is_taken_either_way() {
+        for flag in ["-fdiagnostics-show-option", "-fno-diagnostics-show-option"] {
+            assert_eq!(notes(&["-c", flag, "a.c"]), Vec::<String>::new());
+        }
+    }
+
+    /// `-mrtd` makes every function that is not variadic pop its own arguments on 32 bit x86. It
+    /// does nothing on x86-64, as in gcc, and is refused for a machine that is not x86 and for 32
+    /// bit Windows, where gcc also gives each name the `@` suffix (tamnd/rucc#4092).
+    #[test]
+    fn rtd_is_for_32_bit_x86() {
+        let (opts, _) = compile(&["--target=i686-linux-gnu", "-c", "-mrtd", "a.c"]);
+        assert!(opts.rtd);
+        let (opts, _) = compile(&["--target=i686-linux-gnu", "-c", "-mrtd", "-mno-rtd", "a.c"]);
+        assert!(!opts.rtd);
+        let line = ["--target=x86_64-linux-gnu", "-c", "-mrtd", "a.c"];
+        assert_eq!(notes(&line), ["'-mrtd' is ignored in 64bit mode"]);
+        assert!(!compile(&line).0.rtd);
+        let why = "-mrtd is for x86, and aarch64-unknown-linux-gnu is not";
+        assert_eq!(refused(&["--target=aarch64-linux-gnu", "-c", "-mrtd", "a.c"]), why);
+        let line = ["--target=i686-w64-mingw32", "-c", "-mrtd", "a.c"];
+        assert!(refused(&line).starts_with("-mrtd is not supported on "), "{}", refused(&line));
+    }
+
+    /// `--param min-pagesize=` is the size gcc takes the first page to be when it warns about an
+    /// access to a small constant address. FreeBSD's boot code passes it, in both spellings, and
+    /// rucc records it (tamnd/rucc#4092).
+    #[test]
+    fn min_pagesize_is_taken_in_both_spellings() {
+        assert_eq!(compile(&["-c", "a.c"]).0.min_pagesize, 4096);
+        let (opts, _) = compile(&["-c", "--param", "min-pagesize=1024", "a.c"]);
+        assert_eq!(opts.min_pagesize, 1024);
+        let (opts, _) = compile(&["-c", "--param=min-pagesize=0", "a.c"]);
+        assert_eq!(opts.min_pagesize, 0);
+        let why = "invalid value 'big' for --param min-pagesize";
+        assert_eq!(refused(&["-c", "--param=min-pagesize=big", "a.c"]), why);
     }
 }
