@@ -165,7 +165,7 @@ pub struct Context<'a> {
     /// it to leave out. See `check/attr.rs`.
     pub landing_pads: bool,
     /// Whether a function with a fixed number of arguments takes them off the stack itself, which
-    /// is `-mrtd` on 32 bit x86. Read by [`Checker::own_convention`].
+    /// is `-mrtd` on 32 bit x86. Read by `Checker::own_convention`.
     pub rtd: bool,
 }
 
