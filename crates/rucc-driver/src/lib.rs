@@ -4139,6 +4139,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             let tuple = pinned.unwrap_or_else(|| opts.target.tuple());
             if let Some(wall) = rucc_sysroot::Wall::of(tuple) {
                 opts.search.explain_missing_system(wall.no_headers(&tuple.to_canonical_string()));
+            } else if let Some(why) = link::bsd_no_headers(opts.target) {
+                opts.search.explain_missing_system(why);
             }
         }
         // And whether the tree somebody named is the release they asked for, which is the one
@@ -6622,6 +6624,38 @@ mod tests {
         // And the mingw-w64 target has its headers from us, so nothing is missing to explain.
         let (opts, _) = compile(&["--target=x86_64-windows-gnu", "-c", "a.c"]);
         assert_eq!(opts.search.missing_system(), None);
+    }
+
+    /// A BSD target on a machine that is not a BSD, with no `--sysroot`.
+    ///
+    /// There is no tree of a BSD in the cache, so the search has no directory for the library and
+    /// the include that fails says to name one. Not run on a BSD, which has its own headers.
+    #[test]
+    fn a_bsd_target_with_no_sysroot_says_to_name_one_and_searches_no_cache() {
+        if cfg!(any(
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly"
+        )) {
+            return;
+        }
+        let (opts, _) = compile(&["--target=x86_64-unknown-freebsd", "-c", "a.c"]);
+        let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
+        assert_eq!(dirs, [runtime::DIR]);
+        let why = opts.search.missing_system().expect("the reason there are none");
+        assert!(why.contains("this machine is not FreeBSD"), "{why}");
+        assert!(why.contains("--sysroot=<dir>"), "{why}");
+
+        // A tree somebody named is searched and needs no reason.
+        let root = std::env::temp_dir().join(format!("rucc-bsd-headers-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("usr/include")).expect("a tree");
+        let named = format!("--sysroot={}", root.display());
+        let (opts, _) = compile(&["--target=x86_64-unknown-netbsd", &named, "-c", "a.c"]);
+        let dirs: Vec<_> = opts.search.dirs().iter().map(|d| d.path.clone()).collect();
+        assert_eq!(dirs, [PathBuf::from(runtime::DIR), root.join("usr/include")]);
+        assert_eq!(opts.search.missing_system(), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
