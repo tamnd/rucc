@@ -117,6 +117,10 @@ pub struct Preprocessor {
     /// claims, so a name that came in a later release is one they have not heard of. Set by
     /// [`Preprocessor::predefine`], and every release until then.
     gnuc: Option<u32>,
+    /// What `__has_feature` and `__has_extension` read from the command line: the standard, the
+    /// sanitizers and `-pedantic-errors`. Set by [`Preprocessor::predefine`], and C99 with none
+    /// of the others until then.
+    features: rucc_gnu::Mode,
     /// Whether `__pragma(...)` is Microsoft's pragma operator here rather than an identifier,
     /// which it is where clang has Microsoft extensions on: the `*-windows-msvc` rows unless
     /// `-fno-ms-extensions` said otherwise, and any row under `-fms-extensions`. Set by
@@ -245,12 +249,19 @@ impl Preprocessor {
         self.places =
             rucc_gnu::Target::new(target.tuple.arch().as_str(), target.tuple.os().as_str());
         self.gnuc = Some(opts.gnuc.major);
+        self.features = rucc_gnu::Mode {
+            c11: opts.std.has_c11(),
+            c23: matches!(opts.std, rucc_session::Std::C23 | rucc_session::Std::C2y),
+            pedantic_errors: opts.pedantic_errors,
+            address: opts.address,
+            undefined: opts.undefined,
+        };
         let msvc = Triple::from_tuple(target.tuple)
             .is_some_and(|triple| triple.os == Os::Windows && triple.env == Env::Msvc);
         self.ms_pragma = opts.ms_extensions.unwrap_or(msvc);
         let x86 = target.tuple.arch().as_str() == "x86_64";
         self.targets = TargetLines::new(x86.then_some(opts.isa));
-        let names = Names::new(cx.interner);
+        let names = Names::new(cx.interner, self.gnuc);
         self.chars = cond::Chars::of(target);
         let file = self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
         // The macros that cannot be written as a `#define` line, because what they stand for
@@ -322,7 +333,7 @@ impl Preprocessor {
         if files.is_empty() {
             return Ok(());
         }
-        let names = Names::new(cx.interner);
+        let names = Names::new(cx.interner, self.gnuc);
         // The flags as a file, so that a name that is not found has somewhere to point. The two
         // spellings are the same length, which is what makes the offset of the name the length of
         // the line so far and keeps this from needing a second pass.
@@ -367,7 +378,7 @@ impl Preprocessor {
     /// The result is the tokens that survived the conditionals, with macros expanded. Nothing
     /// is thrown away silently: an unterminated `#if` and a stray `#endif` are both reported.
     pub fn run(&mut self, file: FileId, cx: &mut Context<'_>) -> Vec<Tok> {
-        let names = Names::new(cx.interner);
+        let names = Names::new(cx.interner, self.gnuc);
         let mut out = Vec::new();
         let name = cx.sources.file(file).name.clone();
         let dir = directory_of(&name);
@@ -1580,8 +1591,8 @@ impl Preprocessor {
                     Kind::Attribute => rucc_gnu::has_attribute(name, places, gnuc),
                     Kind::CAttribute => rucc_gnu::has_c_attribute(name, places, gnuc),
                     Kind::Builtin => rucc_gnu::has_builtin(name, places, gnuc),
-                    Kind::Feature => rucc_gnu::has_feature(name, places, gnuc),
-                    Kind::Extension => rucc_gnu::has_extension(name, places, gnuc),
+                    Kind::Feature => rucc_gnu::has_feature(name, places, gnuc, self.features),
+                    Kind::Extension => rucc_gnu::has_extension(name, places, gnuc, self.features),
                 }
             }
         }
@@ -2444,10 +2455,17 @@ struct HasOps {
     /// interned before any file is read, so a name out of the source sorts above the range and
     /// one comparison turns it away.
     range: (Symbol, Symbol),
+    /// Whether `__has_feature` and `__has_extension` are operators, which they are from gcc 14.
+    /// Under an older persona they are plain names, so `#ifdef __has_feature` is false and a
+    /// header can define them, as FreeBSD's `sys/cdefs.h` does.
+    feature: bool,
 }
 
 impl HasOps {
-    fn new(interner: &mut Interner) -> HasOps {
+    /// The gcc release that added `__has_feature` and `__has_extension`.
+    const FEATURE: u32 = 14;
+
+    fn new(interner: &mut Interner, gnuc: Option<u32>) -> HasOps {
         let ops = [
             (interner.intern("__has_include"), Op::Include),
             (interner.intern("__has_include_next"), Op::IncludeNext),
@@ -2463,7 +2481,7 @@ impl HasOps {
         for &(sym, _) in &ops {
             range = (range.0.min(sym), range.1.max(sym));
         }
-        HasOps { ops, range }
+        HasOps { ops, range, feature: gnuc.is_none_or(|gnuc| gnuc >= HasOps::FEATURE) }
     }
 
     /// The operator a name is, if it is one.
@@ -2472,7 +2490,8 @@ impl HasOps {
         if name < self.range.0 || name > self.range.1 {
             return None;
         }
-        self.ops.iter().find(|(sym, _)| *sym == name).map(|(_, op)| *op)
+        let op = self.ops.iter().find(|(sym, _)| *sym == name).map(|(_, op)| *op);
+        op.filter(|op| self.feature || !matches!(op, Op::Table(Kind::Feature | Kind::Extension)))
     }
 }
 
@@ -2509,7 +2528,7 @@ struct Names {
 }
 
 impl Names {
-    fn new(interner: &mut Interner) -> Names {
+    fn new(interner: &mut Interner, gnuc: Option<u32>) -> Names {
         Names {
             define: interner.intern("define"),
             undef: interner.intern("undef"),
@@ -2534,7 +2553,7 @@ impl Names {
             pop_macro: interner.intern("pop_macro"),
             pragma_op: interner.intern("_Pragma"),
             ms_pragma_op: interner.intern("__pragma"),
-            has: HasOps::new(interner),
+            has: HasOps::new(interner, gnuc),
         }
     }
 }
@@ -4041,18 +4060,67 @@ mod tests {
     }
 
     #[test]
-    fn has_feature_and_has_extension_read_the_same_table() {
-        // `__has_extension` answers yes wherever `__has_feature` does, and `__has_feature` never
-        // names an extension.
-        assert_eq!(clean("#if __has_feature(__has_include)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_extension(__has_include)\nyes\n#endif\n"), "yes");
-        assert_eq!(clean("#if __has_feature(include_next)\nyes\n#endif\n"), "");
+    fn has_feature_and_has_extension_answer_what_gcc_14_answers() {
+        // The answers gcc 14 and 16 give for each standard, with `F` from `__has_feature` and `E`
+        // from `__has_extension`. The operand is expanded first, as in gcc, and `modules` is a
+        // name clang has and gcc does not.
+        let asked = "#define NAME c_atomic\n\
+                     F __has_feature(NAME) __has_feature(__c_generic_selections__) \
+                     __has_feature(cxx_binary_literals) __has_feature(tls) \
+                     __has_feature(gnu_asm_goto_with_outputs) __has_feature(modules)\n\
+                     E __has_extension(NAME) __has_extension(c_generic_selections) \
+                     __has_extension(cxx_binary_literals) __has_extension(tls) \
+                     __has_extension(gnu_asm_goto_with_outputs) __has_extension(modules)\n";
+        for (std, pedantic_errors, answer) in [
+            (Std::C99, false, "F 0 0 0 1 0 0 E 1 1 1 1 1 0"),
+            (Std::C11, false, "F 1 1 0 1 0 0 E 1 1 1 1 1 0"),
+            (Std::C17, false, "F 1 1 0 1 0 0 E 1 1 1 1 1 0"),
+            (Std::C23, false, "F 1 1 1 1 0 0 E 1 1 1 1 1 0"),
+            (Std::C99, true, "F 0 0 0 1 0 0 E 0 0 0 1 0 0"),
+            (Std::C11, true, "F 1 1 0 1 0 0 E 1 1 0 1 0 0"),
+        ] {
+            let opts = Predef { std, pedantic_errors, ..Predef::new() };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "{std:?} {pedantic_errors}");
+        }
+        // A sanitizer's name is there only while the sanitizer is on.
+        let asked =
+            "__has_feature(address_sanitizer) __has_extension(undefined_behavior_sanitizer)\n";
+        for (address, undefined, answer) in
+            [(false, false, "0 0"), (true, false, "1 0"), (false, true, "0 1")]
+        {
+            let opts = Predef { address, undefined, ..Predef::new() };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "{address} {undefined}");
+        }
         // The clang names for things this compiler does and gcc 16 does too are answered no,
         // because gcc 16 answers no for them: a header that asks has only ever been built by gcc
         // down the path the no takes. The row still says the thing is implemented.
         for name in ["pragma_once", "include_next", "statement_expressions", "case_ranges"] {
             assert_eq!(clean(&format!("#if __has_feature({name})\nyes\n#endif\n")), "", "{name}");
             assert_eq!(clean(&format!("#if __has_extension({name})\nyes\n#endif\n")), "", "{name}");
+        }
+    }
+
+    /// gcc 13 has neither operator, and FreeBSD's `sys/cdefs.h` defines both as zero when
+    /// `#ifndef` says they are not there.
+    #[test]
+    fn has_feature_and_has_extension_are_not_there_before_gcc_14() {
+        let asked = "#ifdef __has_feature\nF\n#endif\n\
+                     #if defined(__has_extension)\nE\n#endif\n\
+                     #ifndef __has_feature\n#define __has_feature(x) 0\n#endif\n\
+                     #ifndef __has_extension\n#define __has_extension(x) 0\n#endif\n\
+                     #ifdef __has_attribute\nA\n#endif\n\
+                     __has_feature(tls) __has_extension(c_atomic)\n";
+        for (major, answer) in [(13, "A 0 0"), (14, "F E A 1 1"), (16, "F E A 1 1")] {
+            let mut opts = Predef::new();
+            opts.gnuc = rucc_session::GnucVersion { major, minor: 0, patch: 0 };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "gcc {major}");
+            assert!(run.messages().is_empty(), "gcc {major}: {:?}", run.messages());
         }
     }
 
@@ -4092,7 +4160,7 @@ mod tests {
         // GCC and clang both make these builtin macros rather than something only the
         // conditional parser knows, so a program may write one in a declaration. Real headers
         // do: an attribute macro is often written as the answer rather than as a `#if`.
-        assert_eq!(clean("f __has_feature(__has_include)\n"), "f 1");
+        assert_eq!(clean("f __has_feature(tls)\n"), "f 1");
         assert_eq!(clean("b __has_builtin(__builtin_expect)\n"), "b 1");
         assert_eq!(clean("a __has_attribute(packed)\n"), "a 1");
         assert_eq!(clean("c __has_c_attribute(deprecated)\n"), "c 202311");
@@ -4103,7 +4171,7 @@ mod tests {
     fn a_macro_that_expands_to_a_has_operator_is_answered_where_it_is_used() {
         // The awkward half of the same feature. The answer is deferred to wherever the macro
         // lands, so the sweep has to run after expansion and not only before it.
-        assert_eq!(clean("#define HAVE __has_feature(__has_include)\nx HAVE\n"), "x 1");
+        assert_eq!(clean("#define HAVE __has_feature(tls)\nx HAVE\n"), "x 1");
         assert_eq!(clean("#define HAVE(x) __has_attribute(x)\ny HAVE(packed)\n"), "y 1");
     }
 

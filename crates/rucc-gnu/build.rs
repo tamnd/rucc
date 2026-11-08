@@ -26,6 +26,7 @@ struct Row {
     library: String,
     answer: String,
     value: String,
+    when: String,
     targets: Vec<String>,
     used_by: Vec<String>,
     tests: Vec<String>,
@@ -45,6 +46,13 @@ const STATUSES: &[(&str, &str)] = &[
     ("partial", "Status::Partial"),
     ("implemented", "Status::Implemented"),
     ("rejected", "Status::Rejected"),
+];
+
+const WHENS: &[(&str, &str)] = &[
+    ("c11", "When::C11"),
+    ("c23", "When::C23"),
+    ("address", "When::Address"),
+    ("undefined", "When::Undefined"),
 ];
 
 const ANSWERS: &[(&str, &str)] = &[("warn", "Answer::Warn"), ("error", "Answer::Error")];
@@ -96,6 +104,7 @@ fn parse(text: &str) -> Vec<Row> {
                 library: String::new(),
                 answer: String::new(),
                 value: String::new(),
+                when: String::new(),
                 targets: Vec::new(),
                 used_by: Vec::new(),
                 tests: Vec::new(),
@@ -120,6 +129,7 @@ fn parse(text: &str) -> Vec<Row> {
             "library" => row.library = string(value, line),
             "answer" => row.answer = string(value, line),
             "value" => row.value = string(value, line),
+            "when" => row.when = string(value, line),
             "notes" => row.notes = string(value, line),
             "targets" => row.targets = array(value, line),
             "used_by" => row.used_by = array(value, line),
@@ -224,6 +234,20 @@ fn check(rows: &[Row]) {
                 panic!(
                     "features.toml:{line}: `{name}` has value `{}`, which is not a number",
                     row.value
+                );
+            }
+        }
+        // Only `__has_feature` and `__has_extension` ask about the mode of the unit, and only
+        // a feature row can be one in some modes and an extension or nothing in others.
+        if !row.when.is_empty() {
+            if row.kind != "feature" {
+                panic!("features.toml:{line}: `{name}` has a when, which only a feature has");
+            }
+            if pick(WHENS, &row.when).is_none() {
+                panic!(
+                    "features.toml:{line}: `{name}` has when `{}`, which is not one of {}",
+                    row.when,
+                    names(WHENS)
                 );
             }
         }
@@ -364,6 +388,7 @@ fn render(mut rows: Vec<Row>) -> String {
         let status = pick(STATUSES, &row.status).unwrap_or("Status::Unimplemented");
         let answer = pick(ANSWERS, &row.answer).unwrap_or("Answer::Warn");
         let value = if row.value.is_empty() { "1".to_owned() } else { row.value.clone() };
+        let when = pick(WHENS, &row.when).unwrap_or("When::Always");
         out.push_str("    Feature {\n");
         out.push_str(&format!("        name: {},\n", quote(&row.name)));
         out.push_str(&format!("        kind: {kind},\n"));
@@ -373,6 +398,7 @@ fn render(mut rows: Vec<Row>) -> String {
         out.push_str(&format!("        library: {},\n", quote(&row.library)));
         out.push_str(&format!("        answer: {answer},\n"));
         out.push_str(&format!("        value: {value},\n"));
+        out.push_str(&format!("        when: {when},\n"));
         let places: Vec<&str> = row.targets.iter().filter_map(|t| pick(PLACES, t)).collect();
         out.push_str(&format!("        targets: &[{}],\n", places.join(", ")));
         out.push_str(&format!("        used_by: &{},\n", list(&row.used_by)));

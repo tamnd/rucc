@@ -180,6 +180,12 @@ pub struct Predef {
     pub protector: Protector,
     /// Whether `-fsanitize=kernel-address` is on, which decides `__SANITIZE_ADDRESS__`.
     pub address: bool,
+    /// Whether any check of `-fsanitize=undefined` is on, which decides what
+    /// `__has_feature(undefined_behavior_sanitizer)` answers.
+    pub undefined: bool,
+    /// Whether `-pedantic-errors` is on, which makes `__has_extension` answer as `__has_feature`
+    /// does.
+    pub pedantic_errors: bool,
     /// What `-fcf-protection=` asked for, which decides `__CET__` on x86. Assembly reads it to put
     /// `endbr64` at each entry and to write the note that the C code gets from the compiler.
     pub control: Control,
@@ -221,6 +227,8 @@ impl Predef {
             branch_protection: BranchProtection::default(),
             protector: Protector::None,
             address: false,
+            undefined: false,
+            pedantic_errors: false,
             control: Control::None,
             assembler: false,
         }
@@ -262,6 +270,8 @@ impl Predef {
             branch_protection: opts.branch_protection,
             protector: opts.protector,
             address: opts.kasan.on,
+            undefined: opts.sanitize.any(),
+            pedantic_errors: opts.named_warnings.has_pedantic_errors(),
             control: opts.control,
             assembler: false,
         }
