@@ -20,6 +20,10 @@ workspace = true
 [dependencies]
 rucc-driver.workspace = true
 
+# The tests of `--sysroot=9p:` start the small 9P server of rucc-9p, which is rank 0.
+[dev-dependencies]
+rucc-9p.workspace = true
+
 [[bin]]
 name = "rucc"
 path = "src/main.rs"

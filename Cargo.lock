@@ -102,6 +102,7 @@ dependencies = [
 name = "rucc"
 version = "0.30.15"
 dependencies = [
+ "rucc-9p",
  "rucc-driver",
 ]
 
@@ -193,6 +194,7 @@ name = "rucc-driver"
 version = "0.30.15"
 dependencies = [
  "memmap2",
+ "rucc-9p",
  "rucc-archive",
  "rucc-asm",
  "rucc-base",

@@ -2672,6 +2672,11 @@ pub struct Options {
     /// type. APE's `sys/socket.h` declares `getpeername(int, void *, int *)`, and the definition
     /// takes a `struct sockaddr *`.
     pub kencc_strict_void: bool,
+    /// The 9P server that the sysroot is on, as a dial string, from `--sysroot=9p:<address>`.
+    ///
+    /// The sysroot is then the text `9p:<address>`, and the driver reads each path under it from
+    /// the server. No other path goes to the server.
+    pub nine_p: Option<String>,
     /// Whether a tentative definition is offered to the linker as a common symbol, from
     /// `-fcommon` and `-fno-common`.
     ///
@@ -3250,6 +3255,7 @@ impl Options {
             kencc: false,
             ansi_preprocessor: false,
             kencc_strict_void: false,
+            nine_p: None,
             common: None,
             zero_initialized_in_bss: true,
             strict_aliasing: true,
