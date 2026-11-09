@@ -63,6 +63,7 @@ use crate::jumps;
 use crate::kept;
 use crate::layout;
 use crate::lifetimes;
+use crate::locked;
 use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
 use crate::pads;
@@ -938,7 +939,16 @@ pub fn compile_recording(
     } else {
         machine.conv
     };
-    let ran = lowering::group(source, names, conv, switching, &counts, fused, counting);
+    // A sixteen byte compare and exchange on AArch64 is `caspal` in a function built for the large
+    // system extensions and a loop of exclusive accesses in any other. See [`crate::locked`].
+    let lse = rucc_target::Feature::aarch64("lse").is_some_and(|lse| isa.has(lse));
+    let pairs = std::ptr::eq(machine.shapes, &aarch64::MACHINE).then_some(if lse {
+        locked::Exclusive::Casp
+    } else {
+        locked::Exclusive::Loop
+    });
+    let built = lowering::Built { fused, pairs };
+    let ran = lowering::group(source, names, conv, switching, &counts, built, counting);
     // AArch64 has the conditional compare, which is what gcc keeps the and for. See [`jumps`].
     if flags.jumps && !std::ptr::eq(machine.shapes, &aarch64::MACHINE) {
         jumps::branches(source);

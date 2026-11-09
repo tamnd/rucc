@@ -2345,19 +2345,25 @@ impl<'u> Body<'_, 'u> {
         matches!(repr::size_of(self.types(), self.target(), ty), 1 | 2 | 4 | 8)
     }
 
-    /// Whether a `__sync_` name over an object of that type is `lock cmpxchg16b` rather than a
-    /// call, which is true of a sixteen byte integer on x86-64 in a function built with `cx16`.
+    /// Whether a `__sync_` name over an object of that type is a compare and exchange of two
+    /// registers rather than a call. That is a sixteen byte integer on x86-64 in a function built
+    /// with `cx16`, which is `lock cmpxchg16b`, and a sixteen byte integer on AArch64, where every
+    /// processor has the exclusive pair instructions.
     ///
-    /// gcc asks the same three things, and asks them of the `__sync_` names only. A C11 name at
-    /// sixteen bytes calls libatomic whatever the function is built for, and so does this, so that
+    /// gcc asks the same things, and asks them of the `__sync_` names only. A C11 name at sixteen
+    /// bytes calls libatomic whatever the function is built for, and so does this, so that
     /// `__atomic_always_lock_free` stays false and the two agree on which calls the library sees.
     /// What the instruction becomes is `rucc_codegen::locked`'s business.
     fn in_a_pair(&mut self, ty: TypeId) -> bool {
-        if self.target().tuple.arch() != Arch::X86_64 {
+        let arch = self.target().tuple.arch();
+        if !matches!(arch, Arch::X86_64 | Arch::Aarch64) {
             return false;
         }
         if repr::value_type(self.types(), self.target(), ty) != Some(Type::int(128)) {
             return false;
+        }
+        if arch == Arch::Aarch64 {
+            return true;
         }
         let isa = self.func.target.unwrap_or(self.unit.isa);
         rucc_target::Feature::named("cx16").is_some_and(|cx16| isa.has(cx16))

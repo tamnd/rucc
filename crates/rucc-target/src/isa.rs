@@ -84,8 +84,8 @@ const fn arm(name: &'static str) -> Row {
     Row { name, needs: &[], honoured: true, aarch64: true }
 }
 
-/// Every extension gcc 16.2.0 has a `-m` flag and an attribute name for on x86-64, and the one
-/// AArch64 extension this compiler reads.
+/// Every extension gcc 16.2.0 has a `-m` flag and an attribute name for on x86-64, and the two
+/// AArch64 extensions this compiler reads.
 ///
 /// The honoured ones first, in the order of the SSE line, and then the rest roughly in the order
 /// gcc's own table has them. What each needs is gcc's `_SET` mask for it, cut down to the
@@ -201,6 +201,8 @@ pub static FEATURES: &[Row] = &[
     named("amx-movrs", &["amx-tile"]),
     named("amx-tf32", &["amx-tile"]),
     arm("crc"),
+    // The large system extensions, whose `casp` is the sixteen byte compare and swap.
+    arm("lse"),
 ];
 
 /// One extension, as its row in [`FEATURES`].
@@ -424,35 +426,47 @@ impl Isa {
     /// The extensions an AArch64 architecture has, for the names gcc takes after `-march=` and
     /// `arch=`, or `None` for a name that is not one.
     ///
-    /// Only the CRC32 extension is tracked, and it is `armv8-a` alone that lacks it: the
-    /// extension is optional in Armv8.0 and part of every architecture from Armv8.1-A on, which
-    /// includes the Armv9 line and Armv8-R, whose gcc entry is built over Armv8.4-A.
+    /// The CRC32 extension and the large system extensions are tracked, and it is `armv8-a`
+    /// alone that lacks them: both are optional in Armv8.0 and part of every architecture from
+    /// Armv8.1-A on, which includes the Armv9 line and Armv8-R, whose gcc entry is built over
+    /// Armv8.4-A.
     #[must_use]
     pub fn aarch64_arch(name: &str) -> Option<Isa> {
         let (number, profile) = name.strip_prefix("armv")?.split_once('-')?;
         let (major, minor) = number.split_once('.').unwrap_or((number, "0"));
         let major: u32 = major.parse().ok()?;
         let minor: u32 = minor.parse().ok()?;
-        let crc = Feature::aarch64("crc").map_or(Isa::NONE, |crc| Isa(crc.bit()));
+        let later = ["crc", "lse"]
+            .into_iter()
+            .filter_map(Feature::aarch64)
+            .fold(Isa::NONE, |isa, feature| Isa(isa.0 | feature.bit()));
         match (major, minor, profile) {
             (8, 0, "a") => Some(Isa::NONE),
-            (8 | 9, _, "a") | (8, 0, "r") => Some(crc),
+            (8 | 9, _, "a") | (8, 0, "r") => Some(later),
             _ => None,
         }
     }
 
     /// This set with the modifiers of an AArch64 `-march=` or `target` string applied in order,
-    /// each written after a `+`: `crc` turns the CRC32 extension on, `nocrc` turns it off, and
-    /// `nothing` turns off everything before it, which is how gcc's own `<arm_acle.h>` says
-    /// `+nothing+crc`. Every other modifier is left alone.
+    /// each written after a `+`: `crc` turns the CRC32 extension on, `nocrc` turns it off, `lse`
+    /// and `nolse` do the same for the large system extensions, and `nothing` turns off
+    /// everything before it, which is how gcc's own `<arm_acle.h>` says `+nothing+crc`. Every
+    /// other modifier is left alone.
     #[must_use]
     pub fn aarch64_modifiers(self, text: &str) -> Isa {
-        let Some(crc) = Feature::aarch64("crc") else { return self };
-        text.split('+').fold(self, |isa, modifier| match modifier {
-            "crc" => isa.union(Isa(crc.bit())),
-            "nocrc" => isa.minus(Isa(crc.bit())),
-            "nothing" => Isa::NONE,
-            _ => isa,
+        text.split('+').fold(self, |isa, modifier| {
+            if modifier == "nothing" {
+                return Isa::NONE;
+            }
+            let (name, on) = match modifier.strip_prefix("no") {
+                Some(name) => (name, false),
+                None => (modifier, true),
+            };
+            match Feature::aarch64(name) {
+                Some(feature) if on => isa.union(Isa(feature.bit())),
+                Some(feature) => isa.minus(Isa(feature.bit())),
+                None => isa,
+            }
         })
     }
 
@@ -1177,6 +1191,22 @@ mod tests {
         assert_eq!(Isa::aarch64_arch("armv8-a"), Some(Isa::NONE));
         assert_eq!(Isa::aarch64_arch("armv7-a"), None);
         assert_eq!(Isa::aarch64_arch("cortex-a72"), None);
+    }
+
+    /// tamnd/rucc#4088. The large system extensions come with Armv8.1-A, as gcc 16's
+    /// `__ARM_FEATURE_ATOMICS` says, and `+lse` and `+nolse` add and take them away.
+    #[test]
+    fn the_aarch64_architectures_from_8_1_have_lse_and_8_0_needs_the_modifier() {
+        let has_lse = |isa: Isa| isa.has(Feature::aarch64("lse").unwrap());
+        for march in ["armv8-a+lse", "armv8.1-a", "armv8.2-a+fp16", "armv9-a", "armv8-r"] {
+            assert!(has_lse(Isa::aarch64_march(march)), "{march}");
+        }
+        for march in ["armv8-a", "armv8-a+crc", "armv8.1-a+nolse", "armv8-a+lse+nothing"] {
+            assert!(!has_lse(Isa::aarch64_march(march)), "{march}");
+        }
+        assert!(has_crc(Isa::aarch64_march("armv8.1-a+nolse")));
+        assert!(has_lse(Isa::aarch64_march("armv8-a").aarch64_target("+lse")));
+        assert!(Feature::named("lse").is_none());
     }
 
     #[test]

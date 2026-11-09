@@ -339,8 +339,8 @@ impl Step {
     ///
     /// `switching` is the level's goal, the shape `-Zswitch=` forced, whether a jump table may
     /// be written at all and whether the machine has a conditional move, `counts` is the bit
-    /// counts the selector is left to answer, `fused` is whether it answers a fused multiply add,
-    /// and what the `switch` lowering says it did goes into `switched`.
+    /// counts the selector is left to answer, `built` is what the function is built for, and what
+    /// the `switch` lowering says it did goes into `switched`.
     #[allow(clippy::too_many_arguments)]
     fn run(
         self,
@@ -349,7 +349,7 @@ impl Step {
         conv: &CallRegs,
         switching: (Goal, Option<Force>, bool, bool),
         counts: &[CountInst],
-        fused: bool,
+        built: Built,
         switched: &mut Vec<Lowered>,
     ) -> bool {
         let (goal, force, tables, cmov) = switching;
@@ -365,6 +365,9 @@ impl Step {
             Self::Orderings => {
                 expand::orderings(func, conv.word, conv.total_store_order, conv.fenced);
                 locked::ordered(func, names, conv);
+                if let Some(how) = built.pairs {
+                    locked::paired(func, names, how);
+                }
             }
             Self::Overflows => expand::overflows(func, conv.word * 8),
             Self::Decimals => decimal::calls(func, names, conv.abi),
@@ -374,7 +377,7 @@ impl Step {
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func, conv.byte_swaps),
             Self::Counts => expand::counts(func, counts),
-            Self::Maths => maths::calls(func, names, conv.abi, fused),
+            Self::Maths => maths::calls(func, names, conv.abi, built.fused),
             Self::Quads => quad::calls(func, names, conv.abi, conv.word),
             Self::Floats => expand::floats(func, conv.word),
             Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned, goal),
@@ -553,6 +556,19 @@ impl Lowerings {
     }
 }
 
+/// What the processor a function is built for has, as far as a step of the group asks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Built {
+    /// Whether the selector has a rule for a fused multiply add and this function is built for the
+    /// extension that has it, in which case [`maths::calls`] leaves one at `float` and `double`
+    /// alone. See [`crate::select::Selector::fused`].
+    pub fused: bool,
+    /// How a sixteen byte compare and exchange is written on AArch64, which depends on whether the
+    /// function has the large system extensions, and nothing on any other machine. See
+    /// [`locked::paired`].
+    pub pairs: Option<locked::Exclusive>,
+}
+
 /// Runs the whole group over one function, in the order [`Step::GROUP`] gives.
 ///
 /// This is the entry point section 36.1 asks for. Every caller wanting a function lowered calls
@@ -571,26 +587,25 @@ impl Lowerings {
 /// `counts` is the bit counts the selector has a rule for on the processor this function is built
 /// for, which [`expand::counts`] leaves alone. See [`crate::select::Selector::counts`].
 ///
-/// `fused` is whether the selector has a rule for a fused multiply add and this function is built
-/// for the extension that has it, in which case [`maths::calls`] leaves one at `float` and
-/// `double` alone. See [`crate::select::Selector::fused`].
+/// `built` is what the processor this function is built for has that a step asks about. See
+/// [`Built`].
 pub fn group(
     func: &mut Func,
     names: &mut Interner,
     conv: &CallRegs,
     switching: (Goal, Option<Force>, bool, bool),
     counts: &[CountInst],
-    fused: bool,
+    built: Built,
     counting: bool,
 ) -> Ran {
     let mut ran = Ran::default();
     for &step in Step::GROUP {
         if !counting {
-            step.run(func, names, conv, switching, counts, fused, &mut ran.switches);
+            step.run(func, names, conv, switching, counts, built, &mut ran.switches);
             continue;
         }
         let (before, found) = tally(func, step);
-        let did = step.run(func, names, conv, switching, counts, fused, &mut ran.switches);
+        let did = step.run(func, names, conv, switching, counts, built, &mut ran.switches);
         let (after, left) = tally(func, step);
         ran.did.push(Did { step, found, left, before, after, untouched: !did });
     }
@@ -624,7 +639,7 @@ mod tests {
     };
     use rucc_target::{aarch64, x86_64};
 
-    use super::{Goal, Lowerings, Ran, Step, group};
+    use super::{Built, Goal, Lowerings, Ran, Step, group};
 
     /// A function with a body somebody else writes, which is the same helper the passes being
     /// grouped are each tested with.
@@ -646,7 +661,8 @@ mod tests {
     }
 
     fn run(func: &mut Func, names: &mut Interner) -> Ran {
-        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true, true), &[], false, true)
+        let built = Built::default();
+        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true, true), &[], built, true)
     }
 
     fn i32() -> Type {
@@ -750,7 +766,7 @@ mod tests {
             &aarch64::AAPCS64,
             (Goal::Speed, None, true, true),
             &[],
-            false,
+            Built::default(),
             true,
         );
         let did = ran.of(Step::Bytes);
@@ -798,7 +814,8 @@ mod tests {
         });
         let counts = crate::select::x86_64::SELECTOR.counts;
         let switching = (Goal::Speed, None, true, true);
-        let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, counts, false, true);
+        let built = Built::default();
+        let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, counts, built, true);
         assert_eq!((ran.of(Step::Counts).found, ran.of(Step::Counts).left), (1, 1));
     }
 
@@ -814,7 +831,8 @@ mod tests {
                 build.ret(&[answer]);
             });
             let switching = (Goal::Speed, None, true, true);
-            let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, &[], fused, true);
+            let built = Built { fused, pairs: None };
+            let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, &[], built, true);
             assert_eq!((ran.of(Step::Maths).found, ran.of(Step::Maths).left), (1, left));
         }
     }
@@ -874,7 +892,7 @@ mod tests {
                     &aarch64::AAPCS64,
                     (Goal::Speed, None, true, true),
                     &[],
-                    false,
+                    Built::default(),
                     true,
                 )
             } else {
@@ -973,7 +991,7 @@ mod tests {
             &x86_64::SYSV,
             (Goal::Speed, None, true, true),
             &[],
-            false,
+            Built::default(),
             false,
         );
         assert!(quiet.did.is_empty(), "nothing was counted");
@@ -988,7 +1006,7 @@ mod tests {
             &x86_64::SYSV,
             (Goal::Speed, None, true, true),
             &[],
-            false,
+            Built::default(),
             true,
         );
         assert_eq!(loud.of(Step::Counts).left, 0);

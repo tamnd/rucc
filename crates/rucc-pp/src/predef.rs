@@ -644,6 +644,11 @@ fn atomics(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     for width in widths {
         d.flag(&format!("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_{width}"));
     }
+    // AArch64 has it at sixteen bytes as well, as the exclusive pair loop or `caspal`, and gcc
+    // and clang both say so on every AArch64 target. x86-64 says so only with `cx16`, which is
+    // the extension's own macro.
+    let aarch64 = target.tuple.arch() == tuple::Arch::Aarch64;
+    d.flag_if(aarch64, "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16");
     // The two flag bits an x86 memory order can carry, for the hardware lock elision prefixes.
     // They are numbers a program passes back to a builtin rather than a claim that the prefix
     // is emitted, and a program that computes one on a machine where the macro is missing gets
@@ -821,6 +826,10 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // before it includes `<arm_acle.h>`.
             if Feature::aarch64("crc").is_some_and(|crc| opts.isa.has(crc)) {
                 d.set("__ARM_FEATURE_CRC32", "1");
+            }
+            // The large system extensions, which come with Armv8.1-A, as gcc spells them.
+            if Feature::aarch64("lse").is_some_and(|lse| opts.isa.has(lse)) {
+                d.set("__ARM_FEATURE_ATOMICS", "1");
             }
             // What `-mbranch-protection=` asked for, as the ACLE spells it. The signing one is a
             // set of bits: the A key is bit 0 and signing in leaf functions too is bit 2.
@@ -3836,6 +3845,33 @@ mod tests {
         let x86: Triple = "x86_64-unknown-linux-gnu".parse().expect("a triple");
         let opts = Predef { isa: Isa::aarch64_march("armv8-a+crc"), ..Predef::new() };
         assert!(!built_in(&TargetInfo::new(x86), &opts).contains("__ARM_FEATURE_CRC32"));
+    }
+
+    /// tamnd/rucc#4088. gcc says `__ARM_FEATURE_ATOMICS` for the large system extensions, and
+    /// gcc and clang both say `__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16` on every AArch64 target.
+    #[test]
+    fn the_aarch64_atomics_macros_follow_the_march_and_the_machine() {
+        let arm: Triple = "aarch64-unknown-freebsd".parse().expect("a triple");
+        for (march, defined) in [
+            ("armv8-a", false),
+            ("armv8-a+lse", true),
+            ("armv8.1-a", true),
+            ("armv9-a", true),
+            ("armv8.1-a+nolse", false),
+        ] {
+            let opts = Predef { isa: Isa::aarch64_march(march), ..Predef::new() };
+            let text = built_in(&TargetInfo::new(arm), &opts);
+            assert_eq!(has(&text, "#define __ARM_FEATURE_ATOMICS 1"), defined, "{march}");
+        }
+        let sixteen = "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16 1";
+        let with = ["aarch64-unknown-freebsd", "aarch64-unknown-netbsd", "aarch64-apple-darwin"];
+        for triple in with {
+            assert!(has(&set_for(triple), sixteen), "{triple}");
+        }
+        let without = ["x86_64-unknown-freebsd", "riscv64-unknown-freebsd", "i686-linux-gnu"];
+        for triple in without {
+            assert!(!set_for(triple).contains("COMPARE_AND_SWAP_16"), "{triple}");
+        }
     }
 
     #[test]
