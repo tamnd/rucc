@@ -144,3 +144,15 @@ fn on_arm64_a_structure_comes_back_through_the_first_argument() {
     assert!(give.last().is_some_and(|line| line.starts_with("ldp x29")), "{give:?}");
     assert!(give.iter().any(|line| line.starts_with("mov x0, ")), "{give:?}");
 }
+
+#[test]
+fn the_builtin_list_is_a_char_pointer_on_both_targets() {
+    let source = "int sum(int n, ...) { char *ap; __builtin_va_start(ap, n); \
+                  int t = __builtin_va_arg(ap, int); __builtin_va_end(ap); return t; }\n\
+                  _Static_assert(__builtin_types_compatible_p(__builtin_va_list, char *), \"\");\n";
+    for target in ["x86_64-plan9", "aarch64-plan9"] {
+        let (ok, _, err) = compile_for(target, "list", "-O2", source);
+        assert!(ok, "{target}: {err}");
+        assert!(!err.contains("warning"), "{target}: {err}");
+    }
+}

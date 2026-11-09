@@ -28,6 +28,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On x86, the SSE builtins of gcc that NetBSD's `<crypto/arch/x86/immintrin.h>` calls are now answered in the front end: the 10 that stopped 7 units of a NetBSD GENERIC kernel (`movhlps`, `movlhps`, `pshufb128`, the four logical shifts by a count of `int` and `long long` lanes, and three unpacks), the 5 the header's macros call (`pshufd`, `shufps`, `pslldqi128`, `psrldqi128` and `palignr128`), and 9 small siblings. Each one is a shuffle, a shift or a mask, with the lanes the instruction gives (#4164)
 - On the x86_64-plan9 target, calls use the convention of kencc. Each argument has an 8-byte slot, an integer or a pointer first also goes in `rbp`, a structure result goes through a hidden pointer, and no register is kept across a call. A parameter whose address is taken lives in its slot, so the `va_start` of the Plan 9 `u.h` and `getcallerpc(&arg)` work. No function keeps a frame pointer, and a function that needs one is refused (#4154)
 - On the aarch64-plan9 target, calls use the convention of kencc on arm64. It is the same as on amd64 with `x0` for the register, and the first slot is at `8(SP)` at the call. A function on this target may keep a frame pointer (#4154)
+- On Plan 9 targets, `__builtin_va_list` is `char *`, as `va_list` is in the Plan 9 `u.h` (#4154)
 
 ### Fixed
 
