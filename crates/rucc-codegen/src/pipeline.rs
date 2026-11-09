@@ -2861,6 +2861,46 @@ mod tests {
         }
     }
 
+    /// `double f(int n, double x) { char a[n]; g(a); return x; }` on i386 with the stack kept on
+    /// four bytes, which is `-mpreferred-stack-boundary=2`. The `double` goes back on the x87
+    /// stack through eight bytes of the frame, and those bytes are aligned to no more than the
+    /// stack pointer is kept on, so the frame is not one that is both forced and grown.
+    #[test]
+    fn a_growing_i386_frame_on_four_bytes_crosses_a_double_to_the_x87_stack() {
+        let triple = "i686-unknown-linux-gnu".parse::<rucc_target::Triple>().expect("a triple");
+        let info = TargetInfo::new(triple);
+        let conv = info.call_regs.expect("i386 has a convention").aligned_to(4);
+        let machine = Machine::x86(conv);
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[Type::int(32), f64]);
+        let mut build = Builder::new(&mut source, block);
+        let info = rucc_ir::MemInfo {
+            size: 0,
+            align: 1,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let mem = build.func().add_mem(info);
+        let size = build.func().push_values(&[args[0]]);
+        let array = build.value(
+            ir::InstData {
+                args: size,
+                extra: ir::Extra::Mem(mem),
+                ..ir::InstData::new(Opcode::Alloca)
+            },
+            Type::PTR,
+        );
+        build.store(args[1], array, rucc_ir::MemInfo { size: 8, ..info }, IrFlags::default());
+        build.ret(&[args[1]]);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("a growing frame with a double in it on four bytes");
+        let text = mir::print_func(&out, &names, &x86::REGS);
+        assert!(text.contains("fld"), "the double goes back on the x87 stack: {text}");
+    }
+
     /// A zero count on a plain x86-64 is the search instruction and a conditional move for the
     /// zero, which is what `palloc` asks for on every call, rather than the arithmetic.
     #[test]
