@@ -568,7 +568,7 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
         return vec!["lld-link".to_owned(), "link.exe".to_owned()];
     }
     if target.os.is_bsd() {
-        return bsd::order(target, Triple::host(), &opts.prefixes);
+        return bsd::order(target, opts.pinned, Triple::host(), &opts.prefixes);
     }
     if cross_sysroot(target, opts).is_some() {
         let mut names = cross_order(target);
@@ -712,6 +712,12 @@ pub fn cross_sysroot(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
 #[must_use]
 pub fn bsd_no_headers(target: Triple) -> Option<String> {
     target.os.is_bsd().then(|| bsd::no_headers(target))
+}
+
+/// The triple a GCC for the BSD target is configured with, as its `-dumpmachine` prints it.
+/// `pinned` is the target as the command line named it, or nothing for this machine.
+pub(crate) fn bsd_triple(target: Triple, pinned: Option<TargetTuple>) -> String {
+    bsd::triple(target, pinned)
 }
 
 /// The same answer with the host as a parameter, so that both branches are testable on one machine.

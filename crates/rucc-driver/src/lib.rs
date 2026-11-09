@@ -4666,20 +4666,14 @@ fn report(done: &install::Installed, what: &str, say: &impl Fn(&str)) {
 
 /// The triple that `-dumpmachine` prints.
 ///
-/// A BSD triple has no environment, so it has the three fields that the compilers of each BSD
-/// print, as `x86_64-unknown-freebsd15`. On a FreeBSD host the release of that host has its minor
-/// number too, as `x86_64-unknown-freebsd15.1`, which is what the base system's `cc` prints.
-fn machine(target: Triple) -> String {
+/// A BSD triple has no environment, so it has the three fields that a GCC for the system is
+/// configured with, as `x86_64-unknown-freebsd15.1`. The release keeps the minor number the
+/// target named, and 32-bit x86 has each system's own word for it. `link::bsd_triple` says how.
+fn machine(target: Triple, pinned: Option<TargetTuple>) -> String {
     if !target.os.is_bsd() {
         return target.to_string();
     }
-    let os = match (target.os, host::freebsd_release()) {
-        (rucc_target::Os::FreeBsd(release), Some((major, minor))) if release == major => {
-            format!("freebsd{major}.{minor}")
-        }
-        (os, _) => os.to_string(),
-    };
-    format!("{}-unknown-{os}", target.arch.as_str())
+    link::bsd_triple(target, pinned)
 }
 
 /// What one of the `-dump` and `-print` flags prints.
@@ -4693,7 +4687,7 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
             .map_or_else(|| name.to_owned(), |path| path.display().to_string())
     };
     Ok(match query {
-        Query::Machine => machine(opts.target),
+        Query::Machine => machine(opts.target, link.pinned),
         Query::Version => opts.gnuc.dumpversion(),
         Query::FullVersion => opts.gnuc.to_string(),
         Query::Multiarch => link::multiarch(opts.target),
@@ -10248,8 +10242,20 @@ mod tests {
         // A BSD has no environment field. The release follows the target, unless it is the
         // release of the FreeBSD this runs on, which has its minor number too.
         assert_eq!(printed(&["--target=x86_64--netbsd", "-dumpmachine"]), "x86_64-unknown-netbsd");
+        // The minor number of a FreeBSD release stays, as a GCC configured for it prints it.
         let freebsd = printed(&["--target=aarch64-freebsd13.2", "-dumpmachine"]);
-        assert!(freebsd.starts_with("aarch64-unknown-freebsd13"), "{freebsd}");
+        assert_eq!(freebsd, "aarch64-unknown-freebsd13.2");
+        let freebsd = printed(&["--target=x86_64-unknown-freebsd15", "-dumpmachine"]);
+        assert_eq!(freebsd, "x86_64-unknown-freebsd15");
+        // 32-bit x86 is i386 on FreeBSD and i486 on NetBSD, as their compilers say.
+        assert_eq!(
+            printed(&["--target=i686-unknown-freebsd15.1", "-dumpmachine"]),
+            "i386-unknown-freebsd15.1"
+        );
+        assert_eq!(
+            printed(&["--target=i486--netbsdelf", "-dumpmachine"]),
+            "i486-unknown-netbsdelf"
+        );
         assert_eq!(printed(&[target, "-dumpversion"]), "16");
         assert_eq!(printed(&[target, "-dumpfullversion"]), "16.0.0");
         // They follow the release claimed, since that is the one `__GNUC__` says.

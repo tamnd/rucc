@@ -29,6 +29,7 @@
 use std::path::{Path, PathBuf};
 
 use rucc_target::{Arch, Os, Triple};
+use rucc_tuple::TargetTuple;
 
 use super::{Error, Item, LinkOptions, builtins_archive, find_file, push_items, under};
 
@@ -50,23 +51,63 @@ pub(super) enum Ld {
 /// alone then, because it links for this machine. Then `<triple>-ld`, the name a cross binutils
 /// installs on `PATH`, which is the name collect2 of a cross GCC looks for there. lld comes last,
 /// which links for every BSD from one binary.
-pub(super) fn order(target: Triple, host: Option<Triple>, prefixes: &[PathBuf]) -> Vec<String> {
+pub(super) fn order(
+    target: Triple,
+    pinned: Option<TargetTuple>,
+    host: Option<Triple>,
+    prefixes: &[PathBuf],
+) -> Vec<String> {
     let mut names = Vec::new();
     if native(target, host) {
         names.push("ld".to_owned());
     } else {
         // A path, so that the search does not go on to `PATH` with it.
         names.extend(prefixes.iter().map(|dir| dir.join("ld").display().to_string()));
-        names.push(format!("{}-ld", triple(target)));
+        names.push(format!("{}-ld", triple(target, pinned)));
     }
     names.extend(["ld.lld".to_owned(), "lld".to_owned()]);
     names
 }
 
-/// The triple a GCC for the target is configured with, as `-dumpmachine` prints it on another
-/// machine: `x86_64-unknown-freebsd15` or `aarch64-unknown-netbsd`.
-fn triple(target: Triple) -> String {
-    format!("{}-unknown-{}", target.arch.as_str(), target.os)
+/// The triple a GCC for the target is configured with, which is what its `-dumpmachine` prints
+/// and the prefix of the cross binutils it runs: `x86_64-unknown-freebsd15.1`,
+/// `aarch64-unknown-netbsd` or `i486-unknown-netbsdelf`.
+///
+/// `pinned` is the target as the command line named it. GCC prints its triple as it was
+/// configured, so a FreeBSD release keeps the minor number that the target gave. With no target on
+/// the command line, the target is this machine, and on a FreeBSD machine its minor number is the
+/// one of the release that runs, as the base system's `cc` prints it.
+///
+/// 32-bit x86 is spelled as each system's compiler spells it. FreeBSD and OpenBSD say `i386`,
+/// which is the `MACHINE_ARCH` of both and the word of the triple their GCC ports and their base
+/// compilers are built for. NetBSD says `i486` and `netbsdelf`, which is `MACHINE_GNU_PLATFORM` in
+/// its `share/mk/bsd.own.mk` and the triple its own GCC is built for.
+pub(crate) fn triple(target: Triple, pinned: Option<TargetTuple>) -> String {
+    let arch = match (target.arch, target.os) {
+        (Arch::X86, Os::NetBsd) => "i486",
+        (Arch::X86, _) => "i386",
+        (arch, _) => arch.as_str(),
+    };
+    let os = match target.os {
+        Os::FreeBsd(major) => {
+            let minor = match pinned {
+                Some(tuple) => tuple
+                    .os_version()
+                    .filter(|version| version.major_part() == major)
+                    .and_then(rucc_tuple::Version::minor_part),
+                None => crate::host::freebsd_release()
+                    .filter(|&(running, _)| running == major)
+                    .map(|(_, minor)| minor),
+            };
+            match minor {
+                Some(minor) => format!("freebsd{major}.{minor}"),
+                None => format!("freebsd{major}"),
+            }
+        }
+        Os::NetBsd if target.arch == Arch::X86 => "netbsdelf".to_owned(),
+        os => os.to_string(),
+    };
+    format!("{arch}-unknown-{os}")
 }
 
 /// Which linker `--version` says it is.
@@ -138,7 +179,7 @@ pub(super) fn no_headers(target: Triple) -> String {
         "{tuple} compiles against the headers of {name}, and this machine is not {name}. Pass \
          --sysroot=<dir> naming a copy of its root, the directory with usr/include in it, or pass \
          -nostdinc for a program that includes none of the library",
-        tuple = triple(target)
+        tuple = triple(target, None)
     )
 }
 
@@ -185,7 +226,7 @@ pub(super) fn line(
                 "a link for {tuple} is against the C library of {name}, and this machine is \
                  not {name}. Pass --sysroot=<dir> naming a copy of its root, the directory with \
                  usr/lib/{crt} in it",
-                tuple = triple(target),
+                tuple = triple(target, None),
                 crt = crt(target.os)
             ),
         });
@@ -934,7 +975,7 @@ mod tests {
         let dirs = [PathBuf::from("/w/usr/bin"), PathBuf::from("/x/bin")];
         let ld = |dir: &str| Path::new(dir).join("ld").display().to_string();
         assert_eq!(
-            order(freebsd(), linux(), &dirs),
+            order(freebsd(), None, linux(), &dirs),
             [
                 ld("/w/usr/bin"),
                 ld("/x/bin"),
@@ -946,25 +987,54 @@ mod tests {
         // On the machine itself the name `ld` is looked for, in the `-B` directories and then on
         // `PATH`.
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(15)));
-        assert_eq!(order(freebsd(), host, &dirs), ["ld", "ld.lld", "lld"]);
+        assert_eq!(order(freebsd(), None, host, &dirs), ["ld", "ld.lld", "lld"]);
     }
 
     #[test]
     fn the_machines_own_linker_is_first_only_on_that_machine() {
         let cross = ["x86_64-unknown-freebsd14-ld", "ld.lld", "lld"];
-        assert_eq!(order(freebsd(), linux(), &[]), cross);
+        assert_eq!(order(freebsd(), None, linux(), &[]), cross);
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(13)));
-        assert_eq!(order(freebsd(), host, &[]), ["ld", "ld.lld", "lld"]);
+        assert_eq!(order(freebsd(), None, host, &[]), ["ld", "ld.lld", "lld"]);
         let arm = Some(bsd(Arch::Aarch64, Os::FreeBsd(14)));
-        assert_eq!(order(freebsd(), arm, &[]), cross);
+        assert_eq!(order(freebsd(), None, arm, &[]), cross);
     }
 
     #[test]
     fn a_cross_binutils_on_path_is_looked_for_by_the_name_of_the_target() {
-        let names = |arch, os| order(bsd(arch, os), linux(), &[]).remove(0);
+        let names = |arch, os| order(bsd(arch, os), None, linux(), &[]).remove(0);
         assert_eq!(names(Arch::Aarch64, Os::FreeBsd(14)), "aarch64-unknown-freebsd14-ld");
         assert_eq!(names(Arch::X86_64, Os::NetBsd), "x86_64-unknown-netbsd-ld");
-        assert_eq!(names(Arch::X86, Os::OpenBsd), "i686-unknown-openbsd-ld");
+        assert_eq!(names(Arch::X86, Os::OpenBsd), "i386-unknown-openbsd-ld");
         assert_eq!(names(Arch::X86_64, Os::DragonFly), "x86_64-unknown-dragonfly-ld");
+        // The release the target named, with its minor number, is the one binutils was configured
+        // for, as `x86_64-unknown-freebsd15.1` installs `x86_64-unknown-freebsd15.1-ld`.
+        let named = "x86_64-unknown-freebsd15.1".parse::<TargetTuple>().ok();
+        let target = bsd(Arch::X86_64, Os::FreeBsd(15));
+        assert_eq!(order(target, named, linux(), &[])[0], "x86_64-unknown-freebsd15.1-ld");
+    }
+
+    #[test]
+    fn the_triple_is_spelled_as_the_gcc_of_each_system_spells_it() {
+        let named = |text: &str| text.parse::<TargetTuple>().ok();
+        let freebsd = bsd(Arch::X86_64, Os::FreeBsd(15));
+        assert_eq!(
+            triple(freebsd, named("x86_64-unknown-freebsd15.1")),
+            "x86_64-unknown-freebsd15.1"
+        );
+        assert_eq!(triple(freebsd, named("x86_64-freebsd15")), "x86_64-unknown-freebsd15");
+        assert_eq!(
+            triple(freebsd, named("amd64-unknown-freebsd15.0")),
+            "x86_64-unknown-freebsd15.0"
+        );
+        let i386 = bsd(Arch::X86, Os::FreeBsd(15));
+        assert_eq!(triple(i386, named("i686-unknown-freebsd15.1")), "i386-unknown-freebsd15.1");
+        assert_eq!(triple(i386, named("i386-unknown-freebsd15")), "i386-unknown-freebsd15");
+        let netbsd = bsd(Arch::X86, Os::NetBsd);
+        assert_eq!(triple(netbsd, named("i486--netbsdelf")), "i486-unknown-netbsdelf");
+        assert_eq!(triple(netbsd, named("i686-unknown-netbsd")), "i486-unknown-netbsdelf");
+        assert_eq!(triple(bsd(Arch::X86_64, Os::NetBsd), None), "x86_64-unknown-netbsd");
+        assert_eq!(triple(bsd(Arch::X86, Os::OpenBsd), None), "i386-unknown-openbsd");
+        assert_eq!(triple(bsd(Arch::Riscv64, Os::FreeBsd(15)), None), "riscv64-unknown-freebsd15");
     }
 }
