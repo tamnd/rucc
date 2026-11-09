@@ -3541,13 +3541,28 @@ impl<'a> Lowering<'a> {
             Some(index) => index,
             None => {
                 let index = self.stack.locals.len();
-                self.stack.locals.push(Local { size: X87_BYTES, align: X87_BYTES });
+                let align = self.scratch_align(X87_BYTES);
+                self.stack.locals.push(Local { size: X87_BYTES, align });
                 self.slots[value.index()] = Some(index);
                 index
             }
         };
         let block = self.at.expect("a block is being filled");
         self.frame_address(block, index)
+    }
+
+    /// What a slot the lowering takes for itself is aligned to, which is what it would like but
+    /// never more than the stack pointer is kept on.
+    ///
+    /// Nothing on x86 faults on an x87 load or store that is off its alignment, so the alignment
+    /// of these slots is a choice and not a rule. A slot that wanted more than the stack pointer
+    /// is kept on would make the prologue force the alignment, which gcc does not do for its own
+    /// x87 temporaries, and in a frame that also grows it is a refusal: a frame cannot be both
+    /// forced and grown. Under `-mpreferred-stack-boundary=2` on i386 a `double` a call gave back
+    /// crosses through eight bytes, so a function with a variable length array and a call that
+    /// gives back a `double` was refused with E0653.
+    fn scratch_align(&self, wanted: u32) -> u32 {
+        wanted.min(self.conv.stack_align)
     }
 
     /// The bytes a value crosses between a register and the x87 stack through, as their address
@@ -3557,7 +3572,8 @@ impl<'a> Lowering<'a> {
             Some(index) => index,
             None => {
                 let index = self.stack.locals.len();
-                self.stack.locals.push(Local { size: X87_CROSSING, align: X87_CROSSING });
+                let align = self.scratch_align(X87_CROSSING);
+                self.stack.locals.push(Local { size: X87_CROSSING, align });
                 self.crossing = Some(index);
                 index
             }
