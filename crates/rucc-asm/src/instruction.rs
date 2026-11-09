@@ -1675,6 +1675,13 @@ fn operand(text: &str, mode: Mode) -> Result<Operand, String> {
         }
         Err(_) => {}
     }
+    // A name less a label with no registers, which is an address the machine holds outright and
+    // which gas works out when the two are in one section. Startup code that runs before it is
+    // where it was linked to reaches its data that way: FreeBSD's acpi_wakecode.S writes
+    // `movb $0, resume_beep - wakeup_start` in sixteen bit code.
+    if let Ok((_, Some(_), Some(_))) = apart(text) {
+        return address(text, mode);
+    }
     Err(format!("'{text}' is not an operand this compiler reads"))
 }
 
