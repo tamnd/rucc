@@ -165,7 +165,22 @@ int flexible(void) { struct flex f; use(&f); return 0; }
     assert_eq!(protected(&text), ["flexible"], "{text}");
     // The strong flag takes any array and anything holding one, so all of them.
     let text = asm("chars-strong", &["-fstack-protector-strong"], source);
-    assert_eq!(protected(&text).len(), 14, "{text}");
+    let all = [
+        "ints",
+        "bytes",
+        "eight",
+        "seven",
+        "quals",
+        "member",
+        "nested",
+        "either",
+        "short_member",
+        "grid",
+        "records",
+        "atom",
+        "flexible",
+    ];
+    assert_eq!(protected(&text), all, "{text}");
 }
 
 /// The strong one adds the small array and the address that got away.
