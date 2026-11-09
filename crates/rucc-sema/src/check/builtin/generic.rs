@@ -304,6 +304,11 @@ impl Checker<'_> {
         if let Some(answer) = self.parts_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // A value with a speculation barrier after it, whose type is the type of the value. In
+        // `check/builtin/speculation.rs`.
+        if let Some(answer) = self.speculation_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         // The call `<tgmath.h>` makes for each of its macros, to the function the arguments pick.
         // In `check/builtin/tgmath.rs`.
         if let Some(answer) = self.tgmath_builtin_call(name, args, span) {
@@ -855,6 +860,7 @@ mod tests {
                 || crate::check::builtin::classify::is_family(feature.name)
                 || crate::check::builtin::sign::is_family(feature.name)
                 || crate::check::builtin::parts::is_family(feature.name)
+                || crate::check::builtin::speculation::is_family(feature.name)
                 || crate::check::builtin::tgmath::is_family(feature.name)
                 || crate::check::builtin::shuffle::is_family(feature.name)
                 || crate::check::builtin::sse::is_family(feature.name)

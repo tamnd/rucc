@@ -8473,6 +8473,90 @@ decl #0 x : int object external static defined
         assert!(said.contains("only available on x86-64"), "{said}");
     }
 
+    /// tamnd/rucc#4088. `__builtin_speculation_safe_value` is the value and then gcc's barrier,
+    /// `lfence` on x86 and `isb` and `dsb sy` on AArch64. RISC-V has no barrier, and there the
+    /// value comes back alone with gcc's warning.
+    #[test]
+    fn a_speculation_safe_value_is_the_value_and_a_barrier_after_it() {
+        let source = "int a[16];\n\
+                      int f(unsigned i) { return i < 16 ? a[__builtin_speculation_safe_value(i)] : 0; }\n\
+                      int *g(int *p) { return __builtin_speculation_safe_value(p, (int *)0); }\n\
+                      __int128 h(__int128 v) { return __builtin_speculation_safe_value(v); }\n\
+                      int n;\n\
+                      long k(long v) { return __builtin_speculation_safe_value(v, (long)n++); }\n";
+        let lfence = [0x0f, 0xae, 0xe8];
+        let object = obj(source);
+        let count = object.windows(3).filter(|w| *w == lfence).count();
+        assert!(count >= 4, "{count} lfence in the object");
+        assert!(!object.windows(12).any(|w| w == b"__builtin_sp"), "an undefined name");
+
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.target = "aarch64-unknown-freebsd".parse::<Triple>().unwrap();
+        let ran = run(&opts, source);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        let Artifact::Object { bytes, .. } = ran.artifact else { panic!("an object") };
+        let barrier = [0xdf, 0x3f, 0x03, 0xd5, 0x9f, 0x3f, 0x03, 0xd5];
+        let count = bytes.windows(8).filter(|w| *w == barrier).count();
+        assert!(count >= 4, "{count} isb and dsb sy in the object");
+
+        opts.target = "riscv64-unknown-freebsd".parse::<Triple>().unwrap();
+        let ran = run(&opts, "int f(int i) { return __builtin_speculation_safe_value(i); }\n");
+        assert!(!ran.failed(), "{:?}", ran.messages);
+        assert_eq!(ran.messages.len(), 1, "{:?}", ran.messages);
+        assert!(
+            ran.messages[0].contains("does not define a speculation barrier"),
+            "{:?}",
+            ran.messages
+        );
+
+        // Answered by the table, so a program that asks before it uses the builtin gets a yes.
+        let text = ir("int yes = __has_builtin(__builtin_speculation_safe_value);\n");
+        assert!(text.contains("global @yes : i32 = 1,"), "{text}");
+    }
+
+    /// The operands gcc refuses, in gcc's words.
+    #[test]
+    fn a_speculation_safe_value_refuses_what_gcc_refuses() {
+        let cases = [
+            ("int f(void) { return __builtin_speculation_safe_value(); }\n", "too few arguments"),
+            (
+                "int f(int i) { return __builtin_speculation_safe_value(i, 0, 0); }\n",
+                "too many arguments",
+            ),
+            (
+                "double f(double d) { return __builtin_speculation_safe_value(d); }\n",
+                "operand type 'double' is incompatible with argument 1",
+            ),
+            (
+                "struct s { int x; }; struct s v;\n\
+                 void f(void) { __builtin_speculation_safe_value(v); }\n",
+                "is incompatible with argument 1",
+            ),
+            (
+                "_Bool f(_Bool b) { return __builtin_speculation_safe_value(b); }\n",
+                "expecting argument of type pointer or of type integer for argument 1",
+            ),
+            (
+                "enum e { A }; enum e f(enum e v) { return __builtin_speculation_safe_value(v); }\n",
+                "expecting argument of type pointer or of type integer for argument 1",
+            ),
+            (
+                "long f(long v) { return __builtin_speculation_safe_value(v, 0); }\n",
+                "both arguments must be compatible",
+            ),
+            (
+                "int *f(int *p) { return __builtin_speculation_safe_value(p, 0L); }\n",
+                "both arguments must be compatible",
+            ),
+        ];
+        for (source, wanted) in cases {
+            let messages = errors(source);
+            assert_eq!(messages.len(), 1, "{source}{messages:?}");
+            assert!(messages[0].contains(wanted), "{source}{messages:?}");
+        }
+    }
+
     /// The flags register is read and written with a push and a pop where the call was, which is
     /// what the x86 selftests' helpers.h asks for around a system call. The stack pointer steps
     /// over the red zone first, so a leaf keeping something there does not lose it to the push.

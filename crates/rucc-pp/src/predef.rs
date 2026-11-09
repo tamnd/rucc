@@ -468,6 +468,20 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     let arm = target.tuple.arch() == tuple::Arch::Arm;
     let cfi = gcc && opts.unwinds && elf && !arm && !freebsd_riscv;
     d.flag_if(cfi, "__GCC_HAVE_DWARF2_CFI_ASM");
+    // gcc says this on the machines it has a speculation barrier for, where
+    // `__builtin_speculation_safe_value` is the value and then the barrier. rucc-sema's list of
+    // those machines is the same. clang has no such builtin, so the Apple and MSVC rows say nothing.
+    let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
+    let clang = apple || target.tuple.env() == tuple::Env::Msvc;
+    let barrier = matches!(
+        target.tuple.arch(),
+        tuple::Arch::X86_64
+            | tuple::Arch::X86
+            | tuple::Arch::Aarch64
+            | tuple::Arch::Arm
+            | tuple::Arch::PowerPc64
+    );
+    d.flag_if(gcc && !clang && barrier, "__HAVE_SPECULATION_SAFE_VALUE");
 }
 
 /// `__GXX_ABI_VERSION` for a gcc release, which is a thousand and the `-fabi-version=` that
@@ -2567,6 +2581,29 @@ mod tests {
         let absolute = built(12, Pic::Absolute);
         assert!(has(&absolute, "#define __riscv_cmodel_medlow 1"), "{absolute}");
         assert!(!absolute.contains("cmodel_pic") && !absolute.contains("cmodel_medany"));
+    }
+
+    /// tamnd/rucc#4088. gcc says `__HAVE_SPECULATION_SAFE_VALUE` where it has a speculation
+    /// barrier, which is x86 and AArch64 here and not RISC-V. clang has no such builtin.
+    #[test]
+    fn the_speculation_macro_is_on_the_machines_with_a_barrier() {
+        let said = |triple: &str| {
+            let triple: Triple = triple.parse().expect("a triple");
+            built_in(&TargetInfo::new(triple), &Predef::new())
+        };
+        let with = ["x86_64-unknown-freebsd", "i686-unknown-linux-gnu", "aarch64-unknown-netbsd"];
+        for triple in with {
+            assert!(has(&said(triple), "#define __HAVE_SPECULATION_SAFE_VALUE 1"), "{triple}");
+        }
+        let without = [
+            "riscv64-unknown-freebsd",
+            "aarch64-apple-darwin",
+            "x86_64-pc-windows-msvc",
+            "wasm32-unknown-unknown",
+        ];
+        for triple in without {
+            assert!(!said(triple).contains("__HAVE_SPECULATION_SAFE_VALUE"), "{triple}");
+        }
     }
 
     /// tamnd/rucc#4096. NetBSD's `_SOFT_FLOAT` says the machine has no float registers, which

@@ -572,6 +572,15 @@ pub enum ExprKind {
         /// read.
         value: Option<ExprId>,
     },
+    /// `__builtin_speculation_safe_value(value)`, the value with a speculation barrier after it.
+    ///
+    /// A node for the reason the ones above are. What it becomes is the value and then the
+    /// barrier, `lfence` on x86 and `isb` and `dsb sy` on AArch64. Only made on a machine gcc has
+    /// a barrier for. See `check/builtin/speculation.rs`.
+    Speculation {
+        /// The value, a pointer or an integer, which is the node's value and type.
+        value: ExprId,
+    },
     /// `__builtin_ia32_xsave(area, mask)` and the rest of its family, the processor's extended
     /// state saved to the area or restored from it.
     ///

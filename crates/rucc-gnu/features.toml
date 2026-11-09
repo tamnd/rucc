@@ -4826,6 +4826,16 @@ used_by = ["glibc"]
 tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::builtin_complex_is_the_two_halves_with_no_arithmetic", "rucc-driver::builtin_complex_refuses_what_gcc_refuses"]
 
 [[feature]]
+name = "__builtin_speculation_safe_value"
+kind = "builtin"
+gcc_version = "9.1"
+status = "implemented"
+signature = ""
+used_by = ["linux"]
+tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_speculation_safe_value_is_the_value_and_a_barrier_after_it", "rucc-driver::a_speculation_safe_value_refuses_what_gcc_refuses"]
+notes = "The value and then gcc's speculation barrier, `lfence` on x86 and `isb` and `dsb sy` on AArch64. The type is the type of the value, a pointer or an integer of 1, 2, 4, 8 or 16 bytes. The fail value is worked out for what it does. A target gcc has no barrier for, such as RISC-V, gets the value and gcc's warning. Answered in check/builtin/speculation.rs."
+
+[[feature]]
 name = "__builtin_tgmath"
 kind = "builtin"
 gcc_version = "8.0"

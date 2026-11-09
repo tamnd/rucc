@@ -84,6 +84,7 @@ mod prefetch;
 mod shuffle;
 mod sign;
 mod size;
+mod speculation;
 mod sse;
 mod tgmath;
 mod thread;

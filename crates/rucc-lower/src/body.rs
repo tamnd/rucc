@@ -3239,6 +3239,25 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
+    /// The barrier of `__builtin_speculation_safe_value`, which is what gcc writes after the value:
+    /// `lfence` on x86, and `isb` and `dsb sy` on AArch64. It clobbers memory, as gcc's does, so
+    /// that no load after it is moved in front of it. Sema makes the node only where gcc has a
+    /// barrier, and of those this compiles code for these three.
+    fn speculation_barrier(&mut self, span: Span) {
+        let template = match self.target().tuple.arch() {
+            Arch::X86_64 | Arch::X86 => "lfence",
+            Arch::Aarch64 => "isb\n\tdsb\tsy",
+            _ => return,
+        };
+        let info = AsmInfo {
+            template: self.unit.names.intern(template),
+            constraints: self.unit.names.intern(""),
+            clobbers: self.unit.names.intern("memory"),
+            targets: rucc_ir::BlockCallList::EMPTY,
+        };
+        self.build(span).inline_asm(info, &[], &[], Flags::VOLATILE);
+    }
+
     /// The processor's extended state saved to the area at `address` or restored from it, for
     /// the components in `mask`.
     ///
@@ -7779,6 +7798,12 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Eflags { value } => {
                 let value = value.map(|value| self.value(value));
                 self.eflags(value, ty, span)
+            }
+            // The value, and then the barrier nothing after it runs ahead of.
+            ExprKind::Speculation { value } => {
+                let value = self.value(value);
+                self.speculation_barrier(span);
+                Some(value)
             }
             // The extended state, saved or restored by the one instruction.
             ExprKind::XState { op, address, mask } => {
@@ -12638,6 +12663,7 @@ impl<'a> Scan<'a> {
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::TimeStamp { aux: Some(base) }
             | ExprKind::Eflags { value: Some(base) }
+            | ExprKind::Speculation { value: base }
             | ExprKind::ConstantP { value: base } => {
                 self.expr(base);
             }
