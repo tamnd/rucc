@@ -120,6 +120,8 @@ impl Checker<'_> {
             ast::Expr::Cast { ty, operand } => self.cast(ty, operand, span),
             ast::Expr::SizeofExpr(operand) => self.measure_expr(operand, Measure::Size, span),
             ast::Expr::SizeofType(ty) => self.measure_type(ty, Measure::Size, span),
+            ast::Expr::SignofExpr(operand) => self.signof_expr(operand, span),
+            ast::Expr::SignofType(ty) => self.signof_type(ty, span),
             ast::Expr::AlignofExpr(operand) => self.measure_expr(operand, Measure::Align, span),
             ast::Expr::AlignofType(ty) => self.measure_type(ty, Measure::Align, span),
             ast::Expr::Generic { control, assocs } => self.generic(control, assocs, span),

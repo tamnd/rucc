@@ -36,9 +36,9 @@ use rucc_ast::{self as ast, Designator};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
-    ArrayLen, Extent, FloatKind, Layout, LayoutError, RecordId, TypeId, TypeKind, align,
+    ArrayLen, Extent, FloatKind, IntKind, Layout, LayoutError, RecordId, TypeId, TypeKind, align,
     compatible, element_as_written, is_arithmetic, is_complete, is_floating, is_function,
-    is_integer, is_pointer, is_record, is_void, layout,
+    is_integer, is_pointer, is_record, is_void, kencc_signature, layout,
 };
 
 use crate::check::Checker;
@@ -393,6 +393,44 @@ impl Checker<'_> {
         }
         let ty = self.tast[operand].ty;
         self.measure(ty, what, span)
+    }
+
+    /// kencc's `signof expr`. The operand is not evaluated and does not decay, as under `sizeof`.
+    pub(super) fn signof_expr(&mut self, operand: ast::ExprId, span: Span) -> ExprId {
+        self.unevaluated += 1;
+        let operand = self.expr(operand);
+        self.unevaluated -= 1;
+        if self.is_poisoned(operand) {
+            return self.poison(span);
+        }
+        if self.tast[operand].category == Category::Bitfield {
+            self.report(Diagnostic::error("signof bitfield".to_string(), span).with_code("E0570"));
+            return self.poison(span);
+        }
+        let ty = self.tast[operand].ty;
+        self.signof(ty, span)
+    }
+
+    /// kencc's `signof (ty)`.
+    pub(super) fn signof_type(&mut self, ty: ast::TypeNameId, span: Span) -> ExprId {
+        let ty = self.type_name(ty);
+        self.signof(ty, span)
+    }
+
+    /// The signature of a type as an `unsigned long` constant, with the value `6c` gives it. A
+    /// structure or a union with no members yet has no signature, which `com.c` refuses with the
+    /// message used here. `void` and a function type are measured, as kencc gives them a width of
+    /// zero.
+    fn signof(&mut self, ty: TypeId, span: Span) -> ExprId {
+        if is_record(&self.types, ty) && !is_complete(&self.types, ty) {
+            self.report(
+                Diagnostic::error("signof undefined type".to_string(), span).with_code("E0571"),
+            );
+            return self.poison(span);
+        }
+        let value = kencc_signature(&self.types, ty, self.cx.target, &|_| false);
+        let ulong = self.types.int(IntKind::ULong);
+        self.constant(Const::Int(i128::from(value)), ulong, span)
     }
 
     /// `sizeof (ty)` and `_Alignof (ty)`.
