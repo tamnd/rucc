@@ -75,6 +75,7 @@ mod diagnostic;
 mod expr;
 mod extname;
 mod init;
+mod kencc_pragma;
 mod options;
 mod order;
 mod pack;
