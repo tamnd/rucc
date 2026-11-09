@@ -10687,22 +10687,23 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// byte access at all.
     ///
     /// The whole point of both names is that the answer is available before the program runs, so
-    /// what is checked is that a `mov` of a constant is the whole function and that no call was
-    /// left behind. A call would be to `__atomic_is_lock_free` in libatomic, which is not a library
-    /// this links against.
+    /// what is checked is that the function puts a constant in `%eax` and that no call was left
+    /// behind. A call would be to `__atomic_is_lock_free` in libatomic, which is not a library
+    /// this links against. The constant is written over the whole register, `movl $1, %eax` for
+    /// yes and `xorl %eax, %eax` for no, as gcc writes it.
     #[test]
     fn the_lock_free_questions_are_answered_as_constants() {
         for size in ["1", "2", "4", "8"] {
             let source =
                 format!("int f(void) {{ return __atomic_always_lock_free({size}, 0); }}\n");
             let text = asm(&source);
-            assert!(text.contains("movb\t$1, %al"), "{size} bytes is lock free: {text}");
+            assert!(text.contains("movl\t$1, %eax"), "{size} bytes is lock free: {text}");
             assert!(!text.contains("call"), "and is not a call: {text}");
         }
         for size in ["3", "16", "sizeof(long double)"] {
             let source = format!("int f(void) {{ return __atomic_is_lock_free({size}, 0); }}\n");
             let text = asm(&source);
-            assert!(text.contains("movb\t$0, %al"), "{size} bytes is not: {text}");
+            assert!(text.contains("xorl\t%eax, %eax"), "{size} bytes is not: {text}");
             assert!(!text.contains("call"), "and is not a call either: {text}");
         }
 
@@ -10710,11 +10711,11 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // whose type is aligned under the size asked about, which is the whole of what the second
         // argument is for.
         let text = asm("int f(int n) { return __atomic_is_lock_free(n, 0); }\n");
-        assert!(text.contains("movb\t$0, %al"), "a size nobody knows is not lock free: {text}");
+        assert!(text.contains("xorl\t%eax, %eax"), "a size nobody knows is not lock free: {text}");
         let text = asm("int f(int *p) { return __atomic_always_lock_free(8, p); }\n");
-        assert!(text.contains("movb\t$0, %al"), "eight bytes at four is not: {text}");
+        assert!(text.contains("xorl\t%eax, %eax"), "eight bytes at four is not: {text}");
         let text = asm("int f(long *p) { return __atomic_always_lock_free(8, p); }\n");
-        assert!(text.contains("movb\t$1, %al"), "and at eight it is: {text}");
+        assert!(text.contains("movl\t$1, %eax"), "and at eight it is: {text}");
     }
 
     /// A memory order an operation cannot carry is read as the strongest one, and said so about.
