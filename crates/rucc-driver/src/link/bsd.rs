@@ -47,8 +47,9 @@ pub(super) enum Ld {
 /// use. For another machine, the `ld` in each `-B` directory first, because that is where GCC
 /// looks for the linker and where FreeBSD's build puts the binutils of the target: it passes
 /// `-B${WORLDTMP}/usr/bin`, or `-B` and its `CROSS_BINUTILS_PREFIX`. The `ld` on `PATH` is left
-/// alone then, because it links for this machine. lld comes last, which links for every BSD from
-/// one binary.
+/// alone then, because it links for this machine. Then `<triple>-ld`, the name a cross binutils
+/// installs on `PATH`, which is the name collect2 of a cross GCC looks for there. lld comes last,
+/// which links for every BSD from one binary.
 pub(super) fn order(target: Triple, host: Option<Triple>, prefixes: &[PathBuf]) -> Vec<String> {
     let mut names = Vec::new();
     if native(target, host) {
@@ -56,9 +57,16 @@ pub(super) fn order(target: Triple, host: Option<Triple>, prefixes: &[PathBuf]) 
     } else {
         // A path, so that the search does not go on to `PATH` with it.
         names.extend(prefixes.iter().map(|dir| dir.join("ld").display().to_string()));
+        names.push(format!("{}-ld", triple(target)));
     }
     names.extend(["ld.lld".to_owned(), "lld".to_owned()]);
     names
+}
+
+/// The triple a GCC for the target is configured with, as `-dumpmachine` prints it on another
+/// machine: `x86_64-unknown-freebsd15` or `aarch64-unknown-netbsd`.
+fn triple(target: Triple) -> String {
+    format!("{}-unknown-{}", target.arch.as_str(), target.os)
 }
 
 /// Which linker `--version` says it is.
@@ -900,7 +908,13 @@ mod tests {
         let ld = |dir: &str| Path::new(dir).join("ld").display().to_string();
         assert_eq!(
             order(freebsd(), linux(), &dirs),
-            [ld("/w/usr/bin"), ld("/x/bin"), "ld.lld".to_owned(), "lld".to_owned()]
+            [
+                ld("/w/usr/bin"),
+                ld("/x/bin"),
+                "x86_64-unknown-freebsd14-ld".to_owned(),
+                "ld.lld".to_owned(),
+                "lld".to_owned()
+            ]
         );
         // On the machine itself the name `ld` is looked for, in the `-B` directories and then on
         // `PATH`.
@@ -910,10 +924,20 @@ mod tests {
 
     #[test]
     fn the_machines_own_linker_is_first_only_on_that_machine() {
-        assert_eq!(order(freebsd(), linux(), &[]), ["ld.lld", "lld"]);
+        let cross = ["x86_64-unknown-freebsd14-ld", "ld.lld", "lld"];
+        assert_eq!(order(freebsd(), linux(), &[]), cross);
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(13)));
         assert_eq!(order(freebsd(), host, &[]), ["ld", "ld.lld", "lld"]);
         let arm = Some(bsd(Arch::Aarch64, Os::FreeBsd(14)));
-        assert_eq!(order(freebsd(), arm, &[]), ["ld.lld", "lld"]);
+        assert_eq!(order(freebsd(), arm, &[]), cross);
+    }
+
+    #[test]
+    fn a_cross_binutils_on_path_is_looked_for_by_the_name_of_the_target() {
+        let names = |arch, os| order(bsd(arch, os), linux(), &[]).remove(0);
+        assert_eq!(names(Arch::Aarch64, Os::FreeBsd(14)), "aarch64-unknown-freebsd14-ld");
+        assert_eq!(names(Arch::X86_64, Os::NetBsd), "x86_64-unknown-netbsd-ld");
+        assert_eq!(names(Arch::X86, Os::OpenBsd), "i686-unknown-openbsd-ld");
+        assert_eq!(names(Arch::X86_64, Os::DragonFly), "x86_64-unknown-dragonfly-ld");
     }
 }
