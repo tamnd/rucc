@@ -37,6 +37,7 @@
  * `<xsaveintrin.h>` is reached the same way and for the same reason, and holds `_xgetbv`.
  * `<cetintrin.h>` is too, and holds the shadow stack instructions that pcre2's JIT calls.
  * `<wmmintrin.h>` is too, and holds the AES steps and the carryless multiplication.
+ * `<shaintrin.h>` is too, and holds the SHA-1 and SHA-256 steps that libiberty's sha1.c calls.
  * `<avxintrin.h>` is too, and holds the AVX names on 32 byte vectors.
  * `<avx2intrin.h>` is too, and holds the AVX2 integer names, the gathers and the reductions.
  * `<fmaintrin.h>` is too, and holds the fused multiply and add.
@@ -69,6 +70,7 @@
 #include <xsaveintrin.h>
 #include <cetintrin.h>
 #include <wmmintrin.h>
+#include <shaintrin.h>
 #include <avxintrin.h>
 #include <avx2intrin.h>
 #include <fmaintrin.h>

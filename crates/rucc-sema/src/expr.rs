@@ -528,6 +528,11 @@ pub enum ExprKind {
     /// Only AArch64 has it. It is a node for the same reason the one above is, and what it answers
     /// is where the caller's arguments on the stack begin. See `check/builtin/entry.rs`.
     SpEntry,
+    /// `__builtin_stack_address()`, where the stack pointer is at the call.
+    ///
+    /// Every target has it, and it is the move out of the stack pointer a variable length array
+    /// saves. See `check/builtin/entry.rs`.
+    StackAddress,
     /// `__builtin_unwind_init()`, which makes the function save every register a call preserves,
     /// so that libgcc's unwinder can find all of them in its frame. See `check/builtin/unwind.rs`.
     UnwindInit,

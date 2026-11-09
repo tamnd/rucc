@@ -7740,6 +7740,9 @@ impl<'u> Body<'_, 'u> {
             ExprKind::SpEntry => {
                 Some(self.build(span).value(InstData::new(Opcode::SpEntry), Type::PTR))
             }
+            ExprKind::StackAddress => {
+                Some(self.build(span).value(InstData::new(Opcode::StackSave), Type::PTR))
+            }
             // The three of libgcc's unwinder that are the back end's. The first is no instruction
             // and changes what the prologue saves, the second is an address finished once the
             // frame is known, and the third leaves the function and never comes back, which is
@@ -12603,6 +12606,7 @@ impl<'a> Scan<'a> {
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
+            | ExprKind::StackAddress
             | ExprKind::UnwindInit
             | ExprKind::DwarfCfa
             | ExprKind::TimeStamp { aux: None }

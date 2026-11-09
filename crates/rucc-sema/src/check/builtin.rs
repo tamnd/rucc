@@ -68,6 +68,7 @@ mod convertvector;
 mod count;
 pub(in crate::check) mod cpu;
 mod ctype;
+mod device;
 mod eflags;
 mod elementwise;
 mod entry;

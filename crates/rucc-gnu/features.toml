@@ -3196,6 +3196,37 @@ tests = ["rucc-driver::sponentry_is_the_stack_pointer_the_function_was_entered_w
 notes = "A clang builtin that gcc never had, AArch64 only. mingw-w64 defines setjmp on ARM64 Windows as _setjmp(buf, __builtin_sponentry()), so no header that includes setjmp.h compiles for that target without it. The answer is where the caller's arguments on the stack start, so it is lowered as the address of the first incoming stack argument and finished when the frame is laid out. Asking for it on another target is refused in check/builtin/entry.rs, as clang refuses it."
 
 [[feature]]
+name = "__builtin_stack_address"
+kind = "builtin"
+gcc_version = "14.1"
+status = "implemented"
+signature = "void *(void)"
+used_by = ["netbsd", "libgcc"]
+tests = ["rucc-sema::the_stack_address_is_a_row_of_the_table_that_carries_a_signature", "rucc-driver::the_stack_address_is_the_stack_pointer"]
+notes = "The value of the stack pointer where the call is. libgcc's strub.c is the program that writes it. The answer is the move out of the stack pointer a variable length array saves, on every target. It is in check/builtin/entry.rs."
+
+[[feature]]
+name = "__builtin_fork"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+signature = "int(void)"
+library = "fork"
+used_by = ["netbsd", "libgcc"]
+tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_fork_by_its_builtin_name_reaches_fork"]
+notes = "A call to fork. libgcov-interface.c writes it, because gcc gives the builtin to the profiler. The return type is int, which is the pid_t of every target here."
+
+[[feature]]
+name = "__builtin_acc_on_device"
+kind = "builtin"
+gcc_version = "5.1"
+status = "implemented"
+signature = "int(int)"
+used_by = ["netbsd", "libgomp"]
+tests = ["rucc-sema::acc_on_device_is_a_row_of_the_table_taking_and_giving_int", "rucc-driver::acc_on_device_is_true_of_the_host_and_of_no_device"]
+notes = "Whether the code runs on the OpenACC device type given. Code that rucc compiles always runs on the host, so the answer is whether the argument is acc_device_none (0) or acc_device_host (2), which is what gcc folds it to outside an offload compiler. It is one test of the argument with the bit of 2 masked off, so the argument is evaluated once. libgomp's oacc-init.c is the program that writes it. It is in check/builtin/device.rs."
+
+[[feature]]
 name = "__builtin_unwind_init"
 kind = "builtin"
 gcc_version = "2.95"
