@@ -391,6 +391,53 @@ fn read_as(list: &[AsmOperand<'_>], index: usize) -> Option<Value> {
     list.iter().find(|entry| entry.tied == Some(index)).and_then(|entry| entry.value)
 }
 
+/// The template with each number of an input tied to an output written as that output's number.
+///
+/// A matching constraint makes the input and the output one place, so the two numbers name the
+/// same register. NetBSD's `<machine/byte_swap.h>` writes `"bswap %1" : "=r" (x) : "0" (x)`. Read
+/// as written, the instruction writes an input, which nothing here places. Read with `%0`, it
+/// writes the output, which is what gcc assembles. A number is left alone when the two operands
+/// differ in width or in being memory, since `%1` is then printed at a size `%0` is not, and when
+/// the modifier is `l`, which counts labels. `%%` and a name in brackets are copied as they are.
+fn untie(
+    template: &str,
+    list: &[AsmOperand<'_>],
+    widths: &[Option<x86_64::Width>],
+    memory: &[bool],
+) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at + 1..];
+        if let Some(after) = rest.strip_prefix('%') {
+            out.push_str("%%");
+            rest = after;
+            continue;
+        }
+        let letters = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_alphabetic()).len();
+        let (modifier, after) = rest.split_at(letters);
+        let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let (number, after) = after.split_at(digits);
+        out.push('%');
+        out.push_str(modifier);
+        let tied =
+            number.parse::<usize>().ok().filter(|_| !modifier.contains('l')).and_then(|input| {
+                let output = list.get(input)?.tied?;
+                let same = widths.get(input) == widths.get(output)
+                    && memory.get(input) == memory.get(output);
+                same.then_some(output)
+            });
+        match tied {
+            Some(output) => out.push_str(&output.to_string()),
+            None => out.push_str(number),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Which of an assembly statement's operands is in that register, for an instruction that reaches
 /// the register without its text saying so.
 ///
@@ -6561,7 +6608,7 @@ impl<'a> Lowering<'a> {
         // An operand in memory is an address the statement holds and an object the template names,
         // so the reader is told which ones those are and spells `%0` for one as the object.
         let memory: Vec<bool> = list.iter().map(|operand| operand.memory).collect();
-        let template = self.names.resolve(info.template).to_string();
+        let template = untie(self.names.resolve(info.template), &list, &widths, &memory);
         // A clobber list naming a vector register goes the way a template this cannot read does.
         // The instructions read here are all in the general purpose file, and what keeps the text
         // already takes every vector register a call may use away from the allocator across it.
@@ -10650,6 +10697,24 @@ mod tests {
     use crate::finish::{Convention, finish};
     use crate::frame::{Frame, Incoming, Layout};
     use crate::select::x86_64::SELECTOR;
+
+    /// An input tied to an output by a number is written as the output's number, with the
+    /// modifier kept. NetBSD's `<machine/byte_swap.h>` writes `"bswap %1"` with `"0"`.
+    #[test]
+    fn untie_writes_a_tied_input_as_its_output() {
+        let values: Vec<Value> = (0..3).map(Value::from_usize).collect();
+        let read = AsmOperands::read("=r,0,r", &values[..1], &values[1..]).expect("three operands");
+        let list: Vec<AsmOperand<'_>> = read.iter().copied().collect();
+        let long = Some(x86_64::Width::Long);
+        let widths = [long, long, long];
+        let memory = [false; 3];
+        let untied = |template| untie(template, &list, &widths, &memory);
+        assert_eq!(untied("bswap %1"), "bswap %0");
+        assert_eq!(untied("rorw $8, %w1"), "rorw $8, %w0");
+        assert_eq!(untied("addl %2, %1 # %%1 %[x] %l1"), "addl %2, %0 # %%1 %[x] %l1");
+        let narrow = [long, Some(x86_64::Width::Byte), long];
+        assert_eq!(untie("bswap %1", &list, &narrow, &memory), "bswap %1");
+    }
 
     /// A function of as many 64 bit parameters as the test wants, and the block they are in.
     fn blank(params: &[Type]) -> (Interner, Func, Block, Vec<Value>) {
