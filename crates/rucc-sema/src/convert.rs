@@ -74,6 +74,9 @@ pub struct Conv<'a> {
     /// `float` and `double` in it, which is `-fexcess-precision=standard`. See
     /// [`Conv::evaluated`] for what reads it.
     pub excess_constants: bool,
+    /// Whether the unit is in the kencc dialect, which is `-fkencc`. The promotions then keep
+    /// the sign, and the usual arithmetic conversions are the table of kencc.
+    pub kencc: bool,
 }
 
 impl Conv<'_> {
@@ -118,6 +121,14 @@ impl Conv<'_> {
     /// answer, the last because C23 6.3.1.1p2 says so and because that is the point of the
     /// type: it is the one integer type in C that does what it says.
     pub fn promote(&mut self, expr: ExprId) -> ExprId {
+        if self.kencc {
+            let expr = self.value(expr);
+            if let Some(promoted) =
+                rucc_types::kencc_promote(self.types, self.tast[expr].ty, self.target)
+            {
+                return self.arithmetic(expr, promoted);
+            }
+        }
         let expr = self.value_promoting_bits(expr);
         let ty = self.tast[expr].ty;
         let promoted = rucc_types::promote(self.types, ty, self.target);
@@ -225,6 +236,10 @@ impl Conv<'_> {
         rhs: ExprId,
         operation: bool,
     ) -> Option<(ExprId, ExprId, TypeId)> {
+        if let Some((lhs, rhs)) = self.kencc_arithmetic(lhs, rhs, true) {
+            let ty = self.tast[lhs].ty;
+            return Some((lhs, rhs, ty));
+        }
         let (lhs, rhs) = (self.value_promoting_bits(lhs), self.value_promoting_bits(rhs));
         let common = rucc_types::usual_arithmetic(
             self.types,
@@ -311,6 +326,38 @@ impl Conv<'_> {
             return node;
         }
         self.write(Conversion::Excess, node, ty)
+    }
+
+    /// The conversions of a comparison and of a conditional. In C these are the usual arithmetic
+    /// conversions. In kencc the operands go to the type in the table and are not promoted, so
+    /// `char` with `unsigned char` is `unsigned char`, and `-1` and `255` are then equal.
+    /// The type beside the two operands is the type that the result stands as, as in
+    /// [`Self::evaluated`].
+    pub fn balanced(&mut self, lhs: ExprId, rhs: ExprId) -> Option<(ExprId, ExprId, TypeId)> {
+        match self.kencc_arithmetic(lhs, rhs, false) {
+            Some((lhs, rhs)) => {
+                let ty = self.tast[lhs].ty;
+                Some((lhs, rhs, ty))
+            }
+            None => self.evaluated(lhs, rhs, false),
+        }
+    }
+
+    /// Both operands converted to the type that the table of kencc gives, or [`None`] where the
+    /// unit is not in kencc or an operand is not a kencc integer.
+    fn kencc_arithmetic(
+        &mut self,
+        lhs: ExprId,
+        rhs: ExprId,
+        promote: bool,
+    ) -> Option<(ExprId, ExprId)> {
+        if !self.kencc {
+            return None;
+        }
+        let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        let common = rucc_types::kencc_arithmetic(self.types, left, right, promote, self.target)?;
+        let (lhs, rhs) = (self.value(lhs), self.value(rhs));
+        Some((self.arithmetic(lhs, common), self.arithmetic(rhs, common)))
     }
 
     /// A scalar as a condition, which is a comparison against zero and not a truncation.
@@ -589,6 +636,7 @@ mod tests {
                 names: &self.names,
                 trapping_math: true,
                 excess_constants: false,
+                kencc: false,
             }
         }
 

@@ -1826,10 +1826,15 @@ impl Checker<'_> {
             return self.lanewise_comparison(op, lhs, rhs, span);
         }
         if is_arithmetic(&self.types, left) && is_arithmetic(&self.types, right) {
-            let Some(converted) = self.conv().usual_arithmetic(lhs, rhs) else {
+            let Some((left, right, _)) = self.conv().balanced(lhs, rhs) else {
                 return self.mixed_decimal(span);
             };
-            (lhs, rhs) = converted;
+            (lhs, rhs) = (left, right);
+            // In kencc the comparison is in the type of the table, which may be narrower than
+            // an `int`. The promotion of kencc keeps each value, so the answer is the same.
+            if self.cx.kencc {
+                (lhs, rhs) = (self.conv().promote(lhs), self.conv().promote(rhs));
+            }
         } else if is_pointer(&self.types, left) && is_pointer(&self.types, right) {
             let (a, b) = (
                 pointee(&self.types, left).expect("a pointer"),
@@ -2025,9 +2030,19 @@ impl Checker<'_> {
                     self.invalid_computation(op, target, source, span);
                     return None;
                 }
-                let Some(computation) =
+                // kencc computes `a op= b` in the type of its table with no promotion.
+                let kencc = self.cx.kencc.then(|| {
+                    rucc_types::kencc_arithmetic(
+                        &mut self.types,
+                        target,
+                        source,
+                        false,
+                        self.cx.target,
+                    )
+                });
+                let Some(computation) = kencc.flatten().or_else(|| {
                     rucc_types::usual_arithmetic(&mut self.types, target, source, self.cx.target)
-                else {
+                }) else {
                     self.mixed_decimal(span);
                     return None;
                 };
@@ -2084,7 +2099,7 @@ impl Checker<'_> {
         let (ty, then, otherwise) = if is_arithmetic(&self.types, left)
             && is_arithmetic(&self.types, right)
         {
-            let Some((then, otherwise, ty)) = self.conv().evaluated(then, otherwise, false) else {
+            let Some((then, otherwise, ty)) = self.conv().balanced(then, otherwise) else {
                 return self.mixed_decimal(span);
             };
             // An arm computed in `long double` keeps its wide value, and so does the whole
