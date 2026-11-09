@@ -62,16 +62,6 @@ rucc __GCC_IEC_559 zero, which is the value that a program reads from clang, whi
 rucc __GCC_IEC_559_COMPLEX zero, which is the value that a program reads from clang, which does not define it.
 rucc __STDC_ISO_10646__ wasi-libc's wchar_t holds a code point in every locale, and gcc 16 says so.
 
-# The names that rucc shows with -dM and clang does not. Both compilers expand them.
-rucc __BASE_FILE__ a dynamic name.
-rucc __COUNTER__ a dynamic name.
-rucc __DATE__ a dynamic name.
-rucc __FILE__ a dynamic name.
-rucc __FILE_NAME__ a dynamic name.
-rucc __INCLUDE_LEVEL__ a dynamic name.
-rucc __LINE__ a dynamic name.
-rucc __TIME__ a dynamic name.
-
 # Types where rucc follows the wasi-libc headers and clang does not.
 value __WINT_TYPE__ wasi-libc says "typedef unsigned wint_t", and rucc follows it.
 value __WINT_MAX__ wasi-libc says "typedef unsigned wint_t", and rucc follows it.
