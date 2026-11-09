@@ -1974,7 +1974,7 @@ fn generate(
                             trouble.line, trouble.why
                         ))]
                     })?;
-                let info = if opts.debug_info {
+                let mut info = if opts.debug_info {
                     let (assembled, symbols) =
                         placed(&read, &funcs, names, target).map_err(|why| vec![internal(&why)])?;
                     let image = globals.image();
@@ -1983,6 +1983,7 @@ fn generate(
                 } else {
                     rucc_object::Info::default()
                 };
+                info.source = Some(source_symbol(origin.name));
                 let defines = rucc_object::assembled_defines(&read);
                 let bytes =
                     rucc_object::assembled_described(&read, target, &info).map_err(wrote)?;
@@ -2001,12 +2002,13 @@ fn generate(
             // The line table, from the spans the assembler kept beside the bytes. Empty when the
             // build asked for no debug information, which is the case the rows above are not even
             // recorded in.
-            let info = if opts.debug_info {
+            let mut info = if opts.debug_info {
                 describe(&assembled, &[], &data, &funcs, names, origin, opts, target)
                     .map_err(|why| vec![internal(&why)])?
             } else {
                 rucc_object::Info::default()
             };
+            info.source = Some(source_symbol(origin.name));
             let mut text = assembled.text;
             if opts.asm_keep_slots {
                 for reloc in &mut text.relocs {
@@ -2033,6 +2035,13 @@ fn generate(
         }
         _ => Ok(Artifact::Text(rucc_mir::print(&funcs, names, target.regs))),
     }
+}
+
+/// What the `STT_FILE` symbol of an object says, which is the name the command line gave the
+/// source without its directory. That is what gcc writes in the `.file` at the top of a unit, so
+/// `nm` and NetBSD's `ctfmerge` see the same name for the file from either compiler.
+fn source_symbol(name: &str) -> String {
+    std::path::Path::new(name).file_name().and_then(|base| base.to_str()).unwrap_or(name).to_owned()
 }
 
 /// The last extension the unit may use of the ones that change how `-fzero-call-used-regs=`
@@ -3664,6 +3673,27 @@ mod tests {
         let mut fs = MemoryFileSystem::new();
         fs.insert("/main.c", source.to_owned().into_bytes());
         compile(opts, "/main.c", &fs)
+    }
+
+    /// An object names its source file without the directory, as gcc's `.file` does, both when
+    /// the code went straight to the writer and when a file-scope `asm` sent it through the
+    /// assembler. Without `-g` that symbol is the only place the name is.
+    #[test]
+    fn an_object_names_its_source_file_without_the_directory() {
+        let mut opts = options();
+        opts.emit = EmitKind::Object;
+        opts.target = "x86_64-unknown-netbsd".parse::<Triple>().unwrap();
+        for source in [
+            "static int f(void) { return 1; }\nint g(void) { return f(); }\n",
+            "asm(\".text\");\nstatic int f(void) { return 1; }\nint g(void) { return f(); }\n",
+        ] {
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+            let Artifact::Object { bytes, .. } = result.artifact else { panic!("an object") };
+            let has = |name: &[u8]| bytes.windows(name.len()).any(|at| at == name);
+            assert!(has(b"\0main.c\0"), "no file symbol for {source:?}");
+            assert!(!has(b"/main.c"), "the directory is in the name for {source:?}");
+        }
     }
 
     /// NetBSD's kernel line, `-Wstack-usage=3584 -Werror`, on a function over the limit, one

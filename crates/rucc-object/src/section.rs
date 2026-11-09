@@ -290,6 +290,15 @@ pub struct Info {
     /// How the sections are stored in an ELF file, which is what `-gz` asks. Every other format
     /// gets them as they are.
     pub compress: Compress,
+    /// The name of the source file without its directory, which an ELF object names in an
+    /// `STT_FILE` symbol in front of every other symbol. `None` writes no such symbol.
+    ///
+    /// Here and not in the debug sections because it is written with or without `-g`, as gcc
+    /// writes it: gcc starts every unit with `.file "name.c"` and gas makes the symbol out of that.
+    /// A reader that sorts the local names by the file they came from needs it. NetBSD's
+    /// `ctfmerge` is one, and it takes the file of each local name that has type data from the
+    /// last `STT_FILE` before that name and stops on a null pointer when there is none.
+    pub source: Option<String>,
 }
 
 /// How an ELF file stores its debug sections.

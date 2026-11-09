@@ -616,6 +616,13 @@ pub fn assembled_described(
     // A name in a file of assembly is already the name in the object, underscore and all, which the
     // writer underneath would otherwise put a second one on for COFF on i386.
     obj.set_mangling(object::write::Mangling::None);
+    // The source file's name first, unless the listing said `.file` itself, which makes the same
+    // symbol. See [`Info::source`].
+    if let (Flavour::Elf, Some(source)) = (flavour, &info.source) {
+        if !input.names.iter().any(|name| name.sort == Sort::File) {
+            obj.add_file_symbol(source.clone().into_bytes());
+        }
+    }
 
     // Every section first, because a symbol says which one it is in and a relocation says which one
     // it is written into, so both need the whole list before either can be added.
@@ -1195,6 +1202,41 @@ mod tests {
     /// The first half of that.
     fn st_info(bytes: &[u8], want: &str) -> u8 {
         raw(bytes, want).0
+    }
+
+    #[test]
+    fn a_compiled_listing_names_its_source_file_once_and_first() {
+        // A C unit that went through the assembler as text still gets the `STT_FILE` gcc's
+        // `.file` would have made, and a listing that said `.file` itself keeps its own and no
+        // second one.
+        let info = Info { source: Some("subr.c".to_owned()), ..Info::default() };
+        let names = vec![at("f", 0, Sort::Func, Binding::Local)];
+        let input = Assembled { parts: vec![part(".text", vec![0xc3])], names, subsections: false };
+        let bytes = assembled_described(&input, &target(), &info).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let first = file.symbols().next().expect("a symbol");
+        assert_eq!((first.kind(), first.name()), (SymbolKind::File, Ok("subr.c")));
+
+        let mut said = input.clone();
+        said.names.insert(
+            0,
+            Name {
+                name: "own.c".to_owned(),
+                at: Held::Absolute(0),
+                size: 0,
+                sort: Sort::File,
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+            },
+        );
+        let bytes = assembled_described(&said, &target(), &info).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let files: Vec<_> = file
+            .symbols()
+            .filter(|s| s.kind() == SymbolKind::File)
+            .map(|s| s.name().expect("a name").to_owned())
+            .collect();
+        assert_eq!(files, ["own.c"]);
     }
 
     #[test]

@@ -415,6 +415,10 @@ pub fn write(
     // The names go in as they are, and the one format and machine that decorates them has that
     // done by `spell` rather than by the writer underneath.
     obj.set_mangling(Mangling::None);
+    // The source file's name first, so that it comes before every local name. See `Info::source`.
+    if let (Flavour::Elf, Some(source)) = (flavour, &info.source) {
+        obj.add_file_symbol(source.clone().into_bytes());
+    }
     let spell = |name: &str| flavour.spell(machine, name).into_bytes();
     // How wide an address is, which is how wide the records of addresses below are written.
     let pointer = if machine == Architecture::I386 { 4u8 } else { 8 };
@@ -2269,6 +2273,42 @@ mod tests {
         assert!(matches!(written, Err(Error::Refused { .. })), "{written:?}");
     }
 
+    /// The source file's name is the first symbol of an ELF object, as gas makes it from the
+    /// `.file` gcc writes, and there is none when nobody named the file. NetBSD's `ctfmerge` takes
+    /// the file of every local name from the `STT_FILE` before it.
+    #[test]
+    fn an_elf_object_names_its_source_file_ahead_of_every_symbol() {
+        let info = Info { source: Some("subr.c".to_owned()), ..Info::default() };
+        let bytes =
+            write(&calling("puts"), &Data::default(), &[], &target(), Output::default(), &info)
+                .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let first = file.symbols().next().expect("a symbol");
+        assert_eq!(first.index().0, 1);
+        assert_eq!(first.kind(), SymbolKind::File);
+        assert_eq!(first.name(), Ok("subr.c"));
+        assert_eq!(file.symbols().filter(|s| s.kind() == SymbolKind::File).count(), 1);
+
+        let bytes = write(
+            &calling("puts"),
+            &Data::default(),
+            &[],
+            &target(),
+            Output::default(),
+            &Info::default(),
+        )
+        .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.symbols().all(|s| s.kind() != SymbolKind::File));
+
+        // Not a thing COFF is given, where gcc's `.file` is a different record.
+        let bytes =
+            write(&calling("puts"), &Data::default(), &[], &windows(), Output::default(), &info)
+                .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.symbols().all(|s| s.kind() != SymbolKind::File));
+    }
+
     /// Debug information on Windows: an offset into another debug section is a section relative
     /// relocation, and an address in the code is still an address.
     #[test]
@@ -3708,6 +3748,7 @@ mod tests {
                 }],
             }],
             compress: Compress::Zlib,
+            ..Info::default()
         };
         let bytes =
             write(&calling("puts"), &Data::default(), &[], &i386(), Output::default(), &info)
