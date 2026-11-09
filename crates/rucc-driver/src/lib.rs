@@ -3435,6 +3435,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     }
                 }
             }
+            // What gcc's own build of libgcc passes, which defines the `__LIBGCC_*__` macros the
+            // library reads. gcc takes the negative form too.
+            "-fbuilding-libgcc" => opts.building_libgcc = true,
+            "-fno-building-libgcc" => opts.building_libgcc = false,
             // Whether the object says what made it, in `.comment`, as gcc's does.
             "-fident" => opts.ident = true,
             "-fno-ident" => opts.ident = false,
@@ -7313,6 +7317,16 @@ mod tests {
         // A later yes in one family clears the other, as gcc's chain of negatives does.
         assert_eq!(pic(&["-fPIE", "-fPIC"]), Pic::Library);
         assert_eq!(pic(&["-fPIC", "-fPIE"]), Pic::Executable);
+    }
+
+    /// tamnd/rucc#4095. gcc's own build of libgcc passes `-fbuilding-libgcc`, NetBSD's too, and
+    /// gcc takes the negative form as well.
+    #[test]
+    fn building_libgcc_is_a_flag_gcc_takes() {
+        let opts = |line: &[&str]| compile(&[line, &["-c", "a.c"]].concat()).0;
+        assert!(!opts(&[]).building_libgcc);
+        assert!(opts(&["-fbuilding-libgcc"]).building_libgcc);
+        assert!(!opts(&["-fbuilding-libgcc", "-fno-building-libgcc"]).building_libgcc);
     }
 
     /// tamnd/rucc#4088. gcc for a BSD builds a position dependent executable when nothing says,

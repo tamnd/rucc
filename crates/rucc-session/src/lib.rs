@@ -2485,6 +2485,9 @@ pub struct Options {
     /// block whose every way out the front end could see and mark, which is narrower than either of
     /// gcc's and is contained in both. The second kind is tamnd/rucc#2201.
     pub stack_reuse: Option<bool>,
+    /// Whether `-fbuilding-libgcc` was given, which gcc's own build of libgcc passes. It defines
+    /// the `__LIBGCC_*__` macros that the library reads, and changes nothing else.
+    pub building_libgcc: bool,
     /// Which functions get a stack protector, from the `-fstack-protector` family.
     pub protector: Protector,
     /// How many bytes an array has to have for `-fstack-protector` to protect the function it is
@@ -3153,6 +3156,7 @@ impl Options {
             backtracking: None,
             rewriter: String::new(),
             stack_reuse: None,
+            building_libgcc: false,
             protector: Protector::default(),
             ssp_buffer_size: 8,
             stack_clash: false,
