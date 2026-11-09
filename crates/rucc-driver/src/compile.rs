@@ -4372,6 +4372,54 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// libiberty's sha1.c includes `<x86intrin.h>` and calls the SHA-1 steps from a function built
+    /// for `sse4.1,sha`. Each of the seven is the instruction, inlined at every level, and a
+    /// function not built for `sha` is refused the call the way gcc refuses it.
+    #[test]
+    fn the_shipped_shaintrin_has_the_seven_steps_under_sha() {
+        let source = concat!(
+            "#include <x86intrin.h>\n",
+            "__attribute__((__target__(\"sse4.1,sha\")))\n",
+            "__m128i f(__m128i a, __m128i b, __m128i k) {\n",
+            "  a = _mm_sha1rnds4_epu32(a, b, 3);\n",
+            "  a = _mm_sha1nexte_epu32(a, b);\n",
+            "  a = _mm_sha1msg1_epu32(a, b);\n",
+            "  a = _mm_sha1msg2_epu32(a, b);\n",
+            "  a = _mm_sha256msg1_epu32(a, b);\n",
+            "  a = _mm_sha256msg2_epu32(a, b);\n",
+            "  return _mm_sha256rnds2_epu32(a, b, k);\n",
+            "}\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = freestanding();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            for step in [
+                "sha1rnds4 $3",
+                "sha1nexte",
+                "sha1msg1",
+                "sha1msg2",
+                "sha256msg1",
+                "sha256msg2",
+                "sha256rnds2 %xmm0, %xmm2, %xmm1",
+            ] {
+                assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
+            }
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
+        }
+        let result = run(
+            &freestanding(),
+            "#include <immintrin.h>\n__m128i f(__m128i x) { return _mm_sha1msg1_epu32(x, x); }\n",
+        );
+        let said = result.messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_mm_sha1msg1_epu32': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
     /// libsodium's configure asks for AVX with the pragma and `_mm256_zeroall`, and its code calls
     /// the arithmetic, the comparisons and the moves from functions built for it. Each one is the
     /// instruction, inlined at every level, and a function not built for AVX is refused the call.
@@ -10287,6 +10335,56 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // A char is promoted by the prototype first, so a negative one is not a digit.
         let text = body("int f(signed char c) { return __builtin_isdigit(c); }\n");
         assert!(!text.contains("call"), "{text}");
+    }
+
+    /// gcc 14's `__builtin_stack_address` is the stack pointer at the call, and not a call.
+    ///
+    /// libgcc's `strub.c` writes it. It is the move out of the stack pointer a variable length
+    /// array saves, on x86-64 and on i386 alike.
+    #[test]
+    fn the_stack_address_is_the_stack_pointer() {
+        let source = "void g(void *);\nvoid f(void) { g(__builtin_stack_address()); }\n";
+        let text = body(source);
+        assert!(text.contains("stacksave"), "{text}");
+        assert!(!text.contains("__builtin_stack_address"), "the call does not happen:\n{text}");
+        let text = asm(source);
+        assert!(text.contains("%rsp, %"), "{text}");
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "i486--netbsdelf".parse::<Triple>().unwrap();
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        assert!(result.text().contains("%esp, %"), "{}", result.text());
+    }
+
+    /// `__builtin_fork` is a call to `fork`, which libgcov's `__gcov_fork` writes, and nothing had
+    /// to declare it.
+    #[test]
+    fn a_call_to_fork_by_its_builtin_name_reaches_fork() {
+        let text = body("int f(void) { return __builtin_fork(); }\n");
+        assert!(text.contains("call @fork() : () -> i32"), "{text}");
+    }
+
+    /// `__builtin_acc_on_device` is true of `acc_device_none` and `acc_device_host`, 0 and 2, and
+    /// of nothing else, since the code rucc compiles runs on the host. gcc folds it the same way
+    /// outside an offload compiler, and libgomp's `acc_on_device` is the builtin and nothing else.
+    #[test]
+    fn acc_on_device_is_true_of_the_host_and_of_no_device() {
+        let text = body("int f(int d) { return __builtin_acc_on_device(d); }\n");
+        assert!(text.contains("iconst.i32 -3"), "{text}");
+        assert!(text.contains(" = and "), "{text}");
+        assert!(text.contains("icmp eq"), "{text}");
+        assert!(!text.contains("call"), "the call does not happen:\n{text}");
+
+        // A constant argument folds, and each value has the answer gcc gives.
+        let source = "int a = __builtin_acc_on_device(0), b = __builtin_acc_on_device(1),\n\
+                      c = __builtin_acc_on_device(2), d = __builtin_acc_on_device(3),\n\
+                      e = __builtin_acc_on_device(8);\n";
+        let text = ir(source);
+        for (name, value) in [("a", 1), ("b", 0), ("c", 1), ("d", 0), ("e", 0)] {
+            let wanted = format!("global @{name} : i32 = {value},");
+            assert!(text.contains(&wanted), "{wanted} in:\n{text}");
+        }
     }
 
     /// A byte swap is one instruction and not a call, and nothing had to declare it.

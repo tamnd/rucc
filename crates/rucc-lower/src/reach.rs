@@ -422,6 +422,7 @@ impl Reach<'_> {
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
+            | ExprKind::StackAddress
             | ExprKind::UnwindInit
             | ExprKind::DwarfCfa
             | ExprKind::TimeStamp { aux: None }

@@ -659,6 +659,7 @@ impl<'a> Printer<'a> {
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
             ExprKind::SpEntry => "sp-entry".to_owned(),
+            ExprKind::StackAddress => "stack-address".to_owned(),
             ExprKind::UnwindInit => "unwind-init".to_owned(),
             ExprKind::DwarfCfa => "dwarf-cfa".to_owned(),
             ExprKind::EhReturn { .. } => "eh-return".to_owned(),
@@ -701,6 +702,7 @@ impl<'a> Printer<'a> {
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
+            | ExprKind::StackAddress
             | ExprKind::UnwindInit
             | ExprKind::DwarfCfa
             | ExprKind::TimeStamp { aux: None }

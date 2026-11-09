@@ -854,6 +854,10 @@ impl Checker<'_> {
         if let Some(value) = self.sponentry_builtin(function, signature.ret, span) {
             return value;
         }
+        // Where the stack pointer is at the call, gcc 14's. In `check/builtin/entry.rs`.
+        if let Some(value) = self.stack_address_builtin(function, signature.ret, span) {
+            return value;
+        }
         // The six libgcc's DWARF unwinder is written with, three of which are facts about the
         // target and three of which are the back end saving every register, saying where the frame
         // is and leaving for a handler in another one. In `check/builtin/unwind.rs`.
@@ -885,6 +889,11 @@ impl Checker<'_> {
         // `__builtin_isdigit`, which Linux asks for by name and has no function behind. In
         // `check/builtin/ctype.rs`.
         if let Some(value) = self.ctype_builtin_value(function, &args, span) {
+            return value;
+        }
+        // `__builtin_acc_on_device`, which is true of the host and of no device here. In
+        // `check/builtin/device.rs`.
+        if let Some(value) = self.acc_on_device_builtin(function, &args, span) {
             return value;
         }
         // The sign bit pair under the plain names the math library gives them, which are the

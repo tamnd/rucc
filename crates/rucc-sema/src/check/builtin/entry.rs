@@ -12,9 +12,15 @@
 //! called with, so the address is the one the first argument passed on the stack would have, and
 //! the backend already knows how to finish that address once the frame is laid out.
 //!
+//! # `__builtin_stack_address`
+//!
+//! gcc 14 added it, and libgcc's `strub.c` writes it. It answers where the stack pointer is at the
+//! call, on every target. That is the move out of the stack pointer a variable length array saves
+//! before it takes its bytes, so the node lowers to the same instruction.
+//!
 //! # Why this is answered after the call is checked
 //!
-//! The same reason `check/builtin/thread.rs` is: the row in the table carries `void *(void)`, and
+//! The same reason `check/builtin/thread.rs` is: the rows in the table carry `void *(void)`, and
 //! the prototype is what reports a call with arguments and gives the expression its type.
 
 use rucc_base::Symbol;
@@ -29,6 +35,9 @@ const NAME: &str = "__builtin_sponentry";
 
 /// The code for asking for it on a target that does not have it.
 const CODE: &str = "E0748";
+
+/// gcc's name for the stack pointer where the call is.
+const STACK: &str = "__builtin_stack_address";
 
 impl Checker<'_> {
     /// The node a call to `__builtin_sponentry` becomes, if the name is that one.
@@ -53,6 +62,19 @@ impl Checker<'_> {
         }
         Some(self.tast.expr(Expr::new(ExprKind::SpEntry, ret, Category::Rvalue), span))
     }
+
+    /// The node a call to `__builtin_stack_address` becomes, if the name is that one.
+    pub(in crate::check) fn stack_address_builtin(
+        &mut self,
+        function: Option<Symbol>,
+        ret: TypeId,
+        span: Span,
+    ) -> Option<ExprId> {
+        if self.text(function?) != STACK {
+            return None;
+        }
+        Some(self.tast.expr(Expr::new(ExprKind::StackAddress, ret, Category::Rvalue), span))
+    }
 }
 
 #[cfg(test)]
@@ -71,5 +93,17 @@ mod tests {
         assert_eq!(feature.status, Status::Implemented);
         assert_eq!(feature.signature, "void *(void)");
         assert!(feature.library.is_empty(), "{NAME} is not a call to anything");
+    }
+
+    /// The same for gcc's name for the stack pointer, which every target has.
+    #[test]
+    fn the_stack_address_is_a_row_of_the_table_that_carries_a_signature() {
+        let Some(feature) = rucc_gnu::lookup(Kind::Builtin, STACK) else {
+            panic!("{STACK} is answered here and is not in features.toml");
+        };
+        assert_eq!(feature.status, Status::Implemented);
+        assert_eq!(feature.signature, "void *(void)");
+        assert!(feature.library.is_empty(), "{STACK} is not a call to anything");
+        assert!(feature.targets.is_empty(), "{STACK} is on every target");
     }
 }
