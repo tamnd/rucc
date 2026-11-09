@@ -151,6 +151,16 @@ pub fn mark(target: &TargetInfo, func: usize, inst: Inst) -> String {
     spell_mark(Directives::for_target(target), func, inst)
 }
 
+/// The label [`print_marked`] puts right after the function's own label, at its first byte.
+///
+/// The function's name is not always still there when the listing has been read. A `.symver` with
+/// `@@@` renames a function the file defines, as FreeBSD's `__sym_default` does to `openat` and
+/// `setcontext`, and the name it had is gone afterwards, in gas as here. This label stays.
+#[must_use]
+pub fn mark_start(target: &TargetInfo, func: usize) -> String {
+    format!("{}rucc_start{func}", Directives::for_target(target).local())
+}
+
 /// The label [`print_marked`] puts after the last instruction of the function with this place in
 /// the list.
 ///
@@ -497,6 +507,9 @@ impl Writer<'_> {
         }
         let fill = self.fill();
         self.directives.open(&mut self.out, &name, align, fill, binding, seen, &ahead);
+        if let Some(which) = self.marks {
+            let _ = writeln!(self.out, "{}rucc_start{which}:", self.directives.local());
+        }
         // And what it writes over, which is after the label and in front of everything the
         // unwinder is told, as gcc has it.
         let opening = crate::hook::opening(self.arch);
@@ -1936,11 +1949,12 @@ mod tests {
         assert!(label.starts_with(".L"), "{label}");
         assert!(text.contains(&format!("\n{label}:\n\tjmp\t.Lg_1\n")), "{text}");
         assert!(text.contains(&format!("\n{}:\n", mark(&target, 0, inst))), "{text}");
+        assert!(text.contains(&format!("\ng:\n{}:\n", mark_start(&target, 1))), "{text}");
         // And none at all in the listing `-S` writes.
         let plain =
             print(&funcs, &Globals::default(), &[], &names, &target, true, Output::default())
                 .expect("two functions");
-        assert!(!plain.contains("rucc_row"), "{plain}");
+        assert!(!plain.contains("rucc_row") && !plain.contains("rucc_start"), "{plain}");
     }
 
     #[test]
