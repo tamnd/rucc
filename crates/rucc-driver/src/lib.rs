@@ -4087,7 +4087,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         return Err(err("-MG may only be used with -M or -MM"));
     }
     if !nostdinc {
-        opts.search.push_system(runtime::DIR);
+        // NetBSD's own GCC has a directory of its own with the intrinsics in it and none of the
+        // headers of the C standard: `<stdarg.h>`, `<stddef.h>`, `<limits.h>` and the rest are the
+        // system's, in /usr/include. Ours would come first and define `va_start` and `va_arg` in
+        // other words than `<sys/stdarg.h>` does, and NetBSD builds with -Wsystem-headers and
+        // -Werror, so the second definition stops the build. So on NetBSD the system's directories
+        // come first, and ours only answer what the system does not have, as GCC's do there.
+        let ours_last = opts.target.os == rucc_target::Os::NetBsd;
+        if !ours_last {
+            opts.search.push_system(runtime::DIR);
+        }
         // And the library's after ours, which is the other half of the same order. They go on
         // here rather than at the point `--target=` or `--sysroot=` was read because either
         // one changes the answer and the last word on both is the end of the loop.
@@ -4152,6 +4161,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
         for dir in system {
             opts.search.push_system(dir);
+        }
+        if ours_last {
+            opts.search.push_system(runtime::DIR);
         }
     }
     // Once, here, rather than as each directory is pushed. A `-I` that names a system
@@ -6671,7 +6683,7 @@ mod tests {
         let named = format!("--sysroot={}", root.display());
         let (opts, _) = compile(&["--target=x86_64-unknown-netbsd", &named, "-c", "a.c"]);
         let dirs: Vec<_> = opts.search.dirs().iter().map(|d| d.path.clone()).collect();
-        assert_eq!(dirs, [PathBuf::from(runtime::DIR), root.join("usr/include")]);
+        assert_eq!(dirs, [root.join("usr/include"), PathBuf::from(runtime::DIR)]);
         assert_eq!(opts.search.missing_system(), None);
         let _ = std::fs::remove_dir_all(&root);
     }
