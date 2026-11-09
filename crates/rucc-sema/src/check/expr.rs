@@ -1107,6 +1107,9 @@ impl Checker<'_> {
     /// which is why this looks twice rather than once: a single walk in declaration order would
     /// let an anonymous member's `x` hide the record's own.
     pub(in crate::check) fn find_field(&self, record: RecordId, name: Symbol) -> Option<Vec<u32>> {
+        if self.cx.plan9_extensions {
+            return self.find_field_plan9(record, name);
+        }
         let fields = &self.types.record_info(record).fields;
         for (index, field) in fields.iter().enumerate() {
             if field.name == Some(name) {
@@ -1126,6 +1129,111 @@ impl Checker<'_> {
             }
         }
         None
+    }
+
+    /// Where a member lives under `-fplan9-extensions`, which is kencc's `dotsearch` in
+    /// `cc/sub.c`.
+    ///
+    /// A member of the record itself is found first, by its name. Then an anonymous member is
+    /// found by the name of its type: the typedef name it was written with, and under `-fkencc`
+    /// its tag too. In the 9front tree that is how `r->Lock` reaches the `Lock` in `struct Ref
+    /// { Lock; long ref; }`. Last, the name is looked for in each anonymous member, at any depth.
+    /// kencc calls a name found in two places ambiguous, and the first is taken here.
+    fn find_field_plan9(&self, record: RecordId, name: Symbol) -> Option<Vec<u32>> {
+        let fields = &self.types.record_info(record).fields;
+        let at = fields.iter().position(|field| field.name == Some(name)).or_else(|| {
+            fields.iter().position(|field| self.anonymous_member_is_named(field, name))
+        });
+        if let Some(index) = at {
+            return Some(vec![index as u32]);
+        }
+        for (index, field) in fields.iter().enumerate() {
+            if field.name.is_some() {
+                continue;
+            }
+            let TypeKind::Record(inner) = self.types.kind(self.types.canonical(field.ty)) else {
+                continue;
+            };
+            if let Some(mut path) = self.find_field_plan9(inner, name) {
+                path.insert(0, index as u32);
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Whether `field` is an anonymous member that `name` names under `-fplan9-extensions`.
+    ///
+    /// The name names it when it is a typedef name in scope for the type of the member, as
+    /// kencc's `dotsearch` decides by type and not by spelling. A plain typedef interns nothing,
+    /// so the type of the member does not hold the name it was written with. Under `-fkencc` the
+    /// tag of the type names it too.
+    fn anonymous_member_is_named(&self, field: &rucc_types::Field, name: Symbol) -> bool {
+        if field.name.is_some() || field.is_bit_field() {
+            return false;
+        }
+        let TypeKind::Record(id) = self.types.kind(self.types.canonical(field.ty)) else {
+            return false;
+        };
+        if let Some(Binding::Typedef(ty)) = self.scopes.lookup(name) {
+            if self.types.kind(self.types.canonical(ty)) == TypeKind::Record(id) {
+                return true;
+            }
+        }
+        self.cx.kencc && self.types.record_info(id).tag == Some(name)
+    }
+
+    /// The anonymous member that a pointer to `source` converts to when `target` is wanted,
+    /// under the Plan 9 rule. This is kencc's `dotoffset` in `cc/sub.c`.
+    ///
+    /// Both are the types the pointers point to. An anonymous member of `source` whose type is
+    /// `target` is found first, and then one in each anonymous member, at any depth. The answer
+    /// is the chain of member indices, and is `None` when the two are not records or when
+    /// `source` has no such member.
+    pub(in crate::check) fn promotion(&self, target: TypeId, source: TypeId) -> Option<Vec<u32>> {
+        let TypeKind::Record(want) = self.types.kind(self.types.canonical(target)) else {
+            return None;
+        };
+        let TypeKind::Record(have) = self.types.kind(self.types.canonical(source)) else {
+            return None;
+        };
+        if want == have {
+            return None;
+        }
+        self.promotion_in(want, have)
+    }
+
+    fn promotion_in(&self, want: RecordId, have: RecordId) -> Option<Vec<u32>> {
+        let fields = &self.types.record_info(have).fields;
+        let anonymous = |field: &&rucc_types::Field| field.name.is_none() && !field.is_bit_field();
+        for (index, field) in fields.iter().enumerate().filter(|(_, f)| anonymous(f)) {
+            if self.types.kind(self.types.canonical(field.ty)) == TypeKind::Record(want) {
+                return Some(vec![index as u32]);
+            }
+        }
+        for (index, field) in fields.iter().enumerate().filter(|(_, f)| anonymous(f)) {
+            let TypeKind::Record(inner) = self.types.kind(self.types.canonical(field.ty)) else {
+                continue;
+            };
+            if let Some(mut path) = self.promotion_in(want, inner) {
+                path.insert(0, index as u32);
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// The pointer `value` made into a pointer to the anonymous member at `path` of what it
+    /// points to, which is `&value->member`. The offset of the member is added.
+    fn promote(&mut self, value: ExprId, path: Vec<u32>, span: Span) -> ExprId {
+        let ty = self.tast[value].ty;
+        let target = pointee_as_written(&self.types, ty).expect("a pointer");
+        let node = ExprKind::Unary { op: UnaryOp::Deref, operand: value };
+        let mut base = self.tast.expr(Expr::new(node, target, Category::Lvalue), span);
+        for index in path {
+            base = self.member_node(base, index, span);
+        }
+        self.address_of(base, span)
     }
 
     /// The lane of a vector, and the type itself where it is not one.
@@ -2087,6 +2195,36 @@ impl Checker<'_> {
                 return self.conv().to_type(value, target);
             }
             if is_pointer(&self.types, source) {
+                let path = self.promotion(
+                    pointee(&self.types, target).expect("a pointer"),
+                    pointee(&self.types, source).expect("a pointer"),
+                );
+                if let Some(path) = path {
+                    // A pointer to a `struct Ref` passed where a `Lock *` is wanted. Under the Plan
+                    // 9 rule it points at the `Lock` inside. Without the rule it is a pointer of
+                    // the wrong type, and on a Plan 9 target that is always an error: code for
+                    // kencc that reaches here would pass the start of the record and not the
+                    // member, which is silent wrong code when the member is not first.
+                    if self.cx.plan9_extensions {
+                        let value = self.promote(value, path, span);
+                        let source = self.tast[value].ty;
+                        self.check_pointer_assignment(target, source, span, to);
+                        return self.conv().to_type(value, target);
+                    }
+                    if self.cx.target.tuple.os().as_str() == "plan9" {
+                        let (want, have) = (self.spell(target), self.spell(source));
+                        self.report(
+                            Diagnostic::error(
+                                format!(
+                                    "'{have}' converts to '{want}' only under -fplan9-extensions or -fkencc"
+                                ),
+                                span,
+                            )
+                            .with_code("E0512"),
+                        );
+                        return self.conv().to_type(value, target);
+                    }
+                }
                 self.check_pointer_assignment(target, source, span, to);
                 return self.conv().to_type(value, target);
             }

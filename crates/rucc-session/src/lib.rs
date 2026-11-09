@@ -2645,6 +2645,19 @@ pub struct Options {
     /// Windows headers need it, because `<objidl.h>` and the rest close a nameless union with
     /// `} DUMMYUNIONNAME;` and the macro expands to nothing.
     pub ms_extensions: Option<bool>,
+    /// Whether the Plan 9 reading of an anonymous member is taken, from `-fplan9-extensions`.
+    ///
+    /// The member can then be a `struct` named by a tag or a typedef, as under
+    /// `-fms-extensions`. The typedef name also names the member, and a pointer to the record
+    /// converts to a pointer to the member on assignment and in a call, with the offset of the
+    /// member added. gcc has the same option. `-fkencc` turns it on too.
+    pub plan9_extensions: bool,
+    /// Whether the unit is in the dialect of the Plan 9 compilers, from `-fkencc`.
+    ///
+    /// It is `-fplan9-extensions` and more: the tag names an anonymous member as well as the
+    /// typedef name, a member name is found breadth first as `cc/dcl.c` finds it, and the rest
+    /// of the kencc dialect is read. The kencc driver turns it on.
+    pub kencc: bool,
     /// Whether a tentative definition is offered to the linker as a common symbol, from
     /// `-fcommon` and `-fno-common`.
     ///
@@ -3219,6 +3232,8 @@ impl Options {
             conserve_stack: false,
             short_enums: false,
             ms_extensions: None,
+            plan9_extensions: false,
+            kencc: false,
             common: None,
             zero_initialized_in_bss: true,
             strict_aliasing: true,
@@ -3448,6 +3463,12 @@ impl Session {
     #[must_use]
     pub fn ms_extensions(&self) -> bool {
         self.opts.ms_extensions.unwrap_or(self.opts.target.os == Os::Windows)
+    }
+
+    /// Whether the Plan 9 reading of an anonymous member is taken. `-fkencc` includes it.
+    #[must_use]
+    pub fn plan9_extensions(&self) -> bool {
+        self.opts.plan9_extensions || self.opts.kencc
     }
 
     /// Whether a tentative definition is a common symbol rather than one in `.bss`.

@@ -290,6 +290,7 @@ pub fn plan(
     }
     common.extend(o.rucc.iter().cloned());
     common.push("-c".to_owned());
+    common.push("-fkencc".to_owned());
     if !o.has(b'w') {
         common.push("-w".to_owned());
     }
@@ -421,11 +422,20 @@ mod tests {
     fn a_plain_compile_is_quiet_and_optimized() {
         assert_eq!(
             one("6c", &["-FTVw", "acme.c"]),
-            ["--target=x86_64-plan9", "-c", "-O2", "-o", "acme.6", "acme.c"]
+            ["--target=x86_64-plan9", "-c", "-fkencc", "-O2", "-o", "acme.6", "acme.c"]
         );
         assert_eq!(
             one("7c", &["../port/proc.c"]),
-            ["--target=aarch64-plan9", "-c", "-w", "-O2", "-o", "proc.7", "../port/proc.c"]
+            [
+                "--target=aarch64-plan9",
+                "-c",
+                "-fkencc",
+                "-w",
+                "-O2",
+                "-o",
+                "proc.7",
+                "../port/proc.c"
+            ]
         );
     }
 
@@ -437,6 +447,7 @@ mod tests {
             [
                 "--target=x86_64-plan9",
                 "-c",
+                "-fkencc",
                 "-DX=1",
                 "-DY",
                 "-I../common",
@@ -474,14 +485,14 @@ mod tests {
         assert_eq!(plan_with("6c", &["-w"], &[]).unwrap_err().0, "usage: 6c [-options] files");
         assert_eq!(
             one("6c", &["-o", "p.6"]),
-            ["--target=x86_64-plan9", "-c", "-w", "-O2", "-x", "c", "-o", "p.6", "-"]
+            ["--target=x86_64-plan9", "-c", "-fkencc", "-w", "-O2", "-x", "c", "-o", "p.6", "-"]
         );
     }
 
     #[test]
     fn dot_searches_the_current_directory_for_quoted_includes() {
         let a = one("6c", &["-.", "-Iinc", "sub/x.c"]);
-        assert_eq!(a[2..6], ["-w", "-I.", "-I-", "-Iinc"]);
+        assert_eq!(a[3..7], ["-w", "-I.", "-I-", "-Iinc"]);
     }
 
     #[test]
@@ -493,7 +504,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            p.jobs[0].args[2..6],
+            p.jobs[0].args[3..7],
             ["-I/sys/include", "-nostdinc", "-I/amd64/include", "-O2"]
         );
     }
@@ -501,11 +512,11 @@ mod tests {
     #[test]
     fn r9_opt_sets_the_options_and_n_turns_off_the_optimizer() {
         let a = plan_with("6c", &["-w", "x.c"], &[("R9_OPT", "-O1 -g")]).unwrap();
-        assert_eq!(a.jobs[0].args[2..4], ["-O1", "-g"]);
+        assert_eq!(a.jobs[0].args[3..5], ["-O1", "-g"]);
         let a = plan_with("6c", &["-wN", "x.c"], &[("R9_OPT", "-O3")]).unwrap();
-        assert_eq!(a.jobs[0].args[2..4], ["-O3", "-O0"]);
+        assert_eq!(a.jobs[0].args[3..5], ["-O3", "-O0"]);
         let a = one("6c", &["-N", "x.c"]);
-        assert_eq!(a[3..5], ["-O2", "-O0"]);
+        assert_eq!(a[4..6], ["-O2", "-O0"]);
     }
 
     #[test]
@@ -513,7 +524,10 @@ mod tests {
         let p = plan_with("6c", &["-Sw", "x.c"], &[]).unwrap();
         assert_eq!(p.jobs.len(), 2);
         assert_eq!(p.jobs[0].args.last().unwrap(), "x.c");
-        assert_eq!(p.jobs[1].args, ["--target=x86_64-plan9", "-O2", "-S", "-o", "-", "x.c"]);
+        assert_eq!(
+            p.jobs[1].args,
+            ["--target=x86_64-plan9", "-fkencc", "-O2", "-S", "-o", "-", "x.c"]
+        );
         assert!(!p.announce);
     }
 
@@ -529,6 +543,7 @@ mod tests {
                 "--target=aarch64-plan9",
                 "--sysroot=/n/guest",
                 "-c",
+                "-fkencc",
                 "-I../common",
                 "-O2",
                 "-o",

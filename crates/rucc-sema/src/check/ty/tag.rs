@@ -647,8 +647,10 @@ impl Checker<'_> {
             TypeSpec::Record { tag: None, fields: Some(_), .. } => true,
             // A typedef name can name anything, and only a record has members to reach, so this
             // is the one place the type rather than the spelling settles it.
+            // Plan 9's rule is the same, under `-fplan9-extensions` and `-fkencc`: `struct Ref {
+            // Lock; long ref; }` has the members of `Lock` in it.
             TypeSpec::Record { .. } | TypeSpec::Typedef(_) => {
-                self.cx.ms_extensions
+                (self.cx.ms_extensions || self.cx.plan9_extensions)
                     && matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Record(_))
             }
             _ => false,
