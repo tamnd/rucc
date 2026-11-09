@@ -317,10 +317,6 @@ fn brace(tast: &Tast, body: StmtId, declared: Span) -> Span {
     if span.is_dummy() { declared } else { span }
 }
 
-/// How many bytes of array make a buffer worth protecting, which is gcc's `ssp-buffer-size` and
-/// which has been eight since the flag was written.
-const BUFFER: u64 = 8;
-
 /// What the pointer `__builtin_alloca` answers is aligned to.
 ///
 /// Sixteen, which is what gcc gives it and what the SysV psABI requires of the stack pointer at a
@@ -458,6 +454,7 @@ fn guarded(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> Set
     if !matches!(want, Protector::Buffers | Protector::Strong) {
         return Set::default();
     }
+    let buffer = body.unit.ssp_buffer_size;
     let types = body.types();
     let target = body.target();
     let tast = body.tast();
@@ -468,7 +465,7 @@ fn guarded(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> Set
             let ty = tast[local].ty;
             match want {
                 Protector::Strong => escaped.contains(&local) || holds_array(types, ty),
-                _ => is_array(types, ty) && repr::size_of(types, target, ty) >= BUFFER,
+                _ => is_array(types, ty) && repr::size_of(types, target, ty) >= buffer,
             }
         })
         .collect()
