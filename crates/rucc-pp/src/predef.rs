@@ -1839,6 +1839,7 @@ const fn characteristics(format: Format) -> &'static Characteristics {
         Format::Single => &SINGLE,
         Format::Double => &DOUBLE,
         Format::X87Extended => &X87,
+        Format::X87Round53 => &X87_ROUND_53,
         Format::Quad => &QUAD,
         Format::DoubleDouble => &DOUBLE_DOUBLE,
         // No target has a decimal `long double` or `_Float64x`, which are the two rows a target
@@ -1846,16 +1847,6 @@ const fn characteristics(format: Format) -> &'static Characteristics {
         Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
             panic!("a binary type's format is never a decimal one")
         }
-    }
-}
-
-/// The row of a type whose format the target chooses, which is the x87 row rounded to fifty three
-/// bits on a target that sets the x87 unit to round there.
-fn characteristics_on(target: &TargetInfo, format: Format) -> &'static Characteristics {
-    if format == Format::X87Extended && target.long_double_rounds_to_53 {
-        &X87_ROUND_53
-    } else {
-        characteristics(format)
     }
 }
 
@@ -1913,7 +1904,7 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // gcc writes the `double` values as `long double` constants cast back down, which is exact
     // in every format `long double` has and is the one family whose values are not a suffix.
     family(d, gnuc, "DBL", &DOUBLE, |value| format!("((double){value}L)"));
-    let long_double = characteristics_on(target, target.long_double_format);
+    let long_double = characteristics(target.long_double_format);
     family(d, gnuc, "LDBL", long_double, |value| format!("{value}L"));
 
     // The two named types that are not on every machine, each written where the type is and left
@@ -1940,9 +1931,7 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // there: `_Float64x` is not a type on that machine and the family that describes it is not a
     // set of macros with a smaller answer in them.
     if let Some(format) = target.float64x_format {
-        family(d, gnuc, "FLT64X", characteristics_on(target, format), |value| {
-            format!("{value}F64x")
-        });
+        family(d, gnuc, "FLT64X", characteristics(format), |value| format!("{value}F64x"));
     }
 
     // The number itself rather than the name of the other macro. The value is the same either
@@ -1980,10 +1969,10 @@ fn libgcc(d: &mut Defs, target: &TargetInfo) {
     modes.push(("SF", 24, Some(("FLT", "f"))));
     modes.push(("DF", 53, Some(("DBL", ""))));
     if x86 {
-        let xf = if long_double == Format::X87Extended {
+        let xf = if long_double.is_x87() {
             Some(("LDBL", "l"))
         } else {
-            (target.float64x_format == Some(Format::X87Extended)).then_some(("FLT64X", "f64x"))
+            target.float64x_format.is_some_and(Format::is_x87).then_some(("FLT64X", "f64x"))
         };
         modes.push(("XF", 64, xf));
     }

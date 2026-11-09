@@ -29,7 +29,7 @@
 
 use rucc_ast::{self as ast, BinaryOp, UnaryOp};
 use rucc_base::Symbol;
-use rucc_base::float::{Float, Format};
+use rucc_base::float::Float;
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, FloatConstantType, IntConstantType, Remarks, StringLiteral};
 use rucc_session::Std;
@@ -406,7 +406,7 @@ impl Checker<'_> {
             // double` where that is the x87 format, and `_Float64x`, which is that format on
             // x86 whatever the operating system has done to `long double`, where it is not.
             FloatConstantType::Float80 => {
-                if self.cx.target.long_double_format == Format::X87Extended {
+                if self.cx.target.long_double_format.is_x87() {
                     FloatKind::LongDouble
                 } else {
                     FloatKind::Float64x
@@ -2757,6 +2757,7 @@ impl Checker<'_> {
 mod tests {
     use rucc_ast::{BuiltinSet, DeclSpecs, DeclSpecsId, Declarator, DeclaratorId, Derived};
     use rucc_base::Interner;
+    use rucc_base::float::Format;
     use rucc_lex::{CharConstant, FloatConstant, IntConstant, Remarks, StringLiteral};
     use rucc_session::Std;
     use rucc_target::{TargetInfo, Triple};

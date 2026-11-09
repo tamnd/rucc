@@ -287,6 +287,10 @@ impl AttrSet {
     /// shadow checks go in this function, and it is not inlined into one that has them, which is
     /// what lets the kernel read a word past the end of a string in `read_word_at_a_time`.
     pub const NO_ASAN: Self = Self(1 << 44);
+    /// Every `f80` result is rounded to fifty three bits, which is what i386 FreeBSD sets the x87
+    /// unit to do and what GCC's `ieee_extended_intel_96_round_53` folds to. The bits in memory
+    /// are the x87 format as ever. The pass that folds operations on `f80` constants reads this.
+    pub const X87_ROUND_53: Self = Self(1 << 45);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -424,6 +428,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NO_SANCOV, "no_sancov"),
     (AttrSet::INLINE_MEMSET, "inline_memset"),
     (AttrSet::NO_ASAN, "no_asan"),
+    (AttrSet::X87_ROUND_53, "x87_round_53"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

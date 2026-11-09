@@ -220,6 +220,8 @@ enum Mode {
 /// register and `pointer` is an address, and on every target here those are the same size, which
 /// is why they give the same answer and are still written down separately.
 fn named_mode(name: &str, target: &TargetInfo) -> Option<Mode> {
+    // GCC's XFmode is the x87 format, which rounds to fifty three bits on i386 FreeBSD.
+    let xf = if target.long_double_rounds_to_53 { Format::X87Round53 } else { Format::X87Extended };
     let mode = match name {
         "QI" => Mode::Int(8),
         "HI" => Mode::Int(16),
@@ -231,12 +233,12 @@ fn named_mode(name: &str, target: &TargetInfo) -> Option<Mode> {
         "HF" => Mode::Float(Format::Half),
         "SF" => Mode::Float(Format::Single),
         "DF" => Mode::Float(Format::Double),
-        "XF" => Mode::Float(Format::X87Extended),
+        "XF" => Mode::Float(xf),
         "TF" => Mode::Float(Format::Quad),
         "HC" => Mode::Complex(Format::Half),
         "SC" => Mode::Complex(Format::Single),
         "DC" => Mode::Complex(Format::Double),
-        "XC" => Mode::Complex(Format::X87Extended),
+        "XC" => Mode::Complex(xf),
         "TC" => Mode::Complex(Format::Quad),
         _ => return None,
     };

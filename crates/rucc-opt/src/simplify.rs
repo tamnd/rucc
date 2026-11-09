@@ -2756,7 +2756,7 @@ fn float_constant(func: &Func, value: Value) -> Option<Float> {
         return None;
     }
     let Extra::Imm(at) = data.extra else { return None };
-    let format = func[value].ty.format()?.encoding();
+    let format = crate::fold::folded_format(func, func[value].ty)?;
     // A decimal constant decodes, but the arithmetic a fold does on it is binary and would read the
     // coefficient as a significand, so a decimal is never a constant here. Its operations become
     // library calls in the back end instead, tamnd/rucc#207.

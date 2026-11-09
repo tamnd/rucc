@@ -643,7 +643,8 @@ fn scalar(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Scalar> {
         | TypeKind::BitInt { .. }
         | TypeKind::Enum(_)
         | TypeKind::Pointer(_) => Kind::Integer,
-        TypeKind::Float(kind) => Kind::Float(float_format(kind, target)),
+        // The ABI sees the bits, so the x87 format of i386 FreeBSD passes as the x87 format.
+        TypeKind::Float(kind) => Kind::Float(float_format(kind, target).storage()),
         TypeKind::Atomic(inner) => return scalar(types, target, inner),
         _ => return None,
     };

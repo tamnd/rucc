@@ -33,7 +33,6 @@
 use rucc_ast::{
     self as ast, ArraySize, Complexity, Derived, ParamKind, Scalar, TypeSpec, TypeofArg,
 };
-use rucc_base::float::Format;
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Symbol, sym};
 use rucc_diag::{Diagnostic, Span};
@@ -1777,9 +1776,7 @@ fn float_kind(scalar: Scalar, target: &TargetInfo) -> Option<FloatKind> {
         Scalar::Float128 if target.has_float128 => Some(FloatKind::Float128),
         Scalar::Float32x => Some(FloatKind::Float32x),
         Scalar::Float64x if target.float64x_format.is_some() => Some(FloatKind::Float64x),
-        Scalar::Float80 if target.long_double_format == Format::X87Extended => {
-            Some(FloatKind::LongDouble)
-        }
+        Scalar::Float80 if target.long_double_format.is_x87() => Some(FloatKind::LongDouble),
         Scalar::Decimal32 if target.has_decimal_float => Some(FloatKind::Decimal32),
         Scalar::Decimal64 if target.has_decimal_float => Some(FloatKind::Decimal64),
         Scalar::Decimal128 if target.has_decimal_float => Some(FloatKind::Decimal128),
