@@ -1117,6 +1117,16 @@ pub struct TargetInfo {
     /// The type does not exist there and neither reference defines the macros that describe it,
     /// so the honest answer is that there is no format rather than a `double` in its place.
     pub float64x_format: Option<Format>,
+    /// Whether the x87 format of `long double` and `_Float64x` holds only fifty three bits of
+    /// significand, which is GCC's `TARGET_96_ROUND_53_LONG_DOUBLE`.
+    ///
+    /// i386 FreeBSD sets the x87 unit to round every result to fifty three bits, and GCC's
+    /// `i386/freebsd.h` and `i386/dragonfly.h` say so by giving the eighty bit mode the format
+    /// `ieee_extended_intel_96_round_53`. The bits in memory are the same as the x87 format, so
+    /// the size, the alignment and the encoding do not change. What changes is what `float.h`
+    /// says: `LDBL_MANT_DIG` is 53, `LDBL_EPSILON` is two to the minus fifty two, and the smallest
+    /// subnormal is two to the minus sixteen thousand four hundred and thirty four.
+    pub long_double_rounds_to_53: bool,
     /// Whether the target has `_Float16`.
     ///
     /// The named types are not all universal the way `_Float32` and `_Float64` are. gcc 13 has
@@ -1601,6 +1611,7 @@ impl TargetInfo {
             long_double_width: bits(layout.long_double.size),
             long_double_format: layout.long_double.format,
             float64x_format: float64x_format(target),
+            long_double_rounds_to_53: rounds_to_53(target),
             has_float16: has_float16(target),
             has_float128: has_float128(target),
             has_decimal_float: matches!(
@@ -1739,6 +1750,17 @@ fn float64x_format(target: TargetTuple) -> Option<Format> {
         // describe and neither reference defines the macros that would describe it.
         tuple::Arch::Arm | tuple::Arch::Arm64Ec | tuple::Arch::Wasm32 => None,
     }
+}
+
+/// Whether the x87 format rounds to fifty three bits on this target, which is GCC's
+/// `TARGET_96_ROUND_53_LONG_DOUBLE`.
+///
+/// `i386/freebsd.h` and `i386/dragonfly.h` define it as `!TARGET_64BIT`. DragonFly is in the
+/// match for that reason, though there is no i386 DragonFly here. NetBSD and OpenBSD do not
+/// define it, and on x86-64 FreeBSD the x87 format keeps its sixty four bits.
+fn rounds_to_53(target: TargetTuple) -> bool {
+    target.arch() == tuple::Arch::X86
+        && matches!(target.os(), tuple::Os::FreeBsd | tuple::Os::DragonFly)
 }
 
 /// Whether the target has `_Float16`.
@@ -2037,6 +2059,26 @@ mod tests {
         assert_eq!((netbsd.wchar_width, netbsd.wchar_is_signed), (32, true));
         let freebsd = TargetInfo::new("aarch64-unknown-freebsd".parse().unwrap());
         assert_eq!((freebsd.wchar_width, freebsd.wchar_is_signed), (32, false));
+    }
+
+    #[test]
+    fn only_i386_freebsd_rounds_long_double_to_53_bits() {
+        // `TARGET_96_ROUND_53_LONG_DOUBLE` in gcc's `i386/freebsd.h` is `!TARGET_64BIT`, and no
+        // other header that rucc has a target for defines it.
+        for (spelling, rounds) in [
+            ("i386-unknown-freebsd14.5", true),
+            ("i686-unknown-freebsd15", true),
+            ("x86_64-unknown-freebsd", false),
+            ("i486--netbsdelf", false),
+            ("i386-unknown-openbsd", false),
+            ("x86_64-dragonfly", false),
+            ("i686-unknown-linux-gnu", false),
+        ] {
+            let target = TargetInfo::new(spelling.parse().unwrap());
+            assert_eq!(target.long_double_rounds_to_53, rounds, "{spelling}");
+            // The storage is the x87 format whichever it is.
+            assert_eq!(target.long_double_format, Format::X87Extended, "{spelling}");
+        }
     }
 
     #[test]
