@@ -92,16 +92,16 @@ jobs:
       # A step limit as well as the job limit, so that a test that hangs ends this step and the
       # steps after it still run. On Linux the tests take about five minutes.
       #
-      # The two tests that are skipped fail on main on every host, Linux too, so they say nothing
-      # about FreeBSD. They are skipped by name, so that this job shows a failure that is new here.
-      # Take a name out of SKIP when its test passes on Linux again.
+      # The test that is skipped fails on main on every host, Linux too, so it says nothing about
+      # FreeBSD. It is skipped by name, so that this job shows a failure that is new here. Take a
+      # name out of SKIP when its test passes on Linux again.
       - name: cargo test
         timeout-minutes: 60
         shell: freebsd {0}
         run: |
           set -e
           . /root/ci.env
-          SKIP="the_lock_free_questions_are_answered_as_constants the_netbsd_printf_and_syslog_forms_are_read_as_printf"
+          SKIP="the_lock_free_questions_are_answered_as_constants"
           skip=""
           for name in $SKIP; do skip="$skip --skip $name"; done
           cargo test --workspace --all-features --no-fail-fast -- $skip
