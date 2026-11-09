@@ -1035,6 +1035,14 @@ mod tests {
         assert_eq!(triple(netbsd, named("i686-unknown-netbsd")), "i486-unknown-netbsdelf");
         assert_eq!(triple(bsd(Arch::X86_64, Os::NetBsd), None), "x86_64-unknown-netbsd");
         assert_eq!(triple(bsd(Arch::X86, Os::OpenBsd), None), "i386-unknown-openbsd");
-        assert_eq!(triple(bsd(Arch::Riscv64, Os::FreeBsd(15)), None), "riscv64-unknown-freebsd15");
+        // With no pin, the minor release is the one of the host when the host runs FreeBSD 15.
+        let minor = crate::host::freebsd_release()
+            .filter(|&(running, _)| running == 15)
+            .map(|(_, minor)| format!(".{minor}"))
+            .unwrap_or_default();
+        assert_eq!(
+            triple(bsd(Arch::Riscv64, Os::FreeBsd(15)), None),
+            format!("riscv64-unknown-freebsd15{minor}")
+        );
     }
 }
