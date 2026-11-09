@@ -1958,9 +1958,10 @@ fn generate(
                         ))]
                     })?;
                 let info = if opts.debug_info {
-                    let assembled =
+                    let (assembled, symbols) =
                         placed(&read, &funcs, names, target).map_err(|why| vec![internal(&why)])?;
-                    describe(&assembled, &globals.image(), &funcs, names, origin, opts, target)
+                    let image = globals.image();
+                    describe(&assembled, &symbols, &image, &funcs, names, origin, opts, target)
                         .map_err(|why| vec![internal(&why)])?
                 } else {
                     rucc_object::Info::default()
@@ -1984,7 +1985,7 @@ fn generate(
             // build asked for no debug information, which is the case the rows above are not even
             // recorded in.
             let info = if opts.debug_info {
-                describe(&assembled, &data, &funcs, names, origin, opts, target)
+                describe(&assembled, &[], &data, &funcs, names, origin, opts, target)
                     .map_err(|why| vec![internal(&why)])?
             } else {
                 rucc_object::Info::default()
@@ -2045,6 +2046,9 @@ fn zero_extension(isa: rucc_target::Isa) -> rucc_codegen::zero::Extension {
 /// label's distance from the symbol. The row for the front of the function is the one the encoder
 /// writes from `Func::declared`, and it is written here the same way.
 ///
+/// Beside it, for each function, the name the debug information has to give the linker for it
+/// when that is not the function's own, which is when the listing renamed the function.
+///
 /// # Errors
 ///
 /// A function or a label the reader did not place, which is a listing this compiler wrote and got
@@ -2054,7 +2058,7 @@ fn placed(
     funcs: &[rucc_mir::Func],
     names: &Interner,
     target: &TargetInfo,
-) -> Result<rucc_asm::Assembled, String> {
+) -> Result<(rucc_asm::Assembled, Vec<Option<String>>), String> {
     let at: Map<&str, &rucc_object::Name> =
         read.names.iter().map(|name| (name.name.as_str(), name)).collect();
     let offset = |name: &str| match at.get(name).map(|name| name.at) {
@@ -2063,6 +2067,7 @@ fn placed(
     };
     let mut text = rucc_object::Text::default();
     let mut lines = Vec::with_capacity(funcs.len());
+    let mut symbols = Vec::with_capacity(funcs.len());
     // The name the listing gave each function, which on Mach-O and on i386 COFF has the underscore
     // in front. The debug information keeps the C name, and the object writer puts the underscore
     // back on when it looks one up.
@@ -2070,9 +2075,20 @@ fn placed(
     for (which, func) in funcs.iter().enumerate() {
         let name = names.resolve(func.name);
         let spelled = directives.spell(name);
-        let Some((part, start)) = offset(&spelled) else {
-            return Err(format!("the listing has no label for the function '{name}'"));
+        // A function a `.symver` with `@@@` renamed has lost its name, and is found by the label
+        // the listing put at its first byte. The debug information then names it by that label,
+        // which is somewhere in the section rather than a symbol, as gcc's `.LFB` labels are.
+        let (part, start, symbol) = match offset(&spelled) {
+            Some((part, start)) => (part, start, None),
+            None => {
+                let front = rucc_asm::mark_start(target, which);
+                let Some((part, start)) = offset(&front) else {
+                    return Err(format!("the listing has no label for the function '{name}'"));
+                };
+                (part, start, Some(front))
+            }
         };
+        symbols.push(symbol);
         let mut rows = Vec::with_capacity(func.inst_count() + 1);
         if !func.declared.is_dummy() {
             rows.push(rucc_asm::Row { at: 0, span: func.declared, inst: None });
@@ -2110,7 +2126,7 @@ fn placed(
         });
         lines.push(rows);
     }
-    Ok(rucc_asm::Assembled { text, lines, frames: None })
+    Ok((rucc_asm::Assembled { text, lines, frames: None }, symbols))
 }
 
 /// The debug sections for what was just assembled, as bytes and relocations.
@@ -2131,8 +2147,10 @@ fn placed(
 ///
 /// Whatever the DWARF writer refused, which is a bug here rather than a program this compiler is
 /// behind on.
+#[allow(clippy::too_many_arguments)]
 fn describe(
     assembled: &rucc_asm::Assembled,
+    symbols: &[Option<String>],
     data: &rucc_object::Data,
     machine: &[rucc_mir::Func],
     names: &Interner,
@@ -2149,7 +2167,7 @@ fn describe(
     let mut files: Vec<String> = Vec::new();
     let mut funcs = Vec::with_capacity(text.funcs.len());
     let mut copying = Copying::new(origin.meaning);
-    for ((extent, rows), built) in text.funcs.iter().zip(lines).zip(machine) {
+    for (nth, ((extent, rows), built)) in text.funcs.iter().zip(lines).zip(machine).enumerate() {
         let mut out: Vec<rucc_debug::Row> = Vec::with_capacity(rows.len());
         for row in rows {
             if row.span.is_dummy() {
@@ -2323,7 +2341,7 @@ fn describe(
         let calls = sites(extent, rows, built, names, target);
         funcs.push(rucc_debug::Function {
             name: extent.name.clone(),
-            symbol: None,
+            symbol: symbols.get(nth).cloned().flatten(),
             len: extent.len as u64,
             prologue_end,
             rows: out,

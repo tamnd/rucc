@@ -220,3 +220,27 @@ fn the_reader_switch_takes_on_or_off_and_nothing_else() {
     let said = String::from_utf8_lossy(&done.stderr);
     assert!(said.contains("-frucc-asm-reader="), "{said}");
 }
+
+/// FreeBSD's `__sym_default` with `__weak_reference`, as `setcontext.c` writes them. The `@@@`
+/// renames `s` to `s@@V2`, so the debug information cannot find the function by its own name,
+/// and `-g` stopped with "the listing has no label". gcc writes `s@@V2` and the weak `__i`.
+const RENAMED: &str = "\
+__asm__(\".weak __i\");
+__asm__(\".equ __i, s\");
+__asm__(\".symver s, s@@@V2\");
+int g(int);
+int s(int x) { return g(x); }
+";
+
+#[test]
+fn a_function_renamed_by_symver_still_gets_its_debug_information() {
+    let bytes = object("renamed", RENAMED, &["-g"]);
+    let symbols = symbols(&bytes);
+    let s = symbol(&symbols, "s@@V2");
+    assert_eq!((s.bind, s.kind), (STB_GLOBAL, STT_FUNC), "{s:?}");
+    assert_eq!(symbol(&symbols, "__i").bind, STB_WEAK);
+    assert!(symbols.iter().all(|s| s.name != "s"), "{symbols:#?}");
+    let headers = headers(&bytes);
+    assert!(section(&headers, ".debug_info").size > 0);
+    assert!(section(&headers, ".debug_line").size > 0);
+}
