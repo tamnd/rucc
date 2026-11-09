@@ -545,13 +545,15 @@ mod tests {
     #[test]
     fn plan_9_searches_the_machine_directory_and_then_sys_include() {
         let machine = Machine { sysroot: Some("/opt/9front".into()), ..on(Os::Linux) };
-        let dirs = |arch| {
-            let dirs = candidates(Triple::new(arch, Os::Plan9, Env::None), &machine);
-            dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>()
+        let dirs = |arch| candidates(Triple::new(arch, Os::Plan9, Env::None), &machine);
+        // Joined and not spelled out, because a host can use a backslash as the separator.
+        let under = |objtype| {
+            let root = PathBuf::from("/opt/9front");
+            [root.join(objtype).join("include"), root.join("sys").join("include")]
         };
-        assert_eq!(dirs(Arch::X86_64), ["/opt/9front/amd64/include", "/opt/9front/sys/include"]);
-        assert_eq!(dirs(Arch::Aarch64), ["/opt/9front/arm64/include", "/opt/9front/sys/include"]);
-        assert_eq!(dirs(Arch::X86), ["/opt/9front/386/include", "/opt/9front/sys/include"]);
+        assert_eq!(dirs(Arch::X86_64), under("amd64"));
+        assert_eq!(dirs(Arch::Aarch64), under("arm64"));
+        assert_eq!(dirs(Arch::X86), under("386"));
         // With no tree to read, a host that is not Plan 9 has no Plan 9 headers.
         assert!(candidates(triple(Os::Plan9, Env::None), &on(Os::Linux)).is_empty());
     }
