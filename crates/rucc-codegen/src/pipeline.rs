@@ -1253,7 +1253,10 @@ pub fn compile_recording(
         //
         // `-momit-leaf-frame-pointer` takes back what `-fno-omit-frame-pointer` asked for, in a
         // leaf only. A leaf calls nothing, so no frame below it has to find this one.
-        frame_pointer: !naked && (asked || needed),
+        //
+        // Nor on a convention that has no frame pointer at all. What still needs one there is
+        // refused once the frame is known, below.
+        frame_pointer: !naked && !machine.conv.frameless && (asked || needed),
         // A leaf the flags alone gave one to may hand it back once it turns out to have no frame,
         // which gcc does on x86. Not on a machine whose call leaves the return address in a
         // register, where the frame record is also where that register is put away.
@@ -1509,6 +1512,12 @@ pub fn compile_recording(
     // are the three ways to want them, and the answer to all three is the same sentence.
     if naked && frame.size() > 0 {
         return Err(Unsupported::Naked { bytes: frame.size() });
+    }
+    // The one thing a function on a convention with no frame pointer cannot be given, which is a
+    // frame that only a frame pointer reaches: one that grows while it runs, or one aligned past
+    // what a call leaves the stack pointer on.
+    if machine.conv.frameless && frame.frame_pointer() {
+        return Err(Unsupported::Frameless);
     }
     // Here because the frame is settled and nothing after this changes how big it is. The name is
     // the one the source spelled, since that is what gcc's report says and what a person reading

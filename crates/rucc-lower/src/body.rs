@@ -120,6 +120,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         brace: brace(tast, root, span),
         nests: Nests::default(),
         in_place: Set::default(),
+        homed: Map::default(),
         env: Env::default(),
         skipped: Set::default(),
     };
@@ -203,6 +204,12 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         if body.in_place(param, travel) {
             body.in_place.insert(param);
         }
+    }
+    // And which are kept in the slot the caller reserved for them, on a convention that reserves
+    // one for every argument. See [`Body::homes`].
+    body.homed = body.homes(&params, plan, &escaped);
+    if !body.homed.is_empty() {
+        body.func.attrs.set |= AttrSet::NOIPA | AttrSet::NOINLINE;
     }
     for &param in &params {
         body.declare(param, escaped.contains(&param));
@@ -973,6 +980,9 @@ struct Body<'a, 'u> {
     /// The parameters the body works on where the caller left their bytes, which get no slot of
     /// their own. See [`Body::in_place`].
     in_place: Set<DeclId>,
+    /// The parameters kept in the slot the caller reserved for them, as how far up the argument
+    /// area each slot is. See [`Body::homes`].
+    homed: Map<DeclId, u64>,
     /// Where the things a nested function reaches are, for a function in a tree of nested ones.
     /// See [`crate::nest`].
     env: Env,
@@ -1344,6 +1354,12 @@ impl<'u> Body<'_, 'u> {
             return;
         }
         let span = self.brace;
+        if let Some(&up) = self.homed.get(&decl) {
+            let entry = self.build(span).value(InstData::new(Opcode::SpEntry), Type::PTR);
+            let slot = self.offset(entry, up, span);
+            self.vars.insert(decl, Local::Slot(slot));
+            return;
+        }
         let size = repr::size_of(self.types(), self.target(), ty);
         let align =
             tast[decl].alignment.unwrap_or_else(|| repr::align_of(self.types(), self.target(), ty));
@@ -2069,6 +2085,70 @@ impl<'u> Body<'_, 'u> {
         let align =
             tast[decl].alignment.unwrap_or_else(|| repr::align_of(self.types(), self.target(), ty));
         size == travel.size && align <= travel.align
+    }
+
+    /// Where each parameter the body takes the address of is in the argument area, on a convention
+    /// that gives every argument a slot of its own.
+    ///
+    /// The kencc convention of Plan 9 reserves a slot for each argument in order, and it also puts
+    /// the first argument in a register when it is an integer or a pointer. Code written for it
+    /// finds a parameter by its address. The `va_start` of the Plan 9 `u.h` steps from `&start` to
+    /// the slot after it, and `getcallerpc(&arg)` reads the word below the first slot, which is the
+    /// return address. So a parameter whose address is taken is kept in its own slot and not in a
+    /// copy in the frame. The value that arrived in the register is stored to its slot first, which
+    /// is what `6c` does.
+    ///
+    /// The address is `sponentry` and the distance up the area. A function with such a parameter
+    /// is not inlined or specialised, because each of those moves the parameters out of the slots
+    /// the caller made.
+    ///
+    /// Only scalars. A structure the convention passes in memory is already in its slot, and
+    /// [`Body::in_place`] is what uses it there.
+    fn homes(&self, params: &[DeclId], plan: &Plan, escaped: &Set<DeclId>) -> Map<DeclId, u64> {
+        let mut homed = Map::default();
+        let Some(regs) = self.target().call_regs.filter(|regs| regs.slotted) else {
+            return homed;
+        };
+        let mut places = rucc_target::Places::new(regs);
+        if plan.returns_through_memory() {
+            places.integer(regs.word);
+        }
+        for (&param, travel) in params.iter().zip(&plan.args) {
+            let up = u64::from(places.size());
+            match &travel.pass {
+                Pass::Ignore => {}
+                Pass::Direct => {
+                    let ty = travel.types[0];
+                    let bytes = ty.bits().div_ceil(8);
+                    if ty.is_float() {
+                        places.float(bytes)
+                    } else {
+                        places.integer(bytes)
+                    };
+                    if escaped.contains(&param) {
+                        homed.insert(param, up);
+                    }
+                }
+                Pass::Pieces(_) => {
+                    for ty in &travel.types {
+                        let bytes = ty.bits().div_ceil(8);
+                        if ty.is_float() {
+                            places.float(bytes)
+                        } else {
+                            places.integer(bytes)
+                        };
+                    }
+                }
+                Pass::Reference => {
+                    places.integer(regs.word);
+                }
+                Pass::Memory => {
+                    let size = u32::try_from(travel.size).unwrap_or(u32::MAX);
+                    places.object(size, travel.align);
+                }
+            }
+        }
+        homed
     }
 
     /// A scalar put back together out of the registers it travelled in.

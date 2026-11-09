@@ -884,6 +884,8 @@ const fn aapcs64(
         int_args: &INT_ARGS,
         sse_args: &FP_ARGS,
         shared_positions: false,
+        slotted: false,
+        frameless: false,
         int_returns: &INT_RETURNS,
         sse_returns: &FP_RETURNS,
         x87_returns: &NO_X87,

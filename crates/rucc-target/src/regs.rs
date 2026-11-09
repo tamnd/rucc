@@ -448,6 +448,24 @@ pub struct CallRegs {
     /// `xmm0`. True on Windows, which counts one position for both, so a `double` in the third
     /// position is in `xmm2` and `r8` is skipped.
     pub shared_positions: bool,
+    /// Whether every argument has a slot of its own in the argument area, in order, and a value
+    /// that goes in a register leaves its slot empty.
+    ///
+    /// True on the Plan 9 convention of kencc and false everywhere else. `6c` and `7c` reserve a
+    /// slot for each argument and put the first one in a register as well when it is an integer or
+    /// a pointer, so the register is used only when nothing is in the argument area yet. A `double`
+    /// or a structure first is written to the first slot, and nothing after it goes in a register.
+    /// The callee stores the register to its slot when it needs the address, which is how the
+    /// `va_start` of `u.h` finds the arguments after it.
+    pub slotted: bool,
+    /// Whether no function may keep a frame pointer.
+    ///
+    /// True on the Plan 9 convention of kencc, where the register a frame pointer would be is
+    /// where the first argument arrives, and no register survives a call into code `6c` compiled.
+    /// A frame pointer set up in the prologue would overwrite the first argument, and the first
+    /// call would overwrite the frame pointer. So a function there addresses its frame from the
+    /// stack pointer, and one that cannot is refused.
+    pub frameless: bool,
     /// The general purpose registers an integer return value comes back in.
     pub int_returns: &'static [PhysReg],
     /// The vector registers a floating point return value comes back in.
@@ -995,6 +1013,9 @@ impl<'a> Places<'a> {
         match self.regs.int_args.get(self.position(false)) {
             Some(&reg) => {
                 self.int += 1;
+                if self.regs.slotted {
+                    self.stack += self.regs.word;
+                }
                 Where::Reg(reg)
             }
             None => self.scalar(bytes),
@@ -1015,6 +1036,9 @@ impl<'a> Places<'a> {
         match self.regs.sse_args.get(self.position(true)) {
             Some(&reg) => {
                 self.sse += 1;
+                if self.regs.slotted {
+                    self.stack += self.regs.word;
+                }
                 Where::Reg(reg)
             }
             None => self.scalar(bytes),
@@ -1130,6 +1154,12 @@ impl<'a> Places<'a> {
 
     /// The position the next value of a kind is at.
     fn position(&self, sse: bool) -> usize {
+        if self.regs.slotted {
+            // Each argument before this one took at least a word of the area, so a register is
+            // only for the value that the area starts with.
+            let words = (self.stack - self.regs.shadow) / self.regs.word.max(1);
+            return usize::try_from(words).unwrap_or(usize::MAX);
+        }
         if self.regs.shared_positions {
             self.int + self.sse
         } else if sse {
@@ -1280,6 +1310,8 @@ mod tests {
             int_args: &INT,
             sse_args: &SSE,
             shared_positions: shared,
+            slotted: false,
+            frameless: false,
             int_returns: &INT,
             sse_returns: &SSE,
             x87_returns: &NONE,
@@ -1435,5 +1467,32 @@ mod tests {
         places.drain_integers();
         assert_eq!(places.integer(8), Where::Stack(8));
         assert_eq!((places.integers(), places.floats()), (2, 2));
+    }
+
+    /// kencc on amd64: an integer first goes in `rbp` and still takes the first slot, and every
+    /// argument after it is in its own slot whatever it is.
+    #[test]
+    fn a_slotted_convention_gives_the_first_integer_a_register_and_every_argument_a_slot() {
+        let regs = &crate::x86_64::PLAN9;
+        let mut places = Places::new(regs);
+        assert_eq!(places.integer(4), Where::Reg(crate::x86_64::RBP));
+        assert_eq!(places.integer(8), Where::Stack(8));
+        assert_eq!(places.float(8), Where::Stack(16));
+        assert_eq!(places.integer(1), Where::Stack(24));
+        assert_eq!(places.size(), 32);
+    }
+
+    /// A `double` or a structure first is written to the first slot, and then nothing goes in the
+    /// register, because the register is only for the value the area starts with.
+    #[test]
+    fn a_slotted_convention_uses_no_register_after_something_is_in_the_area() {
+        let regs = &crate::x86_64::PLAN9;
+        let mut places = Places::new(regs);
+        assert_eq!(places.float(8), Where::Stack(0));
+        assert_eq!(places.integer(8), Where::Stack(8));
+        let mut places = Places::new(regs);
+        assert_eq!(places.object(12, 4), Where::Stack(0));
+        assert_eq!(places.integer(8), Where::Stack(16));
+        assert_eq!(places.size(), 24);
     }
 }
