@@ -2046,6 +2046,12 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movsw", &NO_ARGS, Word, &[0xA5], NO_MODRM, NO_IMM),
     bytes("movsl", &NO_ARGS, Long, &[0xA5], NO_MODRM, NO_IMM),
     bytes("movsq", &NO_ARGS, Quad, &[0xA5], NO_MODRM, NO_IMM),
+    // The older AT&T names of the same four, which gas still takes. FreeBSD's dtrace_asm.S
+    // copies with `rep smovb`.
+    bytes("smovb", &NO_ARGS, Byte, &[0xA4], NO_MODRM, NO_IMM),
+    bytes("smovw", &NO_ARGS, Word, &[0xA5], NO_MODRM, NO_IMM),
+    bytes("smovl", &NO_ARGS, Long, &[0xA5], NO_MODRM, NO_IMM),
+    bytes("smovq", &NO_ARGS, Quad, &[0xA5], NO_MODRM, NO_IMM),
     // The ten conditional jumps, which are one opcode column of sixteen and are told apart by the
     // low four bits the way the ten `setcc` above are. The low bits are the same ones: a jump on
     // a condition and a set on it differ in the byte before, `0x8` against `0x9`, and in nothing
@@ -2352,6 +2358,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("skinit", &R, Long, &[0x0F, 0x01, 0xDE], NO_MODRM, NO_IMM),
     bytes("invlpga", &NO_ARGS, Long, &[0x0F, 0x01, 0xDF], NO_MODRM, NO_IMM),
     bytes("invlpga", &RR, Long, &[0x0F, 0x01, 0xDF], NO_MODRM, NO_IMM),
+    // AMD's broadcast of a TLB flush to every processor and the wait for it to finish. Every
+    // operand is in a fixed register, so FreeBSD's `invlpgb` in mp_machdep.c names none.
+    bytes("invlpgb", &NO_ARGS, Long, &[0x0F, 0x01, 0xFE], NO_MODRM, NO_IMM),
+    bytes("tlbsync", &NO_ARGS, Long, &[0x0F, 0x01, 0xFF], NO_MODRM, NO_IMM),
     // SEV-SNP, TDX, SGX and the platform configuration, which are fixed opcodes the same way.
     bytes("pvalidate", &NO_ARGS, Long, &[0xF2, 0x0F, 0x01, 0xFF], NO_MODRM, NO_IMM),
     bytes("rmpadjust", &NO_ARGS, Long, &[0xF3, 0x0F, 0x01, 0xFE], NO_MODRM, NO_IMM),
@@ -3576,6 +3586,10 @@ static ENCODINGS: &[Encoding] = &[
     evex("vporq", &MVV, Word, &[0xEB], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
     evex("vpord", &VVV, Word, &[0xEB], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
     evex("vpord", &MVV, Word, &[0xEB], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    // The AND of four byte lanes, which is the same bits as `vpandq` and differs only where a
+    // mask picks lanes. OpenZFS's AVX-512 Fletcher checksum writes it.
+    evex("vpandd", &VVV, Word, &[0xDB], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vpandd", &MVV, Word, &[0xDB], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
     // The multiply and add of 52 bit halves that the kernel's IFMA Poly1305 is written with. gas
     // writes these with EVEX unless `{vex}` asks for the AVX-IFMA form, so there is no VEX form.
     evex("vpmadd52luq", &VVV, Word, &[0xB4], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
@@ -3649,6 +3663,10 @@ static ENCODINGS: &[Encoding] = &[
     evex("vpbroadcastq", &RV, Word, &[0x7C], pair(0, 1), Evex::new(Map::Escape38, true)),
     evex("vshufi64x2", &IVVV, Word, &[0x43], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
     evex("vshufi64x2", &IMVV, Word, &[0x43], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    // The same shuffle of 128 bit blocks with four byte lanes, which matters only to a mask.
+    // OpenSSL's aes-gcm-avx512.S writes it.
+    evex("vshufi32x4", &IVVV, Word, &[0x43], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("vshufi32x4", &IMVV, Word, &[0x43], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
     evex("vpshufd", &IVV, Word, &[0x70], pair(1, 2), Evex::new(Map::Escape, false).or_vex(false)),
     evex("vpshufd", &IMV, Word, &[0x70], pair(1, 2), Evex::new(Map::Escape, false).or_vex(false)),
     evex(
@@ -3819,6 +3837,12 @@ static ENCODINGS: &[Encoding] = &[
     // An unsigned compare of eight byte lanes, whose result is a mask rather than a vector.
     evex("vpcmpuq", &IVVK, Word, &[0x1E], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
     evex("vpcmpuq", &IMVK, Word, &[0x1E], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    // The compares of byte lanes with the condition as a number, signed and unsigned. OpenZFS's
+    // AVX512BW RAID-Z writes the signed one.
+    evex("vpcmpb", &IVVK, Word, &[0x3F], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("vpcmpb", &IMVK, Word, &[0x3F], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("vpcmpub", &IVVK, Word, &[0x3E], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("vpcmpub", &IMVK, Word, &[0x3E], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
     // A signed compare of byte lanes into a mask, and the mask turned back into a vector whose
     // bytes are all ones where its bits were set. lib/raid6 multiplies by two in GF(2^8) with the
     // pair of them.
