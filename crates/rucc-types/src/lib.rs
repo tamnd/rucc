@@ -340,7 +340,8 @@ mod tests {
                 (16, 16),
                 (4, 4),
                 (8, 8),
-                (16, 16)
+                (16, 16),
+                (2, 2)
             ]
         );
         assert_eq!(
@@ -357,7 +358,8 @@ mod tests {
                 (16, 16),
                 (4, 4),
                 (8, 8),
-                (16, 16)
+                (16, 16),
+                (2, 2)
             ]
         );
         // The i386 rows, read off gcc 13 the same way. `_Float64x` is the twelve byte `long
@@ -377,7 +379,8 @@ mod tests {
                 (16, 16),
                 (4, 4),
                 (8, 8),
-                (16, 16)
+                (16, 16),
+                (2, 2)
             ]
         );
         assert_eq!(
@@ -394,14 +397,15 @@ mod tests {
                 (16, 16),
                 (4, 4),
                 (8, 8),
-                (16, 16)
+                (16, 16),
+                (2, 2)
             ]
         );
     }
 
     #[test]
     fn every_floating_type_has_a_slot_of_its_own_and_a_name_of_its_own() {
-        // Twelve types and twelve ids, which is what makes `_Float64` and `double` two types that
+        // Thirteen types and thirteen ids, which is what makes `_Float64` and `double` two types that
         // `_Generic` can tell apart rather than one type with two spellings.
         let types = Types::new();
         let mut seen = Vec::new();
@@ -429,6 +433,7 @@ mod tests {
                 "_Decimal32",
                 "_Decimal64",
                 "_Decimal128",
+                "__fp16",
             ]
         );
     }
@@ -1585,6 +1590,24 @@ mod tests {
             let ty = types.int(kind);
             assert_eq!(promote(&mut types, ty, &linux), ty, "{}", kind.as_str());
         }
+    }
+
+    #[test]
+    fn an_fp16_promotes_to_a_float_and_a_float16_does_not() {
+        // gcc 15 for aarch64-unknown-freebsd15.1 names `+h` a `float` for an `__fp16`, and `h + h`
+        // as well, where both are `_Float16` for a `_Float16`.
+        let mut types = Types::new();
+        let linux = linux();
+        let float = types.float(FloatKind::Float);
+        let fp16 = types.float(FloatKind::Fp16);
+        let half = types.float(FloatKind::Float16);
+        assert_eq!(promote(&mut types, fp16, &linux), float);
+        assert_eq!(usual_arithmetic(&mut types, fp16, fp16, &linux), Some(float));
+        assert_eq!(promote(&mut types, half, &linux), half);
+        assert_eq!(usual_arithmetic(&mut types, half, half, &linux), Some(half));
+        let double = types.float(FloatKind::Double);
+        assert_eq!(usual_arithmetic(&mut types, fp16, double, &linux), Some(double));
+        assert_eq!(usual_arithmetic(&mut types, fp16, half, &linux), Some(float));
     }
 
     #[test]

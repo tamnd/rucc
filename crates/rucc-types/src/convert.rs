@@ -25,7 +25,8 @@ use crate::types::{TypeId, Types};
 ///
 /// Anything narrower than `int` becomes `int`, or `unsigned int` when `int` cannot hold every
 /// value it had. Everything else, floating types and pointers included, is its own answer, so
-/// this can be called on any operand without asking what it is first.
+/// this can be called on any operand without asking what it is first. The one floating type that
+/// is not is `__fp16`, which becomes a `float`, as gcc's promotion hook for AArch64 says.
 ///
 /// The qualifiers and `_Atomic` come off, because by the time a value is being promoted the
 /// lvalue conversion of 6.3.2.1 has already happened and neither of them is part of the value.
@@ -47,6 +48,10 @@ pub fn promote(types: &mut Types, id: TypeId, target: &TargetInfo) -> TypeId {
                 None => types.int(IntKind::Int),
             }
         }
+        // Not an integer promotion, but it happens in the same places and gcc does it in the
+        // same step: AArch64's `__fp16` is a format to store a value in, and its value is a
+        // `float`. So `h + h` is a `float`, and so is `+h`.
+        TypeKind::Float(FloatKind::Fp16) => types.float(FloatKind::Float),
         _ => id,
     }
 }

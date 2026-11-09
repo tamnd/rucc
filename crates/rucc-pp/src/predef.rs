@@ -788,6 +788,12 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                 d.set("__ARM_FP", if clang { "0xe" } else { "14" });
                 d.set("__ARM_NEON", "1");
             }
+            // `__fp16` is the IEEE half, and a function may take one and return one. gcc says so
+            // only where there are floating registers to pass one in, and clang says so always.
+            if opts.vector || clang {
+                d.set("__ARM_FP16_FORMAT_IEEE", "1");
+                d.set("__ARM_FP16_ARGS", "1");
+            }
             if !opts.strict_align {
                 d.set("__ARM_FEATURE_UNALIGNED", "1");
             }
@@ -3950,6 +3956,31 @@ mod tests {
         }
         assert!(has(&text, "#define __ARM_FEATURE_IDIV 1"));
         assert!(has(&set_for("aarch64-unknown-linux-gnu"), "#define __ARM_NEON 1"));
+    }
+
+    /// tamnd/rucc#4088. gcc on AArch64 says `__fp16` is the IEEE half and may be passed, and
+    /// takes both away with the floating registers. clang 23 says both even with
+    /// `-mgeneral-regs-only`. No other machine has the type.
+    #[test]
+    fn the_fp16_macros_are_on_aarch64_where_the_type_is() {
+        let names = ["#define __ARM_FP16_FORMAT_IEEE 1", "#define __ARM_FP16_ARGS 1"];
+        for triple in ["aarch64-unknown-freebsd15.1", "aarch64-unknown-netbsd10.2"] {
+            let text = set_for(triple);
+            for name in names {
+                assert!(has(&text, name), "{triple}: {name}");
+            }
+            let target = TargetInfo::new(triple.parse().expect("a triple"));
+            let bare = built_in(&target, &Predef { vector: false, ..Predef::new() });
+            assert!(!bare.contains("__ARM_FP16_"), "{triple}");
+        }
+        let apple = TargetInfo::new("aarch64-apple-darwin".parse().expect("a triple"));
+        let bare = built_in(&apple, &Predef { vector: false, ..Predef::new() });
+        for name in names {
+            assert!(has(&bare, name), "{name}");
+        }
+        for triple in ["x86_64-unknown-freebsd15.1", "riscv64-unknown-freebsd15.1"] {
+            assert!(!set_for(triple).contains("__ARM_FP16_"), "{triple}");
+        }
     }
 
     #[test]

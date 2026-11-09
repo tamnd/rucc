@@ -353,6 +353,7 @@ fn float_layout(kind: FloatKind, target: &TargetInfo) -> Layout {
         // Each decimal is aligned to its size on every target gcc has them for, the sixteen
         // byte one included.
         FloatKind::Float16
+        | FloatKind::Fp16
         | FloatKind::Float
         | FloatKind::Float32
         | FloatKind::Decimal32
@@ -383,7 +384,7 @@ fn capped(size: u64, target: &TargetInfo) -> u64 {
 #[must_use]
 pub fn float_width(kind: FloatKind, target: &TargetInfo) -> u32 {
     match kind {
-        FloatKind::Float16 => 16,
+        FloatKind::Float16 | FloatKind::Fp16 => 16,
         FloatKind::Float | FloatKind::Float32 | FloatKind::Decimal32 => 32,
         FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 | FloatKind::Decimal64 => 64,
         FloatKind::Decimal128 => 128,
@@ -404,7 +405,7 @@ pub fn float_width(kind: FloatKind, target: &TargetInfo) -> u32 {
 #[must_use]
 pub fn float_format(kind: FloatKind, target: &TargetInfo) -> Format {
     match kind {
-        FloatKind::Float16 => Format::Half,
+        FloatKind::Float16 | FloatKind::Fp16 => Format::Half,
         FloatKind::Float | FloatKind::Float32 => Format::Single,
         FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 => Format::Double,
         FloatKind::LongDouble => target.long_double_format,

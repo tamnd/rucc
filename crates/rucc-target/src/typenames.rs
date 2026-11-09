@@ -6,6 +6,10 @@
 //! `__GNUC__` is nine or more and `typedef __SVFloat32_t __sv_f32_t;` when it is ten or more. A
 //! compiler without them cannot include `<math.h>` for that target at all.
 //!
+//! AArch64 also has `__fp16`, the half precision type of the Arm C Language Extensions, which gcc
+//! registers there and on Arm and nowhere else. `arm_fp16.h` and `arm_neon.h` build `float16_t`
+//! out of it.
+//!
 //! x86 and PowerPC have one more, `__float128`, which is gcc's older name for `_Float128` and the
 //! one code written before C23 reaches for. gcc has it on those two and nowhere else, and
 //! `__SIZEOF_FLOAT128__` is defined exactly where it is. wasm32 has it too, because clang has it
@@ -76,6 +80,8 @@ pub enum TypeName {
     Sizeless,
     /// `_Float128`, under the name gcc had for it before the ISO one.
     Float128,
+    /// `__fp16`, half precision that the promotions make a `float`.
+    Fp16,
     /// A polynomial scalar of this many bits, which C reads as the unsigned integer of the same
     /// size and gcc's debug information describes as a base type of its own.
     Poly(u8),
@@ -130,6 +136,7 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__Poly16_t", TypeName::Poly(16)),
     ("__Poly64_t", TypeName::Poly(64)),
     ("__Poly128_t", TypeName::Poly(128)),
+    ("__fp16", TypeName::Fp16),
 ];
 
 /// The name x86, PowerPC and wasm32 have for quad precision.
