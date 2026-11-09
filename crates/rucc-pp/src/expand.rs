@@ -70,6 +70,9 @@ pub struct Expander {
     /// make one token is an error in C and not in assembly, where gcc leaves the two halves
     /// next to each other and `L__sym_size_\name` in a `.macro` body relies on that.
     assembly: bool,
+    /// Whether the text is in the kencc dialect, where a parameter is replaced in a string
+    /// literal or a character constant of the body too.
+    kencc: bool,
     /// Lists an expansion has finished with, kept for the next one to fill.
     spare: Spare,
 }
@@ -84,6 +87,7 @@ impl Expander {
             counter: 0,
             prefix_map: PrefixMap::new(),
             assembly: false,
+            kencc: false,
             spare: Spare::default(),
         }
     }
@@ -96,6 +100,11 @@ impl Expander {
     /// Says whether what comes next is assembly rather than C.
     pub fn set_assembly(&mut self, assembly: bool) {
         self.assembly = assembly;
+    }
+
+    /// Says whether what comes next is in the kencc dialect.
+    pub fn set_kencc(&mut self, kencc: bool) {
+        self.kencc = kencc;
     }
 
     /// Whether what is being expanded is assembly.
@@ -219,6 +228,7 @@ impl Expander {
             counter: &mut self.counter,
             prefix_map: &self.prefix_map,
             assembly: self.assembly,
+            kencc: self.kencc,
             condition,
             steps: 0,
             spare: &mut self.spare,
@@ -257,6 +267,8 @@ struct Run<'a> {
     macros: &'a MacroTable,
     /// Whether a paste that does not make one token is let through, which it is in assembly.
     assembly: bool,
+    /// Whether a parameter is replaced in a literal of the body, which it is in kencc.
+    kencc: bool,
     /// Where a token is, which is what the builtin macros are answered from.
     sources: &'a SourceMap,
     /// `__VA_OPT__`, interned once rather than looked up per body token.
@@ -882,6 +894,15 @@ impl<'a> Run<'a> {
                 }
             }
 
+            // kencc replaces a parameter in a literal of the body with the text of the argument,
+            // so `#define assert(x) if(x){}else _assert("x")` gives the condition as a string.
+            if self.kencc && matches!(tok.kind, PpTokenKind::StringLit | PpTokenKind::CharConst) {
+                let literal = self.kencc_literal(def, args, tok);
+                emit_plain(&mut os, literal, &mut owed);
+                at += 1;
+                continue;
+            }
+
             // A parameter. Pasted with what follows it means the raw argument; otherwise the
             // fully expanded one.
             if let Some(idx) = tok.ident().and_then(|s| def.param_index(s)) {
@@ -1060,6 +1081,61 @@ impl<'a> Run<'a> {
         }
         out.push('"');
         out
+    }
+
+    /// A literal of a body with each parameter in it replaced by the text of its argument, as
+    /// `macdef` in `cc/macbody` of kencc does it. A word in the literal is a parameter when its
+    /// spelling is the name of one. The character after a backslash is not the start of a word,
+    /// so `"\\nx"` has the word `x` and not `nx`.
+    fn kencc_literal(&mut self, def: &MacroDef, args: &mut Args, tok: Tok) -> Tok {
+        let mut spelled = String::new();
+        self.spell(tok, &mut spelled);
+        let Some(open) = spelled.find(['"', '\'']) else { return tok };
+        let word = |c: char| c == '_' || c.is_ascii_alphanumeric() || !c.is_ascii();
+        let mut out = String::from(&spelled[..open]);
+        let mut changed = false;
+        let mut chars = spelled[open..].char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            if c == '\\' {
+                out.push(c);
+                if let Some((_, next)) = chars.next() {
+                    out.push(next);
+                }
+                continue;
+            }
+            if !(word(c) && !c.is_ascii_digit()) {
+                out.push(c);
+                continue;
+            }
+            let mut end = at + c.len_utf8();
+            while let Some(&(next_at, next)) = chars.peek() {
+                if !word(next) {
+                    break;
+                }
+                end = next_at + next.len_utf8();
+                chars.next();
+            }
+            let name = &spelled[open + at..open + end];
+            let param = self.interner.find(name).and_then(|sym| def.param_index(sym));
+            match param {
+                Some(idx) => {
+                    let mut first = true;
+                    for &arg in args.raw(idx).iter().filter(|t| !t.is_placemarker()) {
+                        if !first && arg.flags.has(TokenFlags::LEADING_SPACE) {
+                            out.push(' ');
+                        }
+                        first = false;
+                        self.spell(arg, &mut out);
+                    }
+                    changed = true;
+                }
+                None => out.push_str(name),
+            }
+        }
+        if !changed {
+            return tok;
+        }
+        Tok { value: Some(self.interner.intern(&out)), ..tok }
     }
 
     /// Wraps stringized text as a token.

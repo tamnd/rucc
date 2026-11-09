@@ -51,6 +51,10 @@ pub struct Context<'a> {
     /// Whether a header that is not found is one the build makes later, from `-MG`. It goes in
     /// the dependencies by the name the `#include` wrote, and there is no error.
     pub generated_headers: bool,
+    /// Whether the unit is in the kencc dialect, which is `-fkencc`. The preprocessor then
+    /// follows `cc/macbody` of kencc: `#` and `##` are not operators, a parameter is replaced
+    /// in a string literal of the body, and `#include` takes no macro.
+    pub kencc: bool,
 }
 
 impl<'a> Context<'a> {
@@ -70,6 +74,7 @@ impl<'a> Context<'a> {
             max_include_depth: 200,
             pedantic: false,
             generated_headers: false,
+            kencc: false,
         }
     }
 }

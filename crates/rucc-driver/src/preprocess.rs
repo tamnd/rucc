@@ -326,6 +326,7 @@ pub fn preprocess(opts: &Options, name: &str, assembly: bool, fs: &dyn FileSyste
     cx.lex = if assembly { lex.for_assembly() } else { lex };
     cx.pedantic = opts.pedantic;
     cx.generated_headers = opts.deps.generated;
+    cx.kencc = opts.kencc && !assembly;
     if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
         return failure(format!("{name}: the source map has no room left for the built in macros"));
     }

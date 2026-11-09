@@ -273,7 +273,8 @@ impl Preprocessor {
         self.targets = TargetLines::new(x86.then_some(opts.isa));
         let names = Names::new(cx.interner, self.gnuc);
         self.chars = cond::Chars::of(target);
-        let file = self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
+        let text = if opts.kencc { String::new() } else { built_in(target, opts) };
+        let file = self.synthetic(BUILT_IN, text, cx, &names)?;
         // The macros that cannot be written as a `#define` line, because what they stand for
         // depends on where they are used. They go in after the generated file and before the
         // command line, so that `-U__FILE__` takes one away the way it takes any other away.
@@ -602,6 +603,7 @@ impl Preprocessor {
             return;
         }
         self.expander.set_assembly(cx.lex.assembly);
+        self.expander.set_kencc(cx.kencc);
         let mark = out.len();
         self.expander.expand_toks_into(text, out, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
@@ -678,6 +680,15 @@ impl Preprocessor {
 
         let interner = &mut *cx.interner;
         if name == Some(names.define) {
+            // kencc has no `#` and no `##` operator. They stay in the body as text, and the
+            // parser gives an error where an expansion leaves one in the program.
+            let plain;
+            let rest = if cx.kencc {
+                plain = kencc_body(rest, interner);
+                &plain[..]
+            } else {
+                rest
+            };
             let (def, diagnostics) = parse_define_in(rest, interner, cx.lex.assembly);
             self.diagnostics.extend(diagnostics);
             if let Some(def) = def {
@@ -1290,6 +1301,11 @@ impl Preprocessor {
                 self.extra_tokens(&rest[1..], "#include");
                 return header;
             }
+        }
+        // kencc reads the name as it is written and does not expand a macro there.
+        if cx.kencc {
+            self.bad_header(rest.first().map_or(hash, |t| t.span));
+            return None;
         }
         // The computed include, `#include MACRO`. The line is macro expanded and then has to
         // look like a header name, which is the one place in the language where the spelling
@@ -2162,6 +2178,22 @@ fn calls(mut name: Symbol, macros: &MacroTable) -> bool {
 /// Whether a directive name is one that may be followed by a header name.
 fn is_include(name: Option<Symbol>, names: &Names) -> bool {
     name == Some(names.include) || name == Some(names.include_next) || name == Some(names.embed)
+}
+
+/// The tokens of a `#define` line in kencc, with each `#` and `##` made a token that is not an
+/// operator.
+fn kencc_body(tokens: &[PpToken], interner: &mut Interner) -> Vec<PpToken> {
+    tokens
+        .iter()
+        .map(|&tok| match tok.punct() {
+            Some(p @ (Punct::Hash | Punct::HashHash)) => PpToken {
+                kind: PpTokenKind::Other,
+                value: Some(interner.intern(p.as_str())),
+                ..tok
+            },
+            _ => tok,
+        })
+        .collect()
 }
 
 /// Whether `name` is a directive this phase answers, which in assembly is what tells a
