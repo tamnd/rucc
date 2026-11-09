@@ -18,12 +18,15 @@ use crate::scope::{IdentKind, Scopes};
 
 /// How deeply brackets may nest before the parser gives up.
 ///
-/// Recursive descent uses the machine stack for the grammar's nesting, so a file with a
+/// Recursive descent uses the machine stack for the grammar's nesting, so a file with ten
 /// thousand open parentheses is a stack overflow rather than a diagnostic unless something
-/// stops it. The number is clang's `-fbracket-depth` default, which is the one real code has
-/// been measured against, and it is far above anything a human writes and far below anything
-/// that costs the stack more than a fraction of a megabyte.
-pub const MAX_NESTING: usize = 256;
+/// stops it. GCC has no such limit, so the number is set by what real code needs and by what
+/// the stack holds. FreeBSD's `usr.sbin/wlanstat` numbers its counters with a chain of 162
+/// `#define S_X AFTER(S_PREV)`, where `AFTER(prev)` is `((prev)+1)`, so its last `case` is 324
+/// parentheses deep, and 256 refused it. At 512 the deepest shape, a call nested in a call, still
+/// compiles at `-O2` in an optimized build on a 1 MiB stack, the default for the main thread on
+/// Windows, and 1024 does not.
+pub const MAX_NESTING: usize = 512;
 
 /// Everything the parser needs that is not the tokens.
 #[derive(Debug, Clone, Copy)]
