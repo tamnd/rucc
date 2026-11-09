@@ -687,9 +687,7 @@ fn place(
     // copy of whatever else is true of it. It is never merged, since what `.comm` asks the linker
     // for is one piece of zeroed space and this wants one per thread, and it is never read only,
     // since the copy is made by writing it.
-    let zero = !global.nobss
-        && !pieces.is_empty()
-        && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)));
+    let zero = !global.nobss && !pieces.is_empty() && all_zero(pieces);
     if global.tls.is_some() {
         return Place::Thread { zero };
     }
@@ -699,7 +697,7 @@ fn place(
     // The flags come from the same two questions asked below of a variable in no section.
     if let Some(section) = global.section {
         let name = names.resolve(section).to_owned();
-        let zero = pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)));
+        let zero = all_zero(pieces);
         // A shared one is written whatever its bytes are, since gcc gives the flag to any
         // section it would make writable and names no section of zeros on COFF.
         let read_only = global.constant && addrs.is_empty();
@@ -733,6 +731,19 @@ fn place(
         };
     }
     Place::Written
+}
+
+/// Whether every byte of an image is zero, which is gcc's `initializer_zerop`.
+///
+/// A number or a string the program wrote as zero counts as much as the zeros after the end of a
+/// partly written array, so `int x = 0;` and `char s[4] = "";` go in `.bss` as gcc puts them there.
+/// A floating zero with its sign bit set is not zero to gcc either, and its bytes say so.
+fn all_zero(pieces: &[Piece]) -> bool {
+    pieces.iter().all(|piece| match piece {
+        Piece::Zero(_) => true,
+        Piece::Bytes(bytes) | Piece::Scalar(bytes) => bytes.iter().all(|&byte| byte == 0),
+        _ => false,
+    })
 }
 
 /// Whether that name is one this file both defines and keeps to itself.
