@@ -1327,7 +1327,9 @@ fn wint(target: &TargetInfo) -> Wint {
         tuple::Os::Windows => {
             Wint { spelling: "short unsigned int", max: "0xffff", min: "0", width: 16 }
         }
-        os if os.is_darwin() => {
+        // Every BSD makes it an `int` too, which is `WINT_TYPE` in gcc's `freebsd.h`, `netbsd.h`,
+        // `dragonfly.h` and `i386/openbsdelf.h`.
+        os if os.is_darwin() || os.is_bsd() => {
             Wint { spelling: "int", max: "0x7fffffff", min: "(-__WINT_MAX__ - 1)", width: 32 }
         }
         _ => Wint { spelling: "unsigned int", max: "0xffffffffU", min: "0U", width: 32 },
@@ -1349,12 +1351,16 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     // writes out by hand. The exact, least and fast sixty four bit types follow it, while
     // `intmax_t`, `intptr_t` and `size_t` stay `long`. Saying `long` here gave a freestanding
     // `stdint.h` an `int64_t` that the SDK's own typedef then redefined as a different type.
+    //
+    // OpenBSD goes further, and gcc's `openbsd-stdint.h` makes every sixty four bit type a `long
+    // long` on every processor, `intmax_t` included. `intptr_t` stays `long`.
     let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
-    let (int64, uint64, int64_suffix) = if apple {
-        ("long long int", "long long unsigned int", "LL")
-    } else {
-        (wide, wide_unsigned, wide_suffix)
-    };
+    let openbsd = target.tuple.os() == tuple::Os::OpenBsd;
+    let long_long = ("long long int", "long long unsigned int", "LL");
+    let (int64, uint64, int64_suffix) =
+        if apple || openbsd { long_long } else { (wide, wide_unsigned, wide_suffix) };
+    let (intmax, uintmax, intmax_suffix) =
+        if openbsd { long_long } else { (wide, wide_unsigned, wide_suffix) };
     // The types as wide as a pointer, which are the wide ones above everywhere but a thirty two
     // bit target, where they are `int`. That is what gcc says for i386 on Linux and on Windows,
     // and it is what `rucc_sema` gives `sizeof` and a pointer difference, which have to agree.
@@ -1376,15 +1382,16 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__INT_MAX__", "0x7fffffff");
     d.set("__LONG_MAX__", if lp64 { "0x7fffffffffffffffL" } else { "0x7fffffffL" });
     d.set("__LONG_LONG_MAX__", "0x7fffffffffffffffLL");
-    d.set("__INTMAX_MAX__", &wide_max);
-    d.set("__UINTMAX_MAX__", &wide_umax);
+    d.set("__INTMAX_MAX__", &format!("0x7fffffffffffffff{intmax_suffix}"));
+    d.set("__UINTMAX_MAX__", &format!("0xffffffffffffffffU{intmax_suffix}"));
     d.set("__SIZE_MAX__", &pointer_umax);
     d.set("__PTRDIFF_MAX__", &pointer_max);
     d.set("__INTPTR_MAX__", &pointer_max);
     d.set("__UINTPTR_MAX__", &pointer_umax);
-    // `long` where the pointer sized integer is, which is wasm32, whose `signal.h` says `typedef
-    // long sig_atomic_t;`, and `int` everywhere else.
-    let sig_atomic = if target.scalars.pointer_int_is_long { "long int" } else { "int" };
+    // `long` on wasm32, whose `signal.h` says `typedef long sig_atomic_t;`, and `int` everywhere
+    // else. That includes i386 OpenBSD, where the pointer sized integer is a `long` as well.
+    let wasm32 = target.tuple.arch() == tuple::Arch::Wasm32;
+    let sig_atomic = if wasm32 { "long int" } else { "int" };
     d.set("__SIG_ATOMIC_MAX__", if sig_atomic == "int" { "0x7fffffff" } else { "0x7fffffffL" });
     d.set("__SIG_ATOMIC_MIN__", "(-__SIG_ATOMIC_MAX__ - 1)");
     // The widest `_BitInt` this compiler builds, which is narrower than gcc 16's sixty five
@@ -1405,15 +1412,15 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__WINT_MIN__", wint.min);
     d.set("__SIZE_TYPE__", pointer_unsigned);
     d.set("__PTRDIFF_TYPE__", pointer);
-    d.set("__INTMAX_TYPE__", wide);
-    d.set("__UINTMAX_TYPE__", wide_unsigned);
+    d.set("__INTMAX_TYPE__", intmax);
+    d.set("__UINTMAX_TYPE__", uintmax);
     d.set("__INTPTR_TYPE__", pointer);
     d.set("__UINTPTR_TYPE__", pointer_unsigned);
     d.set("__SIG_ATOMIC_TYPE__", sig_atomic);
     d.set("__CHAR16_TYPE__", "short unsigned int");
     d.set("__CHAR32_TYPE__", "unsigned int");
-    d.set("__INTMAX_C(c)", &format!("c ## {wide_suffix}"));
-    d.set("__UINTMAX_C(c)", &format!("c ## U{wide_suffix}"));
+    d.set("__INTMAX_C(c)", &format!("c ## {intmax_suffix}"));
+    d.set("__UINTMAX_C(c)", &format!("c ## U{intmax_suffix}"));
 
     // The exact width family, which is what a freestanding `stdint.h` is written out of.
     exact(d, 8, "signed char", "unsigned char", "0x7f", "0xff", "");
@@ -1446,10 +1453,20 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     // `stdint.h` is the same shape, `int16_t` for the 16 bit one and `int32_t` for the other.
     let fast16_is_short =
         matches!(target.tuple.os(), tuple::Os::Windows | tuple::Os::MacOs | tuple::Os::IOs);
-    d.set("__INT_FAST8_TYPE__", "signed char");
-    d.set("__UINT_FAST8_TYPE__", "unsigned char");
-    d.set("__INT_FAST8_MAX__", "0x7f");
-    d.set("__UINT_FAST8_MAX__", "0xff");
+    // The BSDs make the 8 bit one an `int` as well, which is what gcc's `freebsd-stdint.h`,
+    // `netbsd-stdint.h`, `openbsd-stdint.h` and `dragonfly-stdint.h` say on every processor here.
+    let fast8_is_int = target.tuple.os().is_bsd();
+    if fast8_is_int {
+        d.set("__INT_FAST8_TYPE__", "int");
+        d.set("__UINT_FAST8_TYPE__", "unsigned int");
+        d.set("__INT_FAST8_MAX__", "0x7fffffff");
+        d.set("__UINT_FAST8_MAX__", "0xffffffffU");
+    } else {
+        d.set("__INT_FAST8_TYPE__", "signed char");
+        d.set("__UINT_FAST8_TYPE__", "unsigned char");
+        d.set("__INT_FAST8_MAX__", "0x7f");
+        d.set("__UINT_FAST8_MAX__", "0xff");
+    }
     for width in [16, 32] {
         let (signed, unsigned, max, umax) = if width == 16 && fast16_is_short {
             ("short int", "short unsigned int", "0x7fff", "0xffff")
@@ -1469,7 +1486,9 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__UINT_FAST64_MAX__", &int64_umax);
 
     let fast32 = if fast_is_wide { 64 } else { 32 };
-    widths(d, target, &wchar, &wint, if fast16_is_short { 16 } else { fast32 }, fast32);
+    let fast16 = if fast16_is_short { 16 } else { fast32 };
+    let fast8 = if fast8_is_int { 32 } else { 8 };
+    widths(d, target, &wchar, &wint, [fast8, fast16, fast32]);
 }
 
 /// The widths, which C23's `limits.h` and `stdint.h` are written out of.
@@ -1482,7 +1501,8 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
 /// Each of these says how many value bits and sign bits the type has, which is not the same as
 /// how many bits it occupies. They agree for every type on every target here, and the day one of
 /// them does not, this is the family that has to say the smaller number.
-fn widths(d: &mut Defs, target: &TargetInfo, wchar: &Wchar, wint: &Wint, fast16: u32, fast32: u32) {
+fn widths(d: &mut Defs, target: &TargetInfo, wchar: &Wchar, wint: &Wint, fast: [u32; 3]) {
+    let [fast8, fast16, fast32] = fast;
     let pointer = target.pointer_width;
     d.set("__SCHAR_WIDTH__", "8");
     d.set("__SHRT_WIDTH__", "16");
@@ -1499,7 +1519,7 @@ fn widths(d: &mut Defs, target: &TargetInfo, wchar: &Wchar, wint: &Wint, fast16:
     for width in [8, 16, 32, 64] {
         d.set(&format!("__INT_LEAST{width}_WIDTH__"), &width.to_string());
     }
-    d.set("__INT_FAST8_WIDTH__", "8");
+    d.set("__INT_FAST8_WIDTH__", &fast8.to_string());
     d.set("__INT_FAST16_WIDTH__", &fast16.to_string());
     d.set("__INT_FAST32_WIDTH__", &fast32.to_string());
     d.set("__INT_FAST64_WIDTH__", "64");
@@ -2023,6 +2043,77 @@ mod tests {
         let strict =
             built_in(&TargetInfo::new(triple), &Predef { gnu_extensions: false, ..Predef::new() });
         assert!(has(&strict, "#define __unix__ 1") && !strict.contains("#define unix "));
+    }
+
+    /// tamnd/rucc#4088. The integer types are gcc's `freebsd-stdint.h`, `netbsd-stdint.h`,
+    /// `dragonfly-stdint.h` and `openbsd-stdint.h`, with `wint_t` an `int` on all four.
+    #[test]
+    fn a_bsd_takes_the_integer_types_of_its_gcc() {
+        let every = [
+            "__WINT_TYPE__ int",
+            "__WINT_MAX__ 0x7fffffff",
+            "__WINT_MIN__ (-__WINT_MAX__ - 1)",
+            "__INT_FAST8_TYPE__ int",
+            "__UINT_FAST8_TYPE__ unsigned int",
+            "__INT_FAST8_MAX__ 0x7fffffff",
+            "__UINT_FAST8_MAX__ 0xffffffffU",
+            "__INT_FAST8_WIDTH__ 32",
+            "__INT_FAST16_TYPE__ int",
+            "__INT_FAST16_WIDTH__ 32",
+            "__INT_FAST32_TYPE__ int",
+            "__SIG_ATOMIC_TYPE__ int",
+        ];
+        for triple in [
+            "x86_64-unknown-freebsd",
+            "i386-unknown-freebsd",
+            "aarch64--netbsd",
+            "x86_64-unknown-dragonfly",
+            "x86_64-unknown-openbsd",
+            "i386-unknown-openbsd",
+        ] {
+            let set = set_for(triple);
+            for line in every {
+                assert!(has(&set, &format!("#define {line}")), "{triple}: {line}");
+            }
+        }
+        let freebsd = set_for("x86_64-unknown-freebsd");
+        for line in ["__INT64_TYPE__ long int", "__INTMAX_TYPE__ long int", "__INTMAX_C(c) c ## L"]
+        {
+            assert!(has(&freebsd, &format!("#define {line}")), "{line}");
+        }
+        // OpenBSD makes every sixty four bit type a `long long`, and i386 OpenBSD makes the pointer
+        // sized ones `long`.
+        let openbsd = set_for("x86_64-unknown-openbsd");
+        for line in [
+            "__INT64_TYPE__ long long int",
+            "__INT_LEAST64_TYPE__ long long int",
+            "__INT_FAST64_TYPE__ long long int",
+            "__INTMAX_TYPE__ long long int",
+            "__UINTMAX_TYPE__ long long unsigned int",
+            "__INTMAX_MAX__ 0x7fffffffffffffffLL",
+            "__INTMAX_C(c) c ## LL",
+            "__UINTMAX_C(c) c ## ULL",
+            "__INTPTR_TYPE__ long int",
+            "__SIZE_TYPE__ long unsigned int",
+        ] {
+            assert!(has(&openbsd, &format!("#define {line}")), "{line}");
+        }
+        let i386 = set_for("i386-unknown-openbsd");
+        for line in [
+            "__SIZE_TYPE__ long unsigned int",
+            "__SIZE_MAX__ 0xffffffffUL",
+            "__PTRDIFF_TYPE__ long int",
+            "__INTPTR_TYPE__ long int",
+            "__SIG_ATOMIC_MAX__ 0x7fffffff",
+        ] {
+            assert!(has(&i386, &format!("#define {line}")), "{line}");
+        }
+        assert!(has(&set_for("i386-unknown-freebsd"), "#define __SIZE_TYPE__ unsigned int"));
+        // Linux keeps its own answers.
+        let linux = set_for("x86_64-unknown-linux-gnu");
+        assert!(has(&linux, "#define __WINT_TYPE__ unsigned int"));
+        assert!(has(&linux, "#define __INT_FAST8_TYPE__ signed char"));
+        assert!(has(&linux, "#define __INT_FAST8_WIDTH__ 8"));
     }
 
     #[test]

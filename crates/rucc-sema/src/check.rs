@@ -770,8 +770,10 @@ impl<'a> Checker<'a> {
     /// bit targets get `long long`. `rucc_pp::predef` writes `__INTMAX_TYPE__` and
     /// `__UINTMAX_TYPE__` out of the same rule and the two have to agree, or a program that reads
     /// the macro and a program that calls `__builtin_imaxabs` are working in different types.
-    pub(crate) const fn widest_integer(&self, signed: bool) -> IntKind {
-        match (self.cx.target.long_width == 64, signed) {
+    /// OpenBSD is the LP64 system that makes it `long long`, as gcc's `openbsd-stdint.h` says.
+    pub(crate) fn widest_integer(&self, signed: bool) -> IntKind {
+        let openbsd = self.cx.target.tuple.os().as_str() == "openbsd";
+        match (self.cx.target.long_width == 64 && !openbsd, signed) {
             (true, true) => IntKind::Long,
             (true, false) => IntKind::ULong,
             (false, true) => IntKind::LongLong,
