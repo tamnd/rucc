@@ -9969,6 +9969,32 @@ nop
         );
     }
 
+    /// FreeBSD's acpi_wakecode.S and mpboot.S reach their data as the distance of a label from the
+    /// start of the code, with no registers, since that code runs at an address it was not linked
+    /// at. Both labels are in this section, so the distance is a number and nothing is relocated.
+    /// The bytes are the ones GNU as 2.42 writes for the same lines.
+    #[test]
+    fn a_label_less_a_label_is_an_address_the_machine_holds_outright() {
+        let read = assembled(
+            "\t.text\n\t.code16\nwakeup_start:\n\tnop\n\ttestb $~0, resume_beep - wakeup_start\n\
+             \tmovb $0, resume_beep - wakeup_start\n\tlgdtl bootgdtdesc - wakeup_start\n\
+             \torl %ebx, bootgdtdesc-wakeup_start+2\n\tmov $bootgdtdesc - wakeup_start, %eax\n\
+             \t.code32\n\tmovl %eax, bootgdtdesc - wakeup_start\n\tlgdt bootgdtdesc-wakeup_start\n\
+             \t.code64\n\tmovl %eax, bootgdtdesc - wakeup_start\nresume_beep:\n\t.byte 0\n\
+             bootgdtdesc:\n\t.word 0\n\t.long 0\n",
+        );
+        assert_eq!(
+            bytes(&read, ".text"),
+            [
+                0x90, 0xf6, 0x06, 0x2f, 0x00, 0xff, 0xc6, 0x06, 0x2f, 0x00, 0x00, 0x66, 0x0f, 0x01,
+                0x16, 0x30, 0x00, 0x66, 0x09, 0x1e, 0x32, 0x00, 0x66, 0xb8, 0x30, 0x00, 0x00, 0x00,
+                0xa3, 0x30, 0x00, 0x00, 0x00, 0x0f, 0x01, 0x15, 0x30, 0x00, 0x00, 0x00, 0x89, 0x04,
+                0x25, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            ]
+        );
+        assert!(relocs(&read, ".text").is_empty());
+    }
+
     /// NetBSD's amd64 `mptramp.S` and `acpi_wakecode.S` load the table for protected mode from
     /// real mode with `data32 addr32 lgdt`. gas writes the address size prefix and then the
     /// operand size one, and with `addr32` the address of a name is four bytes and the addressing
