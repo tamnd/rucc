@@ -420,7 +420,8 @@ const fn order_of(order: MemOrder) -> i128 {
 /// ones left out are the ones an exploit goes looking for.
 ///
 /// ```text
-///   -fstack-protector          a local array of eight bytes or more, or a stack that grows
+///   -fstack-protector          a local character array of `ssp-buffer-size` bytes or more,
+///                              alone or in a structure, or a stack that grows
 ///   -fstack-protector-strong   any local array, anything holding one, or an address taken
 ///   -fstack-protector-all      every function
 /// ```
@@ -465,10 +466,48 @@ fn guarded(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> Set
             let ty = tast[local].ty;
             match want {
                 Protector::Strong => escaped.contains(&local) || holds_array(types, ty),
-                _ => is_array(types, ty) && repr::size_of(types, target, ty) >= buffer,
+                _ => holds_char_buffer(types, target, ty, buffer),
             }
         })
         .collect()
+}
+
+/// Whether an object of that type is, or has among its members, an array of `char`, `signed char`
+/// or `unsigned char` of at least `buffer` bytes. That is what the plain `-fstack-protector`
+/// protects: gcc's `stack_protect_classify_type` calls it a large character array and the plain
+/// flag asks for nothing else.
+///
+/// gcc reads the rule narrowly and so does this. The element is looked at with typedefs, qualifiers
+/// and `_Atomic` taken off, so `uint8_t buf[16]` counts and `int buf[16]` does not. A structure or
+/// union counts through its members at any depth, but an array does not count through its
+/// elements: `char grid[4][4]` and an array of structures that hold character arrays have no
+/// character array as gcc sees them. An array whose size is not a constant, a variable length one
+/// or a flexible array member, counts whatever `buffer` is, because gcc takes its size to be the
+/// limit.
+fn holds_char_buffer(types: &Types, target: &TargetInfo, ty: TypeId, buffer: u64) -> bool {
+    match types.kind(types.canonical(ty)) {
+        TypeKind::Array { elem, len } => {
+            is_char(types, elem)
+                && match len {
+                    ArrayLen::Fixed(_) => repr::size_of(types, target, ty) >= buffer,
+                    ArrayLen::Unknown | ArrayLen::Star | ArrayLen::Variable(_) => true,
+                }
+        }
+        TypeKind::Record(id) => {
+            let fields = &types.record_info(id).fields;
+            fields.iter().any(|field| holds_char_buffer(types, target, field.ty, buffer))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `ty` is one of the three character types, under any typedef, qualifier or `_Atomic`.
+fn is_char(types: &Types, ty: TypeId) -> bool {
+    let kind = match types.kind(types.canonical(ty)) {
+        TypeKind::Atomic(inner) => types.kind(types.canonical(inner)),
+        kind => kind,
+    };
+    matches!(kind, TypeKind::Int(IntKind::Char | IntKind::SChar | IntKind::UChar))
 }
 
 /// Whether an object of that type is an array.
