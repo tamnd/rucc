@@ -3493,13 +3493,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // static PIE there is placed by a kernel that does not align it to that page yet.
     //
     // NetBSD's own GCC is the exception. Its `LINK_SPEC` reads `-static` and `-pie` together as a
-    // static PIE, with `crtbeginS.o` and `--no-dynamic-linker`, and its `crt0.o` relocates the
-    // program, so there both spellings ask for the same program.
+    // static PIE, with `crtbeginS.o` and `--no-dynamic-linker`, and on x86 its `crt0.o` relocates
+    // the program. It has no spec for `-static-pie`, which is neither of the two words, and the
+    // word turns off a default `-pie`. So for `-static-pie` it links an ordinary program, dynamic
+    // and not position independent, on every machine.
     if link.is_static
         && !static_pie
         && link.pie == Some(true)
         && opts.target.os != rucc_target::Os::NetBsd
     {
+        link.pie = Some(false);
+    }
+    if static_pie && opts.target.os == rucc_target::Os::NetBsd {
+        link.is_static = false;
         link.pie = Some(false);
     }
 
@@ -9125,6 +9131,9 @@ mod tests {
         assert!(link.no_startfiles);
         let (both, _) = linking(&["-static-pie", "a.c"]);
         assert!(both.is_static && both.pie == Some(true));
+        // NetBSD's GCC has no spec for the one word and links an ordinary program for it.
+        let (ordinary, _) = linking(&["--target=aarch64-unknown-netbsd", "-static-pie", "a.c"]);
+        assert!(!ordinary.is_static && ordinary.pie == Some(false));
         for line in [["-pie", "-static", "a.c"], ["-static", "-pie", "a.c"]] {
             let (plain, _) = linking(&line);
             assert!(plain.is_static && plain.pie == Some(false), "{line:?}");
