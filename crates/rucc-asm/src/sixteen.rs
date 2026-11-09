@@ -39,20 +39,44 @@ pub(crate) fn one_in16(word: &str, args: &[String], gcc: bool) -> Result<Written
     {
         return registers16(word, args, which, gcc);
     }
-    let mut written = sized(word, args, gcc)?;
+    let mut written = sized(word, args, gcc, false)?;
     if args.iter().any(|arg| addressed(arg, Width::Long)) {
         crate::source::prefixed(&mut written, 0x67)?;
     }
     Ok(written)
 }
 
+/// The bytes of one instruction in sixteen bit code that the line said `addr32` in front of, as
+/// the instruction before the address size prefix, which the caller puts on.
+///
+/// The prefix makes every address a thirty two bit one, so an address that is only a name keeps
+/// its four bytes and the addressing byte that says so, where without it the name would be cut
+/// to two. NetBSD's `mptramp.S` loads its table with `data32 addr32 lgdt (mptramp_gdt32_desc)`,
+/// which gas writes as `67 66 0f 01 15` and four bytes of address. An address of sixteen bit
+/// registers cannot be one of thirty two, so gas refuses that and so does this.
+///
+/// # Errors
+///
+/// As [`one_in16`].
+pub(crate) fn one_in16_addr32(word: &str, args: &[String], gcc: bool) -> Result<Written, String> {
+    if let Some(arg) = args.iter().find(|arg| arg.trim() != "(%dx)" && addressed(arg, Width::Word))
+    {
+        return Err(format!(
+            "'{}' is an address of sixteen bit registers, which 'addr32' cannot go in front of",
+            arg.trim()
+        ));
+    }
+    sized(word, args, gcc, true)
+}
+
 /// [`one_in16`] before the address size prefix, which is the instruction with its operand size
-/// prefix right and any address that is only a name cut down to two bytes.
-fn sized(word: &str, args: &[String], gcc: bool) -> Result<Written, String> {
+/// prefix right and any address that is only a name cut down to two bytes, unless `addr32` says
+/// it is a thirty two bit address.
+fn sized(word: &str, args: &[String], gcc: bool, addr32: bool) -> Result<Written, String> {
     if let Some(written) = stacked(word, args, gcc) {
         return written;
     }
-    if let Some(written) = branch(word, args, gcc)? {
+    if let Some(written) = branch(word, args, gcc, addr32)? {
         return Ok(written);
     }
     if let Some(written) = segment(word, args, gcc) {
@@ -85,7 +109,9 @@ fn sized(word: &str, args: &[String], gcc: bool) -> Result<Written, String> {
         _ => word,
     };
     let mut written = one_in(word, args, Mode::Bits32)?;
-    absolute(word, args, &mut written)?;
+    if !addr32 {
+        absolute(word, args, &mut written)?;
+    }
     // The four that load or store a table's place are always thirty two bits with the letter on,
     // and the four that widen into a register of thirty two bits say so with the last letter, which
     // the other width of the same line does not show, since there is no `movzww`.
@@ -194,7 +220,7 @@ fn segment(word: &str, args: &[String], gcc: bool) -> Option<Result<Written, Str
 
 /// A jump or call, whose distance is two bytes unless the instruction is the thirty two bit one,
 /// which has the prefix and keeps four.
-fn branch(word: &str, args: &[String], gcc: bool) -> Result<Option<Written>, String> {
+fn branch(word: &str, args: &[String], gcc: bool, addr32: bool) -> Result<Option<Written>, String> {
     let wide = matches!(word, "calll" | "jmpl") || (gcc && word == "call");
     let plain = match word {
         "calll" | "callw" => "call",
@@ -209,7 +235,9 @@ fn branch(word: &str, args: &[String], gcc: bool) -> Result<Option<Written>, Str
         // Through a register or a word in memory, whose width is the register's or the letter's.
         let mut written = one_in(plain, args, Mode::Bits32)?;
         let target = target.trim();
-        absolute(plain, args, &mut written)?;
+        if !addr32 {
+            absolute(plain, args, &mut written)?;
+        }
         let long = target
             .strip_prefix('%')
             .and_then(gpr_named)
@@ -420,8 +448,9 @@ fn registers16(word: &str, args: &[String], which: usize, gcc: bool) -> Result<W
         list[which] = format!("{star}{segment}{place}");
         list
     };
-    let probe = sized(word, &with(MARK), gcc)?;
-    let mut written = if value.is_some() { probe.clone() } else { sized(word, &with(disp), gcc)? };
+    let probe = sized(word, &with(MARK), gcc, false)?;
+    let mut written =
+        if value.is_some() { probe.clone() } else { sized(word, &with(disp), gcc, false)? };
     let Some(mut at) = probe.holes.iter().find(|hole| hole.name == MARK).map(|hole| hole.at) else {
         return Err(format!("'{text}' is an address this instruction cannot have"));
     };

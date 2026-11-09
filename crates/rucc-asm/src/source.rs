@@ -930,6 +930,17 @@ impl Reader {
                 break;
             }
             let Some(byte) = prefix(&word).filter(|_| !rest.is_empty()) else { break };
+            // `data32` is the operand size prefix written in sixteen bit code, where it makes the
+            // instruction behind it thirty two bits wide. gas refuses it anywhere else, since in
+            // thirty two bit code it says what the code is already and sixty four bit code has no
+            // thirty two bit operand size to ask for with it.
+            if word == "data32" && self.sixteen.is_none() {
+                return Err(self.bad(if self.mode() == Mode::Bits64 {
+                    "'data32' is not a prefix sixty four bit code has"
+                } else {
+                    "'data32' in thirty two bit code is a prefix that says nothing"
+                }));
+            }
             prefixes.push(byte);
             let (next, after) = match rest.find(char::is_whitespace) {
                 Some(cut) => (&rest[..cut], rest[cut..].trim()),
@@ -1475,6 +1486,9 @@ impl Reader {
         }
         let mode = self.mode();
         let mut written = match self.sixteen {
+            Some(gcc) if prefixes.contains(&0x67) => {
+                crate::sixteen::one_in16_addr32(word, &args, gcc)
+            }
             Some(gcc) => crate::sixteen::one_in16(word, &args, gcc),
             None => crate::instruction::one_in(word, &args, mode),
         }
@@ -2474,10 +2488,28 @@ impl Reader {
                 // gas puts `.previous` back to what it was at the push too, so a template that
                 // pushes and pops inside `.section .fixup` leaves `.previous` going back to the
                 // section before `.fixup`, and not to the one the template pushed.
-                let Some((back, before)) = self.stack.pop() else {
-                    return Err(self.bad(".popsection with nothing pushed"));
-                };
-                (self.here, self.before) = (back, before);
+                //
+                // With nothing pushed gas warns, leaves the section as it is and goes on, so this
+                // does the same, and stops only under `--fatal-warnings`, as gas does.
+                match self.stack.pop() {
+                    Some((back, before)) => (self.here, self.before) = (back, before),
+                    None if self.fatal_warnings => {
+                        return Err(self.bad(
+                            ".popsection with nothing pushed, which is a warning that \
+                             --fatal-warnings makes an error",
+                        ));
+                    }
+                    None => {}
+                }
+                // gas reads nothing after `.popsection`, so what follows it on the line is read as
+                // the next statement. NetBSD's amd64 locore.S has a backslash at the end of one
+                // `ELFNOTE(...)` line, which joins it to the next one, and the preprocessor then
+                // writes `.popsection .pushsection .note.Xen, "a", @note ; ...` with no `;` between
+                // the two notes. Passing over the second `.pushsection` would leave its
+                // `.popsection` with nothing to pop.
+                if !rest.is_empty() {
+                    self.feed(rest)?;
+                }
             }
             "previous" => {
                 let Some(back) = self.before else {
@@ -6691,7 +6723,7 @@ fn prefix(word: &str) -> Option<u8> {
         "fs" => 0x64,
         "gs" => 0x65,
         "addr32" => 0x67,
-        "data16" => 0x66,
+        "data16" | "data32" => 0x66,
         "rep" | "repe" | "repz" | "xrelease" => 0xF3,
         "repne" | "repnz" | "xacquire" => 0xF2,
         "lock" => 0xF0,
@@ -6764,6 +6796,12 @@ fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
             _ => None,
         };
     }
+    // The VIA PadLock instructions that encrypt, hash and multiply have `0xf3` as part of the
+    // opcode, and VIA's documentation and NetBSD's `aes_via.c` write them `rep xcryptecb`. gas
+    // writes the byte once for the two, so the prefix is the one already there and not a second.
+    if matches!(word, "rep" | "repe" | "repz") && padlock_repeated(next) {
+        return Some((next.to_ascii_lowercase(), after));
+    }
     // `rep bsf` is how gcc writes `tzcnt` for a machine that may not have it: the bytes are the
     // same, and a processor without the instruction ignores the prefix and runs the `bsf`.
     if matches!(word, "rep" | "repe" | "repz") {
@@ -6787,6 +6825,29 @@ fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
         _ => return None,
     };
     Some((format!("{prefix} {next}"), after))
+}
+
+/// Whether the word is a VIA PadLock instruction whose opcode starts with the repeat prefix.
+///
+/// `xstore` is not one of them: it is `0f a7 c0` alone, and `rep xstore` is that with the prefix
+/// in front, which the line's prefix puts there like any other.
+fn padlock_repeated(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "xcryptecb"
+            | "xcryptcbc"
+            | "xcryptctr"
+            | "xcryptcfb"
+            | "xcryptofb"
+            | "xcrypt-ecb"
+            | "xcrypt-cbc"
+            | "xcrypt-ctr"
+            | "xcrypt-cfb"
+            | "xcrypt-ofb"
+            | "montmul"
+            | "xsha1"
+            | "xsha256"
+    )
 }
 
 /// The RISC-V relocation a `.reloc` names that is written as it is asked for rather than as the
@@ -9868,6 +9929,129 @@ nop
                 (16, "b", Reference::Address { bytes: 2 }, 0),
             ]
         );
+    }
+
+    /// NetBSD's amd64 `mptramp.S` and `acpi_wakecode.S` load the table for protected mode from
+    /// real mode with `data32 addr32 lgdt`. gas writes the address size prefix and then the
+    /// operand size one, and with `addr32` the address of a name is four bytes and the addressing
+    /// byte is the thirty two bit `0x15`. Without `addr32` it is two bytes and `0x16`.
+    #[test]
+    fn data32_and_addr32_in_sixteen_bit_code_are_the_two_prefixes_gas_writes() {
+        let read = assembled(
+            "\t.text\n\t.code16\n\tdata32 addr32 lgdt (desc)\n\tdata32 addr32 lgdt desc\n\
+             \tdata32 lgdt desc\n\taddr32 movl (%eax), %ebx\n\t.code64\n\tret\n\t.data\ndesc:\n",
+        );
+        assert_eq!(
+            bytes(&read, ".text"),
+            [
+                0x67, 0x66, 0x0f, 0x01, 0x15, 0, 0, 0, 0, 0x67, 0x66, 0x0f, 0x01, 0x15, 0, 0, 0, 0,
+                0x66, 0x0f, 0x01, 0x16, 0, 0, 0x67, 0x66, 0x8b, 0x18, 0xc3
+            ]
+        );
+        let at: Vec<(usize, &str)> =
+            relocs(&read, ".text").iter().map(|&(at, name, ..)| (at, name)).collect();
+        assert_eq!(at, [(5, "desc"), (14, "desc"), (22, "desc")]);
+        let widths: Vec<Reference> =
+            relocs(&read, ".text").iter().map(|&(_, _, kind, _)| kind).collect();
+        assert_eq!(widths[2], Reference::Address { bytes: 2 });
+        assert_ne!(widths[0], Reference::Address { bytes: 2 });
+        assert_eq!(widths[0], widths[1]);
+    }
+
+    /// gas takes `data32` only in sixteen bit code. In thirty two bit code it is the size the
+    /// code is already, and sixty four bit code has no such prefix.
+    #[test]
+    fn data32_outside_sixteen_bit_code_is_refused_as_gas_refuses_it() {
+        let why = refused("\t.text\n\tdata32 lgdt (desc)\n");
+        assert!(why.why.contains("sixty four bit"), "{why}");
+        let why = refused("\t.text\n\t.code32\n\tdata32 lgdt (desc)\n");
+        assert!(why.why.contains("thirty two bit"), "{why}");
+        let why = refused("\t.text\n\t.code16\n\taddr32 movw (%bx), %ax\n");
+        assert!(why.why.contains("sixteen bit registers"), "{why}");
+    }
+
+    /// gas reads nothing after `.popsection`, so what comes after it on the line is the next
+    /// statement. NetBSD's amd64 locore.S has a backslash at the end of one of its Xen
+    /// `ELFNOTE(...)` lines, and the two notes come out of the preprocessor as one line with
+    /// `.popsection .pushsection` in the middle. Both notes go in, and the second `.popsection`
+    /// has the second `.pushsection` to go back from.
+    #[test]
+    fn what_follows_popsection_on_the_line_is_the_next_statement() {
+        let read = assembled(
+            "\t.section __xen_guest\n\
+             \t.pushsection .note.Xen, \"a\", @note ; .long 1 ; .popsection \
+             .pushsection .note.Xen, \"a\", @note ; .long 2 ; .popsection\n\t.byte 3\n",
+        );
+        assert_eq!(bytes(&read, ".note.Xen"), [1, 0, 0, 0, 2, 0, 0, 0]);
+        assert_eq!(bytes(&read, "__xen_guest"), [3]);
+    }
+
+    /// gas warns about a `.popsection` with nothing pushed, leaves the section as it was and goes
+    /// on. Under `--fatal-warnings`, which NetBSD passes for locore.S, the warning stops the file.
+    #[test]
+    fn popsection_with_nothing_pushed_is_a_warning() {
+        let text = "\t.data\n\t.byte 1\n\t.popsection\n\t.byte 2\n";
+        let read = read(text, Arch::X86_64).expect("a warning is not an error by itself");
+        assert_eq!(bytes(&read, ".data"), [1, 2]);
+        let fatal = Flags { fatal_warnings: true, ..Flags::default() };
+        let why = read_with(text, Arch::X86_64, ObjectFormat::Elf, fatal)
+            .expect_err("--fatal-warnings let a warning through");
+        assert!(why.why.contains("nothing pushed"), "{why}");
+    }
+
+    /// The forms NetBSD's `busfunc.S`, `cpufunc.S`, `cpu_rng.c` and `aes_via.c` write. A string
+    /// through a port with its operands written out is the instruction without them, `monitor` and
+    /// `mwait` take their registers at sixty four bits as well, and the VIA PadLock instructions
+    /// are `0f a7` and `0f a6` with the repeat prefix written once, as gas writes them.
+    #[test]
+    fn the_netbsd_amd64_port_and_padlock_forms_are_the_bytes_gas_writes() {
+        for (line, want) in [
+            ("insb %dx, %es:(%rdi)", &[0x6c][..]),
+            ("insw %dx, %es:(%rdi)", &[0x66, 0x6d]),
+            ("insl %dx, %es:(%rdi)", &[0x6d]),
+            ("insl (%dx), (%rdi)", &[0x6d]),
+            ("insb %dx, %es:(%edi)", &[0x67, 0x6c]),
+            ("outsb %ds:(%rsi), %dx", &[0x6e]),
+            ("outsw %ds:(%rsi), %dx", &[0x66, 0x6f]),
+            ("outsl %ds:(%rsi), %dx", &[0x6f]),
+            ("outsl %fs:(%rsi), %dx", &[0x64, 0x6f]),
+            ("outsl (%esi), (%dx)", &[0x67, 0x6f]),
+            ("rep insw %dx, %es:(%rdi)", &[0x66, 0xf3, 0x6d]),
+            ("rep outsb (%rsi), %dx", &[0xf3, 0x6e]),
+            ("monitor %rax, %rcx, %rdx", &[0x0f, 0x01, 0xc8]),
+            ("monitor %rax, %ecx, %edx", &[0x0f, 0x01, 0xc8]),
+            ("mwait %rax, %rcx", &[0x0f, 0x01, 0xc9]),
+            ("mwait %eax, %ecx", &[0x0f, 0x01, 0xc9]),
+            ("xstorerng", &[0x0f, 0xa7, 0xc0]),
+            ("xstore", &[0x0f, 0xa7, 0xc0]),
+            ("rep xstore", &[0xf3, 0x0f, 0xa7, 0xc0]),
+            ("xcryptecb", &[0xf3, 0x0f, 0xa7, 0xc8]),
+            ("rep xcryptecb", &[0xf3, 0x0f, 0xa7, 0xc8]),
+            ("rep xcryptcbc", &[0xf3, 0x0f, 0xa7, 0xd0]),
+            ("rep xcryptctr", &[0xf3, 0x0f, 0xa7, 0xd8]),
+            ("rep xcryptcfb", &[0xf3, 0x0f, 0xa7, 0xe0]),
+            ("rep xcryptofb", &[0xf3, 0x0f, 0xa7, 0xe8]),
+            ("rep xcrypt-ecb", &[0xf3, 0x0f, 0xa7, 0xc8]),
+            ("rep montmul", &[0xf3, 0x0f, 0xa6, 0xc0]),
+            ("rep xsha1", &[0xf3, 0x0f, 0xa6, 0xc8]),
+            ("rep xsha256", &[0xf3, 0x0f, 0xa6, 0xd0]),
+            ("xsha256", &[0xf3, 0x0f, 0xa6, 0xd0]),
+        ] {
+            let read = assembled(&format!("\t.text\n\t{line}\n"));
+            assert_eq!(bytes(&read, ".text"), want, "{line}");
+        }
+        for (line, said) in [
+            ("insb %dx, %ds:(%rdi)", "through %es"),
+            ("insb %dx, (%rsi)", "(%rdi)"),
+            ("insb %ax, (%rdi)", "%dx"),
+            ("ins %dx, (%rdi)", "how wide"),
+            ("mwait %rax, %ecx", "%eax, %ecx or %rax, %rcx"),
+            ("monitor %rax, %rcx, %edx", "%rax, %ecx, %edx or %rax, %rcx, %rdx"),
+            ("repne xcryptecb", "same kind"),
+        ] {
+            let why = refused(&format!("\t.text\n\t{line}\n"));
+            assert!(why.why.contains(said), "{line}: {why}");
+        }
     }
 
     /// A distance to another section in one byte and in two, which the kernel's boot header writes

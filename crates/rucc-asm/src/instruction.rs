@@ -334,6 +334,82 @@ pub(crate) fn one_in(word: &str, args: &[String], mode: Mode) -> Result<Written,
     Ok(written)
 }
 
+/// A string instruction through a port with its two operands written out, `insb %dx, %es:(%rdi)`
+/// or `outsl %ds:(%rsi), %dx`, which NetBSD's `busfunc.S` writes. The operands say nothing the
+/// opcode does not: the port is always `dx`, and the string is always at `es:di` for `ins` and at
+/// `si` for `outs`. So the bytes are those of the instruction without them, with a segment prefix
+/// for an `outs` that reads through a segment other than `ds`, which is the one thing gas lets
+/// the line choose. An address of thirty two bit registers in sixty four bit code gets its prefix
+/// where every other instruction gets it, in [`one_in`].
+fn port_string(word: &str, args: &[String], mode: Mode) -> Option<Result<Written, String>> {
+    let stem = word.strip_prefix("rep ").unwrap_or(word);
+    let (inward, letter) = match stem.strip_prefix("ins") {
+        Some(letter) => (true, letter),
+        None => (false, stem.strip_prefix("outs")?),
+    };
+    if !matches!(letter, "" | "b" | "w" | "l") {
+        return None;
+    }
+    let [first, second] = args else { return None };
+    let (port, string) = if inward { (first, second) } else { (second, first) };
+    Some(port_string_bytes(word, letter, inward, port.trim(), string.trim(), mode))
+}
+
+/// [`port_string`] once the line is known to be one.
+fn port_string_bytes(
+    word: &str,
+    letter: &str,
+    inward: bool,
+    port: &str,
+    string: &str,
+    mode: Mode,
+) -> Result<Written, String> {
+    if letter.is_empty() {
+        return Err(format!(
+            "'{word}' says neither by its letter nor by a register how wide the string is"
+        ));
+    }
+    if !matches!(port.replace(' ', "").as_str(), "%dx" | "(%dx)") {
+        return Err(format!("'{word}' goes through the port in %dx and no other"));
+    }
+    let (segment, address) = match string.split_once(':') {
+        Some((segment, address)) if segment.trim().starts_with('%') => {
+            (Some(segment.trim()), address.trim())
+        }
+        _ => (None, string),
+    };
+    let (register, default) = if inward { ("di", "%es") } else { ("si", "%ds") };
+    let widths: &[&str] = if mode == Mode::Bits64 { &["r", "e"] } else { &["e"] };
+    let named = address.strip_prefix("(%").and_then(|inside| inside.strip_suffix(')')).is_some_and(
+        |inside| widths.iter().any(|width| inside.strip_prefix(width) == Some(register)),
+    );
+    if !named {
+        let wanted: Vec<String> =
+            widths.iter().map(|width| format!("(%{width}{register})")).collect();
+        return Err(format!("'{word}' moves the string at {}", wanted.join(" or ")));
+    }
+    let override_byte = match segment {
+        None => None,
+        Some(segment) if segment == default => None,
+        Some(segment) if inward => {
+            return Err(format!("'{word}' writes the string through %es, and not {segment}"));
+        }
+        Some(segment) => Some(match segment {
+            "%es" => 0x26,
+            "%cs" => 0x2E,
+            "%ss" => 0x36,
+            "%fs" => 0x64,
+            "%gs" => 0x65,
+            _ => return Err(format!("'{segment}' is not a segment register")),
+        }),
+    };
+    let mut written = full(word, &[], mode)?;
+    if let Some(byte) = override_byte {
+        crate::source::prefixed(&mut written, byte)?;
+    }
+    Ok(written)
+}
+
 /// A far jump or call to a segment and an offset both written out, `ljmpl $0x10, $1f`, which is
 /// the opcode, the offset and then two bytes of segment.
 ///
@@ -440,6 +516,9 @@ fn segment_prefix(byte: u8) -> bool {
 fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     if let Some(far) = far(word, args, mode) {
         return far;
+    }
+    if let Some(string) = port_string(word, args, mode) {
+        return string;
     }
     let mut mask = Opmask::default();
     let mut operands = Vec::with_capacity(args.len());
@@ -814,14 +893,31 @@ fn implied(word: &str, operands: &[Operand], mode: Mode) -> Result<(), String> {
             _ => (reg, width),
         })
         .collect();
-    let named = operands.len() == fixed.len()
-        && operands.iter().zip(&fixed).all(|(operand, &(reg, width))| is(operand, reg, width));
-    if !named {
-        let names: Vec<String> = fixed
-            .iter()
-            .map(|&(reg, width)| format!("%{}", gpr_name(reg, width).unwrap_or("?")))
-            .collect();
-        return Err(format!("'{word}' takes {} and no other registers", names.join(", ")));
+    // gas also takes every register at sixty four bits in sixty four bit code, for the files
+    // older gas wrote that way: NetBSD's `cpufunc.S` has `monitor %rax, %rcx, %rdx` and
+    // `mwait %rax, %rcx`. The bytes are the same.
+    let older: Vec<(PhysReg, Width)> =
+        if mode == Mode::Bits64 && matches!(word, "monitor" | "monitorx" | "mwait" | "mwaitx") {
+            fixed.iter().map(|&(reg, _)| (reg, Width::Quad)).collect()
+        } else {
+            Vec::new()
+        };
+    let names = |list: &[(PhysReg, Width)]| {
+        operands.len() == list.len()
+            && operands.iter().zip(list).all(|(operand, &(reg, width))| is(operand, reg, width))
+    };
+    if !names(&fixed) && !names(&older) {
+        let spelled = |list: &[(PhysReg, Width)]| {
+            list.iter()
+                .map(|&(reg, width)| format!("%{}", gpr_name(reg, width).unwrap_or("?")))
+                .collect::<Vec<String>>()
+                .join(", ")
+        };
+        let mut takes = spelled(&fixed);
+        if !older.is_empty() {
+            takes = format!("{takes} or {}", spelled(&older));
+        }
+        return Err(format!("'{word}' takes {takes} and no other registers"));
     }
     Ok(())
 }

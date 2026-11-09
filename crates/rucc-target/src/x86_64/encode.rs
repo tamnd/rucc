@@ -2282,6 +2282,25 @@ static ENCODINGS: &[Encoding] = &[
     bytes("monitorx", &RRR, Long, &[0x0F, 0x01, 0xFA], NO_MODRM, NO_IMM),
     bytes("mwaitx", &NO_ARGS, Long, &[0x0F, 0x01, 0xFB], NO_MODRM, NO_IMM),
     bytes("mwaitx", &RRR, Long, &[0x0F, 0x01, 0xFB], NO_MODRM, NO_IMM),
+    // The VIA PadLock instructions, whose registers are all fixed. `xstore` takes a repeat
+    // prefix only when the line writes one, and the others have `0xf3` as part of the opcode, so
+    // gas writes it whether the line said `rep` or not. Each has gas's two spellings.
+    bytes("xstore", &NO_ARGS, Long, &[0x0F, 0xA7, 0xC0], NO_MODRM, NO_IMM),
+    bytes("xstorerng", &NO_ARGS, Long, &[0x0F, 0xA7, 0xC0], NO_MODRM, NO_IMM),
+    bytes("xstore-rng", &NO_ARGS, Long, &[0x0F, 0xA7, 0xC0], NO_MODRM, NO_IMM),
+    bytes("xcryptecb", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xC8], NO_MODRM, NO_IMM),
+    bytes("xcrypt-ecb", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xC8], NO_MODRM, NO_IMM),
+    bytes("xcryptcbc", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xD0], NO_MODRM, NO_IMM),
+    bytes("xcrypt-cbc", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xD0], NO_MODRM, NO_IMM),
+    bytes("xcryptctr", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xD8], NO_MODRM, NO_IMM),
+    bytes("xcrypt-ctr", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xD8], NO_MODRM, NO_IMM),
+    bytes("xcryptcfb", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xE0], NO_MODRM, NO_IMM),
+    bytes("xcrypt-cfb", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xE0], NO_MODRM, NO_IMM),
+    bytes("xcryptofb", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xE8], NO_MODRM, NO_IMM),
+    bytes("xcrypt-ofb", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA7, 0xE8], NO_MODRM, NO_IMM),
+    bytes("montmul", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA6, 0xC0], NO_MODRM, NO_IMM),
+    bytes("xsha1", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA6, 0xC8], NO_MODRM, NO_IMM),
+    bytes("xsha256", &NO_ARGS, Long, &[0xF3, 0x0F, 0xA6, 0xD0], NO_MODRM, NO_IMM),
     // The other two barriers beside `mfence`, and the one that waits for everything in flight.
     bytes("lfence", &NO_ARGS, Long, &[0x0F, 0xAE, 0xE8], NO_MODRM, NO_IMM),
     bytes("sfence", &NO_ARGS, Long, &[0x0F, 0xAE, 0xF8], NO_MODRM, NO_IMM),
@@ -6588,6 +6607,32 @@ mod tests {
         assert_eq!(hex("btrq", &[quad(RAX), Value::Mem(base)]), "48 0f b3 01");
         assert_eq!(hex("btsl", &[Value::Imm(5), Value::Mem(base)]), "0f ba 29 05");
         assert_eq!(hex("btcw", &[Value::Imm(3), Value::Mem(base)]), "66 0f ba 39 03");
+    }
+
+    #[test]
+    fn the_via_padlock_instructions_are_written_as_gas_writes_them() {
+        // The bytes are those of gas's opcode table, `xstore-rng` at `0xfa7c0` and the others at
+        // `0xf30fa7c8` and on, with the repeat prefix as part of the opcode.
+        for (mnemonic, bytes) in [
+            ("xstore", "0f a7 c0"),
+            ("xstorerng", "0f a7 c0"),
+            ("xstore-rng", "0f a7 c0"),
+            ("xcryptecb", "f3 0f a7 c8"),
+            ("xcrypt-ecb", "f3 0f a7 c8"),
+            ("xcryptcbc", "f3 0f a7 d0"),
+            ("xcrypt-cbc", "f3 0f a7 d0"),
+            ("xcryptctr", "f3 0f a7 d8"),
+            ("xcrypt-ctr", "f3 0f a7 d8"),
+            ("xcryptcfb", "f3 0f a7 e0"),
+            ("xcrypt-cfb", "f3 0f a7 e0"),
+            ("xcryptofb", "f3 0f a7 e8"),
+            ("xcrypt-ofb", "f3 0f a7 e8"),
+            ("montmul", "f3 0f a6 c0"),
+            ("xsha1", "f3 0f a6 c8"),
+            ("xsha256", "f3 0f a6 d0"),
+        ] {
+            assert_eq!(hex(mnemonic, &[]), bytes, "{mnemonic}");
+        }
     }
 
     #[test]
