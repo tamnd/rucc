@@ -1147,11 +1147,14 @@ fn held(
 /// One enumerator, which is a child of the enumeration rather than an attribute on it.
 ///
 /// Which form the value goes in follows the value rather than the enumeration's underlying type: a
-/// negative one is signed data and anything else is unsigned data, and a reader that wants the
-/// number in the program's own type has the underlying type on the parent to read it through. A
-/// value wider than 64 bits has no form to go in, so the enumerator is left out, which is the same
-/// answer a record gives for a member it cannot describe and for the same reason: what is left is
-/// still true.
+/// negative one is signed data, and anything else is the smallest of the fixed size data forms it
+/// fits in, which is what gcc writes. A reader that wants the number in the program's own type has
+/// the underlying type on the parent to read it through. The fixed size forms matter because the
+/// readers do not agree on them: `ctfconvert` reads `DW_FORM_data1` and `DW_FORM_data2` as signed,
+/// so gcc's 128 is -128 in a kernel's CTF, and the same value in `DW_FORM_udata` is 128. The CTF of
+/// a kernel is only the same as gcc's when the forms are. A value wider than 64 bits has no form to
+/// go in, so the enumerator is left out, which is the same answer a record gives for a member it
+/// cannot describe and for the same reason: what is left is still true.
 fn counted(dwarf: &mut gimli::write::DwarfUnit, at: UnitEntryId, value: &Constant) {
     let held = match value.value {
         held if held < 0 => match i64::try_from(held) {
@@ -1159,13 +1162,27 @@ fn counted(dwarf: &mut gimli::write::DwarfUnit, at: UnitEntryId, value: &Constan
             Err(_) => return,
         },
         held => match u64::try_from(held) {
-            Ok(held) => AttributeValue::Udata(held),
+            Ok(held) => fixed(held),
             Err(_) => return,
         },
     };
     let child = dwarf.unit.add(at, gimli::DW_TAG_enumerator);
     title(dwarf, child, &value.name);
     dwarf.unit.get_mut(child).set(gimli::DW_AT_const_value, held);
+}
+
+/// An unsigned constant in the smallest of `DW_FORM_data1`, `data2`, `data4` and `data8` that holds
+/// it.
+fn fixed(held: u64) -> AttributeValue {
+    if let Ok(held) = u8::try_from(held) {
+        AttributeValue::Data1(held)
+    } else if let Ok(held) = u16::try_from(held) {
+        AttributeValue::Data2(held)
+    } else if let Ok(held) = u32::try_from(held) {
+        AttributeValue::Data4(held)
+    } else {
+        AttributeValue::Data8(held)
+    }
 }
 
 /// What an array holds and how many, the count being a child entry rather than an attribute.
@@ -1997,6 +2014,46 @@ mod tests {
         assert!(names.contains(&"color".to_owned()), "{names:?}");
         assert!(names.contains(&"red".to_owned()), "{names:?}");
         assert!(names.contains(&"green".to_owned()), "{names:?}");
+    }
+
+    /// An enumerator that is not negative is in the smallest fixed size form that holds it, as gcc
+    /// writes it, and a negative one is signed data.
+    #[test]
+    fn an_enumerator_is_in_the_form_gcc_gives_it() {
+        let mut unit = one();
+        let at = unit.types.len();
+        unit.globals = vec![Global {
+            name: "mask".to_owned(),
+            ty: Some(at),
+            external: true,
+            ..Global::default()
+        }];
+        let forms = [
+            (128, gimli::DW_FORM_data1),
+            (0xffff, gimli::DW_FORM_data2),
+            (0x1_0000, gimli::DW_FORM_data4),
+            (0x1_0000_0000, gimli::DW_FORM_data8),
+            (-1, gimli::DW_FORM_sdata),
+        ];
+        for (value, form) in forms {
+            unit.types.truncate(at);
+            unit.types.push(Shape::Enumeration {
+                name: Some("bits".to_owned()),
+                of: Some(0),
+                size: Some(8),
+                values: vec![Constant { name: "one".to_owned(), value }],
+            });
+            let info = write(&unit).expect("sections");
+            let abbrev = ".debug_abbrev";
+            assert!(
+                holds(&info, abbrev, &pair(gimli::DW_AT_const_value, form)),
+                "{value} in {form}"
+            );
+            assert!(
+                !holds(&info, abbrev, &pair(gimli::DW_AT_const_value, gimli::DW_FORM_udata)),
+                "{value} in udata"
+            );
+        }
     }
 
     /// An enumerator whose value is wider than any DWARF form is left out and the rest stand.
