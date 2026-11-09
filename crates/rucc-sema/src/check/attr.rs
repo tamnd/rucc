@@ -152,6 +152,11 @@ const WINDOWS_ARCHETYPES: [&str; 3] = ["ms_printf", "ms_scanf", "ms_strftime"];
 /// neither and warns about both, which is what happens on every other target here.
 const FREEBSD_ARCHETYPES: [&str; 2] = ["printf0", "freebsd_kprintf"];
 
+/// The archetypes NetBSD's gcc knows beyond gcc's, which a NetBSD target takes because that gcc
+/// is the reference there. `syslog` is the other name of `gnu_syslog`, the way `printf` is of
+/// `gnu_printf`, and NetBSD's `<sys/cdefs.h>` writes `__sysloglike` with it.
+const NETBSD_ARCHETYPES: [&str; 2] = ["gnu_syslog", "syslog"];
+
 /// The archetypes clang knows beyond gcc's, which a Darwin target takes because clang is the
 /// reference there.
 const DARWIN_ARCHETYPES: [&str; 10] = [
@@ -672,11 +677,12 @@ impl Checker<'_> {
     /// on Linux does not know the `ms_` names and warns about them, which is what happens here as
     /// well. The Darwin targets take clang's names as well as gcc's, because clang is the
     /// reference there and Apple's headers write `os_log` and `CFString`. The FreeBSD targets take
-    /// `printf0` and `freebsd_kprintf`, which the gcc of the FreeBSD ports knows.
+    /// `printf0` and `freebsd_kprintf`, which the gcc of the FreeBSD ports knows. The NetBSD targets
+    /// take `gnu_syslog` and `syslog`, which NetBSD's own gcc knows.
     ///
     /// The format strings themselves are read by `check/format.rs`, under `-Wformat`, for the
-    /// `printf`, `scanf` and `strftime` archetypes and their `gnu_` names, and on FreeBSD for its
-    /// two. The others are accepted and read no further.
+    /// `printf`, `scanf` and `strftime` archetypes and their `gnu_` names, on FreeBSD for its two
+    /// and on NetBSD for its two. The others are accepted and read no further.
     pub(in crate::check) fn format_archetypes(&mut self, attrs: AttrList) {
         let ast = self.ast;
         let written = &ast[attrs];
@@ -701,7 +707,7 @@ impl Checker<'_> {
     }
 
     /// Whether `name` is a format archetype gcc knows on this target, or clang on a Darwin one, or
-    /// the FreeBSD ports' gcc on a FreeBSD one.
+    /// the FreeBSD ports' gcc on a FreeBSD one, or NetBSD's gcc on a NetBSD one.
     fn knows_archetype(&self, name: &str) -> bool {
         let tuple = self.cx.target.tuple;
         if FORMAT_ARCHETYPES.contains(&name) {
@@ -710,6 +716,7 @@ impl Checker<'_> {
         match tuple.os().as_str() {
             "windows" => WINDOWS_ARCHETYPES.contains(&name),
             "freebsd" => FREEBSD_ARCHETYPES.contains(&name),
+            "netbsd" => NETBSD_ARCHETYPES.contains(&name),
             _ if tuple.os().is_darwin() => DARWIN_ARCHETYPES.contains(&name),
             _ => false,
         }

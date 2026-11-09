@@ -71,6 +71,8 @@ pub(in crate::check) enum Family {
     Printf,
     /// FreeBSD's `printf0`, which is `printf`'s under another name.
     Printf0,
+    /// NetBSD's `gnu_syslog`, which is `printf`'s and the one where `%m` is allowed there.
+    Syslog,
     /// The FreeBSD kernel's `printf`, `freebsd_kprintf`, which has `%b`, `%D`, `%r` and `%y` and
     /// fewer length modifiers and flags.
     Kprintf,
@@ -87,6 +89,7 @@ impl Family {
         match self {
             Family::Printf => "gnu_printf",
             Family::Printf0 => "printf0",
+            Family::Syslog => "gnu_syslog",
             Family::Kprintf => "freebsd_kprintf",
             Family::Scanf => "gnu_scanf",
             Family::Strftime => "gnu_strftime",
@@ -280,6 +283,7 @@ impl Checker<'_> {
         let os = self.cx.target.tuple.os().as_str();
         let windows = os == "windows";
         let freebsd = os == "freebsd";
+        let netbsd = os == "netbsd";
         let family = match name {
             "gnu_printf" => Family::Printf,
             "gnu_scanf" => Family::Scanf,
@@ -289,6 +293,7 @@ impl Checker<'_> {
             "strftime" if !windows => Family::Strftime,
             "printf0" if freebsd => Family::Printf0,
             "freebsd_kprintf" if freebsd => Family::Kprintf,
+            "gnu_syslog" | "syslog" if netbsd => Family::Syslog,
             _ => return None,
         };
         let string = self.attribute_number(*string).filter(|&n| n > 0)?;
@@ -499,7 +504,7 @@ impl Checker<'_> {
                 continue;
             }
             let read = match reading.family {
-                Family::Printf | Family::Printf0 | Family::Kprintf => {
+                Family::Printf | Family::Printf0 | Family::Syslog | Family::Kprintf => {
                     self.printf_directive(&text, at, reading)
                 }
                 Family::Scanf => self.scanf_directive(&text, at, reading),
@@ -692,6 +697,16 @@ impl Checker<'_> {
         if conversion == '%' {
             self.lacks_type(text, percent);
             return Ok(at);
+        }
+        // NetBSD's gcc allows `%m` only in its `gnu_syslog` format, and drops the directive after
+        // it says so, so the `%m` reads no argument and is not checked further.
+        if conversion == 'm'
+            && reading.family != Family::Syslog
+            && self.cx.target.tuple.os().as_str() == "netbsd"
+        {
+            let what = "%m is only allowed in syslog(3) like functions";
+            self.report(Diagnostic::warning(what, text.at(at)).with_code(FORMAT));
+            return Ok(at + 1);
         }
         let found =
             if kernel { kprintf_conversion(conversion) } else { printf_conversion(conversion) };
