@@ -186,11 +186,14 @@ fn env_is_valid_for(os: Os, env: Env) -> bool {
 /// Windows target has 64-bit pointers and a 32-bit `long`, and a compiler that reads the
 /// pointer width off the architecture and assumes `long` matches it produces structures whose
 /// layout disagrees with every Windows header.
+///
+/// Plan 9 is the other system with a 32-bit `long` on a 64-bit machine. kencc keeps `long` at 32
+/// bits everywhere and spells the 64-bit integer `vlong`.
 fn default_data_model(arch: Arch, os: Os, _env: Env) -> DataModel {
     match arch {
         Arch::X86 | Arch::Arm | Arch::Riscv32 | Arch::Wasm32 => DataModel::Ilp32,
         _ => {
-            if matches!(os, Os::Windows) {
+            if matches!(os, Os::Windows | Os::Plan9) {
                 DataModel::Llp64
             } else {
                 DataModel::Lp64
@@ -322,11 +325,14 @@ impl TargetTuple {
     /// that way for source compatibility with the Intel Macs, against what AAPCS64 says. So
     /// `aarch64-macos` and `aarch64-linux-gnu` are the same architecture with opposite answers,
     /// which is the pair most likely to catch a corpus out.
+    ///
+    /// Plan 9 says signed on every machine, because kencc does: `7c` and `5c` make `char` signed
+    /// as `6c` does.
     pub const fn char_is_signed(self) -> bool {
         match self.arch {
             Arch::X86_64 | Arch::X86 | Arch::Wasm32 => true,
             Arch::Arm | Arch::Aarch64 | Arch::Arm64Ec => {
-                matches!(self.os, Os::Windows) || self.os.is_darwin()
+                matches!(self.os, Os::Windows | Os::Plan9) || self.os.is_darwin()
             }
             Arch::Riscv64 | Arch::Riscv32 | Arch::LoongArch64 | Arch::PowerPc64 | Arch::S390x => {
                 false

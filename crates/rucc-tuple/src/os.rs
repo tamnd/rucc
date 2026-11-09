@@ -34,6 +34,9 @@ pub enum Os {
     DragonFly,
     /// illumos. In scope because it is open, which is the whole of the argument.
     Illumos,
+    /// Plan 9 from Bell Labs, as 9front ships it. The objects are the `.6` and `.7` files of
+    /// kencc, not ELF, and `long` is 32 bits on every machine.
+    Plan9,
     /// WASI. The preview number lives in the OS version, because `wasip1` and `wasip3` are
     /// different ABIs rather than different releases of one.
     Wasi,
@@ -55,6 +58,7 @@ impl Os {
             Os::OpenBsd => "openbsd",
             Os::DragonFly => "dragonfly",
             Os::Illumos => "illumos",
+            Os::Plan9 => "plan9",
             Os::Wasi => "wasi",
             Os::None => "none",
         }
@@ -74,6 +78,7 @@ impl Os {
             Os::MacOs | Os::IOs => Some(ObjectFormat::MachO),
             Os::Windows => Some(ObjectFormat::Coff),
             Os::Wasi => Some(ObjectFormat::Wasm),
+            Os::Plan9 => Some(ObjectFormat::Plan9),
             Os::None => None,
         }
     }

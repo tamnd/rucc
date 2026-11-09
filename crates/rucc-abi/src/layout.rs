@@ -213,6 +213,10 @@ fn double_align(target: TargetTuple) -> u64 {
 fn long_double(target: TargetTuple) -> FloatType {
     let double = FloatType { format: Format::Double, size: 8, align: 8 };
     let quad = FloatType { format: Format::Quad, size: 16, align: 16 };
+    // kencc has no wider float than `double` on any machine, and its `long double` is one.
+    if target.os() == Os::Plan9 {
+        return double;
+    }
     match target.arch() {
         // Eighty bits of value in twelve bytes on i386 and sixteen on x86-64, aligned to its
         // storage size both times, and the same format underneath.

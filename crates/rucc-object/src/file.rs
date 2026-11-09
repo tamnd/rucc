@@ -68,12 +68,13 @@ pub(crate) enum Flavour {
 }
 
 impl Flavour {
-    /// Which one a target wants, and nothing for the two formats that are not written.
+    /// Which one a target wants, and nothing for the three formats that are not written here.
+    /// The Plan 9 objects get a writer of their own, because they are not a container of sections.
     pub(crate) fn of(target: &TargetInfo) -> Option<Flavour> {
         match target.object_format {
             ObjectFormat::Elf => Some(Flavour::Elf),
             ObjectFormat::Coff => Some(Flavour::Coff),
-            ObjectFormat::MachO | ObjectFormat::Wasm => None,
+            ObjectFormat::MachO | ObjectFormat::Wasm | ObjectFormat::Plan9 => None,
         }
     }
 

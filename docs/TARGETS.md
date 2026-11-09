@@ -41,6 +41,8 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `aarch64-netbsd` | 4 | 3 | no |  |
 | `x86_64-openbsd` | 4 | 3 | no | dynamic libc only, and zig took a whole release to add it |
 | `x86_64-illumos` | 4 | 4 | no | open, therefore admissible, therefore not excluded on principle |
+| `x86_64-plan9` | 4 | 2 | no | 9front with kencc as the reference, .6 objects, and a 32-bit long |
+| `aarch64-plan9` | 4 | 2 | no | 9front with kencc as the reference, .7 objects, and a signed char |
 | `x86_64-none` | 3 | 1 | no | the kernel target, which rung 4 needs and needs at tier 1 |
 | `aarch64-none` | 3 | 1 | no |  |
 | `riscv64-none` | 3 | 1 | no |  |
@@ -52,4 +54,4 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `wasm32-wasip3` | 4 | 3 | no | a different ABI from p1 and p2, with the stack pointer and TLS base in a context |
 | `wasm32-none` | 4 | 2 | no | freestanding wasm, which is the second back end without the libc question |
 
-43 rows. The plan reaches tier 1 on 10, tier 2 on 19, tier 3 on 8 and recognizes 6, which is 37 targets that compile and link.
+45 rows. The plan reaches tier 1 on 10, tier 2 on 21, tier 3 on 8 and recognizes 6, which is 39 targets that compile and link.

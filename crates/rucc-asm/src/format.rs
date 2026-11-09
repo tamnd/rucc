@@ -51,6 +51,9 @@ impl Directives {
             // cannot emit for. ELF's directives are the ones nothing here depends on being right
             // for a target it will not reach.
             ObjectFormat::Wasm => Directives::Elf,
+            // The same for Plan 9, whose objects come from a writer of their own and not from a
+            // listing.
+            ObjectFormat::Plan9 => Directives::Elf,
         }
     }
 

@@ -1074,7 +1074,7 @@ fn coverage(opts: &Options, target: &TargetInfo, counts: &str) -> rucc_opt::cove
         rucc_target::ObjectFormat::Elf => (Some(".init_array.00100"), Some(".fini_array.00100")),
         rucc_target::ObjectFormat::Coff => (Some(".CRT$XCU"), None),
         rucc_target::ObjectFormat::MachO => (Some("__DATA,__mod_init_func,mod_init_funcs"), None),
-        rucc_target::ObjectFormat::Wasm => (None, None),
+        rucc_target::ObjectFormat::Wasm | rucc_target::ObjectFormat::Plan9 => (None, None),
     };
     // With `-freorder-functions` gcc puts the constructor in `.text.startup` and the destructor in
     // `.text.exit`, which the kernel's linker script keeps with its init and exit code.

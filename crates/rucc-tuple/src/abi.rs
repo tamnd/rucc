@@ -141,6 +141,10 @@ pub enum ObjectFormat {
     /// The WebAssembly object format. A different shape from the other three, and
     /// `spec/cross-compile/05-architectures.md` section 5.9 treats reaching it as a second back end.
     Wasm,
+    /// The object files of the Plan 9 compilers: `.6` for amd64 and `.7` for arm64. Each is a
+    /// list of encoded instructions that the loader `6l` or `7l` lays out, with no sections and
+    /// no relocations.
+    Plan9,
 }
 
 impl ObjectFormat {
@@ -151,6 +155,7 @@ impl ObjectFormat {
             ObjectFormat::MachO => "macho",
             ObjectFormat::Coff => "coff",
             ObjectFormat::Wasm => "wasm",
+            ObjectFormat::Plan9 => "plan9",
         }
     }
 
@@ -179,7 +184,7 @@ impl ObjectFormat {
         match self {
             ObjectFormat::MachO => true,
             ObjectFormat::Coff => matches!(data_model, DataModel::Ilp32),
-            ObjectFormat::Elf | ObjectFormat::Wasm => false,
+            ObjectFormat::Elf | ObjectFormat::Wasm | ObjectFormat::Plan9 => false,
         }
     }
 }

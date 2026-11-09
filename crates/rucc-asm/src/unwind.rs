@@ -249,6 +249,9 @@ pub(crate) fn relaxed_table(
         // than none: it is the same bytes and the same failure to unwind, with the size of the
         // object spent on it.
         ObjectFormat::Wasm => Ok(Unwind::default()),
+        // Nothing for Plan 9 too. Its debuggers walk the stack from the frame sizes that the
+        // loader keeps in the symbol table, and its objects have no place for a table.
+        ObjectFormat::Plan9 => Ok(Unwind::default()),
     }
 }
 

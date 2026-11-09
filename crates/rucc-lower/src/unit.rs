@@ -2293,6 +2293,9 @@ impl Unit<'_> {
     /// clang gives in its `-S` text, and the backend writes each entry as a constructor of the
     /// `linking` section with the number as its priority. `wasm-ld` sorts the constructors by
     /// priority and calls them from `__wasm_call_ctors`.
+    ///
+    /// Plan 9 has neither. Its objects have no sections, and its `main` is called by a `_main`
+    /// that runs no list of functions first, so a constructor has nowhere to go.
     fn start_section(&self, start: &Start) -> Option<String> {
         match self.target.object_format {
             ObjectFormat::Elf => {
@@ -2314,6 +2317,7 @@ impl Unit<'_> {
                 Priority::Unnumbered => ".init_array".to_owned(),
             }),
             ObjectFormat::Coff | ObjectFormat::MachO | ObjectFormat::Wasm => None,
+            ObjectFormat::Plan9 => None,
         }
     }
 

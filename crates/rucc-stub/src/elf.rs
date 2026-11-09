@@ -462,8 +462,8 @@ fn os_abi(os: Os) -> u8 {
         Os::OpenBsd => 12,
         // DragonFly has no number. Its binaries carry ELFOSABI_NONE and a `DragonFly` note.
         Os::DragonFly => 0,
-        // Neither writes ELF, and `write` has refused before this is reached.
-        Os::MacOs | Os::IOs | Os::Windows => 0,
+        // None of these writes ELF, and `write` has refused before this is reached.
+        Os::MacOs | Os::IOs | Os::Windows | Os::Plan9 => 0,
     }
 }
 

@@ -177,6 +177,9 @@ pub enum Os {
     OpenBsd,
     /// DragonFly BSD, on x86-64, which is the one machine it runs on.
     DragonFly,
+    /// Plan 9 from Bell Labs, as 9front ships it, on amd64, arm64 and 386. Its objects are the
+    /// ones of kencc and not ELF, and `long` is 32 bits on every machine.
+    Plan9,
     /// No operating system, which is what `-ffreestanding` kernel work looks like.
     None,
     /// The WebAssembly System Interface, at one of its previews.
@@ -218,7 +221,7 @@ impl Os {
 
     /// Every operating system, in the order of the enumeration. FreeBSD is here once, at
     /// [`Os::FREEBSD_RELEASE`], because its releases are one target.
-    pub const ALL: [Os; 11] = [
+    pub const ALL: [Os; 12] = [
         Os::Linux,
         Os::Darwin,
         Os::Windows,
@@ -226,6 +229,7 @@ impl Os {
         Os::NetBsd,
         Os::OpenBsd,
         Os::DragonFly,
+        Os::Plan9,
         Os::None,
         Os::Wasi(Preview::P1),
         Os::Wasi(Preview::P2),
@@ -242,6 +246,7 @@ impl Os {
             Os::NetBsd => "netbsd",
             Os::OpenBsd => "openbsd",
             Os::DragonFly => "dragonfly",
+            Os::Plan9 => "plan9",
             Os::None => "none",
             Os::Wasi(Preview::P1) => "wasip1",
             Os::Wasi(Preview::P2) => "wasip2",
@@ -351,6 +356,10 @@ pub enum ObjectFormat {
     /// WebAssembly, which is a format for a module rather than for a machine's object file and
     /// is in this list because the target table has two rows that emit one.
     Wasm,
+    /// The objects of the Plan 9 compilers, `.6` and `.7`, which the loaders `6l` and `7l` read.
+    /// No triple of this crate names Plan 9 yet, so a target with this format comes only from a
+    /// tuple, and every writer of objects refuses it.
+    Plan9,
 }
 
 impl ObjectFormat {
@@ -361,6 +370,7 @@ impl ObjectFormat {
             ObjectFormat::MachO => "macho",
             ObjectFormat::Coff => "coff",
             ObjectFormat::Wasm => "wasm",
+            ObjectFormat::Plan9 => "plan9",
         }
     }
 
@@ -376,6 +386,7 @@ impl ObjectFormat {
             tuple::ObjectFormat::MachO => ObjectFormat::MachO,
             tuple::ObjectFormat::Coff => ObjectFormat::Coff,
             tuple::ObjectFormat::Wasm => ObjectFormat::Wasm,
+            tuple::ObjectFormat::Plan9 => ObjectFormat::Plan9,
         }
     }
 }
@@ -690,8 +701,8 @@ impl Triple {
     }
 
     /// Whether the architecture runs on the operating system. wasm runs on WASI or on nothing,
-    /// WASI runs nothing but wasm, and DragonFly runs nothing but x86-64. Every other pair is a
-    /// machine.
+    /// WASI runs nothing but wasm, DragonFly runs nothing but x86-64, and Plan 9 runs on x86-64,
+    /// AArch64 and i386. Every other pair is a machine.
     #[must_use]
     pub const fn pairs(arch: Arch, os: Os) -> bool {
         match (arch, os) {
@@ -700,6 +711,8 @@ impl Triple {
             (_, Os::Wasi(_)) => false,
             (Arch::X86_64, Os::DragonFly) => true,
             (_, Os::DragonFly) => false,
+            (Arch::X86_64 | Arch::Aarch64 | Arch::X86, Os::Plan9) => true,
+            (_, Os::Plan9) => false,
             _ => true,
         }
     }
@@ -718,6 +731,7 @@ impl Triple {
             ) => ObjectFormat::Elf,
             (Os::Darwin, _) => ObjectFormat::MachO,
             (Os::Windows, _) => ObjectFormat::Coff,
+            (Os::Plan9, _) => ObjectFormat::Plan9,
         }
     }
 
@@ -740,7 +754,7 @@ impl Triple {
     /// # Panics
     ///
     /// Never, for a triple this type can hold, which `every_triple_describes_a_machine` checks by
-    /// building all eighty of them whose architecture pairs with the operating system.
+    /// building all 144 of them whose architecture pairs with the operating system.
     #[must_use]
     pub fn tuple(self) -> TargetTuple {
         let arch = match self.arch {
@@ -760,6 +774,7 @@ impl Triple {
             Os::NetBsd => tuple::Os::NetBsd,
             Os::OpenBsd => tuple::Os::OpenBsd,
             Os::DragonFly => tuple::Os::DragonFly,
+            Os::Plan9 => tuple::Os::Plan9,
             Os::None => tuple::Os::None,
             Os::Wasi(_) => tuple::Os::Wasi,
         };
@@ -771,13 +786,14 @@ impl Triple {
             (Os::Windows, Env::Gnu) => tuple::Env::Gnu,
             (Os::Windows, _) => tuple::Env::Msvc,
             // Darwin and freestanding have no libc to name, WASI has one libc, wasi-libc, and each
-            // BSD has its own, which is part of the system and not a choice.
+            // BSD and Plan 9 has its own, which is part of the system and not a choice.
             (
                 Os::Darwin
                 | Os::FreeBsd(_)
                 | Os::NetBsd
                 | Os::OpenBsd
                 | Os::DragonFly
+                | Os::Plan9
                 | Os::None
                 | Os::Wasi(_),
                 _,
@@ -1026,6 +1042,7 @@ impl FromStr for Triple {
                     return Err(err("unknown WASI preview, which is wasip1, wasip2 or wasip3"));
                 }
                 "threads" => return Err(err("the threads variant of WASI is not supported")),
+                "plan9" => os = Some(Os::Plan9),
                 part => {
                     if let Some(bsd) = Os::bsd(part) {
                         os = Some(bsd.map_err(err)?);
@@ -1043,6 +1060,7 @@ impl FromStr for Triple {
             return Err(err(match os {
                 _ if arch.is_wasm() => "wasm32 runs on WASI or with no operating system",
                 Os::DragonFly => "DragonFly runs on x86_64 only",
+                Os::Plan9 => "Plan 9 runs on x86_64, aarch64 and i386 only",
                 _ => "WASI is an operating system for wasm32 only",
             }));
         }
@@ -1056,6 +1074,7 @@ impl FromStr for Triple {
             | Os::NetBsd
             | Os::OpenBsd
             | Os::DragonFly
+            | Os::Plan9
             | Os::None
             | Os::Wasi(_) => Env::None,
         });
@@ -2001,7 +2020,7 @@ mod tests {
     fn rejects_what_it_does_not_support() {
         let e = "sparc64-unknown-linux-gnu".parse::<Triple>().unwrap_err();
         assert_eq!(e.reason, "unknown architecture");
-        let e = "x86_64-unknown-plan9".parse::<Triple>().unwrap_err();
+        let e = "x86_64-unknown-haiku".parse::<Triple>().unwrap_err();
         assert_eq!(e.reason, "unknown operating system");
     }
 
@@ -2080,6 +2099,34 @@ mod tests {
         assert_eq!(t.tuple().to_canonical_string(), "x86_64-freebsd.15");
         let t: Triple = "i486--netbsdelf".parse().unwrap();
         assert_eq!(t.tuple().to_canonical_string(), "i686-netbsd");
+    }
+
+    #[test]
+    fn plan_9_is_read_on_the_three_machines_it_runs_on() {
+        for (spelling, arch) in [
+            ("x86_64-plan9", Arch::X86_64),
+            ("amd64-unknown-plan9", Arch::X86_64),
+            ("aarch64-plan9", Arch::Aarch64),
+            ("i386-plan9", Arch::X86),
+        ] {
+            let t: Triple = spelling.parse().unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            assert_eq!((t.arch, t.os, t.env), (arch, Os::Plan9, Env::None), "{spelling}");
+            assert_eq!(t.object_format(), ObjectFormat::Plan9, "{spelling}");
+            assert_eq!(Triple::from_tuple(t.tuple()), Some(t), "{spelling}");
+            assert_eq!(t.to_string().parse::<Triple>(), Ok(t), "{spelling}");
+            // The facts kencc gives: `long` is 32 bits, `char` is signed, and `long double` is a
+            // `double`.
+            let info = TargetInfo::new(t);
+            assert_eq!(info.long_width, 32, "{spelling}");
+            assert!(info.char_is_signed, "{spelling}");
+            assert_eq!(info.long_double_width, 64, "{spelling}");
+            assert_eq!(info.object_format, ObjectFormat::Plan9, "{spelling}");
+        }
+        for spelling in ["riscv64-plan9", "wasm32-plan9"] {
+            assert!(spelling.parse::<Triple>().is_err(), "{spelling}");
+        }
+        let e = "riscv64-plan9".parse::<Triple>().unwrap_err();
+        assert_eq!(e.reason, "Plan 9 runs on x86_64, aarch64 and i386 only");
     }
 
     #[test]
@@ -2272,7 +2319,7 @@ mod tests {
     #[test]
     fn every_triple_describes_a_machine() {
         // `Triple::tuple` panics on a pair that is not a machine and this is what says there is
-        // no such pair. All 132 combinations whose architecture pairs with the operating
+        // no such pair. All 144 combinations whose architecture pairs with the operating
         // system, including the ones the parser will produce from a string somebody can type and
         // no machine has, such as a Darwin target claiming glibc.
         let mut built = 0;
@@ -2295,7 +2342,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, 132);
+        assert_eq!(built, 144);
     }
 
     #[test]

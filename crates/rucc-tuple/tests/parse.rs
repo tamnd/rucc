@@ -78,6 +78,29 @@ fn the_bsds_are_read_in_the_spellings_their_toolchains_use() {
 }
 
 #[test]
+fn plan_9_has_its_own_objects_a_32_bit_long_and_a_signed_char() {
+    // kencc keeps `long` at 32 bits on every machine and makes `char` signed on arm64 too.
+    for (spelling, canonical) in [
+        ("x86_64-plan9", "x86_64-plan9"),
+        ("x86_64-unknown-plan9", "x86_64-plan9"),
+        ("aarch64-plan9", "aarch64-plan9"),
+        ("i386-plan9", "i686-plan9"),
+    ] {
+        let tuple = parse(spelling);
+        assert_eq!(tuple.os(), Os::Plan9, "{spelling}");
+        assert_eq!(tuple.env(), Env::None, "{spelling}");
+        assert_eq!(tuple.object_format(), ObjectFormat::Plan9, "{spelling}");
+        assert!(tuple.char_is_signed(), "{spelling}");
+        assert_eq!(tuple.to_canonical_string(), canonical, "{spelling}");
+        assert_eq!(parse(canonical), tuple, "{spelling}");
+    }
+    assert_eq!(parse("x86_64-plan9").data_model(), DataModel::Llp64);
+    assert_eq!(parse("aarch64-plan9").data_model(), DataModel::Llp64);
+    assert_eq!(parse("i386-plan9").data_model(), DataModel::Ilp32);
+    assert_eq!(ObjectFormat::Plan9.as_str(), "plan9");
+}
+
+#[test]
 fn windows_is_llp64_and_everything_else_is_not() {
     assert_eq!(parse("x86_64-windows-gnu").data_model(), DataModel::Llp64);
     assert_eq!(parse("aarch64-windows-msvc").data_model(), DataModel::Llp64);
