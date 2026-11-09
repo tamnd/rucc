@@ -3358,10 +3358,11 @@ impl Reader {
     }
 
     /// `.byte`, `.long` and the rest, at the width each of them means.
+    ///
+    /// With nothing after it the directive writes nothing, as in gas. NetBSD's amd64 locore.S
+    /// ends its self relocation code with `gdtrr:` and a `.quad` with no value, so the label is
+    /// where the table would go.
     fn data(&mut self, args: &[String], width: u8) -> Result<(), Trouble> {
-        if args.is_empty() {
-            return Err(self.bad("a data directive with nothing after it"));
-        }
         for arg in args {
             // How far a name is from the global offset table, or a slot of it, which is what gcc
             // fills a jump table with in i386 code that is position independent: `.long .L3@GOTOFF`.
@@ -3619,10 +3620,8 @@ impl Reader {
     ///
     /// Wider than any expression here, so a plain number is read at its own width and anything
     /// else is an expression that has to fit in sixty four bits and is sign extended.
+    /// With nothing after it, it writes nothing, as `.quad` does.
     fn octa(&mut self, args: &[String]) -> Result<(), Trouble> {
-        if args.is_empty() {
-            return Err(self.bad("a data directive with nothing after it"));
-        }
         for arg in args {
             let bytes = match wide(arg) {
                 Some(value) => value.to_le_bytes(),
@@ -10040,6 +10039,17 @@ nop
         assert_eq!(found, [(1, "boothowto", 2_147_483_648)]);
         let read = assembled("\tmovq $1, foo + -8(%rip)\n");
         assert_eq!(relocs(&read, ".text")[0].3, -8 - 8);
+    }
+
+    /// A data directive with nothing after it writes nothing and is not an error, as in gas, and
+    /// the label in front of it is where the next bytes go. NetBSD's amd64 locore.S writes
+    /// `gdtrr:` and then `.quad` with no value at the end of its self relocation code.
+    #[test]
+    fn a_data_directive_with_nothing_after_it_writes_nothing() {
+        for word in ["byte", "short", "word", "long", "int", "quad", "octa"] {
+            let read = assembled(&format!("\t.data\n\t.byte 1\nmark:\n\t.{word}\n\t.byte 2\n"));
+            assert_eq!(bytes(&read, ".data"), [1, 2], ".{word}");
+        }
     }
 
     /// The forms NetBSD's `busfunc.S`, `cpufunc.S`, `cpu_rng.c` and `aes_via.c` write. A string
