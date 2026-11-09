@@ -74,6 +74,7 @@ fn builtin_keyword(word: Keyword) -> Option<BuiltinSet> {
         Keyword::Float32x => BuiltinSet::FLOAT32X,
         Keyword::Float64x => BuiltinSet::FLOAT64X,
         Keyword::Float128x => BuiltinSet::FLOAT128X,
+        Keyword::Float80 => BuiltinSet::FLOAT80,
         Keyword::Decimal32 => BuiltinSet::DECIMAL32,
         Keyword::Decimal64 => BuiltinSet::DECIMAL64,
         Keyword::Decimal128 => BuiltinSet::DECIMAL128,

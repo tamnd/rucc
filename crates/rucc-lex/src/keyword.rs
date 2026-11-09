@@ -167,6 +167,8 @@ pub enum Keyword {
     Float64x,
     /// `_Float128x`.
     Float128x,
+    /// `__float80`, gcc's name for the x87 type, on x86 only.
+    Float80,
     /// `constexpr`, from C23.
     Constexpr,
     /// `false`, from C23.
@@ -352,14 +354,16 @@ impl Keywords {
         self.with(WINDOWS | MSVC)
     }
 
-    /// The same table with the x86 named address spaces, `__seg_fs` and `__seg_gs`, for a
-    /// compile for x86 in a GNU dialect.
+    /// The same table with the x86 words: the named address spaces, `__seg_fs` and `__seg_gs`,
+    /// in a GNU dialect, and `__float80` in every dialect.
     ///
-    /// Measured: gcc 13 has both on x86 in every `-std=gnu*` and in no `-std=c*`, and on AArch64
-    /// in none, where `int __seg_gs x;` is a syntax error.
+    /// Measured: gcc 13 has the address spaces on x86 in every `-std=gnu*` and in no `-std=c*`,
+    /// and on AArch64 in none, where `int __seg_gs x;` is a syntax error. It has `__float80` on
+    /// x86 under `-std=c11` as well, and nowhere else.
     #[must_use]
     pub fn x86(self, gnu: bool) -> Keywords {
-        if gnu { self.with(X86) } else { self }
+        let all = self.with(X86_ALWAYS);
+        if gnu { all.with(X86) } else { all }
     }
 
     /// Turns on every entry with one of `bits` in its mask, whatever the dialect says.
@@ -417,6 +421,9 @@ const MSVC: u16 = 1 << 7;
 /// A target again: x86, where gcc has the named address spaces. They are keywords in the GNU
 /// dialects only, so [`Keywords::x86`] asks for this bit and the GNU one together.
 const X86: u16 = 1 << 8;
+/// x86 again, for the words gcc has there in every dialect. `__float80` is a type name and not an
+/// extension of the grammar, so `-std=c11` has it too.
+const X86_ALWAYS: u16 = 1 << 9;
 
 /// The attribute names the parser writes for a Microsoft keyword, which [`Keywords::msvc`] interns.
 ///
@@ -615,6 +622,7 @@ static KEYWORDS: &[Entry] = &[
     e("__restrict__", Keyword::Restrict, ALWAYS),
     e("__seg_fs", Keyword::SegFs, X86),
     e("__seg_gs", Keyword::SegGs, X86),
+    e("__float80", Keyword::Float80, X86_ALWAYS),
     e("__signed", Keyword::Signed, ALWAYS),
     e("__signed__", Keyword::Signed, ALWAYS),
     // gcc's own diagnostics keep `__thread` and `_Thread_local` apart, but in C they are
@@ -747,6 +755,17 @@ mod tests {
             assert_eq!(keywords.get(symbol), want);
         }
         assert_eq!(lookup(Std::C17, true, "__seg_fs"), None, "not without asking for x86");
+    }
+
+    #[test]
+    fn float80_is_a_type_name_on_x86_in_every_dialect_and_nowhere_else() {
+        for gnu in [true, false] {
+            let mut interner = Interner::new();
+            let keywords = Keywords::new(&mut interner, Std::C11, gnu).x86(gnu);
+            let symbol = interner.intern("__float80");
+            assert_eq!(keywords.get(symbol), Some(Keyword::Float80), "gnu {gnu}");
+        }
+        assert_eq!(lookup(Std::C17, true, "__float80"), None, "not without asking for x86");
     }
 
     #[test]
