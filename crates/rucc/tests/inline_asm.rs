@@ -1587,3 +1587,21 @@ fn an_address_turned_into_a_number_and_back_is_still_a_constant() {
         assert!(text.contains("leaq page+8(%rip)"), "{level}: {text}");
     }
 }
+
+#[test]
+fn an_input_tied_to_an_output_may_be_written_by_its_own_number() {
+    // NetBSD's `<machine/byte_swap.h>` names the tied input, not the output, in the template, and
+    // gcc puts the two in one register. Before, this was refused as an operand nothing places.
+    let source = "\
+unsigned int s32(unsigned int x) { __asm volatile (\"bswap %1\" : \"=r\" (x) : \"0\" (x)); return x; }
+unsigned short s16(unsigned short x) { __asm volatile (\"rorw $8, %w1\" : \"=r\" (x) : \"0\" (x)); return x; }
+";
+    let text = asm("tied-by-number", source);
+    let s32 = body(&text, "s32");
+    assert!(s32.contains("bswapl\t%e"), "{s32}");
+    let s16 = body(&text, "s16");
+    assert!(
+        s16.lines().any(|line| line.starts_with("\trorw\t$8, %") && !line.contains("%e")),
+        "{s16}"
+    );
+}
