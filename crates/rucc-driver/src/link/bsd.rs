@@ -167,8 +167,8 @@ fn crt(os: Os) -> &'static str {
 /// # Errors
 ///
 /// [`Error::Cross`] when the target is not this machine and no `--sysroot` names a copy of its
-/// root, because there is no tree of a BSD in the cache, and for `-static-pie`, which none of
-/// their GCCs links.
+/// root, because there is no tree of a BSD in the cache, and for `-static-pie` on all but NetBSD,
+/// whose GCC is the only one of the four that links a static PIE.
 pub(super) fn line(
     target: Triple,
     opts: &LinkOptions,
@@ -190,7 +190,7 @@ pub(super) fn line(
             ),
         });
     }
-    if opts.is_static && opts.pie == Some(true) {
+    if opts.is_static && opts.pie == Some(true) && target.os != Os::NetBsd {
         return Err(Error::Cross {
             why: format!(
                 "-static-pie needs a start file that relocates the program, and the GCC of {name} \
@@ -199,8 +199,10 @@ pub(super) fn line(
         });
     }
     let dirs = dirs(target, root);
-    // `LINK_PIE_SPEC`, which is `-pie` only when the link is neither static nor shared.
-    let pie = opts.pie == Some(true) && !opts.shared && !opts.is_static;
+    // `LINK_PIE_SPEC`, which is `-pie` only when the link is neither static nor shared. NetBSD's
+    // `LINK_SPEC` has its own `%{pie:-pie}`, which a static link keeps.
+    let pie =
+        opts.pie == Some(true) && !opts.shared && (!opts.is_static || target.os == Os::NetBsd);
 
     let mut args = Vec::new();
     if let Some(root) = root {
@@ -328,6 +330,11 @@ fn link_spec(target: Triple, opts: &LinkOptions, items: &[Item], ld: Ld) -> Vec<
                     push(loader);
                 } else {
                     push("-static");
+                    // `%{static:-static %{pie:--no-dynamic-linker}}`: a static PIE has a dynamic
+                    // section for `crt0.o` to relocate the program with, and no loader to ask for.
+                    if opts.pie == Some(true) {
+                        push("--no-dynamic-linker");
+                    }
                 }
             }
             if target.arch == Arch::Aarch64 {
@@ -374,7 +381,10 @@ fn startfiles(target: Triple, opts: &LinkOptions, pie: bool, dirs: &[PathBuf]) -
                 files.push(path(dirs, if opts.profile { "gcrt0.o" } else { "crt0.o" }));
             }
             files.extend(if_exists(dirs, "crti.o"));
-            let begin = if opts.is_static {
+            // `%{pie:crtbeginS%O%s} %{!pie:...}`, which looks at `-pie` before `-static`.
+            let begin = if pie {
+                path(dirs, "crtbeginS.o")
+            } else if opts.is_static {
                 if_exists(dirs, "crtbeginT.o").unwrap_or_else(|| path(dirs, "crtbegin.o"))
             } else {
                 path(dirs, if moves { "crtbeginS.o" } else { "crtbegin.o" })
@@ -840,6 +850,18 @@ mod tests {
             panic!("-static-pie was not refused");
         };
         assert!(why.starts_with("-static-pie"), "{why}");
+    }
+
+    #[test]
+    fn a_netbsd_static_pie_is_linked_the_way_netbsds_gcc_links_it() {
+        let root = tree("netbsd-static-pie", NETBSD);
+        let opts = LinkOptions { is_static: true, pie: Some(true), ..against(&root) };
+        assert_eq!(
+            text(bsd(Arch::X86_64, Os::NetBsd), &opts, &main_o()),
+            "--sysroot== -e _start -static --no-dynamic-linker -pie -o a.out =/usr/lib/crt0.o \
+             =/usr/lib/crti.o =/usr/lib/crtbeginS.o -L=/usr/lib main.o -lgcc -lc -lgcc \
+             =/usr/lib/crtendS.o =/usr/lib/crtn.o"
+        );
     }
 
     #[test]

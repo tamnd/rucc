@@ -3470,7 +3470,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // is not told `-pie`, so the program is static and loaded where it was linked. Linux 5.15's
     // exec selftests link their load address checks with `-pie -static` and a 2 MiB page, and a
     // static PIE there is placed by a kernel that does not align it to that page yet.
-    if link.is_static && !static_pie && link.pie == Some(true) {
+    //
+    // NetBSD's own GCC is the exception. Its `LINK_SPEC` reads `-static` and `-pie` together as a
+    // static PIE, with `crtbeginS.o` and `--no-dynamic-linker`, and its `crt0.o` relocates the
+    // program, so there both spellings ask for the same program.
+    if link.is_static
+        && !static_pie
+        && link.pie == Some(true)
+        && opts.target.os != rucc_target::Os::NetBsd
+    {
         link.pie = Some(false);
     }
 
@@ -9057,6 +9065,10 @@ mod tests {
         for line in [["-pie", "-static", "a.c"], ["-static", "-pie", "a.c"]] {
             let (plain, _) = linking(&line);
             assert!(plain.is_static && plain.pie == Some(false), "{line:?}");
+            // NetBSD's GCC reads the two together as a static PIE.
+            let netbsd = [&["--target=x86_64-unknown-netbsd"][..], &line[..]].concat();
+            let (moving, _) = linking(&netbsd);
+            assert!(moving.is_static && moving.pie == Some(true), "{netbsd:?}");
         }
         assert!(link.export_dynamic);
         assert!(link.strip);
