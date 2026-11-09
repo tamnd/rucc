@@ -26,11 +26,13 @@
 //! and that choice arrives in [`RecordOptions::bit_fields`].
 
 use rucc_target::{BitFieldStyle, TargetInfo};
-use rucc_tuple::Env;
+use rucc_tuple::{Env, Os};
 
 use crate::kind::{ArrayLen, RecordKind, TypeKind};
 use crate::layout::{Layout, LayoutError, align, layout};
 use crate::types::{TypeId, Types};
+
+mod kencc;
 
 /// One member of a record as the program wrote it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,6 +418,9 @@ struct Builder {
     /// Only a `union` fills this, because only there is the size of the whole a question about
     /// every member at once rather than about where the last one ended.
     widest: Vec<Extent>,
+    /// The state of the parser of kencc on a Plan 9 target, which lays every record out by the
+    /// rules of `6c` and `7c` in place of the ones above. `None` on every other target.
+    kencc: Option<kencc::Bits>,
 }
 
 /// A run of Microsoft bit-fields sharing one piece of storage.
@@ -463,6 +468,7 @@ impl Builder {
             widest: Vec::new(),
             style,
             unnamed_aligns,
+            kencc: (target.tuple.os() == Os::Plan9).then(|| kencc::Bits::new(target.record_align)),
         }
     }
 
@@ -485,6 +491,10 @@ impl Builder {
             Err(LayoutError::Variable) => return self.variable(types, target, index, decl),
             Err(error) => return Err(RecordError::Member { index, error }),
         };
+        if let Some(bits) = self.kencc {
+            self.kencc = Some(self.kencc(types, index, decl, member, bits)?);
+            return Ok(());
+        }
         let align = self.member_align(decl, member.align);
         // Once a member of no fixed size has gone by, the bit the record has got to is counted
         // from the end of that member rather than from its start. Under the Itanium rule that
@@ -888,6 +898,7 @@ impl Builder {
     fn finish(self) -> Result<RecordLayout, RecordError> {
         let align = match self.options.align {
             Some(asked) => self.align.max(asked),
+            None if self.kencc.is_some() => self.kencc_round(),
             None => self.align,
         };
         if self.base.is_some() || !self.widest.is_empty() {
