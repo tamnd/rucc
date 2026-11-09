@@ -468,7 +468,9 @@ pub fn entry(
     // how many of those the named parameters took.
     let homes = conv.shared_positions || conv.shadow > 0;
     let reached = if conv.shared_positions { took.0 + took.1 } else { took.0 };
-    let beyond = match homes && reached < conv.int_args.len() {
+    // A convention that gives every argument a slot has the named ones in their slots whether a
+    // register also held one or not, so what they took is the answer there from the start.
+    let beyond = match homes && !conv.slotted && reached < conv.int_args.len() {
         true => conv.word * u32::try_from(reached).unwrap_or(0),
         false => places.size(),
     };

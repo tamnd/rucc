@@ -9728,8 +9728,11 @@ impl<'a> Lowering<'a> {
         }
         // And a convention with no argument registers at all, which is i386, has nothing to save
         // either, and its list is the address of the first word past the named arguments too.
+        // Nor does a convention that gives every argument a slot, which is kencc's: a register is
+        // only for the first argument, and that is always a named one.
         let registerless = conv.int_args.is_empty() && conv.sse_args.is_empty();
-        let in_memory = self.conv.abi.variadic == Variadic::AlwaysMemory || registerless;
+        let in_memory =
+            self.conv.abi.variadic == Variadic::AlwaysMemory || registerless || conv.slotted;
         let applies = self.saves_arguments();
         let area = (variadic && !in_memory || applies).then(|| match applies {
             true => varargs::Area::every(&conv),
