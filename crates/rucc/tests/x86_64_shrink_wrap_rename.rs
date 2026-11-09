@@ -259,6 +259,7 @@ long res(struct regs *regs) {
 /// the frame and the prologue stayed at the top, and the copy of a hex digit into `%r10` was taken
 /// out as a copy into a scratch register nothing read. `ffff` came out as 0, and the kernel failed
 /// its scanf and cmdline tests.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 const PARSE: &str = "\
 #include <limits.h>
 #include <stddef.h>

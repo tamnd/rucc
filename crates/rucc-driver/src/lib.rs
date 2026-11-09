@@ -4549,6 +4549,24 @@ fn report(done: &install::Installed, what: &str, say: &impl Fn(&str)) {
     say(&format!("the {what}'s record digests to {}", done.digest));
 }
 
+/// The triple that `-dumpmachine` prints.
+///
+/// A BSD triple has no environment, so it has the three fields that the compilers of each BSD
+/// print, as `x86_64-unknown-freebsd15`. On a FreeBSD host the release of that host has its minor
+/// number too, as `x86_64-unknown-freebsd15.1`, which is what the base system's `cc` prints.
+fn machine(target: Triple) -> String {
+    if !target.os.is_bsd() {
+        return target.to_string();
+    }
+    let os = match (target.os, host::freebsd_release()) {
+        (rucc_target::Os::FreeBsd(release), Some((major, minor))) if release == major => {
+            format!("freebsd{major}.{minor}")
+        }
+        (os, _) => os.to_string(),
+    };
+    format!("{}-unknown-{os}", target.arch.as_str())
+}
+
 /// What one of the `-dump` and `-print` flags prints.
 ///
 /// GCC prints the name back unchanged when it cannot find the file a `-print` flag asked about,
@@ -4560,7 +4578,7 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
             .map_or_else(|| name.to_owned(), |path| path.display().to_string())
     };
     Ok(match query {
-        Query::Machine => opts.target.to_string(),
+        Query::Machine => machine(opts.target),
         Query::Version => opts.gnuc.dumpversion(),
         Query::FullVersion => opts.gnuc.to_string(),
         Query::Multiarch => link::multiarch(opts.target),
@@ -7192,8 +7210,10 @@ mod tests {
 
     #[test]
     fn the_pic_and_pie_families_are_settled_the_way_gcc_settles_them() {
+        // For a Linux target, because a BSD makes no position independent executable when the
+        // line says nothing, and the host of the test can be a BSD.
         let pic = |line: &[&str]| {
-            let mut line = line.to_vec();
+            let mut line = [&[LINUX], line].concat();
             line.push("a.c");
             compile(&line).0.pic
         };
@@ -10059,6 +10079,11 @@ mod tests {
     fn the_questions_a_build_system_asks_before_it_compiles_anything() {
         let target = "--target=x86_64-unknown-linux-gnu";
         assert_eq!(printed(&[target, "-dumpmachine"]), "x86_64-unknown-linux-gnu");
+        // A BSD has no environment field. The release follows the target, unless it is the
+        // release of the FreeBSD this runs on, which has its minor number too.
+        assert_eq!(printed(&["--target=x86_64--netbsd", "-dumpmachine"]), "x86_64-unknown-netbsd");
+        let freebsd = printed(&["--target=aarch64-freebsd13.2", "-dumpmachine"]);
+        assert!(freebsd.starts_with("aarch64-unknown-freebsd13"), "{freebsd}");
         assert_eq!(printed(&[target, "-dumpversion"]), "16");
         assert_eq!(printed(&[target, "-dumpfullversion"]), "16.0.0");
         // They follow the release claimed, since that is the one `__GNUC__` says.
