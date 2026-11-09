@@ -1687,6 +1687,31 @@ const X87: Characteristics = Characteristics {
     is_iec_60559: "1",
 };
 
+/// The x87 format rounded to fifty three bits, which is `long double` and `_Float64x` on i386
+/// FreeBSD. It is GCC's `ieee_extended_intel_96_round_53_format`: the precision of a `double`
+/// and the exponent range of the x87 format.
+///
+/// The values are what `builtin_define_float_constants` in GCC's `c-cppbuiltin.cc` makes of
+/// that format. `MAX` is `(1 - 2^-53) * 2^16384`, `MIN` is `2^-16382` as on the x87 row,
+/// `EPSILON` is `2^-52` and `DENORM_MIN` is `2^(emin - p)`, which is `2^-16434`. Each is written
+/// to thirty six digits, rounded to nearest with ties to even, because GCC writes every value to
+/// the digits of the widest format, and that is `_Float128` on i386.
+const X87_ROUND_53: Characteristics = Characteristics {
+    mant_dig: "53",
+    dig: "15",
+    min_exp: "(-16381)",
+    min_10_exp: "(-4931)",
+    max_exp: "16384",
+    max_10_exp: "4932",
+    decimal_dig: "17",
+    max: "1.18973149535723163299902939989638351e+4932",
+    norm_max: "1.18973149535723163299902939989638351e+4932",
+    min: "3.36210314311209350626267781732175260e-4932",
+    epsilon: "2.22044604925031308084726333618164062e-16",
+    denorm_min: "7.46536864129530798597817535205257178e-4948",
+    is_iec_60559: "1",
+};
+
 /// IEEE binary128, which is `_Float128`, `_Float64x` off x86 and `long double` on AArch64 and
 /// RISC-V Linux.
 const QUAD: Characteristics = Characteristics {
@@ -1755,6 +1780,16 @@ const fn characteristics(format: Format) -> &'static Characteristics {
     }
 }
 
+/// The row of a type whose format the target chooses, which is the x87 row rounded to fifty three
+/// bits on a target that sets the x87 unit to round there.
+fn characteristics_on(target: &TargetInfo, format: Format) -> &'static Characteristics {
+    if format == Format::X87Extended && target.long_double_rounds_to_53 {
+        &X87_ROUND_53
+    } else {
+        characteristics(format)
+    }
+}
+
 /// The `float.h` characteristics.
 ///
 /// Nine families of them, which is `float`, `double` and `long double` and the six C23 named
@@ -1799,7 +1834,8 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // gcc writes the `double` values as `long double` constants cast back down, which is exact
     // in every format `long double` has and is the one family whose values are not a suffix.
     family(d, "DBL", &DOUBLE, |value| format!("((double){value}L)"));
-    family(d, "LDBL", characteristics(target.long_double_format), |value| format!("{value}L"));
+    let long_double = characteristics_on(target, target.long_double_format);
+    family(d, "LDBL", long_double, |value| format!("{value}L"));
 
     // The two named types that are not on every machine, each written where the type is and left
     // out where it is not. A program reads `__FLT128_MANT_DIG__` to find out whether it may write
@@ -1818,14 +1854,14 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // there: `_Float64x` is not a type on that machine and the family that describes it is not a
     // set of macros with a smaller answer in them.
     if let Some(format) = target.float64x_format {
-        family(d, "FLT64X", characteristics(format), |value| format!("{value}F64x"));
+        family(d, "FLT64X", characteristics_on(target, format), |value| format!("{value}F64x"));
     }
 
     // The number itself rather than the name of the other macro. The value is the same either
     // way, since `long double` is the widest format here, but the two are not the same thing to
     // read: `-dM` prints what the macro is, and a program that undefines `__LDBL_DECIMAL_DIG__`
     // takes this one with it. gcc writes the number.
-    d.set("__DECIMAL_DIG__", characteristics(target.long_double_format).decimal_dig);
+    d.set("__DECIMAL_DIG__", long_double.decimal_dig);
     if target.has_decimal_float {
         decimals(d);
     }
@@ -2114,6 +2150,44 @@ mod tests {
         assert!(has(&linux, "#define __WINT_TYPE__ unsigned int"));
         assert!(has(&linux, "#define __INT_FAST8_TYPE__ signed char"));
         assert!(has(&linux, "#define __INT_FAST8_WIDTH__ 8"));
+    }
+
+    /// tamnd/rucc#4088. i386 FreeBSD's `long double` is GCC's
+    /// `ieee_extended_intel_96_round_53_format`, so its `float.h` values are a `double`'s
+    /// precision in the x87 exponent range. `_Float64x` is the same mode and takes them too.
+    #[test]
+    fn i386_freebsd_describes_a_long_double_of_53_bits() {
+        let freebsd = set_for("i386-unknown-freebsd14");
+        for prefix in ["LDBL", "FLT64X"] {
+            let suffix = if prefix == "LDBL" { "L" } else { "F64x" };
+            for (name, value) in [
+                ("MANT_DIG", "53".to_owned()),
+                ("DIG", "15".to_owned()),
+                ("MIN_EXP", "(-16381)".to_owned()),
+                ("MIN_10_EXP", "(-4931)".to_owned()),
+                ("MAX_EXP", "16384".to_owned()),
+                ("MAX_10_EXP", "4932".to_owned()),
+                ("DECIMAL_DIG", "17".to_owned()),
+                ("MAX", format!("1.18973149535723163299902939989638351e+4932{suffix}")),
+                ("NORM_MAX", format!("1.18973149535723163299902939989638351e+4932{suffix}")),
+                ("MIN", format!("3.36210314311209350626267781732175260e-4932{suffix}")),
+                ("EPSILON", format!("2.22044604925031308084726333618164062e-16{suffix}")),
+                ("DENORM_MIN", format!("7.46536864129530798597817535205257178e-4948{suffix}")),
+                ("IS_IEC_60559", "1".to_owned()),
+            ] {
+                let line = format!("#define __{prefix}_{name}__ {value}");
+                assert!(has(&freebsd, &line), "{line}");
+            }
+        }
+        assert!(has(&freebsd, "#define __DECIMAL_DIG__ 17"));
+        assert!(has(&freebsd, "#define __SIZEOF_LONG_DOUBLE__ 12"));
+        // The other i386 BSDs and x86-64 FreeBSD keep the sixty four bits of the x87 format.
+        for triple in ["x86_64-unknown-freebsd", "i386-unknown-openbsd", "i486--netbsdelf"] {
+            let set = set_for(triple);
+            assert!(has(&set, "#define __LDBL_MANT_DIG__ 64"), "{triple}");
+            assert!(has(&set, "#define __FLT64X_MANT_DIG__ 64"), "{triple}");
+            assert!(has(&set, "#define __DECIMAL_DIG__ 21"), "{triple}");
+        }
     }
 
     #[test]
