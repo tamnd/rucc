@@ -427,7 +427,16 @@ impl<'a> Scoped<'a> {
             return &self.base;
         }
         let order = self.sources.reading_order(pos);
+        let first = self.changes.partition_point(|(at, _)| *at < order);
         let after = self.changes.partition_point(|(at, _)| *at <= order);
+        // Several lines at the very position asked about came out of one macro expansion with
+        // the warning, since every token of an expansion is placed at it. gcc tells them apart
+        // by where each token sits in the expansion, which a position cannot say, so this takes
+        // the shape such a macro has: `push`, `ignored`, the code, then `pop`. The warning is in
+        // the middle, which is what the first of them left in effect.
+        if after - first > 1 {
+            return &self.changes[first].1;
+        }
         match after.checked_sub(1) {
             Some(last) => &self.changes[last].1,
             None => &self.base,
@@ -475,6 +484,28 @@ mod tests {
         // The command line still holds for everything the lines did not name.
         assert!(scoped.at(65).silenced(&warning_at("E0771", 65)));
         assert!(scoped.at(BytePos::MAX).silenced(&warning_at("E0771", BytePos::MAX)));
+    }
+
+    /// A macro that wraps code in `push`, `ignored` and `pop` places all three, and every
+    /// warning about the code, at its expansion. The code is between them.
+    #[test]
+    fn a_warning_inside_a_macro_that_pushes_and_pops_around_it_is_silenced() {
+        let ignored = DiagnosticPragma::Set(PragmaKind::Ignored, "deprecated-declarations".into());
+        let lines = [
+            (10, DiagnosticPragma::Push),
+            (10, ignored.clone()),
+            (10, DiagnosticPragma::Pop),
+            (20, ignored),
+        ];
+        let mut sources = SourceMap::new();
+        sources.add("p.c", vec![b'\n'; 100]).unwrap();
+        let scoped = Scoped::new(&Named::default(), &lines, &sources);
+        let deprecated = |at| warning_at("E0770", at);
+        assert!(!scoped.at(5).silenced(&deprecated(5)));
+        assert!(scoped.at(10).silenced(&deprecated(10)));
+        assert!(!scoped.at(15).silenced(&deprecated(15)));
+        // One line at a position still holds from there on, as a line written alone does.
+        assert!(scoped.at(20).silenced(&deprecated(20)));
     }
 
     fn warning(code: &'static str) -> Diagnostic {
