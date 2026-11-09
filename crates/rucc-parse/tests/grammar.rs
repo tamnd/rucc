@@ -11,7 +11,7 @@ use rucc_ast::{
 };
 use rucc_base::Interner;
 use rucc_lex::{Convert, Keywords, Options, convert, tokenize};
-use rucc_parse::{Context, Parsed, parse};
+use rucc_parse::{Context, MAX_NESTING, Parsed, parse};
 use rucc_session::Std;
 use rucc_target::{TargetInfo, Triple};
 
@@ -949,12 +949,23 @@ fn a_missing_semicolon_is_reported_once() {
 
 #[test]
 fn nesting_deeper_than_the_cap_is_reported_and_not_a_crash() {
-    let depth = 400;
+    let depth = MAX_NESTING + 100;
     let src = format!("int x = {}1{};", "(".repeat(depth), ")".repeat(depth));
     let out = Fixture::new(Std::C23).parse(&src);
     assert!(out.failed());
     let deep = out.diagnostics.iter().filter(|d| d.message.contains("nested more deeply")).count();
     assert_eq!(deep, 1, "the cap is reported once");
+}
+
+/// FreeBSD's `usr.sbin/wlanstat` numbers its counters as `#define S_RATE AFTER(S_TX_MCAST)` with
+/// `#define AFTER(prev) ((prev)+1)`, 162 deep, so a `case` of the last one is 324 parentheses.
+#[test]
+fn a_chain_of_after_macros_as_deep_as_wlanstat_parses() {
+    let chain = 162;
+    let value = format!("{}0{}", "((".repeat(chain), ")+1)".repeat(chain));
+    let src = format!("int f(int s) {{ switch (s) {{ case {value}: return 1; }} return 0; }}");
+    let out = Fixture::new(Std::C23).parse(&src);
+    assert!(!out.failed(), "{:?}", out.diagnostics);
 }
 
 #[test]
