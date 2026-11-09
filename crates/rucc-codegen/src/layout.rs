@@ -187,7 +187,11 @@ pub fn blocks(
 /// after it, which is what a function with no frame returns through. The rows are what make a
 /// longer epilogue unsafe to copy here, since each copy would want its own, and a return with none
 /// leaves the rules what the jump left them. The block it was copied from stays where it is, since
-/// another block may still fall into it.
+/// another block may still fall into it. When none does and nothing else leads there, its `ret` is
+/// one no path reaches, and objtool says so. That was `set_worker_dying` in kernel/workqueue.c of
+/// Linux 7.3, where the block that clears `last_woken_worker` jumps back up and the return the
+/// three `WARN_ON` paths went to was left behind it. Such a block is emptied the way [`merge`]
+/// empties one, which is what gcc does with it.
 pub fn returns(
     func: &mut mir::Func,
     insts: &BranchInsts,
@@ -198,6 +202,7 @@ pub fn returns(
     let ret = mir::Opcode::new(names.join(insts.prefix, ret));
     let order: Vec<mir::Block> = func.blocks().collect();
     let mut copied = 0;
+    let mut left = Vec::new();
     for block in order {
         let Some(last) = func.terminator(block) else { continue };
         if func[last].opcode != jump || func[block].succs.len() != 1 {
@@ -218,6 +223,24 @@ pub fn returns(
         copy.finish();
         func.succs_mut(block).clear();
         copied += 1;
+        if !left.contains(&to) {
+            left.push(to);
+        }
+    }
+    if left.is_empty() {
+        return copied;
+    }
+    let (preds, fixed) = ways_in(func, &Ends::new(insts, names));
+    for to in left {
+        if !preds[to.index()].is_empty() || fixed[to.index()] {
+            continue;
+        }
+        let gone: Vec<mir::Inst> = func.insts(to).collect();
+        for inst in gone {
+            func.remove_inst(inst);
+        }
+        func.set_dead_end(to);
+        func.set_weight(to, mir::Weight::NEVER);
     }
     copied
 }
