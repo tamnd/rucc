@@ -697,6 +697,16 @@ mod tests {
     }
 
     #[test]
+    fn a_backslash_with_a_trailing_space_in_a_comment_says_nothing() {
+        // gcc warns only outside a comment. In a block comment the splice changes nothing, and
+        // in a line comment it carries the comment on, which gcc's -Wcomment is about instead.
+        let (tokens, diagnostics) = scan("/* a\\ \n b */ int x; // c\\ \n d\nint y;");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let names: Vec<_> = tokens.iter().map(|token| token.1.as_str()).collect();
+        assert_eq!(names, ["int", "x", ";", "int", "y", ";"]);
+    }
+
+    #[test]
     fn utf8_in_an_identifier_survives_the_scan() {
         let (tokens, diagnostics) = scan("café = 1;");
         assert!(diagnostics.is_empty());
