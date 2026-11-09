@@ -10034,10 +10034,11 @@ nop
     #[test]
     fn a_name_minus_a_negative_number_is_the_name_plus_the_number() {
         let read = assembled("\t.code32\n\tmovl %eax, ((boothowto) - -2147483648)\n");
-        assert_eq!(bytes(&read, ".text")[..2], [0x89, 0x05]);
+        // `a3` is the store of `eax` to an address with no registers, which gas picks as well.
+        assert_eq!(bytes(&read, ".text")[0], 0xa3);
         assert_eq!(
             relocs(&read, ".text"),
-            [(2, "boothowto", Reference::Address { bytes: 4 }, 2_147_483_648)]
+            [(1, "boothowto", Reference::Address { bytes: 4 }, 2_147_483_648)]
         );
         let read = assembled("\tmovq $1, foo + -8(%rip)\n");
         assert_eq!(relocs(&read, ".text")[0].3, -8 - 8);

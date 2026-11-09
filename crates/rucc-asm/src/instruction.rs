@@ -418,11 +418,10 @@ fn string_place(
         _ => (None, string),
     };
     let widths: &[char] = if mode == Mode::Bits64 { &['r', 'e'] } else { &['e'] };
-    let named = address.strip_prefix("(%").and_then(|inside| inside.strip_suffix(')')).and_then(
-        |inside| {
+    let named =
+        address.strip_prefix("(%").and_then(|inside| inside.strip_suffix(')')).and_then(|inside| {
             widths.iter().copied().find(|&width| inside.strip_prefix(width) == Some(register))
-        },
-    );
+        });
     let Some(width) = named else {
         let wanted: Vec<String> =
             widths.iter().map(|width| format!("(%{width}{register})")).collect();
