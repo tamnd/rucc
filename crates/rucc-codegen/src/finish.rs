@@ -667,7 +667,7 @@ pub struct Wrapped {
     entered: Vec<CfiOp>,
 }
 
-/// What [`Writer::rename`] did to the function, which stays done whether or not the prologue then
+/// What `Writer::rename` did to the function, which stays done whether or not the prologue then
 /// goes further in.
 ///
 /// The rename is asked for when no block but the entry will take the prologue, and after it the
