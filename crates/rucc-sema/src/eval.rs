@@ -411,6 +411,16 @@ impl<'a> Eval<'a> {
             // The sign and not the value, so a negative zero answers yes where `x < 0` would
             // answer no.
             Classify::SignBit => left.is_negative(),
+            // A NaN with the quiet bit clear, which is the bit below the leading one of the
+            // significand in every binary format. The decimal formats keep the difference
+            // somewhere else, and a decimal is left to the program to work out.
+            Classify::Signaling => {
+                if left.format().decimal().is_some() {
+                    return Err(self.stop(expr));
+                }
+                let quiet = 1u128 << (left.format().precision() - 2);
+                left.is_nan() && left.to_bits() & quiet == 0
+            }
             Classify::InfiniteSign => unreachable!("answered above"),
             Classify::Unordered | Classify::LessGreater => {
                 let Some(rhs) = rhs else { return Err(self.stop(expr)) };

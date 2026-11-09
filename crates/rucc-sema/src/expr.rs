@@ -1069,6 +1069,9 @@ pub enum Classify {
     /// a negative one and zero for everything else. It is the one question in the family whose
     /// answer is a number rather than a bit.
     InfiniteSign,
+    /// `issignaling(x)`, a NaN whose quiet bit is clear. It is a question about the bits, since
+    /// the two kinds of NaN compare the same way with everything.
+    Signaling,
 }
 
 impl Classify {
@@ -1084,6 +1087,7 @@ impl Classify {
             Classify::Normal => "normal",
             Classify::SignBit => "signbit",
             Classify::InfiniteSign => "infinite-sign",
+            Classify::Signaling => "signaling",
         }
     }
 

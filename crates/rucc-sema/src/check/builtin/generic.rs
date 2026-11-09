@@ -229,6 +229,29 @@ const GENERIC: &[Generic] = &[
 /// `__builtin_constant_p`, the one row here that is answered rather than called.
 const CONSTANT_P: &str = "__builtin_constant_p";
 
+/// The widths in bytes that gcc gives each name of the older family a spelling for.
+///
+/// `__sync_fetch_and_add_4` is `__sync_fetch_and_add` on an object of four bytes, whatever the
+/// pointer it is handed points at, and the same for every other name of the family. NetBSD's
+/// tests of its own `__sync_*_N` functions call the names directly, and gcc writes the instruction
+/// in place of each call. gcc has a sixteen byte spelling too, which is a call to libatomic on
+/// x86-64 unless `-mcx16` is given, so it is not here.
+const SIZES: [u32; 4] = [1, 2, 4, 8];
+
+/// The row of the older family that a name with a width at its end is, and the width in bits.
+fn sized(spelled: &str) -> Option<(Generic, u32)> {
+    let (base, size) = spelled.rsplit_once('_')?;
+    let size: u32 = size.parse().ok().filter(|size| SIZES.contains(size))?;
+    let row = GENERIC.iter().find(|row| row.trailing && row.name == base)?;
+    Some((*row, size * 8))
+}
+
+/// Whether the roster's row for this name is one of the spellings with a width.
+#[cfg(test)]
+pub(super) fn is_sized(name: &str) -> bool {
+    sized(name).is_some()
+}
+
 impl Checker<'_> {
     /// Checks a call to a builtin whose type comes from the call, if the name is one.
     ///
@@ -311,7 +334,10 @@ impl Checker<'_> {
             return Some(answer);
         }
         let spelled = self.text(name);
-        let generic = *GENERIC.iter().find(|row| row.name == spelled)?;
+        let generic = match GENERIC.iter().find(|row| row.name == spelled) {
+            Some(&row) => row,
+            None => sized(spelled)?.0,
+        };
         if generic.name == CONSTANT_P {
             return Some(self.constant_p(args, span));
         }
@@ -575,6 +601,13 @@ impl Checker<'_> {
             return self.poison(span);
         }
 
+        // A name with a width at its end works on an object of that width, so the pointer is made
+        // one to an unsigned integer of it, which is what gcc's prototype takes and answers.
+        let mut checked = checked;
+        if let Some((_, bits)) = sized(&spelled) {
+            checked[0] = self.sized_object(checked[0], bits);
+        }
+
         let Some(target) = self.object_type(&generic, &checked, &spelled) else {
             return self.poison(span);
         };
@@ -607,14 +640,15 @@ impl Checker<'_> {
         // checked it becomes a node of its own instead of the prototype the rest of the table
         // builds. The rule that decides the type it happens at is in `check/builtin/overflow.rs`,
         // and it needs the argument types as written, which is what it has here.
-        if let Some(asked) = super::overflow::operation(&spelled) {
+        if let Some(asked) = super::overflow::operation(generic.name) {
             return self.overflow_builtin(asked, &checked, span);
         }
         // The atomic accesses and the barrier are the same: an ordering is something the IR says
         // about an access rather than an argument anything is passed, so a call to one of these
-        // becomes a node too. See `check/builtin/atomic.rs`.
-        if let Some(op) = super::atomic::shape(&spelled) {
-            return self.atomic_builtin(op, &spelled, &checked, span);
+        // becomes a node too. See `check/builtin/atomic.rs`. The row's name and not the one the
+        // program wrote, which differ for the spellings with a width.
+        if let Some(op) = super::atomic::shape(generic.name) {
+            return self.atomic_builtin(op, generic.name, &checked, span);
         }
 
         let ret = match generic.answer {
@@ -663,6 +697,21 @@ impl Checker<'_> {
         let callee = self.tast.expr(Expr::new(ExprKind::Decl(decl), ty, Category::Function), span);
         let callee = self.value(callee);
         self.finish_call(callee, Some(name), checked, span)
+    }
+
+    /// The first argument of a `__sync_*_N` call, as a pointer to a `volatile` unsigned integer of
+    /// `bits`, which is the `volatile void *` of gcc's prototype read at the width the name says.
+    ///
+    /// An argument that is not a pointer is left as it is, so that what is said about it is what
+    /// is said for the name without the width.
+    fn sized_object(&mut self, arg: ExprId, bits: u32) -> ExprId {
+        if self.is_poisoned(arg) || !is_pointer(&self.types, self.tast[arg].ty) {
+            return arg;
+        }
+        let object = self.exact_unsigned(bits);
+        let object = self.types.qualified(object, Qualifiers::VOLATILE);
+        let ty = self.types.pointer(object);
+        self.conv().to_type(arg, ty)
     }
 
     /// What the first argument points at, once the qualifiers and the `_Atomic` are off it.
@@ -802,6 +851,7 @@ mod tests {
                 continue;
             }
             let known = GENERIC.iter().any(|generic| generic.name == feature.name)
+                || is_sized(feature.name)
                 || crate::check::builtin::classify::is_family(feature.name)
                 || crate::check::builtin::sign::is_family(feature.name)
                 || crate::check::builtin::parts::is_family(feature.name)

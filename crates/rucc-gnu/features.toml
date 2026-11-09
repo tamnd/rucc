@@ -3145,6 +3145,16 @@ tests = ["rucc-driver::the_return_address_builtins_that_adjust_one_hand_it_back"
 notes = "Turns what __builtin_return_address answered into the address the program can compare with a function's. That is the same address on x86-64 and AArch64, so the call is its argument, which check/builtin/frame.rs returns in place of the call. The kernel's vsprintf.c uses it when printing a return address as a symbol."
 
 [[feature]]
+name = "__builtin_extend_pointer"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+signature = "size_t(void *)"
+used_by = ["libgcc"]
+tests = ["rucc-driver::the_return_address_builtins_that_adjust_one_hand_it_back"]
+notes = "A pointer as an unsigned integer of the width of a machine word. gcc's type is unsigned word, which is size_t on every target here. libgcc's unwinder uses it on the addresses it keeps."
+
+[[feature]]
 name = "__builtin_frob_return_addr"
 kind = "builtin"
 gcc_version = "2.95"
@@ -5138,6 +5148,66 @@ used_by = ["glibc", "musl"]
 tests = ["rucc-sema::the_two_that_read_the_rounding_mode_are_called_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
 
 [[feature]]
+name = "__builtin_logb"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double)"
+library = "logb"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_logbf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float)"
+library = "logbf"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_logbl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double)"
+library = "logbl"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_scalbn"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "double(double, int)"
+library = "scalbn"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_scalbnf"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "float(float, int)"
+library = "scalbnf"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_scalbnl"
+kind = "builtin"
+gcc_version = "3.0"
+status = "implemented"
+signature = "long double(long double, int)"
+library = "scalbnl"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
 name = "__builtin_sqrt"
 kind = "builtin"
 gcc_version = "2.0"
@@ -5475,6 +5545,15 @@ status = "implemented"
 used_by = ["glibc"]
 tests = ["rucc-driver::the_last_three_classification_builtins_are_comparisons_and_not_calls"]
 notes = "isinf with a sign, and the one question of the family whose answer is a number rather than a bit."
+
+[[feature]]
+name = "__builtin_issignaling"
+kind = "builtin"
+gcc_version = "13.0"
+status = "implemented"
+used_by = ["libquadmath"]
+tests = ["rucc-driver::a_signaling_nan_is_told_from_a_quiet_one_by_its_bits"]
+notes = "Whether the value is a signaling NaN, which is a NaN whose quiet bit is clear. The question is about the bits, so it is answered from them in every binary format, the x87 one and the 128-bit one through memory."
 
 [[feature]]
 name = "__builtin_fpclassify"
@@ -6128,6 +6207,582 @@ tests = ["rucc-driver::a_read_modify_write_is_one_instruction_and_the_arithmetic
 notes = "Giving a lock back, which is a store of a zero at release ordering. The other name that is not a full barrier, for the mirror of the reason above."
 
 [[feature]]
+name = "__sync_fetch_and_add_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_add on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_add_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_add on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_add_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_add on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_add_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_add on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_sub_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_sub on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_sub_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_sub on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_sub_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_sub on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_sub_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_sub on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_or_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_or on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_or_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_or on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_or_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_or on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_or_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_or on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_and_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_and on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_and_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_and on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_and_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_and on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_and_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_and on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_xor_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_xor on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_xor_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_xor on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_xor_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_xor on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_xor_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_xor on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_nand_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_nand on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_nand_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_nand on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_nand_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_nand on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_fetch_and_nand_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_fetch_and_nand on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_add_and_fetch_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_add_and_fetch on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_add_and_fetch_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_add_and_fetch on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_add_and_fetch_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_add_and_fetch on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_add_and_fetch_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_add_and_fetch on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_sub_and_fetch_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_sub_and_fetch on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_sub_and_fetch_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_sub_and_fetch on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_sub_and_fetch_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_sub_and_fetch on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_sub_and_fetch_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_sub_and_fetch on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_or_and_fetch_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_or_and_fetch on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_or_and_fetch_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_or_and_fetch on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_or_and_fetch_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_or_and_fetch on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_or_and_fetch_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_or_and_fetch on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_and_and_fetch_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_and_and_fetch on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_and_and_fetch_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_and_and_fetch on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_and_and_fetch_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_and_and_fetch on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_and_and_fetch_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_and_and_fetch on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_xor_and_fetch_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_xor_and_fetch on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_xor_and_fetch_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_xor_and_fetch on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_xor_and_fetch_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_xor_and_fetch on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_xor_and_fetch_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_xor_and_fetch on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_nand_and_fetch_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_nand_and_fetch on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_nand_and_fetch_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_nand_and_fetch on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_nand_and_fetch_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_nand_and_fetch on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_nand_and_fetch_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_nand_and_fetch on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_bool_compare_and_swap_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_bool_compare_and_swap on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_bool_compare_and_swap_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_bool_compare_and_swap on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_bool_compare_and_swap_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_bool_compare_and_swap on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_bool_compare_and_swap_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_bool_compare_and_swap on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_val_compare_and_swap_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_val_compare_and_swap on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_val_compare_and_swap_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_val_compare_and_swap on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_val_compare_and_swap_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_val_compare_and_swap on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_val_compare_and_swap_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_val_compare_and_swap on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_lock_test_and_set_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_lock_test_and_set on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_lock_test_and_set_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_lock_test_and_set on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_lock_test_and_set_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_lock_test_and_set on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_lock_test_and_set_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_lock_test_and_set on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_lock_release_1"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_lock_release on an object of 1 byte, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_lock_release_2"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_lock_release on an object of 2 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_lock_release_4"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_lock_release on an object of 4 bytes, whatever the pointer points at."
+
+[[feature]]
+name = "__sync_lock_release_8"
+kind = "builtin"
+gcc_version = "4.1"
+status = "implemented"
+used_by = ["netbsd"]
+tests = ["rucc-driver::a_sized_sync_builtin_is_the_generic_one_at_its_width"]
+notes = "__sync_lock_release on an object of 8 bytes, whatever the pointer points at."
+
+[[feature]]
 name = "__builtin_clrsb"
 kind = "builtin"
 gcc_version = "4.7"
@@ -6521,6 +7176,28 @@ signature = "_Float64x(const char *)"
 library = "nansf64x"
 used_by = ["glibc"]
 tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_infq"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Float128(void)"
+targets = ["x86-64", "x86"]
+used_by = ["libquadmath"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::the_x86_names_for_a_float128_infinity_are_constants"]
+notes = "The x86 spelling of the _Float128 infinity, which gcc has on x86 and on no other target. libquadmath writes HUGE_VALQ with it."
+
+[[feature]]
+name = "__builtin_huge_valq"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "_Float128(void)"
+targets = ["x86-64", "x86"]
+used_by = ["libquadmath"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::the_x86_names_for_a_float128_infinity_are_constants"]
+notes = "The x86 spelling of the _Float128 infinity, which gcc has on x86 and on no other target. libquadmath writes HUGE_VALQ with it."
 
 [[feature]]
 name = "__builtin_nansd128"

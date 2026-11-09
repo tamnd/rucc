@@ -10731,6 +10731,46 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("setne\t"), "{text}");
     }
 
+    /// The spellings of the older family with a width at the end are the name without it, on an
+    /// object of that many bytes whatever the pointer points at.
+    ///
+    /// NetBSD's `tests/lib/libc/atomic` calls `__sync_fetch_and_and_1` and the rest by name, and
+    /// gcc 15.1 writes the locked instruction for each at the width the name says.
+    #[test]
+    fn a_sized_sync_builtin_is_the_generic_one_at_its_width() {
+        let source = "unsigned char f(unsigned char *p) { return __sync_fetch_and_add_1(p, 3); }\n";
+        let text = asm(source);
+        assert!(text.contains("\tlock\n"), "{text}");
+        assert!(text.contains("xaddb\t"), "{text}");
+        // The pointer says nothing about the width: a `long *` handed to the four byte spelling
+        // is read four bytes at a time, as gcc's `volatile void *` parameter says.
+        let source = "unsigned f(long *p) { return __sync_fetch_and_add_4(p, 1); }\n";
+        assert!(asm(source).contains("xaddl\t"), "{}", asm(source));
+        let source = "unsigned short f(void *p) { return __sync_lock_test_and_set_2(p, 1); }\n";
+        assert!(asm(source).contains("xchgw\t"), "{}", asm(source));
+        let source = "int f(void *p) { return __sync_bool_compare_and_swap_8(p, 1, 2); }\n";
+        assert!(asm(source).contains("cmpxchgq\t"), "{}", asm(source));
+        let source = "void f(void *p) { __sync_lock_release_4(p); }\n";
+        assert!(!asm(source).contains("call"), "{}", asm(source));
+        for op in ["and", "or", "xor", "nand", "sub"] {
+            for size in [1, 2, 4, 8] {
+                let source = format!(
+                    "unsigned long long f(void *p) {{ return __sync_fetch_and_{op}_{size}(p, 1) + __sync_{op}_and_fetch_{size}(p, 1) + __sync_val_compare_and_swap_{size}(p, 1, 2); }}\n"
+                );
+                let compiled = run(&options(), &source);
+                assert!(compiled.messages.is_empty(), "{op} {size}: {:?}", compiled.messages);
+                assert!(!asm(&source).contains("call"), "{op} {size}");
+            }
+        }
+        // A width gcc does not spell is no builtin at all.
+        let compiled = run(&options(), "int f(int *p) { return __sync_fetch_and_add_3(p, 1); }\n");
+        assert!(
+            compiled.messages.iter().any(|m| m.contains("implicit declaration of function")),
+            "{:?}",
+            compiled.messages
+        );
+    }
+
     /// On this machine it is `xchg` where the machine has an exchange and `lock xadd` where it has
     /// an add, at the width of the object.
     ///
@@ -10982,6 +11022,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("call"), "{text}");
         let text = body("void *f(void *p) { return __builtin_frob_return_addr(p); }\n");
         assert!(!text.contains("call"), "{text}");
+        // And the one libgcc's unwinder keeps addresses with, which is the pointer as a number.
+        let text = body("unsigned long f(void *p) { return __builtin_extend_pointer(p); }\n");
+        assert!(!text.contains("call"), "{text}");
+        assert!(
+            text.contains("ptrtoint") || text.contains("bitcast") || text.contains("return %0"),
+            "{text}"
+        );
     }
 
     /// The assembly of `source` for `target` at `-O2`, and what the compiler said about it.
@@ -12289,6 +12336,81 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
     }
 
+    /// The two x86 names for the `__float128` infinity are constants, as the `_Float128` ones are.
+    ///
+    /// libquadmath writes `HUGE_VALQ` as `__builtin_huge_valq()` and its `nanq` and the rest use
+    /// `__builtin_infq()`. gcc has the pair on x86 alone, so on AArch64 they are names nothing
+    /// declares, which is what gcc 15.1 says there too.
+    #[test]
+    fn the_x86_names_for_a_float128_infinity_are_constants() {
+        for target in ["x86_64-unknown-netbsd", "i486-unknown-netbsdelf", "x86_64-unknown-freebsd"]
+        {
+            let mut opts = options();
+            opts.emit = EmitKind::Ir;
+            opts.target = target.parse::<Triple>().unwrap();
+            let source =
+                "__float128 a = __builtin_infq();\n__float128 b = __builtin_huge_valq();\n";
+            let result = run(&opts, source);
+            let text = result.text();
+            let inf = "f128 = 0x7fff0000000000000000000000000000,";
+            assert!(text.contains(&format!("global @a : {inf}")), "{target}: {text}");
+            assert!(text.contains(&format!("global @b : {inf}")), "{target}: {text}");
+            assert!(!text.contains("call"), "{target}: {text}");
+        }
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, "_Float128 f(void) { return __builtin_infq(); }\n");
+        assert!(
+            result.messages.iter().any(|m| m.contains("implicit declaration of function")),
+            "{:?}",
+            result.messages
+        );
+    }
+
+    /// `__builtin_issignaling` is a test of the bits, and a constant when its operand is one.
+    ///
+    /// A signaling NaN has the quiet bit clear and some other bit of the fraction set, so it is
+    /// the magnitudes above the infinity and below the infinity with the quiet bit set. gcc 15.1
+    /// answers 1 for `__builtin_nans` and 0 for `__builtin_nan` and for an infinity, in each
+    /// format.
+    #[test]
+    fn a_signaling_nan_is_told_from_a_quiet_one_by_its_bits() {
+        let text = ir(concat!(
+            "int a = __builtin_issignaling(__builtin_nans(\"\"));\n",
+            "int b = __builtin_issignaling(__builtin_nan(\"\"));\n",
+            "int c = __builtin_issignaling(__builtin_inf());\n",
+            "int d = __builtin_issignaling(__builtin_nansf(\"1\"));\n",
+            "int e = __builtin_issignaling(__builtin_nansl(\"\"));\n",
+            "int f = __builtin_issignaling(__builtin_nanl(\"\"));\n",
+            "int g = __builtin_issignaling(__builtin_nansf128(\"\"));\n",
+            "int h = __builtin_issignaling(1.0);\n",
+        ));
+        for (name, answer) in [("a", 1), ("b", 0), ("c", 0), ("d", 1), ("e", 1), ("f", 0)] {
+            assert!(text.contains(&format!("global @{name} : i32 = {answer},")), "{name}: {text}");
+        }
+        assert!(text.contains("global @g : i32 = 1,"), "{text}");
+        assert!(text.contains("global @h : i32 = 0,"), "{text}");
+
+        // A double is two unsigned comparisons of its magnitude against the infinity and the
+        // infinity with the quiet bit set.
+        let text = body("int f(double x) { return __builtin_issignaling(x); }\n");
+        assert!(text.contains("icmp ugt"), "{text}");
+        assert!(text.contains("icmp ult"), "{text}");
+        assert!(text.contains(&format!("iconst.i64 {}", 0x7ff0_0000_0000_0000_i64)), "{text}");
+        assert!(text.contains(&format!("iconst.i64 {}", 0x7ff8_0000_0000_0000_i64)), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // The x87 format and the 128-bit one are read back as words, and neither is a call.
+        for ty in ["long double", "__float128", "float"] {
+            let source = format!("int f({ty} x) {{ return __builtin_issignaling(x); }}\n");
+            let compiled = run(&options(), &source);
+            assert!(compiled.messages.is_empty(), "{ty}: {:?}", compiled.messages);
+            let text = body(&source);
+            assert!(!text.contains("call"), "{ty}: {text}");
+        }
+    }
+
     /// The sign builtins of the interchange types are a mask over the bits, as for `double`.
     ///
     /// glibc's `bits/floatn.h` writes `fabsf128` and `copysignf128` with these once `__GNUC__` is
@@ -12915,7 +13037,18 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "double s(void) { return __builtin_sqrt(4.0); }\n",
             "double t(double x, double y, double z) { return __builtin_fma(x, y, z); }\n",
             "float u(float x, float y, float z) { return __builtin_fmaf(x, y, z); }\n",
+            "double v(double x) { return __builtin_logb(x); }\n",
+            "float w(float x) { return __builtin_logbf(x); }\n",
+            "long double y(long double x) { return __builtin_logbl(x); }\n",
+            "double z(double x, int n) { return __builtin_scalbn(x, n); }\n",
+            "float zf(float x, int n) { return __builtin_scalbnf(x, n); }\n",
+            "long double zl(long double x, int n) { return __builtin_scalbnl(x, n); }\n",
         ));
+        // The two that libm's own sources write with the prefix, which are calls by their plain
+        // names as gcc makes them at -O0.
+        for name in ["logb", "logbf", "logbl", "scalbn", "scalbnf", "scalbnl"] {
+            assert!(text.contains(&format!("@{name}(")), "{name}: {text}");
+        }
         // Marked as the library's own, which is what lets wasm write the instruction in its place.
         // `fmax` is not one of those, so its call carries no mark.
         assert!(text.contains("call.library @ceil("), "{text}");

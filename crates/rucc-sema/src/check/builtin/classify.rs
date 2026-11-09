@@ -106,6 +106,9 @@ const FAMILY: &[Question] = &[
     any("__builtin_isfinite", Asks::Node(Classify::Finite)),
     any("__builtin_isnormal", Asks::Node(Classify::Normal)),
     any("__builtin_isinf_sign", Asks::Node(Classify::InfiniteSign)),
+    // From gcc 13, and type generic with no spelling for a width. libquadmath asks it of a
+    // `__float128`.
+    any("__builtin_issignaling", Asks::Node(Classify::Signaling)),
     // The BSD spelling of the same question, which gcc has as well and which is not type generic
     // in any of its three forms.
     at("__builtin_finite", Asks::Node(Classify::Finite), FloatKind::Double),
