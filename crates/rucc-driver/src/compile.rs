@@ -356,6 +356,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             pedantic: opts.pedantic,
             error_limit: opts.error_limit as usize,
             type_names: &type_names,
+            kencc: opts.kencc,
         },
     );
     clock.lap("parse");

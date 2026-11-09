@@ -24,6 +24,8 @@ struct Fixture {
     keywords: Keywords,
     target: TargetInfo,
     std: Std,
+    /// Whether the parse is under `-fkencc`.
+    kencc: bool,
 }
 
 impl Fixture {
@@ -32,7 +34,7 @@ impl Fixture {
         let keywords = Keywords::new(&mut interner, std, true);
         let target =
             TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().expect("a triple"));
-        Fixture { interner, keywords, target, std }
+        Fixture { interner, keywords, target, std, kencc: false }
     }
 
     fn parse(&mut self, src: &str) -> Parsed {
@@ -48,7 +50,7 @@ impl Fixture {
         };
         let (tokens, diagnostics) = convert(&pp, &cx);
         assert!(diagnostics.is_empty(), "phase 7 disliked this:\n{src}");
-        parse(&tokens, Context::new(&self.interner, self.std))
+        parse(&tokens, Context { kencc: self.kencc, ..Context::new(&self.interner, self.std) })
     }
 }
 
@@ -56,8 +58,11 @@ impl Fixture {
 ///
 /// The printed text is given back, so that a case can also say what it expects to see.
 fn round_trip(std: Std, src: &str) -> String {
-    let mut fixture = Fixture::new(std);
+    round_trip_in(Fixture::new(std), src)
+}
 
+/// [`round_trip`] with a fixture that the caller made.
+fn round_trip_in(mut fixture: Fixture, src: &str) -> String {
     let first = fixture.parse(src);
     let complaints: Vec<&str> = first.diagnostics.iter().map(|d| d.message.as_str()).collect();
     assert!(complaints.is_empty(), "expected this to parse:\n{src}\ngot {complaints:?}");
@@ -392,4 +397,16 @@ fn a_wide_string_that_needs_an_escape_comes_back() {
 #[test]
 fn an_empty_translation_unit_prints_as_nothing() {
     assert_eq!(printed(""), "");
+}
+
+#[test]
+fn the_kencc_statements_come_back() {
+    let fixture = Fixture { kencc: true, ..Fixture::new(Std::C89) };
+    let text = round_trip_in(
+        fixture,
+        "void f(int a, int *p) { USED(a, p); USED(); SET(a); if (a) SET(*p); }",
+    );
+    assert!(text.contains("USED(a, p);"), "{text}");
+    assert!(text.contains("USED();"), "{text}");
+    assert!(text.contains("SET(*p);"), "{text}");
 }

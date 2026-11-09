@@ -459,6 +459,13 @@ impl<'a> Printer<'a> {
                 self.asm(asm);
                 self.token(";");
             }
+            Stmt::Used { set, args } => {
+                self.token(if set { "SET" } else { "USED" });
+                self.token("(");
+                self.arguments(args);
+                self.token(")");
+                self.token(";");
+            }
         }
     }
 

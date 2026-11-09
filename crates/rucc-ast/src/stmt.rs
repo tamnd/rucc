@@ -13,7 +13,7 @@
 use rucc_base::Symbol;
 
 use crate::asm::AsmId;
-use crate::ast::{AttrList, StmtList, SymbolList};
+use crate::ast::{AttrList, ExprList, StmtList, SymbolList};
 use crate::decl::DeclId;
 use crate::expr::ExprId;
 
@@ -120,6 +120,15 @@ pub enum Stmt {
     LocalLabels(SymbolList),
     /// An `asm` statement.
     Asm(AsmId),
+    /// kencc's `USED(a, b);`, or `SET(a);` when `set` is true. The expressions are checked and
+    /// not evaluated, and the statement marks them as used or as set. It is in the tree only
+    /// under `-fkencc`, where `USED` and `SET` are keywords.
+    Used {
+        /// Whether the statement is `SET` and not `USED`.
+        set: bool,
+        /// The expressions, which can be none.
+        args: ExprList,
+    },
 }
 
 /// The first clause of a `for` statement.
