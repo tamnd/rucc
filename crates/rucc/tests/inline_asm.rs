@@ -1605,3 +1605,54 @@ unsigned short s16(unsigned short x) { __asm volatile (\"rorw $8, %w1\" : \"=r\"
         "{s16}"
     );
 }
+
+#[test]
+fn a_cc_modifier_is_the_constant_as_c_writes_it() {
+    // FreeBSD's `sdt.h` writes this for every probe when the compiler says it is gcc 15. `%cc0` is
+    // the address of the probe with no `$` in front, as with `%c0`. gcc 15 writes the same three
+    // `.quad` lines. Before, the template was refused, and 672 units of the kernel failed on it.
+    let source = "\
+struct probe { int id; };
+struct probe probe_x;
+extern void hit(int);
+void f(int a) {
+  asm goto(\"0:\\n\"
+           \"nopw 0(%%rax,%%rax,1)\\n\"
+           \".pushsection set_sdt_tracepoint_set, \\\"aw\\\"\\n\"
+           \".quad %cc0\\n\"
+           \".quad 0b\\n\"
+           \".quad %l1\\n\"
+           \".popsection\\n\"
+           : : \"i\" (&probe_x) : : probe);
+  hit(a);
+  if (0) {
+probe:
+    hit(a + 1);
+  }
+}
+";
+    for level in ["-O0", "-O2"] {
+        let (ok, text, said) = run_with("cc-modifier", source, &[level]);
+        assert!(ok, "{level}: {said}");
+        let f = body(&text, "f");
+        assert!(f.contains(".quad probe_x\n"), "{level}: {f}");
+        assert!(f.contains(".quad 0b\n"), "{level}: {f}");
+        let arm = f
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".quad "))
+            .nth(2)
+            .expect("the third .quad is the label of the arm");
+        assert!(f.contains(&format!("\n{arm}:")), "{level}: {f}");
+    }
+    let path = fixture("cc-modifier-object", source);
+    let object = path.with_extension("o");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={TARGET}"))
+        .args(["-O2", "-c", "-o"])
+        .arg(&object)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
