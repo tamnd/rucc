@@ -125,13 +125,30 @@ typedef __WINT_TYPE__ wint_t;
 #endif
 #endif
 
-/* The alignment no standard type needs more of. A union of the widest of each family is the
- * definition every implementation reaches for, and it is written as a union rather than as
- * an `_Alignas` on a character so that its size is a multiple of its alignment. */
+/* The alignment no standard type needs more of. GCC on Linux and FreeBSD declares a struct of
+ * a `long long` and a `long double`, so its size is a multiple of its alignment.
+ *
+ * NetBSD's GCC does not install a `<stddef.h>` of its own. It uses the system's, which declares
+ * a union of a pointer, a `long double` and a `long long`, only for C11 and C++11 and later. The
+ * union is half the size of the struct, so a type that holds one has a different layout. On
+ * NetBSD this declares the same union, with the same member names and the same condition. */
 #ifdef __need_max_align_t
 #undef __need_max_align_t
 #if !defined(__RUCC_MAX_ALIGN_T) && !defined(_GCC_MAX_ALIGN_T) \
     && !defined(__CLANG_MAX_ALIGN_T_DEFINED) && !defined(__DEFINED_max_align_t)
+#if defined(__NetBSD__)
+#if (__STDC_VERSION__ - 0) >= 201112L || (__cplusplus - 0) >= 201103L
+#define __RUCC_MAX_ALIGN_T
+#define _GCC_MAX_ALIGN_T
+#define __CLANG_MAX_ALIGN_T_DEFINED
+#define __DEFINED_max_align_t
+typedef union {
+    void *_v;
+    long double _ld;
+    long long int _ll;
+} max_align_t;
+#endif
+#else
 #define __RUCC_MAX_ALIGN_T
 #define _GCC_MAX_ALIGN_T
 #define __CLANG_MAX_ALIGN_T_DEFINED
@@ -140,6 +157,7 @@ typedef struct {
     long long __rucc_max_align_ll;
     long double __rucc_max_align_ld;
 } max_align_t;
+#endif
 #endif
 #endif
 

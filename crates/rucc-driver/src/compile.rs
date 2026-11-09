@@ -3768,6 +3768,40 @@ mod tests {
         assert!(text.contains("decl #1 b : long"), "{text}");
     }
 
+    /// `max_align_t` has the layout of the reference compiler of each system.
+    ///
+    /// GCC on Linux and FreeBSD declares a struct of a `long long` and a `long double`, which is
+    /// 32 bytes on all three machines. NetBSD's GCC uses the system `<stddef.h>`, which declares
+    /// a union of a pointer, a `long double` and a `long long`, 16 bytes, and only for C11 and
+    /// later. The `bsd-abi` probe of rucc-compat found the difference.
+    #[test]
+    fn max_align_t_is_the_union_of_the_system_header_on_netbsd() {
+        let source = concat!(
+            "#include <stddef.h>\n",
+            "_Static_assert(sizeof(max_align_t) == SIZE, \"size\");\n",
+            "_Static_assert(_Alignof(max_align_t) == 16, \"align\");\n",
+        );
+        let union = "_Static_assert(offsetof(max_align_t, _ld) == 0, \"ld\");\n";
+        for arch in ["x86_64", "aarch64", "riscv64"] {
+            for (target, size, more) in [
+                (format!("{arch}-unknown-netbsd11.1"), 16, union),
+                (format!("{arch}-unknown-freebsd15.1"), 32, ""),
+            ] {
+                let mut opts = freestanding();
+                opts.target = target.parse::<Triple>().unwrap();
+                opts.std = Std::C11;
+                let result = run(&opts, &format!("#define SIZE {size}\n{source}{more}"));
+                assert_eq!(result.messages, Vec::<String>::new(), "{target}");
+            }
+            // The system header declares nothing before C11.
+            let mut opts = freestanding();
+            opts.target = format!("{arch}-unknown-netbsd11.1").parse::<Triple>().unwrap();
+            opts.std = Std::C99;
+            let result = run(&opts, "#include <stddef.h>\nmax_align_t m;\n");
+            assert_eq!(result.errors, 1, "{arch}: {:?}", result.messages);
+        }
+    }
+
     #[test]
     fn the_shipped_limits_and_float_are_the_targets_own_answers() {
         let text = shipped(concat!(
