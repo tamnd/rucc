@@ -96,7 +96,9 @@ pub use crate::classify::{
     is_real, is_real_floating, is_record, is_scalar, is_vector, is_void, lanes, pointee,
     pointee_as_written, real_part,
 };
-pub use crate::compat::{adjust_parameter, compatible, compatible_pointees, composite};
+pub use crate::compat::{
+    adjust_parameter, compatible, compatible_pointees, compatible_unqualified, composite,
+};
 pub use crate::convert::{
     mask_of, promote, promote_bit_field, usual_arithmetic, vectors_convertible,
 };

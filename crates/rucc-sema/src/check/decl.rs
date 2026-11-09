@@ -37,7 +37,9 @@ use rucc_ast::{self as ast, AlignSpec, AttrList, FuncSpecs, StorageClass};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind};
-use rucc_types::{compatible, composite, is_complete, is_function, is_void, layout};
+use rucc_types::{
+    compatible, compatible_unqualified, composite, is_complete, is_function, is_void, layout,
+};
 
 use crate::asm::FileAsm;
 use crate::check::Checker;
@@ -1939,7 +1941,7 @@ impl Checker<'_> {
     }
 
     /// The declaration this one names, which may be one that was already made.
-    fn merge(&mut self, declared: Declared) -> DeclId {
+    fn merge(&mut self, mut declared: Declared) -> DeclId {
         // A declaration with linkage answers to one anywhere in sight, since it names the same
         // object, and one without linkage answers only to this scope, which is what lets a
         // function declare a local called `printf`.
@@ -1996,8 +1998,13 @@ impl Checker<'_> {
             return self.declare(declared);
         }
         if !compatible(&self.types, node.ty, declared.ty) {
-            self.conflicting_types(declared.name, declared.ty, Some(previous), declared.span);
-            return previous;
+            // kencc sets the qualifiers aside when it compares two declarations, and the type
+            // of the first one stays the type of the name.
+            if !(self.cx.kencc && compatible_unqualified(&self.types, node.ty, declared.ty)) {
+                self.conflicting_types(declared.name, declared.ty, Some(previous), declared.span);
+                return previous;
+            }
+            declared.ty = node.ty;
         }
         // A weakref counts as the name's definition, since it has already said what the name is,
         // so a body or a value for it later is a second one, which is what gcc calls it.
