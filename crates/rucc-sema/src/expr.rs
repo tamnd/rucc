@@ -635,6 +635,14 @@ pub enum ExprKind {
         /// How many bytes of arguments in memory go with the call.
         size: u32,
     },
+    /// `__builtin_return(result)`, which leaves the function with what a `__builtin_apply` came
+    /// back with as its answer, whatever the function was declared to return. It never comes back.
+    ///
+    /// The operand is the block, already a `void *`. See `check/builtin/apply.rs`.
+    ApplyReturn {
+        /// The block `__builtin_apply` answered.
+        result: ExprId,
+    },
     /// `__builtin_object_size(p, kind)` where the address is not one whose object can be seen by
     /// looking at the expression, asked again of the IR.
     ///

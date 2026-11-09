@@ -679,6 +679,7 @@ impl<'a> Printer<'a> {
             }
             ExprKind::ApplyArgs => "apply-args".to_owned(),
             ExprKind::Apply { size, .. } => format!("apply {size}"),
+            ExprKind::ApplyReturn { .. } => "apply-return".to_owned(),
             ExprKind::ObjectSize { kind, .. } => format!("object-size {kind}"),
             ExprKind::ConstantP { .. } => "constant-p".to_owned(),
             ExprKind::Alloca { .. } => "alloca".to_owned(),
@@ -737,6 +738,7 @@ impl<'a> Printer<'a> {
             | ExprKind::ConvertVector { operand: base }
             | ExprKind::Prefetch { address: base, .. }
             | ExprKind::RegSizeTable { table: base }
+            | ExprKind::ApplyReturn { result: base }
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::ConstantP { value: base }
             | ExprKind::ByteSwap { operand: base }

@@ -1,5 +1,6 @@
-//! `__builtin_apply_args` and `__builtin_apply`, which pass the arguments a function was called
-//! with on to another function without knowing what they are.
+//! `__builtin_apply_args`, `__builtin_apply` and `__builtin_return`, which pass the arguments a
+//! function was called with on to another function, and what that one gave back on to the caller,
+//! without knowing what either is.
 //!
 //! Design: `spec/13-gnu-compat.md` section 13.5.
 //!
@@ -8,11 +9,12 @@
 //! arguments that came in memory are. The second calls a function with what is in such a block, and
 //! answers the address of a block holding every register a value can come back in. Neither knows
 //! the types of the arguments, which is the point of them: a function that forwards a call it
-//! cannot see the prototype of writes the pair.
+//! cannot see the prototype of writes the pair. The third leaves the function with what is in the
+//! second block as its answer, and never comes back. libobjc's `sendmsg.c` writes all three.
 //!
-//! Both are answered rather than called because there is nothing to call. What the first reads is
-//! the registers at the top of the function, which is a thing only the back end can write, and the
-//! second is a call whose arguments are a block rather than values.
+//! All three are answered rather than called because there is nothing to call. What the first
+//! reads is the registers at the top of the function, which is a thing only the back end can write,
+//! the second is a call whose arguments are a block rather than values, and the third is a return.
 //!
 //! # Why the size has to be a constant
 //!
@@ -23,10 +25,12 @@
 //! moving the stack pointer, which is a thing no program writes: the size is always the most bytes
 //! the functions it forwards to could want, written as a number.
 //!
-//! # What is not here
+//! # How the third gives the block back
 //!
-//! `__builtin_return`, which gives back what a `__builtin_apply` came back with as the answer of the
-//! function it is in, whatever that function was declared to return.
+//! gcc puts every register a value can come back in back from the block and returns. The caller
+//! reads only the registers that the type it called through comes back in, and the function this
+//! is in has that type, so the return is one of that type with each register it travels in read
+//! from where the block has the register. See `Body::apply_return` in `rucc-lower`.
 
 use rucc_ast as ast;
 use rucc_base::Symbol;
@@ -42,6 +46,9 @@ const APPLY_ARGS: &str = "__builtin_apply_args";
 /// The one that passes them on.
 const APPLY: &str = "__builtin_apply";
 
+/// The one that gives back what came back.
+const RETURN: &str = "__builtin_return";
+
 /// The code the operands of `__builtin_apply` are refused under.
 const CODE: &str = "E0716";
 
@@ -52,11 +59,11 @@ const LARGEST: i128 = 1 << 16;
 /// Whether the roster has a row for this name, which is what the test next door asks.
 #[cfg(test)]
 pub(super) fn is_family(name: &str) -> bool {
-    name == APPLY_ARGS || name == APPLY
+    name == APPLY_ARGS || name == APPLY || name == RETURN
 }
 
 impl Checker<'_> {
-    /// Answers a call to one of the two, if the name is one of them.
+    /// Answers a call to one of the three, if the name is one of them.
     ///
     /// The caller has already made sure the program did not declare the name itself, in which
     /// case what it declared is what the call is checked against.
@@ -67,10 +74,11 @@ impl Checker<'_> {
         span: Span,
     ) -> Option<ExprId> {
         let spelled = self.text(name);
-        if spelled != APPLY_ARGS && spelled != APPLY {
+        if spelled != APPLY_ARGS && spelled != APPLY && spelled != RETURN {
             return None;
         }
         let saves = spelled == APPLY_ARGS;
+        let returns = spelled == RETURN;
         let written: Vec<ast::ExprId> = self.ast[args].to_vec();
         // Every argument is checked whatever else is wrong with the call, because a mistake
         // inside one of them is worth hearing about even when there is one too many of them.
@@ -81,7 +89,11 @@ impl Checker<'_> {
                 self.value(arg)
             })
             .collect();
-        let (name, wants) = if saves { (APPLY_ARGS, 0) } else { (APPLY, 3) };
+        let (name, wants) = match (saves, returns) {
+            (true, _) => (APPLY_ARGS, 0),
+            (_, true) => (RETURN, 1),
+            _ => (APPLY, 3),
+        };
         if args.len() != wants {
             let how = if args.len() < wants { "few" } else { "many" };
             self.report(
@@ -95,6 +107,17 @@ impl Checker<'_> {
         }
         let void = self.types.void();
         let ty = self.types.pointer(void);
+        if returns {
+            let result = args[0];
+            if !is_pointer(&self.types, self.tast[result].ty) {
+                let span = self.tast.expr_span(result);
+                let message = format!("argument 1 of '{RETURN}' is the block '{APPLY}' answered");
+                self.report(Diagnostic::error(message, span).with_code(CODE));
+                return Some(self.poison(span));
+            }
+            let node = ExprKind::ApplyReturn { result };
+            return Some(self.tast.expr(Expr::new(node, void, Category::Rvalue), span));
+        }
         if saves {
             let node = ExprKind::ApplyArgs;
             return Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span));
@@ -152,12 +175,12 @@ mod tests {
 
     use super::*;
 
-    /// Both names have to be rows of the roster, or they are builtins `__has_builtin` has never
+    /// Every name has to be a row of the roster, or it is a builtin `__has_builtin` has never
     /// heard of. A row with a signature would be called rather than answered, and there is nothing
     /// to call.
     #[test]
-    fn both_names_are_rows_of_the_table_and_are_answered_not_called() {
-        for name in [APPLY_ARGS, APPLY] {
+    fn the_three_names_are_rows_of_the_table_and_are_answered_not_called() {
+        for name in [APPLY_ARGS, APPLY, RETURN] {
             let Some(feature) = rucc_gnu::lookup(Kind::Builtin, name) else {
                 panic!("{name} is answered here and is not in features.toml");
             };

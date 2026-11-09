@@ -3941,6 +3941,55 @@ impl<'u> Body<'_, 'u> {
         self.at = None;
     }
 
+    /// `__builtin_return`: the function leaves with what a `__builtin_apply` came back with.
+    ///
+    /// gcc puts every register a value can come back in back from the block and returns, so the
+    /// caller finds in them what the function that `__builtin_apply` called left there. The caller
+    /// only reads the registers the type it called through comes back in, so this returns that
+    /// type and reads each register it travels in from where the block has that register. That is
+    /// the same bytes in the same registers, and the return is an ordinary one that every pass
+    /// already knows.
+    ///
+    /// The block is the one the back end writes for a `__builtin_apply`, which it builds on x86-64
+    /// alone: `rax` at 0 and `rdx` at 8, and `xmm0` at 16 and `xmm1` at 32. So the first word the
+    /// answer travels in is read from 0 and the next from 8, and the first vector register from 16
+    /// and the next from 32. Windows x64 has `rax` and `xmm0` at the same two places and never a
+    /// second of either. An answer that goes back in memory goes back with the address the caller
+    /// gave, and the callee of the `__builtin_apply` was given the same address, so it has written
+    /// the answer there already and there is nothing to read. A `long double` goes back on the x87
+    /// stack, which the block does not hold, and it is read from where `xmm0` is.
+    ///
+    /// Nothing is after it, so the walk goes on in a block that nothing reaches, which is what is
+    /// thrown away with the other unreachable blocks.
+    fn apply_return(&mut self, block: Value, span: Span) {
+        const WORDS: u64 = 0;
+        const VECTORS: u64 = 16;
+        let returns: Vec<Type> = match self.ret.pass {
+            Pass::Direct | Pass::Pieces(_) => {
+                self.func.signature().returns.iter().map(|slot| slot.ty).collect()
+            }
+            Pass::Ignore | Pass::Reference | Pass::Memory => Vec::new(),
+        };
+        let (mut words, mut vectors) = (0, 0);
+        let mut values = Vec::with_capacity(returns.len());
+        for ty in returns {
+            let at = if ty.is_float() || ty.is_vector() {
+                vectors += 1;
+                VECTORS + 16 * (vectors - 1)
+            } else {
+                words += 1;
+                WORDS + 8 * (words - 1)
+            };
+            let from = self.offset(block, at, span);
+            values.push(self.build(span).load(ty, from, untyped(8), Flags::NONE));
+        }
+        self.unwind_cleanups(0, span);
+        self.leave_hook(span);
+        let ret = self.build(span).ret(&values);
+        self.mark_early(ret);
+        self.at = Some(self.new_block());
+    }
+
     /// Writes the block of each nested function defined in this one: the address of everything
     /// the nested function reaches, as this function sees it, and the trampoline for one whose
     /// address is taken. See [`crate::nest`].
@@ -7867,6 +7916,13 @@ impl<'u> Body<'_, 'u> {
                 let args = self.func.push_values(&[function, block, size]);
                 let data = InstData { args, ..InstData::new(Opcode::Apply) };
                 Some(self.build(span).value(data, Type::PTR))
+            }
+            // A return of what the block holds, read the way the function's own answer travels.
+            // See [`Self::apply_return`].
+            ExprKind::ApplyReturn { result } => {
+                let block = self.value(result);
+                self.apply_return(block, span);
+                None
             }
             // A hint, so the address under it is lowered for its value and nothing is read through
             // it. It produces nothing, which is why the whole of it answers `None`: a prefetch is
@@ -12644,6 +12700,10 @@ impl<'a> Scan<'a> {
             | ExprKind::Eflags { value: None }
             | ExprKind::CpuModel { .. } => {}
             ExprKind::ApplyArgs => self.forbid(Never::ApplyArgs, self.tast.expr_span(id)),
+            ExprKind::ApplyReturn { result } => {
+                self.forbid(Never::ApplyReturn, self.tast.expr_span(id));
+                self.expr(result);
+            }
             ExprKind::Apply { function, args, .. }
             | ExprKind::EhReturn { offset: function, handler: args } => {
                 self.expr(function);
@@ -12921,6 +12981,8 @@ enum Never {
     VaStart,
     /// A `__builtin_apply_args`.
     ApplyArgs,
+    /// A `__builtin_return`.
+    ApplyReturn,
     /// A `goto` through the address of a label.
     ComputedGoto,
 }
@@ -12934,7 +12996,9 @@ impl Never {
             Self::Setjmp => ("inlined", "uses setjmp"),
             Self::Longjmp => ("inlined", "uses setjmp-longjmp exception handling"),
             Self::VaStart => ("inlined", "uses variable argument lists"),
-            Self::ApplyArgs => ("inlined", "uses '__builtin_return' or '__builtin_apply_args'"),
+            Self::ApplyArgs | Self::ApplyReturn => {
+                ("inlined", "uses '__builtin_return' or '__builtin_apply_args'")
+            }
             Self::ComputedGoto => ("inlined", "contains a computed goto"),
         };
         format!("function '{name}' can never be {done} because it {why}")
@@ -12949,6 +13013,7 @@ impl Never {
             Self::Longjmp => "the '__builtin_longjmp' is here",
             Self::VaStart => "the variable argument list is started here",
             Self::ApplyArgs => "the arguments are saved here",
+            Self::ApplyReturn => "the function leaves with the block here",
             Self::ComputedGoto => "the computed goto is here",
         }
     }
