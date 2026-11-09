@@ -194,6 +194,9 @@ pub struct Predef {
     /// leave its C declarations out, and it takes away the macros that describe the C language
     /// rather than the machine, the way gcc's `-lang-asm` does.
     pub assembler: bool,
+    /// Whether `-fbuilding-libgcc` was given, which defines the `__LIBGCC_*__` macros that gcc's
+    /// own runtime library reads to learn about the machine. See [`libgcc`].
+    pub building_libgcc: bool,
 }
 
 impl Predef {
@@ -231,6 +234,7 @@ impl Predef {
             pedantic_errors: false,
             control: Control::None,
             assembler: false,
+            building_libgcc: false,
         }
     }
 }
@@ -274,6 +278,7 @@ impl Predef {
             pedantic_errors: opts.named_warnings.has_pedantic_errors(),
             control: opts.control,
             assembler: false,
+            building_libgcc: opts.building_libgcc,
         }
     }
 }
@@ -338,6 +343,9 @@ pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
     integers(&mut d, target);
     floats(&mut d, target, opts);
     atomics(&mut d, target);
+    if opts.building_libgcc {
+        libgcc(&mut d, target);
+    }
     d.text
 }
 
@@ -1867,6 +1875,104 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     }
 }
 
+/// The `__LIBGCC_*__` macros, which gcc defines under `-fbuilding-libgcc` for its own runtime
+/// library and nothing else reads. `libgcc2.c`, `crtstuff.c` and the unwinder take the machine's
+/// floating point modes, its sections and its unwind registers from them. NetBSD builds its copy of
+/// libgcc with the flag.
+///
+/// The values are the ones gcc 15 gives for each machine on GNU/Linux. A BSD is the same machine
+/// and the same ELF, so it gets the same values.
+///
+/// gcc writes a group of macros for each floating mode the machine has. `MANT_DIG` comes for
+/// every mode, and the rest only for a mode the compiler has a type for, named after that type's
+/// `float.h` family. `BF` stops at `MANT_DIG` here, since there is no `__BFLT16_*__` family for it
+/// to name.
+fn libgcc(d: &mut Defs, target: &TargetInfo) {
+    let Some(triple) = Triple::from_tuple(target.tuple) else {
+        return;
+    };
+    let x86 = matches!(triple.arch, Arch::X86 | Arch::X86_64);
+    let long_double = target.long_double_format;
+    // The mode, its precision, and the `float.h` family and constant suffix of the type it is, when
+    // there is one.
+    let mut modes =
+        vec![("BF", 8, None), ("HF", 11, target.has_float16.then_some(("FLT16", "f16")))];
+    modes.push(("SF", 24, Some(("FLT", "f"))));
+    modes.push(("DF", 53, Some(("DBL", ""))));
+    if x86 {
+        let xf = if long_double == Format::X87Extended {
+            Some(("LDBL", "l"))
+        } else {
+            (target.float64x_format == Some(Format::X87Extended)).then_some(("FLT64X", "f64x"))
+        };
+        modes.push(("XF", 64, xf));
+    }
+    let tf = if long_double == Format::Quad {
+        Some(("LDBL", "l"))
+    } else {
+        target.has_float128.then_some(("FLT128", "f128"))
+    };
+    modes.push(("TF", 113, tf));
+    for (mode, digits, named) in modes {
+        d.set(&format!("__LIBGCC_{mode}_MANT_DIG__"), &digits.to_string());
+        let Some((family, suffix)) = named else { continue };
+        d.flag(&format!("__LIBGCC_HAS_{mode}_MODE__"));
+        d.set(&format!("__LIBGCC_{mode}_FUNC_EXT__"), suffix);
+        // Only the half precision mode is computed wider than it is, and only on x86, where
+        // arithmetic on a `_Float16` is done in `float`.
+        let excess = x86 && mode == "HF";
+        d.set(&format!("__LIBGCC_{mode}_EXCESS_PRECISION__"), if excess { "1" } else { "0" });
+        for limit in ["EPSILON", "MAX", "MIN"] {
+            d.set(&format!("__LIBGCC_{mode}_{limit}__"), &format!("__{family}_{limit}__"));
+        }
+    }
+
+    if triple.object_format() == ObjectFormat::Elf {
+        d.set("__LIBGCC_EH_TABLES_CAN_BE_READ_ONLY__", "1");
+        d.set("__LIBGCC_EH_FRAME_SECTION_NAME__", "\".eh_frame\"");
+        if triple.arch == Arch::Aarch64 {
+            d.set(
+                "__LIBGCC_CTORS_SECTION_ASM_OP__",
+                "\"\\t.section\\t.init_array,\\\"aw\\\",%init_array\"",
+            );
+            d.set(
+                "__LIBGCC_DTORS_SECTION_ASM_OP__",
+                "\"\\t.section\\t.fini_array,\\\"aw\\\",%fini_array\"",
+            );
+        }
+        d.set("__LIBGCC_TEXT_SECTION_ASM_OP__", "\"\\t.text\"");
+        d.flag("__LIBGCC_INIT_ARRAY_SECTION_ASM_OP__");
+    }
+    // What the unwinder and the trampolines need: the size of a trampoline, the stack pointer's
+    // and the return address column's numbers, how many registers a frame describes, and the
+    // factor every offset in a CIE is a multiple of.
+    let (trampoline, sp, registers, alignment, alternate) = match triple.arch {
+        Arch::X86_64 => (28, 7, 17, -8, None),
+        Arch::X86 => (14, 7, 17, -4, None),
+        Arch::Aarch64 => (40, 31, 97, -8, Some(96)),
+        Arch::Riscv64 => (144, 2, 129, -4, Some(64)),
+        _ => return,
+    };
+    d.set("__LIBGCC_TRAMPOLINE_SIZE__", &trampoline.to_string());
+    d.flag("__LIBGCC_STACK_GROWS_DOWNWARD__");
+    if let Some(column) = alternate {
+        d.set("__LIBGCC_DWARF_ALT_FRAME_RETURN_COLUMN__", &column.to_string());
+    }
+    d.set("__LIBGCC_DWARF_FRAME_REGISTERS__", &registers.to_string());
+    d.set("__LIBGCC_DWARF_CIE_DATA_ALIGNMENT__", &alignment.to_string());
+    d.flag("__LIBGCC_EH_RETURN_STACKADJ_RTX__");
+    d.set("__LIBGCC_STACK_POINTER_REGNUM__", &sp.to_string());
+    d.set("__LIBGCC_VTABLE_USES_DESCRIPTORS__", "0");
+    d.set("__LIBGCC_HAVE_LIBATOMIC", "0");
+    d.flag("__LIBGCC_HAVE_HWDBL__");
+    // `_BitInt` is in limbs of a machine word, low limb first, on the three machines gcc gives it.
+    if triple.arch != Arch::Riscv64 {
+        let limb = if triple.arch == Arch::X86 { "32" } else { "64" };
+        d.set("__LIBGCC_BITINT_LIMB_WIDTH__", limb);
+        d.set("__LIBGCC_BITINT_ORDER__", "__ORDER_LITTLE_ENDIAN__");
+    }
+}
+
 /// The limits of the three decimal types, on the one target that has them.
 ///
 /// Written out rather than worked out, because each is a fact of the interchange format and the
@@ -3118,6 +3224,103 @@ mod tests {
             assert!(has(&text, "#define __ARM_FEATURE_BTI_DEFAULT 1"), "{text}");
             assert!(has(&text, &format!("#define __ARM_FEATURE_PAC_DEFAULT {pac}")), "{text}");
         }
+    }
+
+    /// tamnd/rucc#4095. NetBSD builds libgcc with `-fbuilding-libgcc`. The lines are what
+    /// `x86_64-linux-gnu-gcc` 15.1 prints for `-fbuilding-libgcc -dM -E`, less the `bfloat16`
+    /// mode's limits, which name a `float.h` family this compiler does not define.
+    #[test]
+    fn building_libgcc_defines_the_macros_gcc_gives_libgcc() {
+        let libgcc = |triple: &str| {
+            let target = TargetInfo::new(triple.parse().expect("a triple"));
+            let text = built_in(&target, &Predef { building_libgcc: true, ..Predef::new() });
+            let mut lines: Vec<String> =
+                text.lines().filter(|line| line.contains("__LIBGCC_")).map(str::to_owned).collect();
+            lines.sort();
+            lines
+        };
+        let gcc = [
+            "#define __LIBGCC_BF_MANT_DIG__ 8",
+            "#define __LIBGCC_BITINT_LIMB_WIDTH__ 64",
+            "#define __LIBGCC_BITINT_ORDER__ __ORDER_LITTLE_ENDIAN__",
+            "#define __LIBGCC_DF_EPSILON__ __DBL_EPSILON__",
+            "#define __LIBGCC_DF_EXCESS_PRECISION__ 0",
+            "#define __LIBGCC_DF_FUNC_EXT__ ",
+            "#define __LIBGCC_DF_MANT_DIG__ 53",
+            "#define __LIBGCC_DF_MAX__ __DBL_MAX__",
+            "#define __LIBGCC_DF_MIN__ __DBL_MIN__",
+            "#define __LIBGCC_DWARF_CIE_DATA_ALIGNMENT__ -8",
+            "#define __LIBGCC_DWARF_FRAME_REGISTERS__ 17",
+            "#define __LIBGCC_EH_FRAME_SECTION_NAME__ \".eh_frame\"",
+            "#define __LIBGCC_EH_RETURN_STACKADJ_RTX__ 1",
+            "#define __LIBGCC_EH_TABLES_CAN_BE_READ_ONLY__ 1",
+            "#define __LIBGCC_HAS_DF_MODE__ 1",
+            "#define __LIBGCC_HAS_HF_MODE__ 1",
+            "#define __LIBGCC_HAS_SF_MODE__ 1",
+            "#define __LIBGCC_HAS_TF_MODE__ 1",
+            "#define __LIBGCC_HAS_XF_MODE__ 1",
+            "#define __LIBGCC_HAVE_HWDBL__ 1",
+            "#define __LIBGCC_HAVE_LIBATOMIC 0",
+            "#define __LIBGCC_HF_EPSILON__ __FLT16_EPSILON__",
+            "#define __LIBGCC_HF_EXCESS_PRECISION__ 1",
+            "#define __LIBGCC_HF_FUNC_EXT__ f16",
+            "#define __LIBGCC_HF_MANT_DIG__ 11",
+            "#define __LIBGCC_HF_MAX__ __FLT16_MAX__",
+            "#define __LIBGCC_HF_MIN__ __FLT16_MIN__",
+            "#define __LIBGCC_INIT_ARRAY_SECTION_ASM_OP__ 1",
+            "#define __LIBGCC_SF_EPSILON__ __FLT_EPSILON__",
+            "#define __LIBGCC_SF_EXCESS_PRECISION__ 0",
+            "#define __LIBGCC_SF_FUNC_EXT__ f",
+            "#define __LIBGCC_SF_MANT_DIG__ 24",
+            "#define __LIBGCC_SF_MAX__ __FLT_MAX__",
+            "#define __LIBGCC_SF_MIN__ __FLT_MIN__",
+            "#define __LIBGCC_STACK_GROWS_DOWNWARD__ 1",
+            "#define __LIBGCC_STACK_POINTER_REGNUM__ 7",
+            "#define __LIBGCC_TEXT_SECTION_ASM_OP__ \"\\t.text\"",
+            "#define __LIBGCC_TF_EPSILON__ __FLT128_EPSILON__",
+            "#define __LIBGCC_TF_EXCESS_PRECISION__ 0",
+            "#define __LIBGCC_TF_FUNC_EXT__ f128",
+            "#define __LIBGCC_TF_MANT_DIG__ 113",
+            "#define __LIBGCC_TF_MAX__ __FLT128_MAX__",
+            "#define __LIBGCC_TF_MIN__ __FLT128_MIN__",
+            "#define __LIBGCC_TRAMPOLINE_SIZE__ 28",
+            "#define __LIBGCC_VTABLE_USES_DESCRIPTORS__ 0",
+            "#define __LIBGCC_XF_EPSILON__ __LDBL_EPSILON__",
+            "#define __LIBGCC_XF_EXCESS_PRECISION__ 0",
+            "#define __LIBGCC_XF_FUNC_EXT__ l",
+            "#define __LIBGCC_XF_MANT_DIG__ 64",
+            "#define __LIBGCC_XF_MAX__ __LDBL_MAX__",
+            "#define __LIBGCC_XF_MIN__ __LDBL_MIN__",
+        ];
+        assert_eq!(libgcc("x86_64-unknown-linux-gnu"), gcc);
+        // A BSD is the same machine and the same ELF.
+        assert_eq!(libgcc("x86_64-unknown-netbsd"), gcc);
+        assert_eq!(libgcc("x86_64-unknown-freebsd15.1"), gcc);
+        // i386 differs in the word and so in what follows from it. Its arithmetic is SSE here, so
+        // `float` and `double` are not computed wider, as in gcc with `-mfpmath=sse`.
+        let i386 = libgcc("i486-unknown-netbsdelf");
+        for line in [
+            "#define __LIBGCC_BITINT_LIMB_WIDTH__ 32",
+            "#define __LIBGCC_DWARF_CIE_DATA_ALIGNMENT__ -4",
+            "#define __LIBGCC_TRAMPOLINE_SIZE__ 14",
+            "#define __LIBGCC_SF_EXCESS_PRECISION__ 0",
+            "#define __LIBGCC_XF_FUNC_EXT__ l",
+        ] {
+            assert!(i386.iter().any(|have| have == line), "no {line} in {i386:#?}");
+        }
+        // `long double` is the quad on AArch64, which takes the `l` suffix from `_Float128`.
+        let arm = libgcc("aarch64-unknown-linux-gnu");
+        for line in [
+            "#define __LIBGCC_TF_FUNC_EXT__ l",
+            "#define __LIBGCC_TF_EPSILON__ __LDBL_EPSILON__",
+            "#define __LIBGCC_DWARF_FRAME_REGISTERS__ 97",
+            "#define __LIBGCC_STACK_POINTER_REGNUM__ 31",
+        ] {
+            assert!(arm.iter().any(|have| have == line), "no {line} in {arm:#?}");
+        }
+        assert!(!arm.iter().any(|have| have.contains("_XF_")), "{arm:#?}");
+        // Nothing without the flag.
+        assert!(!set_for("x86_64-unknown-linux-gnu").contains("__LIBGCC_"));
     }
 
     /// The values are the ones gcc 16 gives on Arch Linux, for C and for assembly.
