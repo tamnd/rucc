@@ -53,7 +53,6 @@ rucc __CHAR8_TYPE__ a gcc 16 name, for char8_t.
 rucc __GCC_ATOMIC_CHAR8_T_LOCK_FREE a gcc 16 name, for char8_t.
 rucc __FLOAT_WORD_ORDER__ a gcc 16 name.
 rucc __FLT_EVAL_METHOD__ clang makes it a dynamic name, because a pragma can change it, so -dM does not show it.
-rucc __FLT_EVAL_METHOD_C99__ a gcc 16 name.
 rucc __FLT_EVAL_METHOD_TS_18661_3__ a gcc 16 name.
 rucc *_IS_IEC_60559__ the gcc 16 names for C23's *_IS_IEC_60559.
 rucc __FLT32_* the gcc 16 names for _Float32.
