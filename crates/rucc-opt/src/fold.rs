@@ -87,7 +87,7 @@
 //! comparison did.
 
 use rucc_base::Symbol;
-use rucc_base::float::{Float, Status};
+use rucc_base::float::{Float, Format, Status};
 use rucc_base::hash::Map;
 use rucc_ir::{
     AttrSet, Block, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
@@ -601,7 +601,7 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
         }
         Opcode::SIToFP | Opcode::UIToFP => {
             let (value, from) = constant(func, *args.first()?)?;
-            let format = ty.format()?.encoding();
+            let format = folded_format(func, ty)?;
             if format.decimal().is_some() {
                 return None;
             }
@@ -613,7 +613,7 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
             return settled(func, answer);
         }
         Opcode::FPExt | Opcode::FPTrunc => {
-            let format = ty.format()?.encoding();
+            let format = folded_format(func, ty)?;
             if format.decimal().is_some() {
                 return None;
             }
@@ -811,7 +811,7 @@ fn floating(func: &Func, value: Value) -> Option<Float> {
         return None;
     }
     let Extra::Imm(at) = func[inst].extra else { return None };
-    let format = func[value].ty.format()?.encoding();
+    let format = folded_format(func, func[value].ty)?;
     // A decimal constant decodes, but the arithmetic a fold does on it is binary and would read the
     // coefficient as a significand, so a decimal is never a constant here. Its operations become
     // library calls in the back end instead, tamnd/rucc#207.
@@ -819,6 +819,20 @@ fn floating(func: &Func, value: Value) -> Option<Float> {
         return None;
     }
     Some(Float::from_bits(format, func[at].bits()))
+}
+
+/// The format a floating point type of this function is folded in.
+///
+/// The type's encoding, but for an `f80` in a function marked [`AttrSet::X87_ROUND_53`], which is
+/// folded in [`Format::X87Round53`] so that every answer is rounded to fifty three bits the way
+/// the x87 unit of i386 FreeBSD rounds it. The bits are the same in both.
+pub(crate) fn folded_format(func: &Func, ty: Type) -> Option<Format> {
+    let format = ty.format()?.encoding();
+    if format == Format::X87Extended && func.attrs.set.contains(AttrSet::X87_ROUND_53) {
+        Some(Format::X87Round53)
+    } else {
+        Some(format)
+    }
 }
 
 /// The floating point constant this value is, if it is one and is a number.
@@ -1137,6 +1151,36 @@ mod tests {
         let rounding = AttrSet::ROUNDING_MATH;
         assert_eq!(arithmetic(Opcode::FDiv, "1.0", "3.0", rounding), None);
         assert_eq!(arithmetic(Opcode::FDiv, "1.0", "4.0", rounding), Some(0x3fd0_0000_0000_0000));
+    }
+
+    /// On i386 FreeBSD the x87 unit rounds every result to fifty three bits, so an `f80` answer
+    /// folded there is the `double` answer in the x87 encoding, and a conversion from an integer
+    /// rounds there too.
+    #[test]
+    fn an_x87_answer_is_rounded_to_fifty_three_bits_where_the_unit_rounds_there() {
+        let third = |environment: AttrSet| {
+            let (_, mut func, block) = blank();
+            func.attrs.set |= environment;
+            let ty = Type::float(Float::F80);
+            let mut build = Builder::new(&mut func, block);
+            let one = number(&mut build, "1.0", ty);
+            let three = number(&mut build, "3.0", ty);
+            let out = build.binary(Opcode::FDiv, one, three, Flags::NONE);
+            let big = build.iconst(Type::int(64), (1 << 53) + 1);
+            let wide = build.unary(Opcode::SIToFP, big, ty);
+            build.ret(&[out, wide]);
+            assert!(fold(&mut func));
+            (float_bits(&func, out), float_bits(&func, wide))
+        };
+        let double = super::Float::parse("1", Format::Double).expect("one").0;
+        let double = double.quotient(super::Float::parse("3", Format::Double).expect("three").0).0;
+        let rounded = double.to_format(Format::X87Extended).0.to_bits();
+        let (out, wide) = third(AttrSet::X87_ROUND_53);
+        assert_eq!(out, Some(rounded));
+        assert_eq!(wide, Some(0x4034_8000_0000_0000_0000));
+        let (out, wide) = third(AttrSet::NONE);
+        assert_eq!(out, Some(0x3ffd_aaaa_aaaa_aaaa_aaab));
+        assert_eq!(wide, Some(0x4034_8000_0000_0000_0400));
     }
 
     /// C has no negative floating constant, so `-1.0` is a unary minus on a positive one and

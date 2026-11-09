@@ -69,7 +69,9 @@ pub(crate) fn ir_format(format: rucc_base::float::Format) -> Option<Float> {
         Format::Half => Some(Float::F16),
         Format::Single => Some(Float::F32),
         Format::Double => Some(Float::F64),
-        Format::X87Extended => Some(Float::F80),
+        // The rounding of i386 FreeBSD is in the constants and the folding, not in the bits, so
+        // both x87 formats are the one IR type.
+        Format::X87Extended | Format::X87Round53 => Some(Float::F80),
         Format::Quad => Some(Float::F128),
         Format::Decimal32 => Some(Float::D32),
         Format::Decimal64 => Some(Float::D64),
@@ -220,9 +222,7 @@ pub(crate) fn value_bits(types: &Types, target: &TargetInfo, id: TypeId, at: u64
                 }
             }
         }
-        TypeKind::Float(kind)
-            if float_format(kind, target) == rucc_base::float::Format::X87Extended =>
-        {
+        TypeKind::Float(kind) if float_format(kind, target).is_x87() => {
             mark(at * 8, 80, mask);
         }
         TypeKind::Complex(part) => {

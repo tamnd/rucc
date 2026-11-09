@@ -48,8 +48,8 @@ pub use crate::float::arith::Integral;
 
 /// A floating point format.
 ///
-/// Six of the ten are IEEE 754 binary encodings and the other four are not, which is why
-/// [`Format::is_ieee`] exists and why most of the questions below are answerable for six of them.
+/// Seven of the eleven are IEEE 754 binary encodings and the other four are not, which is why
+/// [`Format::is_ieee`] exists and why most of the questions below are answerable for seven of them.
 /// The four are the double-double and the three decimal formats.
 /// The split is the same one the psABIs make, so this is the enum `rucc-abi` describes a target's
 /// scalar types with as well as the one [`Float`] carries.
@@ -67,6 +67,17 @@ pub enum Format {
     /// The x87 eighty bit format, which is `long double` on x86. It is the one format here that
     /// stores the leading significand bit rather than leaving it implied.
     X87Extended,
+    /// The x87 eighty bit format with every result rounded to fifty three bits, which is `long
+    /// double` on i386 FreeBSD and DragonFly. GCC calls it `ieee_extended_intel_96_round_53` and
+    /// uses it there because those systems start a program with the x87 precision control set to
+    /// fifty three bits, so the unit itself never makes a sixty four bit result.
+    ///
+    /// The encoding is the x87 one and so is the exponent range, which is why the smallest
+    /// subnormal is two to the minus 16434 rather than the minus 16445 of the full format. Only
+    /// the place a result is rounded at is different, which is [`Format::rounding`]. A number
+    /// read out of its bits keeps all sixty four of them, as GCC's does: the bits are what the
+    /// program stored, and only the next operation on them rounds.
+    X87Round53,
     /// IEEE binary128, which C spells `_Float128`, and which is `long double` on AArch64 Linux,
     /// on s390x and on RISC-V.
     Quad,
@@ -119,6 +130,7 @@ impl Format {
             Format::Single => "f32",
             Format::Double => "f64",
             Format::X87Extended => "f80",
+            Format::X87Round53 => "f80r53",
             Format::Quad => "f128",
             Format::DoubleDouble => "ppc-f128",
             Format::Decimal32 => "d32",
@@ -136,6 +148,7 @@ impl Format {
             "f32" => Format::Single,
             "f64" => Format::Double,
             "f80" => Format::X87Extended,
+            "f80r53" => Format::X87Round53,
             "f128" => Format::Quad,
             "ppc-f128" => Format::DoubleDouble,
             "d32" => Format::Decimal32,
@@ -193,11 +206,47 @@ impl Format {
             Format::BFloat16 => 8,
             Format::Single => 24,
             Format::Double => 53,
-            Format::X87Extended => 64,
+            Format::X87Extended | Format::X87Round53 => 64,
             Format::Quad => 113,
             Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
                 not_ieee()
             }
+        }
+    }
+
+    /// The number of significand bits a result is rounded to, which is [`Format::precision`] for
+    /// every format but [`Format::X87Round53`].
+    ///
+    /// That one stores sixty four bits like the x87 format it is, and rounds every result it
+    /// makes to fifty three of them. The subnormals are rounded at the same distance below the
+    /// smallest normal, so the smallest subnormal is eleven bits above the x87 format's one.
+    ///
+    /// # Panics
+    ///
+    /// If the format is not an IEEE encoding, per [`Format::is_ieee`].
+    #[must_use]
+    pub const fn rounding(self) -> u32 {
+        match self {
+            Format::X87Round53 => 53,
+            _ => self.precision(),
+        }
+    }
+
+    /// Whether this is one of the two x87 formats, which have one encoding and one register
+    /// file and differ only in where a result is rounded.
+    #[must_use]
+    pub const fn is_x87(self) -> bool {
+        matches!(self, Format::X87Extended | Format::X87Round53)
+    }
+
+    /// The format whose bits this one is, which is itself for every format but
+    /// [`Format::X87Round53`]. That one is the x87 format with another rounding, so an ABI, a
+    /// register file and an encoding see the x87 format.
+    #[must_use]
+    pub const fn storage(self) -> Format {
+        match self {
+            Format::X87Round53 => Format::X87Extended,
+            _ => self,
         }
     }
 
@@ -212,7 +261,7 @@ impl Format {
             Format::Half => 15,
             Format::BFloat16 | Format::Single => 127,
             Format::Double => 1023,
-            Format::X87Extended | Format::Quad => 16383,
+            Format::X87Extended | Format::X87Round53 | Format::Quad => 16383,
             Format::DoubleDouble | Format::Decimal32 | Format::Decimal64 | Format::Decimal128 => {
                 not_ieee()
             }
@@ -241,7 +290,7 @@ impl Format {
             Format::Half | Format::BFloat16 => 16,
             Format::Single | Format::Decimal32 => 32,
             Format::Double | Format::Decimal64 => 64,
-            Format::X87Extended => 80,
+            Format::X87Extended | Format::X87Round53 => 80,
             Format::Quad | Format::DoubleDouble | Format::Decimal128 => 128,
         }
     }
@@ -254,7 +303,7 @@ impl Format {
     #[must_use]
     pub const fn has_explicit_integer_bit(self) -> bool {
         match self {
-            Format::X87Extended => true,
+            Format::X87Extended | Format::X87Round53 => true,
             Format::Half | Format::BFloat16 | Format::Single | Format::Double | Format::Quad => {
                 false
             }
@@ -836,8 +885,8 @@ fn convert(mut value: Decimal, sign: bool, format: Format) -> (Float, Status) {
 
     // The significand is the value scaled by this many powers of two, clamped so that a number
     // below the smallest normal loses precision instead of exponent.
-    let precision = format.precision() as i32;
-    let scale = (exponent - precision + 1).max(format.min_exponent() - precision + 1);
+    let rounding = format.rounding() as i32;
+    let scale = (exponent - rounding + 1).max(format.min_exponent() - rounding + 1);
     value.shift(exponent - scale);
     let (integer, fraction) = value.round_to_u128();
     let rounded = match fraction {
@@ -845,6 +894,7 @@ fn convert(mut value: Decimal, sign: bool, format: Format) -> (Float, Status) {
         Fraction::Half => integer + (integer & 1),
         Fraction::AboveHalf => integer + 1,
     };
+    let (rounded, scale) = stored(rounded, scale, format);
     finish(rounded, scale, fraction != Fraction::Zero, sign, format)
 }
 
@@ -865,9 +915,9 @@ fn round(
     if significand == 0 {
         return (Float::zero(format, sign), Status::NONE);
     }
-    let precision = format.precision() as i32;
+    let rounding = format.rounding() as i32;
     let leading = (128 - significand.leading_zeros()) as i32;
-    let scale = (exponent + leading - precision).max(format.min_exponent() - precision + 1);
+    let scale = (exponent + leading - rounding).max(format.min_exponent() - rounding + 1);
     let mut sticky = sticky;
     let (integer, half) = if scale <= exponent {
         (significand << (exponent - scale), false)
@@ -883,7 +933,17 @@ fn round(
         }
     };
     let rounded = if half && (sticky || integer & 1 == 1) { integer + 1 } else { integer };
+    let (rounded, scale) = stored(rounded, scale, format);
     finish(rounded, scale, half || sticky, sign, format)
+}
+
+/// A significand rounded to [`Format::rounding`] bits, moved up to the [`Format::precision`] bits
+/// the format stores, with the scale moved down to keep the value.
+///
+/// Nothing moves in a format that rounds where it stores, which is every format but one.
+fn stored(significand: u128, scale: i32, format: Format) -> (u128, i32) {
+    let spare = format.precision() - format.rounding();
+    (significand << spare, scale - spare as i32)
 }
 
 /// Turns a rounded significand and the power of two it is scaled by into a number, handling the
@@ -1073,6 +1133,55 @@ mod tests {
         assert_eq!(Float::parse("1x0", Format::Double), Err(ParseError::Invalid));
     }
 
+    /// GCC's `ieee_extended_intel_96_round_53`, which is `long double` on i386 FreeBSD: the x87
+    /// encoding and range, with every number rounded to fifty three bits.
+    #[test]
+    fn the_x87_format_of_i386_freebsd_rounds_to_fifty_three_bits() {
+        let round53 = |text: &str| Float::parse(text, Format::X87Round53).expect("a number");
+        let x87 = |text: &str| Float::parse(text, Format::X87Extended).expect("a number").0;
+        // A tenth is the `double` nearest to it, in the x87 encoding.
+        let tenth = Float::parse("0.1", Format::Double).expect("a tenth").0;
+        let wide = tenth.to_format(Format::X87Extended).0.to_bits();
+        assert_eq!(round53("0.1").0.to_bits(), wide);
+        assert_ne!(x87("0.1").to_bits(), wide);
+        // Two to the fifty three plus one is a tie at fifty three bits and goes to the even one,
+        // where the full format holds it exactly.
+        let (value, status) = round53("9007199254740993");
+        assert!(status.has(Status::INEXACT));
+        assert_eq!(value.to_bits(), 0x4034_8000_0000_0000_0000);
+        assert_eq!(x87("9007199254740993").to_bits(), 0x4034_8000_0000_0000_0400);
+        // The smallest subnormal is two to the minus 16434, eleven bits up from the full format's,
+        // and half of it is a tie that goes to zero.
+        assert_eq!(round53("0x1p-16434").0.to_bits(), 0x800);
+        assert!(round53("0x1p-16435").0.is_zero());
+        assert!(round53("0x1p-16445").0.is_zero());
+        assert_eq!(x87("0x1p-16445").to_bits(), 1);
+        // The largest finite number has fifty three ones, and a tie above it is an infinity.
+        let largest = round53("0x1.fffffffffffffp16383");
+        assert!(largest.1.is_none());
+        assert_eq!(largest.0.to_bits(), 0x7ffe_ffff_ffff_ffff_f800);
+        assert!(round53("0x1.fffffffffffff8p16383").0.is_infinite());
+        // The arithmetic rounds there too, and a conversion from an integer does.
+        let (one, three) = (round53("1").0, round53("3").0);
+        let third = Float::parse("1", Format::Double).expect("one").0;
+        let third = third.quotient(Float::parse("3", Format::Double).expect("three").0).0;
+        assert_eq!(
+            one.quotient(three).0.to_bits(),
+            third.to_format(Format::X87Extended).0.to_bits()
+        );
+        let big = Float::from_unsigned((1 << 53) + 1, Format::X87Round53).0;
+        assert_eq!(big.to_bits(), 0x4034_8000_0000_0000_0000);
+        // A number read out of its bits keeps all sixty four of them, as GCC's does.
+        let bits = 0x4034_8000_0000_0000_0400;
+        assert_eq!(Float::from_bits(Format::X87Round53, bits).to_bits(), bits);
+        assert_eq!(Format::X87Round53.precision(), 64);
+        assert_eq!(Format::X87Round53.rounding(), 53);
+        assert!(Format::X87Round53.is_x87() && Format::X87Extended.is_x87());
+        assert!(!Format::Double.is_x87());
+        assert_eq!(Format::X87Round53.storage(), Format::X87Extended);
+        assert_eq!(Format::Double.storage(), Format::Double);
+    }
+
     #[test]
     fn a_sign_is_accepted_although_a_c_constant_never_has_one() {
         let (value, _) = Float::parse("-1.5", Format::Double).expect("a number");
@@ -1091,6 +1200,7 @@ mod tests {
             Format::Single,
             Format::Double,
             Format::X87Extended,
+            Format::X87Round53,
             Format::Quad,
         ] {
             assert_eq!(
@@ -1116,6 +1226,7 @@ mod tests {
             Format::Single,
             Format::Double,
             Format::X87Extended,
+            Format::X87Round53,
             Format::Quad,
         ] {
             for text in ["0", "-0", "1", "-1.5", "3.14159", "1e-5", "65504", "0x1p-20"] {

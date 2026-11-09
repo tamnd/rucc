@@ -192,6 +192,11 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // The floating point environment the same way, for the pass that folds operations on
     // floating constants.
     body.func.attrs.set |= body.unit.environment;
+    // And the one fact about it that the target gives: on i386 FreeBSD the x87 unit rounds to
+    // fifty three bits, so an `f80` constant is folded there the way the program would compute it.
+    if body.unit.target.long_double_rounds_to_53 {
+        body.func.attrs.set |= AttrSet::X87_ROUND_53;
+    }
     // Which parameters are used where the caller left them, before any slot is made, because a
     // parameter that is gets none.
     for (&param, travel) in params.iter().zip(&plan.args) {
@@ -6472,7 +6477,7 @@ impl<'u> Body<'_, 'u> {
             Format::Half => "h",
             Format::Single => "s",
             Format::Double => "d",
-            Format::X87Extended => "x",
+            Format::X87Extended | Format::X87Round53 => "x",
             Format::Quad => "t",
             // A complex decimal is not a type C has, so there is never a routine to name.
             Format::BFloat16

@@ -563,7 +563,7 @@ impl DataLayout {
             // the layout of every struct with a `long long` in it.
             i64_align: u32::try_from(target.scalars.long_long_align * 8)
                 .expect("no integer alignment is four billion bits"),
-            f80_align: match target.long_double_format {
+            f80_align: match target.long_double_format.storage() {
                 Format::X87Extended => Some(128),
                 _ => None,
             },

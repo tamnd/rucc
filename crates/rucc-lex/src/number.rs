@@ -252,7 +252,9 @@ impl FloatConstantType {
             // second copy of the rule here had already missed 32-bit x86. A target with no
             // `_Float64x` has refused the suffix before this is asked.
             FloatConstantType::Float64x => target.float64x_format.unwrap_or(Format::Quad),
-            FloatConstantType::Float80 => Format::X87Extended,
+            // The type exists only where `long double` is the x87 format, and it is the same
+            // mode, so it rounds where `long double` does: to fifty three bits on i386 FreeBSD.
+            FloatConstantType::Float80 => target.long_double_format,
             FloatConstantType::Decimal32 => Format::Decimal32,
             FloatConstantType::Decimal64 => Format::Decimal64,
             FloatConstantType::Decimal128 => Format::Decimal128,
@@ -780,7 +782,7 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
                 // `__float80` is the x87 format, and the type exists where `long double` is that
                 // format, which is the test `__float80` itself is held to. Asking the
                 // architecture instead let `1.0w` through on a target that refuses the keyword.
-                if target.long_double_format != Format::X87Extended {
+                if !target.long_double_format.is_x87() {
                     return Err(FloatError::UnsupportedType);
                 }
                 ty = Some(FloatConstantType::Float80);
@@ -1287,6 +1289,16 @@ mod tests {
         let msvc =
             TargetInfo::for_tuple("x86_64-windows-msvc".parse().expect("a row in the table"));
         assert_eq!(floating("1.0w", Std::C23, &msvc), Err(FloatError::UnsupportedType));
+        // i386 FreeBSD rounds its x87 format to fifty three bits, and all three names of it do.
+        let freebsd =
+            TargetInfo::for_tuple("i386-unknown-freebsd15.1".parse().expect("a row in the table"));
+        assert!(floating("1.0w", Std::C23, &freebsd).is_ok());
+        for ty in
+            [FloatConstantType::LongDouble, FloatConstantType::Float64x, FloatConstantType::Float80]
+        {
+            assert_eq!(ty.format(&freebsd), Format::X87Round53, "{ty:?}");
+            assert_eq!(ty.format(&i686), Format::X87Extended, "{ty:?}");
+        }
         // The interchange types every machine has keep working on the machine that has least.
         for text in ["1.0f32", "1.0f64", "1.0f32x"] {
             assert!(floating(text, Std::C23, &arm).is_ok(), "{text} on armv7");

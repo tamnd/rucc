@@ -1126,6 +1126,10 @@ pub struct TargetInfo {
     /// the size, the alignment and the encoding do not change. What changes is what `float.h`
     /// says: `LDBL_MANT_DIG` is 53, `LDBL_EPSILON` is two to the minus fifty two, and the smallest
     /// subnormal is two to the minus sixteen thousand four hundred and thirty four.
+    ///
+    /// The two formats above are [`Format::X87Round53`] where this is true, so a constant that
+    /// is read or folded in them rounds the way GCC rounds it. This flag is for what has to know
+    /// the reason, such as `float.h` and the folding in the optimizer.
     pub long_double_rounds_to_53: bool,
     /// Whether the target has `_Float16`.
     ///
@@ -1611,8 +1615,8 @@ impl TargetInfo {
             char_is_signed: layout.char_is_signed,
             long_width: bits(layout.long_size),
             long_double_width: bits(layout.long_double.size),
-            long_double_format: layout.long_double.format,
-            float64x_format: float64x_format(target),
+            long_double_format: x87_rounding(layout.long_double.format, target),
+            float64x_format: float64x_format(target).map(|format| x87_rounding(format, target)),
             long_double_rounds_to_53: rounds_to_53(target),
             has_float16: has_float16(target),
             has_float128: has_float128(target),
@@ -1764,6 +1768,14 @@ fn float64x_format(target: TargetTuple) -> Option<Format> {
 fn rounds_to_53(target: TargetTuple) -> bool {
     target.arch() == tuple::Arch::X86
         && matches!(target.os(), tuple::Os::FreeBsd | tuple::Os::DragonFly)
+}
+
+/// The format a type is, given the format its bits are stored in: the x87 one rounds to fifty
+/// three bits where [`rounds_to_53`] says so, which is GCC's `ieee_extended_intel_96_round_53`.
+///
+/// That is a property of the XFmode, so `long double`, `_Float64x` and `__float80` all have it.
+fn x87_rounding(format: Format, target: TargetTuple) -> Format {
+    if format == Format::X87Extended && rounds_to_53(target) { Format::X87Round53 } else { format }
 }
 
 /// Whether the target has `_Float16`.
@@ -2097,8 +2109,11 @@ mod tests {
         ] {
             let target = TargetInfo::new(spelling.parse().unwrap());
             assert_eq!(target.long_double_rounds_to_53, rounds, "{spelling}");
-            // The storage is the x87 format whichever it is.
-            assert_eq!(target.long_double_format, Format::X87Extended, "{spelling}");
+            // The storage is the x87 format whichever it is, and the rounding is in the format.
+            let format = if rounds { Format::X87Round53 } else { Format::X87Extended };
+            assert_eq!(target.long_double_format, format, "{spelling}");
+            assert_eq!(target.float64x_format, Some(format), "{spelling}");
+            assert_eq!(target.long_double_format.width(), 80, "{spelling}");
         }
     }
 
