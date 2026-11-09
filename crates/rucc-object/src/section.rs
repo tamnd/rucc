@@ -71,8 +71,9 @@ pub struct Property {
     /// than the command line: gcc writes it once `nodirect_extern_access` was said of a name the
     /// file defines or uses.
     pub needed: u32,
-    /// The bits of the AArch64 feature word, which are [`Self::BTI`] and [`Self::PAC`], and which
-    /// is written under a key of its own because the bits mean something else there.
+    /// The bits of the AArch64 feature word, which are [`Self::BTI`], [`Self::PAC`] and
+    /// [`Self::GCS`], and which is written under a key of its own because the bits mean something
+    /// else there.
     pub arm: u32,
 }
 
@@ -99,6 +100,8 @@ impl Property {
     pub const BTI: u32 = 1;
     /// Every function that saves the return address signs it and checks it before it returns.
     pub const PAC: u32 = 2;
+    /// The code works under the guarded control stack, so the loader may turn it on.
+    pub const GCS: u32 = 4;
 
     /// Whether anything is recorded at all, which is whether the record is written.
     #[must_use]

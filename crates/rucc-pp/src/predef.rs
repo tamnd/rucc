@@ -173,6 +173,9 @@ pub struct Predef {
     pub soft_float: bool,
     /// The RISC-V `-march=` as written, or `None` for `rv64gc`. It decides the extension macros.
     pub riscv_arch: Option<String>,
+    /// Whether there is an x87 unit, which `-msoft-float` and `-mno-80387` take away on x86. gcc
+    /// says `_SOFT_FLOAT` without one.
+    pub x87: bool,
     /// Whether `-mstrict-align` was given, which takes `__ARM_FEATURE_UNALIGNED` away on AArch64
     /// as it does in gcc.
     pub strict_align: bool,
@@ -236,6 +239,7 @@ impl Predef {
             vector: true,
             soft_float: false,
             riscv_arch: None,
+            x87: true,
             strict_align: false,
             tuned: false,
             branch_protection: BranchProtection::default(),
@@ -283,6 +287,7 @@ impl Predef {
             vector: opts.vector,
             soft_float: opts.soft_float,
             riscv_arch: opts.riscv_arch.clone(),
+            x87: opts.x87,
             strict_align: opts.strict_align,
             tuned: opts.tuned,
             branch_protection: opts.branch_protection,
@@ -680,6 +685,7 @@ fn x86(d: &mut Defs, triple: &Triple, opts: &Predef) {
         d.set("__SIZEOF_FLOAT80__", float80);
     }
     d.flag_if(triple.os == Os::NetBsd && !opts.tuned, "__tune_nocona__");
+    d.flag_if(!clang && !opts.x87, "_SOFT_FLOAT");
 }
 
 /// The architecture, the operating system and the object format.
@@ -811,6 +817,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                 SignReturn::None => {}
                 SignReturn::NonLeaf => d.set("__ARM_FEATURE_PAC_DEFAULT", "1"),
                 SignReturn::All => d.set("__ARM_FEATURE_PAC_DEFAULT", "5"),
+            }
+            if opts.branch_protection.gcs {
+                d.set("__ARM_FEATURE_GCS_DEFAULT", "1");
             }
         }
         Arch::Riscv64 => riscv(d, opts, 64),
@@ -2058,6 +2067,22 @@ const fn characteristics(format: Format) -> &'static Characteristics {
 ///
 /// `__FLT128X_*__` is deliberately missing. `_Float128x` is a type no target gcc supports has,
 /// so gcc defines nothing for it and neither does this.
+/// Whether the unit may use a float unit at all, which gcc needs before it says IEC 60559. The
+/// x86 kernels take away both the x87 and SSE, the AArch64 kernels the FP registers, and a RISC-V
+/// machine with no F extension has none.
+fn float_unit(target: &TargetInfo, opts: &Predef) -> bool {
+    match target.tuple.arch() {
+        tuple::Arch::X86_64 | tuple::Arch::X86 => {
+            opts.x87 || Feature::named("sse").is_some_and(|it| opts.isa.has(it))
+        }
+        tuple::Arch::Aarch64 => opts.vector,
+        tuple::Arch::Riscv64 | tuple::Arch::Riscv32 => {
+            RiscvIsa::new(opts.riscv_arch.as_deref(), opts.gnuc.major).has("f")
+        }
+        _ => true,
+    }
+}
+
 fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.set("__FLT_RADIX__", "2");
     // Real arithmetic follows IEC 60559 in every format on every target here, which is what the
@@ -2073,7 +2098,8 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // does not give it.
     let wasm = target.tuple.arch() == tuple::Arch::Wasm32;
     let gnuc = opts.gnuc.major;
-    let iec = if opts.math.iec_559(opts.trapping_math) && !wasm { "2" } else { "0" };
+    let iec = opts.math.iec_559(opts.trapping_math) && !wasm && float_unit(target, opts);
+    let iec = if iec { "2" } else { "0" };
     d.set("__GCC_IEC_559", iec);
     d.set("__GCC_IEC_559_COMPLEX", iec);
     // Every operation is done in the type of its operands, which is what SSE2 and the AArch64
@@ -2106,11 +2132,15 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // have to agree or the header asks for something the compiler will refuse.
     // `_Float16` came to gcc on AArch64 first, then to x86 in gcc 12 and to RISC-V in gcc 13, so
     // a persona that claims an older gcc leaves the family out there.
+    // gcc 12 has it on x86 only with SSE2, and gcc 13 has it without.
+    let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);
+    let sse2 = Feature::named("sse2").is_some_and(|it| opts.isa.has(it));
     let half_since = match target.tuple.arch() {
         tuple::Arch::X86_64 | tuple::Arch::X86 => 12,
         tuple::Arch::Riscv64 | tuple::Arch::Riscv32 => 13,
         _ => 0,
     };
+    let half_since = if x86 && !sse2 { half_since.max(13) } else { half_since };
     if target.has_float16 && gnuc >= half_since {
         family(d, gnuc, "FLT16", &HALF, |value| format!("{value}F16"));
     }
@@ -2555,6 +2585,57 @@ mod tests {
         };
         assert!(!built(None).contains("_SOFT_FLOAT"));
         assert!(has(&built(Some("rv64imac")), "#define _SOFT_FLOAT 1"));
+    }
+
+    /// tamnd/rucc#4096. A kernel unit with no float unit is not IEC 60559 to gcc. x86 says
+    /// `_SOFT_FLOAT` without the x87 as well, and gcc 12 has no `_Float16` there without SSE2.
+    #[test]
+    fn a_kernel_with_no_float_unit_is_not_iec_60559() {
+        let gcc = |major: u32| GnucVersion { major, minor: 0, patch: 0 };
+        let x86 = TargetInfo::new("x86_64-unknown-freebsd".parse().expect("a triple"));
+        let kernel = |major: u32| Predef {
+            gnuc: gcc(major),
+            x87: false,
+            vector: false,
+            isa: Isa::NONE,
+            hosted: false,
+            ..Predef::new()
+        };
+        let text = built_in(&x86, &kernel(15));
+        for line in ["_SOFT_FLOAT 1", "__GCC_IEC_559 0", "__GCC_IEC_559_COMPLEX 0"] {
+            assert!(has(&text, &format!("#define {line}")), "{line}");
+        }
+        assert!(has(&text, "#define __FLT16_MANT_DIG__ 11"), "{text}");
+        assert!(!built_in(&x86, &kernel(12)).contains("__FLT16_MANT_DIG__"));
+        // The x87 alone, or SSE alone, is a float unit.
+        let x87 = built_in(&x86, &Predef { x87: true, ..kernel(15) });
+        assert!(has(&x87, "#define __GCC_IEC_559 2") && !x87.contains("_SOFT_FLOAT"));
+        let sse = built_in(&x86, &Predef { x87: false, ..Predef::new() });
+        assert!(has(&sse, "#define __GCC_IEC_559 2") && has(&sse, "#define _SOFT_FLOAT 1"));
+        assert!(has(
+            &built_in(&x86, &Predef { gnuc: gcc(12), ..Predef::new() }),
+            "#define __FLT16_MANT_DIG__ 11"
+        ));
+
+        let arm = TargetInfo::new("aarch64-unknown-netbsd".parse().expect("a triple"));
+        let text = built_in(&arm, &Predef { vector: false, ..Predef::new() });
+        assert!(has(&text, "#define __GCC_IEC_559 0"), "{text}");
+        assert!(!text.contains("_SOFT_FLOAT"), "{text}");
+        let riscv = TargetInfo::new("riscv64-unknown-netbsd".parse().expect("a triple"));
+        let rv = |march: &str| Predef { riscv_arch: Some(march.to_owned()), ..Predef::new() };
+        assert!(has(&built_in(&riscv, &rv("rv64imac")), "#define __GCC_IEC_559 0"));
+        assert!(has(&built_in(&riscv, &rv("rv64gc")), "#define __GCC_IEC_559 2"));
+    }
+
+    /// tamnd/rucc#4096. The guarded control stack, as gcc 15 says it.
+    #[test]
+    fn the_guarded_control_stack_is_said_the_way_the_acle_says_it() {
+        let arm = TargetInfo::new("aarch64-unknown-freebsd".parse().expect("a triple"));
+        assert!(!built_in(&arm, &Predef::new()).contains("__ARM_FEATURE_GCS_DEFAULT"));
+        let branch_protection =
+            BranchProtection { sign: SignReturn::NonLeaf, bti: true, gcs: true };
+        let text = built_in(&arm, &Predef { branch_protection, ..Predef::new() });
+        assert!(has(&text, "#define __ARM_FEATURE_GCS_DEFAULT 1"), "{text}");
     }
 
     /// tamnd/rucc#4088. gcc writes the AArch64 profile and float formats as numbers, and clang
@@ -3805,7 +3886,7 @@ mod tests {
         assert!(!plain.contains("__ARM_FEATURE_BTI_DEFAULT"));
         assert!(!plain.contains("__ARM_FEATURE_PAC_DEFAULT"));
         for (sign, pac) in [(SignReturn::NonLeaf, "1"), (SignReturn::All, "5")] {
-            let branch_protection = BranchProtection { sign, bti: true };
+            let branch_protection = BranchProtection { sign, bti: true, gcs: false };
             let text = built_in(&arm, &Predef { branch_protection, ..Predef::new() });
             assert!(has(&text, "#define __ARM_FEATURE_BTI_DEFAULT 1"), "{text}");
             assert!(has(&text, &format!("#define __ARM_FEATURE_PAC_DEFAULT {pac}")), "{text}");
