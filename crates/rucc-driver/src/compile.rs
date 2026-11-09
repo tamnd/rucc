@@ -2041,7 +2041,7 @@ fn generate(
 /// source without its directory. That is what gcc writes in the `.file` at the top of a unit, so
 /// `nm` and NetBSD's `ctfmerge` see the same name for the file from either compiler.
 fn source_symbol(name: &str) -> String {
-    std::path::Path::new(name).file_name().and_then(|base| base.to_str()).unwrap_or(name).to_owned()
+    Path::new(name).file_name().and_then(|base| base.to_str()).unwrap_or(name).to_owned()
 }
 
 /// The last extension the unit may use of the ones that change how `-fzero-call-used-regs=`
