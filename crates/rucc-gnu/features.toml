@@ -2866,22 +2866,22 @@ notes = "C23's spelling of the row above, read by the same code."
 [[feature]]
 name = "unsequenced"
 kind = "c-attribute"
-gcc_version = "13.0"
+gcc_version = "15.0"
 status = "implemented"
 value = "202311"
 used_by = []
 tests = ["rucc-parse::a_function_type_attribute_may_sit_between_a_definition_s_parameters_and_its_body", "tests/accept/c23-function-type-attributes.c"]
-notes = "A promise about the function that a compiler may use to merge or drop calls to it and may equally ignore, which is what this does, so nothing is lost by taking it in silence. 202311 is the value C23 as published gives it and what gcc 16 answers."
+notes = "A promise about the function that a compiler may use to merge or drop calls to it and may equally ignore, which is what this does, so nothing is lost by taking it in silence. 202311 is the value C23 as published gives it and what gcc 16 answers. gcc 15 is the first release that has it, and gcc 13 and 14 answer zero."
 
 [[feature]]
 name = "reproducible"
 kind = "c-attribute"
-gcc_version = "13.0"
+gcc_version = "15.0"
 status = "implemented"
 value = "202311"
 used_by = []
 tests = ["rucc-parse::a_function_type_attribute_may_sit_between_a_definition_s_parameters_and_its_body", "tests/accept/c23-function-type-attributes.c"]
-notes = "A promise about the function that a compiler may use to merge or drop calls to it and may equally ignore, which is what this does, so nothing is lost by taking it in silence. 202311 is the value C23 as published gives it and what gcc 16 answers."
+notes = "A promise about the function that a compiler may use to merge or drop calls to it and may equally ignore, which is what this does, so nothing is lost by taking it in silence. 202311 is the value C23 as published gives it and what gcc 16 answers. gcc 15 is the first release that has it, and gcc 13 and 14 answer zero."
 
 # Builtins, from section 13.5. The list is the part of the several hundred that real code
 # reaches for first, and it grows as the matrix fills in.

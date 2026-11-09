@@ -334,7 +334,7 @@ pub fn lookup(kind: Kind, name: &str) -> Option<&'static Feature> {
 /// `__has_attribute(fallthrough)` is 202311 rather than one. GCC does that whether or not the name
 /// is also a GNU attribute, so `maybe_unused`, which is only a standard one, is answered too.
 pub fn has_attribute(name: &str, target: Target, gnuc: u32) -> u32 {
-    match answer(Kind::CAttribute, name, target, gnuc) {
+    match standard(name, target, gnuc) {
         0 => answer(Kind::Attribute, name, target, gnuc),
         standard => standard,
     }
@@ -353,7 +353,31 @@ pub fn has_gnu_attribute(name: &str, target: Target, gnuc: u32) -> u32 {
 /// What `__has_c_attribute(name)` answers, which is the number the standard gives the
 /// attribute rather than one.
 pub fn has_c_attribute(name: &str, target: Target, gnuc: u32) -> u32 {
-    answer(Kind::CAttribute, name, target, gnuc)
+    standard(name, target, gnuc)
+}
+
+/// The number the claimed GCC release gives a C attribute, or zero.
+///
+/// The number is a date, and it changed while C23 was drafted. GCC 14 and later give 202311,
+/// which is the date of the standard. GCC 11 and 12 give the dates of the drafts, and GCC 13
+/// gives newer dates for `fallthrough` and `maybe_unused` and adds `noreturn`. GCC 10 has no
+/// standard attribute numbers at all, so `__has_attribute(deprecated)` is the GNU attribute's
+/// one there. The older dates are what gcc 13 on Ubuntu 24.04 and the gcc 10 and 12 of NetBSD
+/// 10 and 11 answer.
+fn standard(name: &str, target: Target, gnuc: u32) -> u32 {
+    let value = answer(Kind::CAttribute, name, target, gnuc);
+    if value == 0 || gnuc >= 14 {
+        return value;
+    }
+    match (unarmour(name), gnuc) {
+        (_, 0..=10) => 0,
+        ("fallthrough", 13) => 201910,
+        ("maybe_unused", 13) => 202106,
+        ("deprecated" | "fallthrough" | "maybe_unused", _) => 201904,
+        ("nodiscard", _) => 202003,
+        ("noreturn", _) => 202202,
+        _ => value,
+    }
 }
 
 /// What `__has_builtin(name)` answers.
@@ -578,6 +602,33 @@ mod tests {
         // And it is a different row from the GNU attribute of the same name.
         let gnu = lookup(Kind::Attribute, "deprecated").expect("GCC has it too");
         assert_eq!(gnu.value, 1);
+    }
+
+    /// The numbers of the C attributes are the dates the claimed GCC release gives them. GCC 10
+    /// has no such numbers, so `__has_attribute` gives the GNU attribute's one.
+    #[test]
+    fn a_c_attribute_answers_with_the_date_of_the_claimed_gcc() {
+        assert_eq!(has_c_attribute("deprecated", LINUX, 10), 0);
+        assert_eq!(has_attribute("deprecated", LINUX, 10), 1);
+        assert_eq!(has_attribute("fallthrough", LINUX, 10), 1);
+        assert_eq!(has_c_attribute("nodiscard", LINUX, 10), 0);
+        for gnuc in [11, 12] {
+            assert_eq!(has_attribute("deprecated", LINUX, gnuc), 201904);
+            assert_eq!(has_attribute("fallthrough", LINUX, gnuc), 201904);
+            assert_eq!(has_c_attribute("maybe_unused", LINUX, gnuc), 201904);
+            assert_eq!(has_c_attribute("__nodiscard__", LINUX, gnuc), 202003);
+        }
+        assert_eq!(has_c_attribute("deprecated", LINUX, 13), 201904);
+        assert_eq!(has_c_attribute("fallthrough", LINUX, 13), 201910);
+        assert_eq!(has_c_attribute("maybe_unused", LINUX, 13), 202106);
+        assert_eq!(has_c_attribute("nodiscard", LINUX, 13), 202003);
+        assert_eq!(has_c_attribute("noreturn", LINUX, 13), 202202);
+        assert_eq!(has_c_attribute("unsequenced", LINUX, 14), 0);
+        for name in ["deprecated", "fallthrough", "maybe_unused", "nodiscard", "noreturn"] {
+            assert_eq!(has_c_attribute(name, LINUX, 14), 202311, "{name}");
+        }
+        assert_eq!(has_c_attribute("unsequenced", LINUX, 15), 202311);
+        assert_eq!(has_c_attribute("reproducible", LINUX, 15), 202311);
     }
 
     /// The 32-bit conventions and `ms_struct` are there on every x86 target and the DLL

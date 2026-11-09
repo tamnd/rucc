@@ -150,6 +150,9 @@ pub struct Predef {
     pub math: Math,
     /// Whether an exception may unwind through this unit, from `-fexceptions`.
     pub exceptions: bool,
+    /// Whether the functions of this unit get unwind tables, which is
+    /// [`Options::unwinds`](rucc_session::Options::unwinds).
+    pub unwinds: bool,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
     /// `-U` in command line order, applied after the defines. No define comes after an undefine
@@ -220,6 +223,7 @@ impl Predef {
             trapping_math: true,
             math: Math::default(),
             exceptions: false,
+            unwinds: true,
             defines: Vec::new(),
             undefines: Vec::new(),
             isa: Isa::baseline(),
@@ -264,6 +268,7 @@ impl Predef {
             trapping_math: opts.trapping_math,
             math: opts.math,
             exceptions: opts.exceptions,
+            unwinds: opts.unwinds(),
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
             isa: opts.isa,
@@ -339,10 +344,10 @@ pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
     optimization(&mut d, opts);
     platform(&mut d, target, opts);
     hardening(&mut d, target, opts);
-    sizes(&mut d, target, opts.isa);
-    integers(&mut d, target);
+    sizes(&mut d, target, opts);
+    integers(&mut d, target, opts);
     floats(&mut d, target, opts);
-    atomics(&mut d, target);
+    atomics(&mut d, target, opts);
     if opts.building_libgcc {
         libgcc(&mut d, target);
     }
@@ -426,14 +431,46 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // there is no `-fexec-charset` to set them with, and both are what gcc answers with none.
     // The wide one follows `wchar_t`, which is sixteen bits on Windows and thirty two
     // everywhere else, so it is the one target fact in this function.
-    d.set("__GNUC_EXECUTION_CHARSET_NAME", "\"UTF-8\"");
+    // gcc 11 is the first release that names them, so a persona that claims gcc 10 does not.
+    let named = opts.gnuc.major >= 11;
+    d.set_if(named, "__GNUC_EXECUTION_CHARSET_NAME", "\"UTF-8\"");
     let wide = if target.wchar_width == 16 { "\"UTF-16LE\"" } else { "\"UTF-32LE\"" };
-    d.set("__GNUC_WIDE_EXECUTION_CHARSET_NAME", wide);
+    d.set_if(named, "__GNUC_WIDE_EXECUTION_CHARSET_NAME", wide);
     // The C++ ABI this would be if it compiled C++, which gcc defines in C as well. It is not
     // a claim about this compiler so much as a number headers read: libstdc++ is not the only
     // thing that tests it, and a C header shared with a C++ one reaches it through `extern
-    // "C"` guards. The value is gcc 16's.
-    d.set_if(gcc, "__GXX_ABI_VERSION", "1021");
+    // "C"` guards. The value is the one the claimed gcc release gives.
+    d.set_if(gcc, "__GXX_ABI_VERSION", &gxx_abi_version(opts.gnuc.major).to_string());
+    // gcc says this when it writes `.cfi_*` directives into its assembly, and a program that
+    // writes its own assembly reads it to know that it may write them too. glibc's `sysdep.h`
+    // is one. Every table here is written with those directives, so the answer follows whether
+    // there is a table. It is no on 32-bit Arm, which has its own unwind tables, and off ELF,
+    // where gcc says nothing: mingw-w64 has SEH, and clang for Apple does not say it. FreeBSD's
+    // gcc for riscv64 says no as well, and the answer here is the same. A no only means that a
+    // program leaves its own directives out.
+    let elf = target.tuple.object_format() == tuple::ObjectFormat::Elf;
+    let freebsd_riscv =
+        target.tuple.os() == tuple::Os::FreeBsd && target.tuple.arch() == tuple::Arch::Riscv64;
+    let arm = target.tuple.arch() == tuple::Arch::Arm;
+    let cfi = gcc && opts.unwinds && elf && !arm && !freebsd_riscv;
+    d.flag_if(cfi, "__GCC_HAVE_DWARF2_CFI_ASM");
+}
+
+/// `__GXX_ABI_VERSION` for a gcc release, which is a thousand and the `-fabi-version=` that
+/// release uses when it is not given one.
+///
+/// The last seven are what gcc 10 to 16 give on NetBSD, FreeBSD and Ubuntu. The older ones
+/// are the defaults the gcc manual lists for its releases.
+const fn gxx_abi_version(major: u32) -> u32 {
+    match major {
+        0..=4 => 1002,
+        5 => 1009,
+        6 => 1010,
+        7 => 1011,
+        8 | 9 => 1013,
+        10 => 1014,
+        _ => 1005 + major,
+    }
 }
 
 /// What the dialect flags say.
@@ -452,8 +489,11 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // Defined exactly when the extensions are off, which is the whole difference between
     // `-std=c23` and `-std=gnu23` as far as the preprocessor is concerned.
     d.flag_if(!opts.gnu_extensions, "__STRICT_ANSI__");
-    d.flag_if(!opts.assembler, "__STDC_UTF_16__");
-    d.flag_if(!opts.assembler, "__STDC_UTF_32__");
+    // gcc says these where `u"..."` and `U"..."` are literals, which is gnu99 and every dialect
+    // from C11 on. C89, gnu89 and strict C99 do not have them.
+    let unicode = opts.std >= Std::C11 || (opts.std == Std::C99 && opts.gnu_extensions);
+    d.flag_if(!opts.assembler && unicode, "__STDC_UTF_16__");
+    d.flag_if(!opts.assembler && unicode, "__STDC_UTF_32__");
     // What glibc's `<pthread.h>` reads to spell `pthread_cleanup_push` with a `cleanup` attribute
     // rather than with `setjmp`, and gcc defines it in C for `-fexceptions` and for
     // `-fnon-call-exceptions` alone.
@@ -514,9 +554,12 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // because the operator is answerable in every dialect and a header that writes
     // `#if __has_embed(...) == __STDC_EMBED_FOUND__` under `-std=gnu17` would otherwise be
     // comparing against zero and taking the not found branch on a resource that is there.
-    d.set("__STDC_EMBED_NOT_FOUND__", "0");
-    d.set("__STDC_EMBED_FOUND__", "1");
-    d.set("__STDC_EMBED_EMPTY__", "2");
+    // gcc 15 is the release that has `#embed`, and under an older persona `__has_embed` is not
+    // an operator either, so the two go together.
+    let embed = opts.gnuc.major >= 15;
+    d.set_if(embed, "__STDC_EMBED_NOT_FOUND__", "0");
+    d.set_if(embed, "__STDC_EMBED_FOUND__", "1");
+    d.set_if(embed, "__STDC_EMBED_EMPTY__", "2");
 }
 
 /// The memory orders and the lock free answers.
@@ -529,7 +572,7 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 /// Two means always lock free, and every integer type gets a two on all three targets, which
 /// are all sixty four bit machines. `long long` is the one that would change on a thirty two
 /// bit target, where a double word load is an instruction the machine may or may not have.
-fn atomics(d: &mut Defs, target: &TargetInfo) {
+fn atomics(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.set("__ATOMIC_RELAXED", "0");
     d.set("__ATOMIC_CONSUME", "1");
     d.set("__ATOMIC_ACQUIRE", "2");
@@ -545,12 +588,15 @@ fn atomics(d: &mut Defs, target: &TargetInfo) {
     let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);
     let wasm = target.tuple.arch() == tuple::Arch::Wasm32;
     let llong = if target.pointer_width == 64 || x86 || wasm { "2" } else { "1" };
-    for name in [
-        "BOOL", "CHAR", "CHAR8_T", "CHAR16_T", "CHAR32_T", "WCHAR_T", "SHORT", "INT", "LONG",
-        "POINTER",
-    ] {
+    for name in
+        ["BOOL", "CHAR", "CHAR16_T", "CHAR32_T", "WCHAR_T", "SHORT", "INT", "LONG", "POINTER"]
+    {
         d.set(&format!("__GCC_ATOMIC_{name}_LOCK_FREE"), "2");
     }
+    // `char8_t` is a type of C23 alone, as `__CHAR8_TYPE__` is, and gcc 15 is the first release
+    // that answers for it in C.
+    let char8 = opts.std >= Std::C23 && opts.gnuc.major >= 15;
+    d.set_if(char8, "__GCC_ATOMIC_CHAR8_T_LOCK_FREE", "2");
     // The one that is not always two: a target whose word is thirty two bits wide can only
     // promise `long long` is lock free if it has a double word instruction, and the honest
     // answer there is sometimes rather than always.
@@ -1195,7 +1241,8 @@ fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
 }
 
 /// `__CHAR_BIT__`, the `__SIZEOF_*__` family and the alignment macros.
-fn sizes(d: &mut Defs, target: &TargetInfo, isa: Isa) {
+fn sizes(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
+    let isa = opts.isa;
     let pointer = target.pointer_width / 8;
     // The two hardware interference sizes, which say how far apart two objects have to be for
     // a write to one not to invalidate the other's cache line, and how close together two have
@@ -1209,8 +1256,16 @@ fn sizes(d: &mut Defs, target: &TargetInfo, isa: Isa) {
         (tuple::Arch::Aarch64, _) => "256",
         _ => "64",
     };
-    d.set("__GCC_CONSTRUCTIVE_SIZE", "64");
-    d.set("__GCC_DESTRUCTIVE_SIZE", destructive);
+    // gcc 12 is the first release that says them, and it says them only for a machine whose
+    // description gives a cache line. RISC-V, POWER and IBM Z give none, and gcc 13 on Ubuntu
+    // and gcc 14 and 15 on FreeBSD say neither name there.
+    let lineless = matches!(
+        target.tuple.arch(),
+        tuple::Arch::Riscv64 | tuple::Arch::Riscv32 | tuple::Arch::PowerPc64 | tuple::Arch::S390x
+    );
+    let interference = opts.gnuc.major >= 12 && !lineless;
+    d.set_if(interference, "__GCC_CONSTRUCTIVE_SIZE", "64");
+    d.set_if(interference, "__GCC_DESTRUCTIVE_SIZE", destructive);
     let long = target.long_width / 8;
     let long_double = target.long_double_width / 8;
     d.set("__CHAR_BIT__", "8");
@@ -1345,7 +1400,7 @@ fn wint(target: &TargetInfo) -> Wint {
 }
 
 /// The integer type names, their limits, and the exact width family.
-fn integers(d: &mut Defs, target: &TargetInfo) {
+fn integers(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // The one fact everything below turns on: which type is 64 bits wide. On LP64 it is
     // `long`, and on Windows LLP64 it is `long long`, and every `size_t`, `intmax_t` and
     // `int64_t` spelling follows from that.
@@ -1408,7 +1463,13 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     // answer it can rely on, which is the point of saying a number smaller than gcc's rather
     // than saying gcc's and refusing what it asked for. `MAX_BIT_INT_WIDTH` in `rucc-sema` is
     // the same number and has to be changed with it.
-    d.set("__BITINT_MAXWIDTH__", "128");
+    // gcc 14 is the first release with `_BitInt`, and gcc 14 and 15 have it on x86 and AArch64
+    // alone, which is where the `__LIBGCC_BITINT_*` macros below are too. So a persona that
+    // claims an older gcc, or a RISC-V gcc 15, does not say the macro, and a header that tests
+    // it does not reach for the type. RISC-V under gcc 16 keeps it, as it was before.
+    let riscv = target.tuple.arch() == tuple::Arch::Riscv64;
+    let bitint = opts.gnuc.major >= 14 && !(riscv && opts.gnuc.major < 16);
+    d.set_if(bitint, "__BITINT_MAXWIDTH__", "128");
 
     let wchar = wchar(target);
     d.set("__WCHAR_TYPE__", wchar.spelling);
@@ -1827,6 +1888,7 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // the two names. A positive value there would make a header claim Annex F for a library that
     // does not give it.
     let wasm = target.tuple.arch() == tuple::Arch::Wasm32;
+    let gnuc = opts.gnuc.major;
     let iec = if opts.math.iec_559(opts.trapping_math) && !wasm { "2" } else { "0" };
     d.set("__GCC_IEC_559", iec);
     d.set("__GCC_IEC_559_COMPLEX", iec);
@@ -1834,35 +1896,53 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // and RISC-V floating units all do. The other two names are the same answer asked under the
     // rules of C99 and of TS 18661-3, which are the same rules for a target with no excess
     // precision to have, and glibc's `<math.h>` reads the last of the three.
+    // gcc says the C99 one on AArch64 alone, since only that backend defines it, and gcc 13 on
+    // Ubuntu and gcc 10 to 15 on the BSDs leave it out on x86-64 and RISC-V.
     d.set("__FLT_EVAL_METHOD__", "0");
-    d.set("__FLT_EVAL_METHOD_C99__", "0");
+    d.set_if(target.tuple.arch() == tuple::Arch::Aarch64, "__FLT_EVAL_METHOD_C99__", "0");
     d.set("__FLT_EVAL_METHOD_TS_18661_3__", "0");
+    // How a decimal floating expression is evaluated, which gcc says on every target, whether or
+    // not the target has the decimal types. It is 2 in gcc, and a program that reads it is asking
+    // what gcc would do. clang does not say it, so the rows whose reference is clang leave it out.
+    let apple = matches!(target.tuple.os(), tuple::Os::MacOs | tuple::Os::IOs);
+    let msvc = target.tuple.env() == tuple::Env::Msvc && !opts.gnuc_given;
+    let gcc = !wasm && !apple && !msvc;
+    d.set_if(gcc || target.has_decimal_float, "__DEC_EVAL_METHOD__", "2");
 
-    family(d, "FLT", &SINGLE, |value| format!("{value}F"));
+    family(d, gnuc, "FLT", &SINGLE, |value| format!("{value}F"));
     // gcc writes the `double` values as `long double` constants cast back down, which is exact
     // in every format `long double` has and is the one family whose values are not a suffix.
-    family(d, "DBL", &DOUBLE, |value| format!("((double){value}L)"));
+    family(d, gnuc, "DBL", &DOUBLE, |value| format!("((double){value}L)"));
     let long_double = characteristics_on(target, target.long_double_format);
-    family(d, "LDBL", long_double, |value| format!("{value}L"));
+    family(d, gnuc, "LDBL", long_double, |value| format!("{value}L"));
 
     // The two named types that are not on every machine, each written where the type is and left
     // out where it is not. A program reads `__FLT128_MANT_DIG__` to find out whether it may write
     // the type, which is what glibc's `<float.h>` and `<math.h>` do, so the macros and the type
     // have to agree or the header asks for something the compiler will refuse.
-    if target.has_float16 {
-        family(d, "FLT16", &HALF, |value| format!("{value}F16"));
+    // `_Float16` came to gcc on AArch64 first, then to x86 in gcc 12 and to RISC-V in gcc 13, so
+    // a persona that claims an older gcc leaves the family out there.
+    let half_since = match target.tuple.arch() {
+        tuple::Arch::X86_64 | tuple::Arch::X86 => 12,
+        tuple::Arch::Riscv64 | tuple::Arch::Riscv32 => 13,
+        _ => 0,
+    };
+    if target.has_float16 && gnuc >= half_since {
+        family(d, gnuc, "FLT16", &HALF, |value| format!("{value}F16"));
     }
-    family(d, "FLT32", &SINGLE, |value| format!("{value}F32"));
-    family(d, "FLT64", &DOUBLE, |value| format!("{value}F64"));
+    family(d, gnuc, "FLT32", &SINGLE, |value| format!("{value}F32"));
+    family(d, gnuc, "FLT64", &DOUBLE, |value| format!("{value}F64"));
     if target.has_float128 {
-        family(d, "FLT128", &QUAD, |value| format!("{value}F128"));
+        family(d, gnuc, "FLT128", &QUAD, |value| format!("{value}F128"));
     }
-    family(d, "FLT32X", &DOUBLE, |value| format!("{value}F32x"));
+    family(d, gnuc, "FLT32X", &DOUBLE, |value| format!("{value}F32x"));
     // Nothing at all on a target whose widest format is a `double`, which is what gcc does
     // there: `_Float64x` is not a type on that machine and the family that describes it is not a
     // set of macros with a smaller answer in them.
     if let Some(format) = target.float64x_format {
-        family(d, "FLT64X", characteristics_on(target, format), |value| format!("{value}F64x"));
+        family(d, gnuc, "FLT64X", characteristics_on(target, format), |value| {
+            format!("{value}F64x")
+        });
     }
 
     // The number itself rather than the name of the other macro. The value is the same either
@@ -1979,8 +2059,7 @@ fn libgcc(d: &mut Defs, target: &TargetInfo) {
 /// three rows are all there will ever be. The spellings are gcc's, down to the parentheses around a
 /// negative exponent and the suffix on every constant. `__DEC64X_*` is not here: `_Decimal64x` has
 /// a suffix of its own the lexer does not read yet, so the macros would be constants nothing can
-/// use. `__DEC_EVAL_METHOD__` is 2 because it is 2 in gcc, and a program that reads it is asking
-/// what gcc would do.
+/// use. `__DEC_EVAL_METHOD__` is not here, because gcc says it on every target.
 fn decimals(d: &mut Defs) {
     let rows = [
         ("32", "DF", "7", "(-94)", "97", "1E-95", "9.999999E96", "1E-6", "0.000001E-95"),
@@ -2016,14 +2095,22 @@ fn decimals(d: &mut Defs) {
         d.set(&format!("__DEC{bits}_EPSILON__"), &format!("{epsilon}{suffix}"));
         d.set(&format!("__DEC{bits}_SUBNORMAL_MIN__"), &format!("{subnormal_min}{suffix}"));
     }
-    d.set("__DEC_EVAL_METHOD__", "2");
 }
 
 /// One family of `float.h` macros, named `__{prefix}_*__`.
 ///
 /// `write` turns a value into the constant its macro expands to, which is a suffix for every
 /// family but `double`.
-fn family(d: &mut Defs, prefix: &str, c: &Characteristics, write: impl Fn(&str) -> String) {
+///
+/// `__{prefix}_IS_IEC_60559__` depends on the gcc release as well. gcc 10 does not say it, and
+/// gcc 11 and 12 say 2 where gcc 13 and later say 1.
+fn family(
+    d: &mut Defs,
+    gnuc: u32,
+    prefix: &str,
+    c: &Characteristics,
+    write: impl Fn(&str) -> String,
+) {
     d.set(&format!("__{prefix}_MANT_DIG__"), c.mant_dig);
     d.set(&format!("__{prefix}_DIG__"), c.dig);
     d.set(&format!("__{prefix}_MIN_EXP__"), c.min_exp);
@@ -2036,7 +2123,14 @@ fn family(d: &mut Defs, prefix: &str, c: &Characteristics, write: impl Fn(&str) 
     d.set(&format!("__{prefix}_MIN__"), &write(c.min));
     d.set(&format!("__{prefix}_EPSILON__"), &write(c.epsilon));
     d.set(&format!("__{prefix}_DENORM_MIN__"), &write(c.denorm_min));
-    d.set(&format!("__{prefix}_IS_IEC_60559__"), c.is_iec_60559);
+    let iec = match (gnuc, c.is_iec_60559) {
+        (0..=10, _) => None,
+        (11 | 12, "1") => Some("2"),
+        (_, value) => Some(value),
+    };
+    if let Some(iec) = iec {
+        d.set(&format!("__{prefix}_IS_IEC_60559__"), iec);
+    }
     d.set(&format!("__{prefix}_HAS_DENORM__"), "1");
     d.set(&format!("__{prefix}_HAS_INFINITY__"), "1");
     d.set(&format!("__{prefix}_HAS_QUIET_NAN__"), "1");
@@ -2868,6 +2962,126 @@ mod tests {
         }
         // And it is not an IEC 60559 format, which only the brain float can also say.
         assert_eq!(c.is_iec_60559, "0");
+    }
+
+    /// The set under a persona that claims gcc `major`, in the dialect that release compiles
+    /// when it is not given one.
+    fn set_claiming(triple: &str, major: u32) -> String {
+        let triple: Triple = triple.parse().expect("a triple the compiler supports");
+        let gnuc = GnucVersion { major, minor: 0, patch: 0 };
+        let opts = Predef { gnuc, gnuc_given: true, std: gnuc.default_std(), ..Predef::new() };
+        built_in(&TargetInfo::new(triple), &opts)
+    }
+
+    /// tamnd/rucc#4088. The names that came in a gcc release are there when the persona claims
+    /// that release or a later one, with the value that release gives. The values are what the
+    /// gcc 10, 12 and 14 of NetBSD 10, 11 and current, and FreeBSD's gcc 14 and 15, give.
+    #[test]
+    fn the_names_that_came_in_a_gcc_release_follow_the_claimed_one() {
+        let x86 = "x86_64-unknown-netbsd";
+        let gcc10 = set_claiming(x86, 10);
+        assert!(has(&gcc10, "#define __GXX_ABI_VERSION 1014"), "{gcc10}");
+        assert!(has(&gcc10, "#define __DEC_EVAL_METHOD__ 2"), "{gcc10}");
+        for name in [
+            "__GNUC_EXECUTION_CHARSET_NAME ",
+            "__GNUC_WIDE_EXECUTION_CHARSET_NAME ",
+            "__FLT_IS_IEC_60559__ ",
+            "__FLT16_MANT_DIG__ ",
+            "__GCC_CONSTRUCTIVE_SIZE ",
+            "__BITINT_MAXWIDTH__ ",
+            "__STDC_EMBED_FOUND__ ",
+            "__GCC_ATOMIC_CHAR8_T_LOCK_FREE ",
+            "__FLT_EVAL_METHOD_C99__ ",
+        ] {
+            assert!(!gcc10.contains(&format!("#define {name}")), "{name}");
+        }
+        let gcc12 = set_claiming(x86, 12);
+        for line in [
+            "__GXX_ABI_VERSION 1017",
+            "__GNUC_EXECUTION_CHARSET_NAME \"UTF-8\"",
+            "__FLT_IS_IEC_60559__ 2",
+            "__LDBL_IS_IEC_60559__ 2",
+            "__FLT16_MANT_DIG__ 11",
+            "__GCC_CONSTRUCTIVE_SIZE 64",
+            "__GCC_DESTRUCTIVE_SIZE 64",
+        ] {
+            assert!(has(&gcc12, &format!("#define {line}")), "{line}");
+        }
+        assert!(!gcc12.contains("__BITINT_MAXWIDTH__"));
+        let gcc14 = set_claiming("x86_64-unknown-freebsd", 14);
+        for line in ["__GXX_ABI_VERSION 1019", "__FLT_IS_IEC_60559__ 1", "__BITINT_MAXWIDTH__ 128"]
+        {
+            assert!(has(&gcc14, &format!("#define {line}")), "{line}");
+        }
+        assert!(!gcc14.contains("__STDC_EMBED_"));
+        let gcc15 = set_claiming("x86_64-unknown-freebsd", 15);
+        for line in [
+            "__GXX_ABI_VERSION 1020",
+            "__STDC_EMBED_FOUND__ 1",
+            "__GCC_ATOMIC_CHAR8_T_LOCK_FREE 2",
+            "__GCC_HAVE_DWARF2_CFI_ASM 1",
+        ] {
+            assert!(has(&gcc15, &format!("#define {line}")), "{line}");
+        }
+        assert!(has(&set_for("x86_64-unknown-linux-gnu"), "#define __GXX_ABI_VERSION 1021"));
+    }
+
+    /// tamnd/rucc#4088. Some of those names depend on the machine too. AArch64 had `_Float16`
+    /// before gcc 10 and is the one machine with `__FLT_EVAL_METHOD_C99__`. RISC-V got
+    /// `_Float16` in gcc 13 and has no cache line size and no `_BitInt` in gcc 15, and FreeBSD's
+    /// gcc for it writes no CFI.
+    #[test]
+    fn the_names_of_a_gcc_release_follow_the_machine_as_well() {
+        let arm = set_claiming("aarch64-unknown-netbsd", 10);
+        assert!(has(&arm, "#define __FLT16_MANT_DIG__ 11"), "{arm}");
+        assert!(has(&arm, "#define __FLT_EVAL_METHOD_C99__ 0"), "{arm}");
+        assert!(!arm.contains("__GCC_DESTRUCTIVE_SIZE"), "{arm}");
+        assert!(has(
+            &set_claiming("aarch64-unknown-netbsd", 12),
+            "#define __GCC_DESTRUCTIVE_SIZE 256"
+        ));
+        assert!(!set_claiming("riscv64-unknown-netbsd", 12).contains("__FLT16_MANT_DIG__"));
+        let riscv = set_claiming("riscv64-unknown-netbsd", 13);
+        assert!(has(&riscv, "#define __FLT16_MANT_DIG__ 11"), "{riscv}");
+        assert!(has(&riscv, "#define __GCC_HAVE_DWARF2_CFI_ASM 1"), "{riscv}");
+        let freebsd = set_claiming("riscv64-unknown-freebsd", 15);
+        for name in [
+            "__GCC_CONSTRUCTIVE_SIZE",
+            "__BITINT_MAXWIDTH__",
+            "__GCC_HAVE_DWARF2_CFI_ASM",
+            "__FLT_EVAL_METHOD_C99__",
+        ] {
+            assert!(!freebsd.contains(name), "{name}");
+        }
+        assert!(!set_for("x86_64-unknown-linux-gnu").contains("__FLT_EVAL_METHOD_C99__"));
+        // No table, no directives.
+        let triple: Triple = "x86_64-unknown-linux-gnu".parse().expect("a triple");
+        let quiet = built_in(&TargetInfo::new(triple), &Predef { unwinds: false, ..Predef::new() });
+        assert!(!quiet.contains("__GCC_HAVE_DWARF2_CFI_ASM"));
+    }
+
+    /// `u"..."` and `U"..."` are literals in gnu99 and from C11 on, and gcc says the two names
+    /// there and nowhere else. `char8_t` is a C23 type, and gcc 15 says its lock free answer in
+    /// C23 alone.
+    #[test]
+    fn the_unicode_names_follow_the_dialect() {
+        let target = TargetInfo::new("x86_64-unknown-freebsd".parse().expect("a triple"));
+        let gcc15 = GnucVersion { major: 15, minor: 0, patch: 0 };
+        for (std, gnu, utf, char8) in [
+            (Std::C89, true, false, false),
+            (Std::C99, false, false, false),
+            (Std::C99, true, true, false),
+            (Std::C11, false, true, false),
+            (Std::C17, true, true, false),
+            (Std::C23, true, true, true),
+        ] {
+            let opts = Predef { std, gnu_extensions: gnu, gnuc: gcc15, ..Predef::new() };
+            let text = built_in(&target, &opts);
+            assert_eq!(has(&text, "#define __STDC_UTF_16__ 1"), utf, "{std:?} {gnu}");
+            assert_eq!(has(&text, "#define __STDC_UTF_32__ 1"), utf, "{std:?} {gnu}");
+            let lock_free = has(&text, "#define __GCC_ATOMIC_CHAR8_T_LOCK_FREE 2");
+            assert_eq!(lock_free, char8, "{std:?} {gnu}");
+        }
     }
 
     #[test]

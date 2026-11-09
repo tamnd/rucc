@@ -2466,15 +2466,24 @@ struct HasOps {
     /// interned before any file is read, so a name out of the source sorts above the range and
     /// one comparison turns it away.
     range: (Symbol, Symbol),
-    /// Whether `__has_feature` and `__has_extension` are operators, which they are from gcc 14.
-    /// Under an older persona they are plain names, so `#ifdef __has_feature` is false and a
-    /// header can define them, as FreeBSD's `sys/cdefs.h` does.
-    feature: bool,
+    /// The GCC release the persona claims. An operator that came in a later one is a plain name,
+    /// so `#ifdef __has_feature` is false under gcc 13 and a header can define it, as FreeBSD's
+    /// `sys/cdefs.h` does.
+    gnuc: u32,
 }
 
 impl HasOps {
-    /// The gcc release that added `__has_feature` and `__has_extension`.
-    const FEATURE: u32 = 14;
+    /// The gcc release that added an operator. `__has_c_attribute` came in gcc 11,
+    /// `__has_feature` and `__has_extension` in gcc 14, and `__has_embed` in gcc 15 with
+    /// `#embed`. The others are older than any release a persona claims here.
+    const fn since(op: Op) -> u32 {
+        match op {
+            Op::Table(Kind::CAttribute) => 11,
+            Op::Table(Kind::Feature | Kind::Extension) => 14,
+            Op::Embed => 15,
+            _ => 0,
+        }
+    }
 
     fn new(interner: &mut Interner, gnuc: Option<u32>) -> HasOps {
         let ops = [
@@ -2492,7 +2501,7 @@ impl HasOps {
         for &(sym, _) in &ops {
             range = (range.0.min(sym), range.1.max(sym));
         }
-        HasOps { ops, range, feature: gnuc.is_none_or(|gnuc| gnuc >= HasOps::FEATURE) }
+        HasOps { ops, range, gnuc: gnuc.unwrap_or(u32::MAX) }
     }
 
     /// The operator a name is, if it is one.
@@ -2502,7 +2511,7 @@ impl HasOps {
             return None;
         }
         let op = self.ops.iter().find(|(sym, _)| *sym == name).map(|(_, op)| *op);
-        op.filter(|op| self.feature || !matches!(op, Op::Table(Kind::Feature | Kind::Extension)))
+        op.filter(|&op| HasOps::since(op) <= self.gnuc)
     }
 }
 
@@ -4130,6 +4139,28 @@ mod tests {
             opts.gnuc = rucc_session::GnucVersion { major, minor: 0, patch: 0 };
             let mut run = Run::new();
             run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "gcc {major}");
+            assert!(run.messages().is_empty(), "gcc {major}: {:?}", run.messages());
+        }
+    }
+
+    /// gcc 10 has no `__has_c_attribute` and gives `__has_attribute(deprecated)` the GNU answer,
+    /// which is what NetBSD 10's gcc 10.5 says. `__has_embed` came in gcc 15 with `#embed`.
+    #[test]
+    fn has_c_attribute_and_has_embed_are_not_there_before_their_gcc() {
+        let asked = "#ifdef __has_c_attribute\nC\n#endif\n\
+                     #ifdef __has_embed\nE\n#endif\n\
+                     __has_attribute(deprecated) __has_attribute(fallthrough)\n";
+        for (major, answer) in [
+            (10, "1 1"),
+            (11, "C 201904 201904"),
+            (14, "C 202311 202311"),
+            (15, "C E 202311 202311"),
+        ] {
+            let mut opts = Predef::new();
+            opts.gnuc = rucc_session::GnucVersion { major, minor: 0, patch: 0 };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-netbsd", &opts);
             assert_eq!(run.go(asked), answer, "gcc {major}");
             assert!(run.messages().is_empty(), "gcc {major}: {:?}", run.messages());
         }
