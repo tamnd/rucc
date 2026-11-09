@@ -391,6 +391,7 @@ pub struct Frame {
     naked: bool,
     pairs: bool,
     usage: u32,
+    framed: u32,
     home: u32,
     popped: u32,
     interrupt: Option<bool>,
@@ -466,6 +467,8 @@ impl Frame {
                 top += vector;
             }
         }
+        // Where the locals start, for what `-Wframe-larger-than=` counts. See [`Frame::frame`].
+        let start = top;
 
         let mut cells = Vec::with_capacity(plan.cells().len());
         let mut order: Vec<usize> = (0..plan.cells().len()).collect();
@@ -512,6 +515,7 @@ impl Frame {
             canary = Some(offset(top));
             top += word;
         }
+        let framed = top - start;
         if last {
             top = top.next_multiple_of(vector);
             for &reg in &vectors {
@@ -683,6 +687,7 @@ impl Frame {
             naked: layout.naked,
             pairs: layout.pairs,
             usage,
+            framed,
             home: layout.home,
             popped: layout.popped,
             interrupt: layout.interrupt,
@@ -945,6 +950,20 @@ impl Frame {
     #[must_use]
     pub fn usage(&self) -> u32 {
         self.usage
+    }
+
+    /// How many bytes the locals, the spill slots and the canary take, which is what
+    /// `-Wframe-larger-than=` measures.
+    ///
+    /// gcc's `get_frame_size`, which is the part of the frame the function itself lays out. The
+    /// return address, the registers the prologue saves and the outgoing argument area are not in
+    /// it, and nor is what a variable length array or an `alloca` takes while the function runs.
+    /// The padding between locals is, as it is in gcc's. So the number is gcc's when the two
+    /// compilers keep the same locals in the same slots, and it differs by what they keep
+    /// differently, as [`Frame::usage`] does.
+    #[must_use]
+    pub fn frame(&self) -> u32 {
+        self.framed
     }
 }
 

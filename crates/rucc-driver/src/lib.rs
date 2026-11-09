@@ -3393,8 +3393,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      inside this compiler rather than a program it runs"
                 )));
             }
-            // The one warning with a number in it that this compiler gives. The number is a count
-            // of bytes, which gcc also takes with a unit after it.
+            // The two warnings with a number in them that this compiler gives. The number is a
+            // count of bytes, which gcc also takes with a unit after it.
+            _ if arg.starts_with("-Wframe-larger-than=") => {
+                let value = &arg["-Wframe-larger-than=".len()..];
+                let limit = byte_size(value).ok_or_else(|| {
+                    err("argument to `-Wframe-larger-than=` should be a non-negative integer \
+                         optionally followed by a size unit")
+                })?;
+                opts.frame_limit = Some(limit);
+            }
+            "-Wno-frame-larger-than" => opts.frame_limit = None,
             _ if arg.starts_with("-Wstack-usage=") => {
                 let value = &arg["-Wstack-usage=".len()..];
                 let limit = byte_size(value).ok_or_else(|| {
@@ -10391,8 +10400,8 @@ mod tests {
         assert_eq!(opts.deps.targets, vec!["a b.o".to_owned(), "a\\ b.o".to_owned()]);
     }
 
-    /// NetBSD's kernel line passes `-Wstack-usage=3584`. The value is a byte size, read with
-    /// gcc's units, and `-Wno-stack-usage` takes the limit away.
+    /// NetBSD's kernel line passes `-Wstack-usage=3584` and Linux's `-Wframe-larger-than=2048`.
+    /// Each value is a byte size, read with gcc's units, and the `-Wno-` form takes the limit away.
     #[test]
     fn the_stack_usage_limit_is_a_byte_size_and_can_be_taken_away() {
         let (opts, _) = compile(&["-Wstack-usage=3584", "-c", "a.c"]);
@@ -10401,6 +10410,11 @@ mod tests {
         assert_eq!(opts.stack_usage_limit, None);
         let (opts, _) = compile(&["-c", "a.c"]);
         assert_eq!(opts.stack_usage_limit, None);
+        let (opts, _) = compile(&["-Wframe-larger-than=2048", "-c", "a.c"]);
+        assert_eq!(opts.frame_limit, Some(2048));
+        let (opts, _) =
+            compile(&["-Wframe-larger-than=2KB", "-Wno-frame-larger-than", "-c", "a.c"]);
+        assert_eq!(opts.frame_limit, None);
         for (value, bytes) in [
             ("0", 0),
             ("4kB", 4000),
@@ -10417,6 +10431,7 @@ mod tests {
             assert_eq!(byte_size(value), None, "{value}");
         }
         assert!(refused(&["-Wstack-usage=12q", "-c", "a.c"]).contains("size unit"));
+        assert!(refused(&["-Wframe-larger-than=x", "-c", "a.c"]).contains("size unit"));
     }
 
     #[test]

@@ -2988,9 +2988,16 @@ pub struct Options {
     ///
     /// gcc's warning and gcc's numbers: a function whose usage, as the `.su` file counts it, is
     /// over the limit is warned about, and so is every function that takes more stack while it
-    /// runs. NetBSD builds its kernel with `-Wstack-usage=3584 -Werror`. `-Wno-stack-usage` takes
-    /// the limit away again.
+    /// runs by an amount nothing bounds. NetBSD builds its kernel with `-Wstack-usage=3584
+    /// -Werror`. `-Wno-stack-usage` takes the limit away again.
     pub stack_usage_limit: Option<u64>,
+    /// The largest frame a function may have before it is warned about, from
+    /// `-Wframe-larger-than=`.
+    ///
+    /// gcc's warning, about the frame alone: the locals, the spill slots and the canary, and not
+    /// the saved registers, the return address or what a variable length array takes. Linux
+    /// builds with `-Wframe-larger-than=2048`. `-Wno-frame-larger-than` takes the limit away.
+    pub frame_limit: Option<u64>,
     /// What the files kept beside an output are named after, from `-dumpbase`, in place of the
     /// name the output or the input would have given them.
     pub dump_base: Option<String>,
@@ -3256,6 +3263,7 @@ impl Options {
             save_temps: SaveTemps::default(),
             stack_usage: false,
             stack_usage_limit: None,
+            frame_limit: None,
             dump_base: None,
             dump_base_ext: None,
             dump_dir: None,

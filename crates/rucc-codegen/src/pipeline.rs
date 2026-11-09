@@ -79,7 +79,7 @@ use crate::tail;
 use crate::through;
 use crate::thunks;
 use crate::trailing;
-use crate::usage::{StackUsage, Usage};
+use crate::usage::{self, StackUsage, Usage};
 use crate::weights;
 use crate::zero::{self, Zeroing};
 pub use rucc_regalloc::Allocator;
@@ -1496,13 +1496,21 @@ pub fn compile_recording(
     }
     // Here because the frame is settled and nothing after this changes how big it is. The name is
     // the one the source spelled, since that is what gcc's report says and what a person reading
-    // it looks for, and a renamed function is the one place it differs from the symbol.
+    // it looks for, and a renamed function is the one place it differs from the symbol. What a
+    // frame that grows takes while it runs is read off the IR, which still has the sizes as the
+    // constants they are where the machine code has them in registers.
+    let (kind, more) = match frame.grows().then(|| usage::bound(source)) {
+        None => (usage::Kind::Static, 0),
+        Some(Some(bytes)) => (usage::Kind::Bounded, bytes),
+        Some(None) => (usage::Kind::Unbounded, 0),
+    };
     recording.stack.record(Usage {
         name: names.resolve(source.spelled.unwrap_or(source.name)).to_owned(),
         named: source.named,
         declared: source.declared,
-        bytes: frame.usage(),
-        dynamic: frame.grows(),
+        bytes: frame.usage().saturating_add(more),
+        kind,
+        frame: frame.frame(),
     });
 
     // Here because this is where the two halves of the answer are both in hand: which local is
