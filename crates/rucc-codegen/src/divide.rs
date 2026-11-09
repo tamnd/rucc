@@ -553,7 +553,7 @@ fn division(func: &Func, inst: Inst) -> Option<Division> {
 /// is a division by the `int` two made wider, `x / -8` subtracts eight from zero and `x / (1LL <<
 /// 32)` shifts, and each is the same division as the folded one. Nothing deeper than a few steps is
 /// followed, which is more than a constant expression in a kernel header ever is.
-fn constant(func: &Func, value: Value) -> Option<Imm> {
+pub(crate) fn constant(func: &Func, value: Value) -> Option<Imm> {
     folded(func, value, 8)
 }
 

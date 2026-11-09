@@ -19,7 +19,7 @@ use rucc_codegen::elsewhere::{Elsewhere, Slot};
 use rucc_codegen::lowering::Lowerings;
 use rucc_codegen::pipeline::{self, Machine, Recording, Spent};
 use rucc_codegen::pressure::Pressure;
-use rucc_codegen::usage::StackUsage;
+use rucc_codegen::usage::{Kind, StackUsage, Usage};
 use rucc_cost::Goal;
 use rucc_diag::{Diagnostic, SourceFile, SourceMap, Span};
 use rucc_ir::{AttrSet, FpContract, Pic as IrPic, Visibility as IrVisibility};
@@ -734,14 +734,22 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         remarks.push_str(&lowerings.remarks(name));
     }
 
-    if let Some(limit) = opts.stack_usage_limit {
-        diagnostics.extend(stack.rows().iter().filter_map(|row| over_the_limit(row, limit)));
+    for row in stack.rows() {
+        if let Some(limit) = opts.frame_limit {
+            diagnostics.extend(frame_too_large(row, limit));
+        }
+        if let Some(limit) = opts.stack_usage_limit {
+            diagnostics.extend(over_the_limit(row, limit));
+        }
     }
     // What `#pragma GCC diagnostic` made of the command line's warnings, line by line, which is
     // looked up by where each warning is now that they are all in.
     let scoped = rucc_diag::Scoped::new(&opts.named_warnings, &diagnostic_pragmas, &sess.sources);
     let mut messages = Vec::with_capacity(diagnostics.len());
     let mut errors = 0;
+    // The errors that are not a warning about a function's stack that `-Werror` made one, which
+    // are the ones that leave the `.su` file empty.
+    let mut stopped = 0;
     for diag in &mut diagnostics {
         // `-w` drops the warning here rather than at the several hundred places one is raised,
         // and it drops it before the count, so `-w -Werror` compiles. A warning that was never
@@ -765,6 +773,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         let promoted = named.promoted(diag, opts.warnings_are_errors);
         if diag.severity.is_fatal() || promoted {
             errors += 1;
+            if diag.severity.is_fatal() || !matches!(diag.code, Some(STACK_USAGE | FRAME_SIZE)) {
+                stopped += 1;
+            }
         }
         messages.push(render(diag, &sess.sources, promoted));
     }
@@ -773,8 +784,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         artifact = Artifact::Nothing;
     }
     // Before the session goes, since the map that says where each function is goes with it. A
-    // file that did not compile gets an empty report, which is what gcc leaves for one.
-    let stack_usage = if opts.stack_usage && errors == 0 {
+    // file that did not compile gets an empty report, which is what gcc leaves for one. A file
+    // whose only errors are warnings about the stack that `-Werror` made errors gets the whole
+    // report, since every function in it was compiled and the report is where to read what each
+    // one takes. gcc stops compiling at the first such function, and its report ends there.
+    let stack_usage = if opts.stack_usage && stopped == 0 {
         su_file(&stack, &sess.sources, crate::phase::source_name(name))
     } else {
         String::new()
@@ -3565,16 +3579,39 @@ fn su_file(stack: &StackUsage, sources: &SourceMap, file: &str) -> String {
 /// whatever the limit, because nothing bounds what it takes, and any other function is warned
 /// about when the `.su` file's number for it is over the limit. The warning is at the function's
 /// name, as gcc puts it at the declaration.
-fn over_the_limit(row: &rucc_codegen::usage::Usage, limit: u64) -> Option<Diagnostic> {
-    let message = if row.dynamic {
-        "stack usage might be unbounded".to_owned()
-    } else if u64::from(row.bytes) > limit {
-        format!("stack usage is {} bytes", row.bytes)
-    } else {
-        return None;
+fn over_the_limit(row: &Usage, limit: u64) -> Option<Diagnostic> {
+    let message = match row.kind {
+        Kind::Unbounded => "stack usage might be unbounded".to_owned(),
+        _ if u64::from(row.bytes) <= limit => return None,
+        Kind::Bounded => format!("stack usage might be {} bytes", row.bytes),
+        Kind::Static => format!("stack usage is {} bytes", row.bytes),
     };
-    Some(Diagnostic::warning(message, row.span()).with_code("E0867"))
+    Some(Diagnostic::warning(message, row.span()).with_code(STACK_USAGE))
 }
+
+/// The `-Wframe-larger-than=` warning for one function, if it has one.
+///
+/// gcc's words and gcc's place for them, which is the closing brace of the function, where the
+/// compiler has seen all of it. The number is [`rucc_codegen::frame::Frame::frame`].
+fn frame_too_large(row: &Usage, limit: u64) -> Option<Diagnostic> {
+    if u64::from(row.frame) <= limit {
+        return None;
+    }
+    let message = format!("the frame size of {} bytes is larger than {limit} bytes", row.frame);
+    // The last byte of the body is its closing brace. A function with no body span is reported
+    // where the stack usage warning is.
+    let at = if row.declared.is_dummy() || row.declared.hi == row.declared.lo {
+        row.span()
+    } else {
+        Span::empty_at(row.declared.hi - 1)
+    };
+    Some(Diagnostic::warning(message, at).with_code(FRAME_SIZE))
+}
+
+/// The codes of `-Wstack-usage=` and `-Wframe-larger-than=`, which are the two warnings about a
+/// function as the back end laid it out.
+const STACK_USAGE: &str = "E0867";
+const FRAME_SIZE: &str = "E0873";
 
 /// A result that is nothing but one message, for the failures that happen before there is
 /// anything to compile.
@@ -3662,6 +3699,103 @@ mod tests {
         // Without the limit nothing is said.
         opts.stack_usage_limit = None;
         assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
+
+    /// gcc's bounded class: an `alloca` of a constant size outside a loop, and a variable length
+    /// array of a constant size whose scope gives the stack back every time round, take at most
+    /// their bytes, and the report says "might be". An `alloca` in a loop takes more every time
+    /// round, and has no bound.
+    #[test]
+    fn a_function_whose_stack_grows_by_a_bounded_amount_might_use_that_much() {
+        let source = "void g(char *);\n\
+                      void once(void) { g(__builtin_alloca(100)); }\n\
+                      void each(int n) { for (int i = 0; i < n; i++) { char b[(g(0), 100)]; g(b); } }\n\
+                      void piles(int n) { for (int i = 0; i < n; i++) g(__builtin_alloca(100)); }\n";
+        let mut opts = Options::new("x86_64-unknown-netbsd".parse::<Triple>().unwrap());
+        opts.emit = EmitKind::Asm;
+        opts.stack_usage = true;
+        opts.stack_usage_limit = Some(64);
+        let result = run(&opts, source);
+        let said = result.messages.join("\n");
+        assert_eq!(result.messages.len(), 3, "{said}");
+        let lines: Vec<&str> = result.stack_usage.lines().collect();
+        assert_eq!(lines.len(), 3, "{}", result.stack_usage);
+        for (n, (line, message)) in lines.iter().zip(&result.messages).take(2).enumerate() {
+            assert!(line.ends_with("\tdynamic,bounded"), "{line}");
+            // The 100 bytes rounded up to the stack's alignment, on top of the frame.
+            let bytes = line.split('\t').nth(1).and_then(|n| n.parse::<u32>().ok()).unwrap();
+            assert!(bytes >= 112, "{line}");
+            let want =
+                format!("/main.c:{}:6: warning: stack usage might be {bytes} bytes [E0867]", n + 2);
+            assert_eq!(message, &want, "{said}");
+        }
+        assert!(lines[2].ends_with("\tdynamic"), "{}", lines[2]);
+        assert_eq!(
+            result.messages[2],
+            "/main.c:4:6: warning: stack usage might be unbounded [E0867]"
+        );
+
+        // Under the limit a bounded function is not warned about, and the other one still is.
+        opts.stack_usage_limit = Some(1 << 20);
+        let result = run(&opts, source);
+        assert_eq!(
+            result.messages,
+            ["/main.c:4:6: warning: stack usage might be unbounded [E0867]"]
+        );
+    }
+
+    /// Linux's line, `-Wframe-larger-than=2048`, on a function over it and one under it. gcc puts
+    /// the warning at the closing brace.
+    #[test]
+    fn a_frame_over_the_limit_is_warned_about_at_the_end_of_the_function() {
+        let source = "void g(char *);\n\
+                      void big(void) {\n  char b[4000];\n  g(b);\n}\n\
+                      void small(void) { char b[100]; g(b); }\n";
+        let mut opts = Options::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        opts.emit = EmitKind::Asm;
+        opts.frame_limit = Some(2048);
+        let result = run(&opts, source);
+        let said = result.messages.join("\n");
+        assert_eq!(result.messages.len(), 1, "{said}");
+        assert!(
+            result.messages[0].starts_with("/main.c:5:1: warning: the frame size of "),
+            "{said}"
+        );
+        assert!(result.messages[0].ends_with(" bytes is larger than 2048 bytes [E0873]"), "{said}");
+        let bytes = result.messages[0].split(' ').nth(6).and_then(|n| n.parse::<u32>().ok());
+        assert!(bytes.is_some_and(|bytes| (4000..4100).contains(&bytes)), "{said}");
+
+        opts.warnings_are_errors = true;
+        assert_eq!(run(&opts, source).errors, 1);
+        opts.named_warnings.flag("no-error=frame-larger-than=");
+        assert_eq!(run(&opts, source).errors, 0);
+        opts.frame_limit = None;
+        assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
+
+    /// The `.su` file is written when `-Werror` made a warning about the stack an error, since
+    /// that is the file a person reads to see why, and left empty when anything else failed.
+    #[test]
+    fn the_stack_usage_file_is_written_when_only_the_stack_warnings_failed() {
+        let source = "void g(char *);\n\
+                      void big(void) { char b[4000]; g(b); }\n\
+                      void small(void) { char b[100]; g(b); }\n";
+        let mut opts = Options::new("x86_64-unknown-netbsd".parse::<Triple>().unwrap());
+        opts.emit = EmitKind::Asm;
+        opts.stack_usage = true;
+        opts.stack_usage_limit = Some(3584);
+        opts.frame_limit = Some(3584);
+        opts.warnings_are_errors = true;
+        let result = run(&opts, source);
+        assert_eq!(result.errors, 2, "{:?}", result.messages);
+        assert_eq!(result.stack_usage.lines().count(), 2, "{}", result.stack_usage);
+
+        // A `#warning` is not about the stack, and under `-Werror` it fails the file as gcc's
+        // front end does, before any function has been laid out.
+        let broken = format!("#warning \"here\"\n{source}");
+        let result = run(&opts, &broken);
+        assert_eq!(result.errors, 3, "{:?}", result.messages);
+        assert_eq!(result.stack_usage, "");
     }
 
     /// Options with the compiler's own headers on the search path and nothing else, which is

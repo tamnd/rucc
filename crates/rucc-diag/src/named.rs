@@ -82,6 +82,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0857", "maybe-musttail-local-addr"),
     ("E0864", "openmp"),
     ("E0867", "stack-usage"),
+    ("E0873", "frame-larger-than"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -216,8 +217,8 @@ impl Named {
             Some(("format", _)) => "format",
             _ => name,
         };
-        // gcc spells the stack usage option with its `=`, as `-Werror=stack-usage=`, and the
-        // table has the name without it.
+        // gcc spells the stack usage and frame size options with their `=`, as
+        // `-Werror=stack-usage=`, and the table has the name without it.
         let name = name.strip_suffix('=').unwrap_or(name);
         if let Some(name) = name.strip_prefix("no-error=") {
             self.errors.insert(name.to_owned(), false);
