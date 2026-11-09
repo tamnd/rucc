@@ -2611,6 +2611,28 @@ impl Reader {
                     self.put(&one[..width as usize])?;
                 }
             }
+            // A count of items of one size and a value for each, as `.fill` with the size in the
+            // name, from the Motorola assemblers gas also reads. FreeBSD's locore.S writes
+            // `.dcb.l 16,0`. A bare `.dcb` is two byte items, as `.dc` is.
+            "dcb" | "dcb.b" | "dcb.w" | "dcb.l" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(self.bad(&format!(".{word} wants a count and an optional value")));
+                }
+                let count = self.size(&args[0])?;
+                let width = match word {
+                    "dcb.b" => 1,
+                    "dcb.l" => 4,
+                    _ => 2,
+                };
+                let value = match args.get(1) {
+                    Some(arg) => self.number(arg)?,
+                    None => 0,
+                };
+                let one = value.to_le_bytes();
+                for _ in 0..count {
+                    self.put(&one[..width])?;
+                }
+            }
 
             "align" | "balign" | "p2align" => self.align(word, &args)?,
             "org" => {
@@ -2715,6 +2737,10 @@ impl Reader {
             // refusing would turn a note into a failure.
             "ident" if self.elf() => self.ident(&args)?,
             "ident" | "loc_mark_labels" | "version" | "arch" | "arch_extension" | "cpu" => {}
+            // The page, title and on and off switches of the listing gas can print beside the
+            // object. This writes no listing, so they say nothing to it. Skein's
+            // skein_block_asm.S starts with `.psize 0,128`.
+            "psize" | "title" | "sbttl" | "eject" | "list" | "nolist" | "lflags" => {}
             "end" => self.ended = true,
             "att_syntax" | "intel_syntax" => self.intel = !self.aarch64 && word == "intel_syntax",
             "code32" | "code64" if !self.aarch64 => {
@@ -5888,7 +5914,7 @@ pub(crate) fn constant(text: &str) -> Option<i64> {
 const DATA: &[&str] = &[
     "byte", "short", "word", "hword", "value", "2byte", "long", "int", "4byte", "quad", "8byte",
     "xword", "dword", "octa", "uleb128", "sleb128", "ascii", "asciz", "string", "incbin", "space",
-    "skip", "zero", "fill",
+    "skip", "zero", "fill", "dcb", "dcb.b", "dcb.w", "dcb.l",
 ];
 
 /// One expression, being read.
@@ -8218,6 +8244,19 @@ _tls$tlv$init:
     fn space_and_fill_put_that_many_bytes_there() {
         let out = assembled("\t.data\n\t.byte 1\n\t.zero 3\n\t.space 2, 0x41\n\t.fill 2, 1, 7\n");
         assert_eq!(bytes(&out, ".data"), vec![1, 0, 0, 0, 0x41, 0x41, 7, 7]);
+    }
+
+    #[test]
+    fn dcb_puts_that_many_items_of_its_size_there_and_the_listing_directives_put_nothing() {
+        // The bytes are what GNU as 2.42 writes for the same lines.
+        let out = assembled(
+            "\t.psize 0,128\n\t.title \"x\"\n\t.data\n\t.dcb.l 2,0x01020304\n\t.dcb.b 3,9\n\
+             \t.dcb.w 2,0x0506\n\t.dcb 1\n\t.dcb.l 1\n",
+        );
+        assert_eq!(
+            bytes(&out, ".data"),
+            vec![4, 3, 2, 1, 4, 3, 2, 1, 9, 9, 9, 6, 5, 6, 5, 0, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]
