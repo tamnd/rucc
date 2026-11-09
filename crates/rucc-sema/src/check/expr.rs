@@ -35,8 +35,9 @@ use rucc_lex::{Encoding, FloatConstantType, IntConstantType, Remarks, StringLite
 use rucc_session::Std;
 use rucc_types::{
     ArrayLen, FloatKind, FunctionType, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind,
-    compatible, is_arithmetic, is_array, is_atomic, is_complete, is_complex, is_function,
-    is_integer, is_pointer, is_record, is_scalar, is_void, pointee, pointee_as_written, real_part,
+    compatible, compatible_pointees, is_arithmetic, is_array, is_atomic, is_complete, is_complex,
+    is_function, is_integer, is_pointer, is_record, is_scalar, is_void, pointee,
+    pointee_as_written, real_part,
 };
 
 use crate::check::expr::typeop::Measure;
@@ -2266,7 +2267,10 @@ impl Checker<'_> {
         let (a, b) = (self.types.unqualified_object(a), self.types.unqualified_object(b));
         // `void *` converts both ways without a word, which is what makes `malloc` usable
         // without a cast and what a compiler that warns here gets wrong.
-        if is_void(&self.types, a) || is_void(&self.types, b) || compatible(&self.types, a, b) {
+        if is_void(&self.types, a)
+            || is_void(&self.types, b)
+            || compatible_pointees(&self.types, a, b)
+        {
             return;
         }
         if self.differ_in_signedness(a, b) {
