@@ -68,6 +68,12 @@ struct pair { int x, y; };
 struct pair zeroed = {};
 int array[4] = {0};
 static struct pair hidden = {};
+int scalar = 0;
+static long hidden_scalar = 0;
+void *pointer = 0;
+double real = 0.0;
+double negative = -0.0;
+char text[4] = \"\";
 int tentative;
 static int quiet;
 const struct pair fixed = {};
@@ -77,7 +83,7 @@ int touch(void) {
     static struct pair inner = {};
     static int inner_none;
     return zeroed.x + array[1] + hidden.y + tentative + quiet + fixed.x + each.y + each_none
-        + inner.x + inner_none;
+        + inner.x + inner_none + (int)hidden_scalar;
 }
 ";
 
@@ -85,7 +91,7 @@ int touch(void) {
 fn a_zero_the_program_wrote_goes_in_data_under_the_flag() {
     for target in TARGETS {
         let text = listing("off", target, &["-fno-zero-initialized-in-bss"], SOURCE);
-        for name in ["zeroed", "array", "hidden"] {
+        for name in ["zeroed", "array", "hidden", "scalar", "hidden_scalar", "pointer", "text"] {
             assert_eq!(section(&text, name), ".data", "{target} {name}:\n{text}");
         }
         assert_eq!(section(&text, local(&text, "inner.")), ".data", "{target}:\n{text}");
@@ -109,6 +115,12 @@ fn the_default_and_the_positive_form_keep_zeroes_in_bss() {
             for name in ["zeroed", "hidden", "tentative", "quiet"] {
                 assert_eq!(section(&text, name), ".bss", "{target} {flags:?} {name}:\n{text}");
             }
+            // A number, a null pointer and a string the program wrote as zero are zeros to gcc
+            // too. A negative zero is not, because its sign bit is set.
+            for name in ["array", "scalar", "hidden_scalar", "pointer", "real", "text"] {
+                assert_eq!(section(&text, name), ".bss", "{target} {flags:?} {name}:\n{text}");
+            }
+            assert_eq!(section(&text, "negative"), ".data", "{target} {flags:?}:\n{text}");
             assert_eq!(section(&text, "each"), ".tbss", "{target} {flags:?}:\n{text}");
         }
     }
