@@ -333,6 +333,44 @@ fn sysroot_dir(dir: &str) -> PathBuf {
     PathBuf::from(if dir.is_empty() { "/" } else { dir })
 }
 
+/// A count of bytes as gcc reads the value of an option it calls a byte size, such as
+/// `-Wstack-usage=`: a number with or without one of gcc's units after it.
+///
+/// `integral_argument` in gcc's `opts-common.cc` is the rule. `kB` is a thousand and `KB` is
+/// 1024, both spelled exactly so, and every other unit is read without regard to case. A value
+/// too large for the count is the largest count.
+fn byte_size(value: &str) -> Option<u64> {
+    let digits = value.find(|c: char| !c.is_ascii_digit()).unwrap_or(value.len());
+    let (number, unit) = value.split_at(digits);
+    if number.is_empty() {
+        return None;
+    }
+    let number = number.parse::<u64>().unwrap_or(u64::MAX);
+    let unit = match unit {
+        "" => 1,
+        "kB" => 1000,
+        "KB" => 1024,
+        _ => {
+            const UNITS: [(&str, u64); 11] = [
+                ("kib", 1 << 10),
+                ("mb", 1_000_000),
+                ("mib", 1 << 20),
+                ("gb", 1_000_000_000),
+                ("gib", 1 << 30),
+                ("tb", 1_000_000_000_000),
+                ("tib", 1 << 40),
+                ("pb", 1_000_000_000_000_000),
+                ("pib", 1 << 50),
+                ("eb", 1_000_000_000_000_000_000),
+                ("eib", 1 << 60),
+            ];
+            let lower = unit.to_ascii_lowercase();
+            UNITS.iter().find(|&&(name, _)| name == lower)?.1
+        }
+    };
+    Some(number.saturating_mul(unit))
+}
+
 /// The argument of a flag that may be joined to it or may be the next word.
 ///
 /// `-DFOO` and `-D FOO` are the same thing, and `at` is where the flag's own letters end.
@@ -3355,6 +3393,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      inside this compiler rather than a program it runs"
                 )));
             }
+            // The one warning with a number in it that this compiler gives. The number is a count
+            // of bytes, which gcc also takes with a unit after it.
+            _ if arg.starts_with("-Wstack-usage=") => {
+                let value = &arg["-Wstack-usage=".len()..];
+                let limit = byte_size(value).ok_or_else(|| {
+                    err("argument to `-Wstack-usage=` should be a non-negative integer optionally \
+                         followed by a size unit")
+                })?;
+                opts.stack_usage_limit = Some(limit);
+            }
+            "-Wno-stack-usage" => opts.stack_usage_limit = None,
             // Everything else in the `-W` family. `spec/04-driver-and-cli.md` section 4.1 has
             // this one as a rule about build systems rather than about warnings: autoconf and
             // meson find out whether a warning flag exists by passing it and looking at the exit
@@ -10321,6 +10370,34 @@ mod tests {
     fn a_target_arrives_escaped_from_one_flag_and_untouched_from_the_other() {
         let (opts, _) = compile(&["-MM", "-MT", "a b.o", "-MQ", "a b.o", "a.c"]);
         assert_eq!(opts.deps.targets, vec!["a b.o".to_owned(), "a\\ b.o".to_owned()]);
+    }
+
+    /// NetBSD's kernel line passes `-Wstack-usage=3584`. The value is a byte size, read with
+    /// gcc's units, and `-Wno-stack-usage` takes the limit away.
+    #[test]
+    fn the_stack_usage_limit_is_a_byte_size_and_can_be_taken_away() {
+        let (opts, _) = compile(&["-Wstack-usage=3584", "-c", "a.c"]);
+        assert_eq!(opts.stack_usage_limit, Some(3584));
+        let (opts, _) = compile(&["-Wstack-usage=3584", "-Wno-stack-usage", "-c", "a.c"]);
+        assert_eq!(opts.stack_usage_limit, None);
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.stack_usage_limit, None);
+        for (value, bytes) in [
+            ("0", 0),
+            ("4kB", 4000),
+            ("4KB", 4096),
+            ("4kib", 4096),
+            ("2MiB", 2 << 20),
+            ("3gb", 3_000_000_000),
+            ("99999999999999999999", u64::MAX),
+            ("16EiB", u64::MAX),
+        ] {
+            assert_eq!(byte_size(value), Some(bytes), "{value}");
+        }
+        for value in ["", "kB", "4kb", "4 KB", "-1", "12q", "4B"] {
+            assert_eq!(byte_size(value), None, "{value}");
+        }
+        assert!(refused(&["-Wstack-usage=12q", "-c", "a.c"]).contains("size unit"));
     }
 
     #[test]

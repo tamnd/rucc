@@ -81,6 +81,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0855", "switch-bool"),
     ("E0857", "maybe-musttail-local-addr"),
     ("E0864", "openmp"),
+    ("E0867", "stack-usage"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -215,6 +216,9 @@ impl Named {
             Some(("format", _)) => "format",
             _ => name,
         };
+        // gcc spells the stack usage option with its `=`, as `-Werror=stack-usage=`, and the
+        // table has the name without it.
+        let name = name.strip_suffix('=').unwrap_or(name);
         if let Some(name) = name.strip_prefix("no-error=") {
             self.errors.insert(name.to_owned(), false);
         } else if let Some(name) = name.strip_prefix("error=") {
@@ -442,6 +446,24 @@ mod tests {
 
     fn warning_at(code: &'static str, at: BytePos) -> Diagnostic {
         Diagnostic::warning("'f' is deprecated".to_owned(), Span::empty_at(at)).with_code(code)
+    }
+
+    /// gcc spells the option with its `=` in `-Werror=stack-usage=` and in a pragma, and the
+    /// warning answers to it either way.
+    #[test]
+    fn the_stack_usage_option_is_named_with_or_without_its_equals_sign() {
+        let usage = warning_at("E0867", 5);
+        for spelling in ["stack-usage=", "stack-usage"] {
+            let mut named = Named::default();
+            named.flag(&format!("error={spelling}"));
+            assert!(named.promoted(&usage, false), "{spelling}");
+            let mut named = Named::default();
+            named.flag(&format!("no-error={spelling}"));
+            assert!(!named.promoted(&usage, true), "{spelling}");
+            let mut named = Named::default();
+            named.flag(&format!("no-{spelling}"));
+            assert!(named.silenced(&usage), "{spelling}");
+        }
     }
 
     /// The lines of gcc 13's own test of the pragma, measured with `-Werror`: `ignored` holds
