@@ -976,11 +976,29 @@ impl Checker<'_> {
         let ast = self.ast;
         let steps = &ast[ast[declarator].derived];
         let mut ty = base;
+        // A convention written beside a star whose pointee is not a function, with a function
+        // declarator next, which is where gcc passes it on to. See the pointer step.
+        let mut passed_on = None;
         for (index, step) in steps.iter().enumerate().rev() {
             // Nearest the name, which is the step a parameter's adjustment applies to and the
             // only one allowed to write `static` or a qualifier inside its brackets.
             let nearest = index == 0;
             ty = match *step {
+                // `const XML_Char *XMLCALL XML_GetBase(XML_Parser)`, which is expat's on 32-bit
+                // x86 with `XMLCALL` as `__attribute__((cdecl))`. The pointer is to a character
+                // and the convention is the function's: gcc's `decl_attributes` hands a
+                // function type attribute on a pointer to anything but a function on to the
+                // function declarator next to it, under `ATTR_FLAG_FUNCTION_NEXT`, and only
+                // warns when there is none.
+                Derived::Pointer { quals, attrs }
+                    if !is_function(&self.types, self.types.canonical(ty))
+                        && index > 0
+                        && matches!(steps[index - 1], Derived::Function { .. }) =>
+                {
+                    passed_on = Some(attrs);
+                    let pointer = self.types.pointer(ty);
+                    self.qualify(pointer, quals, subject.span)
+                }
                 Derived::Pointer { quals, attrs } => {
                     // `EFI_STATUS (EFIAPI *F)(...)`, where the convention is written beside the
                     // star and belongs to the function the pointer points at.
@@ -1002,7 +1020,11 @@ impl Checker<'_> {
                     self.array_of(ty, size, subject, place)
                 }
                 Derived::Function { params, variadic, kind } => {
-                    self.function_of(ty, params, variadic, kind, subject)
+                    let function = self.function_of(ty, params, variadic, kind, subject);
+                    match passed_on.take() {
+                        Some(attrs) => self.convened(function, attrs),
+                        None => function,
+                    }
                 }
             };
         }

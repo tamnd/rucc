@@ -531,3 +531,32 @@ fn regparm_goes_with_stdcall_and_not_with_fastcall() {
     );
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// A convention written after the star of a function returning a pointer, as expat writes
+/// `const XML_Char *XMLCALL XML_GetBase(XML_Parser)` with `XMLCALL` as `__attribute__((cdecl))` on
+/// 32-bit x86. gcc hands it on from the pointer to the function and says nothing, and NetBSD's
+/// 32-bit expat heard the warning 96 times. Written on a pointer that is not followed by a
+/// function, it is still gcc's warning.
+#[test]
+fn a_convention_after_the_star_of_a_returned_pointer_is_the_function_s() {
+    let text = asm(
+        "i686-past-the-star",
+        WINDOWS_32,
+        "__attribute__((noinline)) char *__attribute__((stdcall)) s(char *a, int b) { return a + \
+         b; }\n\
+         char *g(char *p) { return s(p, 2); }\n",
+    );
+    let s = body(&text, "_s@8");
+    assert!(has(&s, &["ret", "$8"]), "{s:?}\n{text}");
+    let (ok, said) = diagnose(
+        "i686-past-the-star-cdecl",
+        LINUX_32,
+        "const char *__attribute__((cdecl)) get(int x);\n\
+         const char *__attribute__((cdecl)) get(int x) { return x ? \"a\" : \"b\"; }\n\
+         void *__attribute__((cdecl)) __attribute__((__malloc__)) take(int n);\n",
+    );
+    assert!(ok && said.is_empty(), "{said}");
+    let (ok, said) = diagnose("i686-star-object", LINUX_32, "char *__attribute__((cdecl)) p;\n");
+    assert!(ok, "{said}");
+    assert!(said.contains("'cdecl' attribute only applies to function types"), "{said}");
+}
