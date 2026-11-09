@@ -1696,6 +1696,17 @@ impl Checker<'_> {
         if declared.state == Definition::Tentative && self.is_unsized_array(declared.ty) {
             return;
         }
+        // A tentative definition of a structure or a union may come before the type is complete,
+        // 6.9.2p2, since the definition it stands for is at the end of the unit. gcc takes it, and
+        // FreeBSD's vfs_bio.c declares two objects of a bit set type a few lines before the type.
+        // The end of the unit says whether the type was completed. An array of such a type is
+        // refused here, as gcc does, since its element type has to be complete.
+        let record =
+            matches!(self.types.kind(self.types.canonical(declared.ty)), TypeKind::Record(_));
+        if declared.state == Definition::Tentative && self.scopes.at_file_scope() && record {
+            self.incomplete_tentative.push((declared.ty, declared.name, declared.span));
+            return;
+        }
         // gcc words the `void` case after the type in a block and after the size at file scope,
         // which is not a distinction anyone would design and is what it prints.
         let void = is_void(&self.types, declared.ty) && !self.scopes.at_file_scope();
@@ -1707,6 +1718,21 @@ impl Checker<'_> {
                 .with_code("E0601")
         };
         self.report(diagnostic);
+    }
+
+    /// The tentative definitions [`Self::check_storage_size`] left for the end of the unit, each of
+    /// which is an error if its type is still not complete here. gcc says it the same way.
+    pub(in crate::check) fn check_incomplete_tentative(&mut self) {
+        for (ty, name, span) in std::mem::take(&mut self.incomplete_tentative) {
+            if is_complete(&self.types, ty) {
+                continue;
+            }
+            let spelled = self.text(name).to_owned();
+            self.report(
+                Diagnostic::error(format!("storage size of '{spelled}' isn't known"), span)
+                    .with_code("E0601"),
+            );
+        }
     }
 
     /// What the `aligned` attribute on a declaration asks for, which is a raise and never a lower.
@@ -4102,6 +4128,20 @@ mod tests {
             messages(&c),
             ["storage size of 's' isn't known", "variable or field 'x' declared void"]
         );
+    }
+
+    #[test]
+    fn a_tentative_definition_of_a_structure_waits_for_the_end_of_the_unit() {
+        let mut f = Fixture::new();
+        let incomplete = f.record(Some("S"), false);
+        let hidden = f.object(incomplete, "s");
+
+        let mut c = f.checker();
+        c.check_decl(hidden);
+        assert!(messages(&c).is_empty(), "{:?}", messages(&c));
+
+        c.check_incomplete_tentative();
+        assert_eq!(messages(&c), ["storage size of 's' isn't known"]);
     }
 
     #[test]

@@ -347,6 +347,10 @@ pub struct Checker<'a> {
     /// The types used outside any function since the last variable was declared, which the next
     /// one to be declared takes. See [`Tast::record_use`].
     pub(in crate::check) pending_uses: Vec<Used>,
+    /// The tentative definitions of a structure or a union that was not complete where they were
+    /// written, with the name and where it was declared. The end of the unit reports the ones
+    /// that are still not complete there. See `Checker::check_storage_size`.
+    pub(in crate::check) incomplete_tentative: Vec<(TypeId, Symbol, Span)>,
     /// The typedef name each declaration's first declaration wrote its type with, or a function's
     /// return type, or that it wrote none, which is what `typeof` of the declared name is spelled
     /// with. See `Checker::spelled_with`.
@@ -436,6 +440,7 @@ impl<'a> Checker<'a> {
             calling: None,
             defining: None,
             pending_uses: Vec::new(),
+            incomplete_tentative: Vec::new(),
             first_spellings: rucc_base::hash::Map::default(),
             typeof_spellings: rucc_base::hash::Map::default(),
             annotations: annotate::Annotations::default(),
@@ -506,6 +511,7 @@ impl<'a> Checker<'a> {
             self.types.forget_prototypes();
             self.check_decl(decl);
         }
+        self.check_incomplete_tentative();
         self.check_resolvers();
         self.build_simd_clones();
     }
