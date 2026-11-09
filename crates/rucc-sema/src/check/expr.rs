@@ -1551,7 +1551,7 @@ impl Checker<'_> {
     }
 
     /// An operator whose two operands are arithmetic, or integer where the operator says so.
-    fn arithmetic_binary(
+    pub(in crate::check) fn arithmetic_binary(
         &mut self,
         op: BinaryOp,
         lhs: ExprId,
@@ -1634,7 +1634,13 @@ impl Checker<'_> {
     }
 
     /// `<<` and `>>`, where the two operands are promoted apart rather than together.
-    fn shift(&mut self, op: BinaryOp, lhs: ExprId, rhs: ExprId, span: Span) -> ExprId {
+    pub(in crate::check) fn shift(
+        &mut self,
+        op: BinaryOp,
+        lhs: ExprId,
+        rhs: ExprId,
+        span: Span,
+    ) -> ExprId {
         let lhs = self.conv().promote(lhs);
         let rhs = self.conv().promote(rhs);
         if self.is_poisoned(lhs) || self.is_poisoned(rhs) {
