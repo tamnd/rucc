@@ -203,7 +203,7 @@ pub struct Predef {
     /// rather than the machine, the way gcc's `-lang-asm` does.
     pub assembler: bool,
     /// Whether `-fbuilding-libgcc` was given, which defines the `__LIBGCC_*__` macros that gcc's
-    /// own runtime library reads to learn about the machine. See [`libgcc`].
+    /// own runtime library reads to learn about the machine. The function `libgcc` gives them.
     pub building_libgcc: bool,
 }
 
