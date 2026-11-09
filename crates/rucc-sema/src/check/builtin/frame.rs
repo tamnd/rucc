@@ -49,6 +49,11 @@ const NAMES: [(&str, FrameAsk); 2] =
 /// keeps anything in a return address but the address. gcc answers the same on both.
 const UNCHANGED: [&str; 2] = ["__builtin_extract_return_addr", "__builtin_frob_return_addr"];
 
+/// The one that makes an address a number as wide as a machine word, which libgcc's unwinder
+/// keeps the addresses it reads in. A pointer is already that wide on every target this compiles
+/// for, so the call is the conversion and nothing else.
+const EXTEND_POINTER: &str = "__builtin_extend_pointer";
+
 /// The code the argument of either builtin reports under.
 const CODE: &str = "E0705";
 
@@ -107,6 +112,25 @@ impl Checker<'_> {
             return None;
         }
         args.first().copied()
+    }
+
+    /// The value of a call to [`EXTEND_POINTER`], which is its argument converted to the
+    /// unsigned integer the row says it answers with.
+    pub(in crate::check) fn extend_pointer_value(
+        &mut self,
+        function: Option<Symbol>,
+        args: &[ExprId],
+        ret: TypeId,
+    ) -> Option<ExprId> {
+        let name = function?;
+        if self.text(name) != EXTEND_POINTER {
+            return None;
+        }
+        let &pointer = args.first()?;
+        if self.is_poisoned(pointer) {
+            return Some(pointer);
+        }
+        Some(self.conv().to_type(pointer, ret))
     }
 
     /// How far up the argument says to walk, as a number the walk can be written from.

@@ -196,11 +196,13 @@ impl Checker<'_> {
         }
         // gcc has no wasm target, so on any other row the `__builtin_wasm_*` names are names that
         // gcc 16 has never heard of. It says that the declaration is implicit, and `__has_builtin`
-        // already answers 0 there. `__builtin_sponentry` is on one target too, but clang refuses it
-        // in its own words in `check/builtin/entry.rs`, so the test is for the wasm rows alone.
-        let tuple = &self.cx.target.tuple;
-        let here = rucc_gnu::Target::new(tuple.arch().as_str(), tuple.os().as_str());
-        if feature.targets == [rucc_gnu::Place::Wasm] && !feature.is_on(here) {
+        // already answers 0 there. The rows for x86 alone are the same: gcc has `__builtin_infq`
+        // on x86 and nowhere else, and AArch64 has a `_Float128` that would let its signature
+        // build. `__builtin_sponentry` is on one target too, but clang refuses it in its own words
+        // in `check/builtin/entry.rs`, so the test is for these two sets of places alone.
+        let x86 = [rucc_gnu::Place::X86_64, rucc_gnu::Place::X86];
+        let limited = feature.targets == [rucc_gnu::Place::Wasm] || feature.targets == x86;
+        if limited && !feature.is_on(self.gnu_target()) {
             return None;
         }
         let ty = self.signature_type(feature.signature)?;
@@ -236,6 +238,17 @@ impl Checker<'_> {
         self.scopes.declare_at_file_scope(name, Binding::Decl(decl));
         self.declared_builtins.push(name);
         Some(decl)
+    }
+
+    /// The target as the rows of `features.toml` name places.
+    fn gnu_target(&self) -> rucc_gnu::Target {
+        let tuple = &self.cx.target.tuple;
+        rucc_gnu::Target::new(tuple.arch().as_str(), tuple.os().as_str())
+    }
+
+    /// Whether the row for a builtin, if it has one, is there on this target.
+    fn is_builtin_here(&self, spelled: &str) -> bool {
+        rucc_gnu::lookup(Kind::Builtin, spelled).is_none_or(|row| row.is_on(self.gnu_target()))
     }
 
     /// The row for a library function whose own name is in the implementation's namespace.

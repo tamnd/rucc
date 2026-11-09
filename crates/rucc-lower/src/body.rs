@@ -8713,7 +8713,86 @@ impl<'u> Body<'_, 'u> {
             self.unsupported("classifying a value of this type", span);
             return self.poison(Type::I1, span);
         };
+        if op == Classify::Signaling {
+            return self.signaling(value, format, span);
+        }
         self.compares(op, value, format, span)
+    }
+
+    /// `issignaling`, which is whether a value is a NaN whose quiet bit is clear.
+    ///
+    /// The two kinds of NaN compare the same way with everything, so the question is about the
+    /// bits. With the sign cleared, a signaling NaN is above the infinity, since its exponent is
+    /// all ones and its fraction is not zero, and below the infinity with the quiet bit set, since
+    /// every quiet NaN has that bit. So it is two unsigned comparisons of the magnitude, the way
+    /// `isnormal` is.
+    ///
+    /// The x87 format and the 128-bit one have no integer as wide as their value that a rule
+    /// lowers, so each is stored and read back as words. gcc does the same.
+    fn signaling(&mut self, value: Value, format: Format, span: Span) -> Value {
+        if format.decimal().is_some() {
+            self.unsupported("asking whether a decimal value is a signaling NaN", span);
+            return self.poison(Type::I1, span);
+        }
+        let ir = self.func[value].ty;
+        let quiet = 1u128 << (format.precision() - 2);
+        let infinity = Real::infinity(format, false).to_bits();
+        if !signed_in_memory(ir) {
+            let magnitude = self.magnitude(value, span);
+            let bits = self.func[magnitude].ty;
+            let mut build = self.build(span);
+            // Neither has its sign bit set, so neither is a number the IR's constant cannot hold.
+            let low = build.iconst(bits, i128::try_from(infinity).expect("a magnitude"));
+            let high = build.iconst(bits, i128::try_from(infinity | quiet).expect("a magnitude"));
+            let above = build.icmp(IntPred::Ugt, magnitude, low);
+            let below = build.icmp(IntPred::Ult, magnitude, high);
+            return build.binary(Opcode::And, above, below, Flags::NONE);
+        }
+        let word = Type::int(64);
+        let at = self.scratch(X87_SLOT, X87_SLOT as u32, span);
+        self.build(span).store(value, at, untyped(X87_SLOT as u32), Flags::NONE);
+        if is_x87(ir) {
+            // The significand is the low eight bytes, with the integer bit at its top and the
+            // quiet bit under that, and the sign and the exponent are the two bytes above it. The
+            // integer bit is left out, so a NaN without it is asked about the way gcc asks.
+            let top = self.offset(at, X87_TOP, span);
+            let mut build = self.build(span);
+            let significand = build.load(word, at, untyped(8), Flags::NONE);
+            let exponent = build.load(Type::int(16), top, untyped(2), Flags::NONE);
+            let ones = build.iconst(Type::int(16), 0x7fff);
+            let exponent = build.binary(Opcode::And, exponent, ones, Flags::NONE);
+            let special = build.icmp(IntPred::Eq, exponent, ones);
+            let rest = build.iconst(word, i128::from(i64::MAX));
+            let fraction = build.binary(Opcode::And, significand, rest, Flags::NONE);
+            let none = build.iconst(word, 0);
+            let quiet = build.iconst(word, 1 << 62);
+            let some = build.icmp(IntPred::Ne, fraction, none);
+            let loud = build.icmp(IntPred::Ult, fraction, quiet);
+            let nan = build.binary(Opcode::And, special, some, Flags::NONE);
+            return build.binary(Opcode::And, nan, loud, Flags::NONE);
+        }
+        // The 128-bit format, whose high word holds the sign, the exponent and the quiet bit. A
+        // high word strictly between the two bounds is a signaling NaN whatever the low word is,
+        // and one equal to the infinity's is a signaling NaN when the low word is not zero.
+        let (low_at, high_at) = if self.target().little_endian { (0, 8) } else { (8, 0) };
+        let low_at = self.offset(at, low_at, span);
+        let high_at = self.offset(at, high_at, span);
+        let bound = |bits: u128| i128::try_from(bits >> 64).expect("a high word");
+        let mut build = self.build(span);
+        let low = build.load(word, low_at, untyped(8), Flags::NONE);
+        let high = build.load(word, high_at, untyped(8), Flags::NONE);
+        let rest = build.iconst(word, i128::from(i64::MAX));
+        let high = build.binary(Opcode::And, high, rest, Flags::NONE);
+        let infinite = build.iconst(word, bound(infinity));
+        let loud = build.iconst(word, bound(infinity | quiet));
+        let above = build.icmp(IntPred::Ugt, high, infinite);
+        let below = build.icmp(IntPred::Ult, high, loud);
+        let between = build.binary(Opcode::And, above, below, Flags::NONE);
+        let none = build.iconst(word, 0);
+        let at_infinity = build.icmp(IntPred::Eq, high, infinite);
+        let some = build.icmp(IntPred::Ne, low, none);
+        let edge = build.binary(Opcode::And, at_infinity, some, Flags::NONE);
+        build.binary(Opcode::Or, between, edge, Flags::NONE)
     }
 
     /// The three questions that are a comparison against a constant of the format.

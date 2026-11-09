@@ -133,6 +133,10 @@ const TABLE: &[(&str, Answer)] = &[
     ("__builtin_huge_valf64x", Answer::Infinity(FloatKind::Float64x)),
     ("__builtin_nanf64x", Answer::Nan(FloatKind::Float64x, true)),
     ("__builtin_nansf64x", Answer::Nan(FloatKind::Float64x, false)),
+    // The x86 names for `__float128`, which gcc has only there. libquadmath spells `HUGE_VALQ`
+    // with the second, and the row's `targets` keeps the pair off every other machine.
+    ("__builtin_infq", Answer::Infinity(FloatKind::Float128)),
+    ("__builtin_huge_valq", Answer::Infinity(FloatKind::Float128)),
     ("__builtin_strlen", Answer::Length),
     ("__builtin_strcmp", Answer::Compare),
 ];
@@ -151,7 +155,7 @@ impl Checker<'_> {
         let spelled = self.text(name);
         let &(_, answer) = TABLE.iter().find(|(row, _)| *row == spelled)?;
         if let Answer::Infinity(kind) | Answer::Nan(kind, _) = answer {
-            if !self.has_float_kind(kind) {
+            if !self.has_float_kind(kind) || !self.is_builtin_here(spelled) {
                 return None;
             }
         }
