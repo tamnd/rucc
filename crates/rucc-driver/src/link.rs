@@ -705,9 +705,24 @@ pub fn cross_sysroot(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
     cross_for(target, opts, Triple::host())
 }
 
+/// Why a compile for a BSD found no system headers, or [`None`] for a target that is not a BSD.
+///
+/// The driver asks this only when it found no system directory and no `--sysroot` was given, and
+/// the answer is the one the link gives in the same case.
+#[must_use]
+pub fn bsd_no_headers(target: Triple) -> Option<String> {
+    target.os.is_bsd().then(|| bsd::no_headers(target))
+}
+
 /// The same answer with the host as a parameter, so that both branches are testable on one machine.
 fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Sysroot> {
     if opts.sysroot.is_some() {
+        return None;
+    }
+    // A BSD has no tree in the cache and never gets one, so its headers and its libraries come from
+    // `--sysroot` or from this machine. A cache path here sent the header search to a directory
+    // that cannot exist, and the include that failed said nothing about `--sysroot`.
+    if target.os.is_bsd() {
         return None;
     }
     let tuple = target_tuple(target, opts);
@@ -3943,6 +3958,19 @@ mod tests {
         assert!(cross_for(other, &named, Some(host)).is_none());
         // A host this compiler cannot name is a host whose directories it should not be guessing at.
         assert!(cross_for(other, &cached(), None).is_some());
+    }
+
+    #[test]
+    fn a_bsd_is_never_compiled_against_a_tree_in_the_cache() {
+        let linux = Triple::new(Arch::X86_64, Os::Linux, Env::Gnu);
+        for os in [Os::FreeBsd(14), Os::NetBsd, Os::OpenBsd, Os::DragonFly] {
+            let target = Triple::new(Arch::X86_64, os, Env::None);
+            assert!(cross_for(target, &cached(), Some(linux)).is_none(), "{os:?}");
+            assert!(cross_for(target, &cached(), None).is_none(), "{os:?}");
+            let why = bsd_no_headers(target).expect("a BSD has a reason");
+            assert!(why.contains("--sysroot=<dir>"), "{why}");
+        }
+        assert_eq!(bsd_no_headers(linux), None);
     }
 
     #[test]

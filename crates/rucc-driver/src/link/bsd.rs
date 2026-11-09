@@ -82,6 +82,17 @@ fn system(os: Os) -> &'static str {
     }
 }
 
+/// Why a compile for `target` has no system headers when this machine is not that BSD.
+pub(super) fn no_headers(target: Triple) -> String {
+    let name = system(target.os);
+    format!(
+        "{tuple} compiles against the headers of {name}, and this machine is not {name}. Pass \
+         --sysroot=<dir> naming a copy of its root, the directory with usr/include in it, or pass \
+         -nostdinc for a program that includes none of the library",
+        tuple = target.tuple().to_canonical_string()
+    )
+}
+
 /// The program that starts a dynamic program, whose path is stored in it.
 fn loader(target: Triple) -> &'static str {
     match target.os {
