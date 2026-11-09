@@ -93,7 +93,8 @@ fn protected(text: &str) -> Vec<&str> {
     out
 }
 
-/// The plain flag protects a function with an array in it and nothing else.
+/// The plain flag protects a function with a character array of eight bytes or more and nothing
+/// else.
 #[test]
 fn the_plain_flag_protects_the_functions_with_a_buffer_in_them() {
     let text = asm("plain", &["-fstack-protector"], FOUR);
@@ -111,6 +112,60 @@ fn the_buffer_size_param_moves_what_the_plain_flag_protects() {
     assert!(protected(&text).is_empty(), "{text}");
     let text = asm("ssp-strong", &["-fstack-protector-strong", "--param=ssp-buffer-size=17"], FOUR);
     assert_eq!(protected(&text), ["buf", "small", "taken"], "{text}");
+}
+
+/// The plain flag protects what gcc's `stack_protect_classify_type` calls a large character array:
+/// an array of `char`, `signed char` or `unsigned char`, under any typedef, qualifier or `_Atomic`,
+/// on its own or inside a structure or union at any depth. An array of anything else does not
+/// count, and neither does an array of arrays or an array of structures, because gcc does not look
+/// inside an array's elements. Checked against gcc 16 with the same source and limits.
+#[test]
+fn the_plain_flag_counts_only_character_arrays_as_gcc_does() {
+    let source = "\
+void use(void *);
+typedef unsigned char u8;
+struct named { int n; char name[16]; };
+struct outer { long l; struct named inner; };
+struct small { int n; char tag[4]; };
+int ints(void) { int b[16]; use(b); return 0; }
+int bytes(void) { u8 b[16]; use(b); return 0; }
+int eight(void) { signed char b[8]; use(b); return 0; }
+int seven(void) { char b[7]; use(b); return 0; }
+int quals(void) { const volatile char b[16] = {0}; use((void *)b); return 0; }
+int member(void) { struct named v; use(&v); return 0; }
+int nested(void) { struct outer v; use(&v); return 0; }
+int either(void) { union { long l; char c[8]; } v; use(&v); return 0; }
+int short_member(void) { struct small v; use(&v); return 0; }
+int grid(void) { char g[4][4]; use(g); return 0; }
+int records(void) { struct named r[4]; use(r); return 0; }
+int atom(void) { _Atomic char b[16]; use((void *)b); return 0; }
+struct flex { int n; char tail[]; };
+int flexible(void) { struct flex f; use(&f); return 0; }
+";
+    let text = asm("chars", &["-fstack-protector"], source);
+    let want = ["bytes", "eight", "quals", "member", "nested", "either", "atom", "flexible"];
+    assert_eq!(protected(&text), want, "{text}");
+    // The size is the character array's own, not the structure's.
+    let text = asm("chars-four", &["-fstack-protector", "--param=ssp-buffer-size=4"], source);
+    let want = [
+        "bytes",
+        "eight",
+        "seven",
+        "quals",
+        "member",
+        "nested",
+        "either",
+        "short_member",
+        "atom",
+        "flexible",
+    ];
+    assert_eq!(protected(&text), want, "{text}");
+    // A flexible array member has no size, which gcc reads as big enough for any limit.
+    let text = asm("chars-big", &["-fstack-protector", "--param=ssp-buffer-size=17"], source);
+    assert_eq!(protected(&text), ["flexible"], "{text}");
+    // The strong flag takes any array and anything holding one, so all of them.
+    let text = asm("chars-strong", &["-fstack-protector-strong"], source);
+    assert_eq!(protected(&text).len(), 14, "{text}");
 }
 
 /// The strong one adds the small array and the address that got away.
