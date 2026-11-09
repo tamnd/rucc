@@ -141,6 +141,11 @@ pub static HAND: &[(Opcode, &str)] = &[
     // is built here rather than matched: `%fs` is not a register a rule could name.
     (Opcode::ThreadPointer, "`crate::lower`, as the load through `%fs` at zero that reads it"),
     (Opcode::SpEntry, "`crate::lower`, as an address in the caller's argument area"),
+    // libgcc's unwinder, which asks about this function's frame and leaves it a way no return
+    // does. What each one is depends on the frame, which no rule can see.
+    (Opcode::UnwindInit, "`crate::lower`, as a frame that saves every register a callee keeps"),
+    (Opcode::DwarfCfa, "`crate::lower`, as the same address in the caller's argument area"),
+    (Opcode::EhReturn, "`crate::lower` and `crate::finish`, as the epilogue and the jump"),
     (
         Opcode::ApplyArgs,
         "`crate::lower`, as the block the prologue saved the argument registers in",

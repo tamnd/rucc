@@ -10875,6 +10875,191 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("call"), "{text}");
     }
 
+    /// The assembly of `source` for `target` at `-O2`, and what the compiler said about it.
+    fn unwinder_asm(target: &str, source: &str) -> Compiled {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        opts.target = target.parse::<Triple>().unwrap();
+        run(&opts, source)
+    }
+
+    /// The three builtins that are facts about the target, against the numbers gcc 13.3.0 and its
+    /// cross compilers print for the same program on each machine.
+    ///
+    /// The stack pointer column and the data registers are constants, so each function is one
+    /// move of the number. The size table is a run of byte stores, and the columns checked here
+    /// are the first one, the last one and one gcc leaves alone on each machine.
+    #[test]
+    fn the_unwinder_columns_are_the_ones_gcc_answers_with() {
+        let source = concat!(
+            "unsigned sp(void) { return __builtin_dwarf_sp_column(); }\n",
+            "int r0(void) { return __builtin_eh_return_data_regno(0); }\n",
+            "int r1(void) { return __builtin_eh_return_data_regno(1); }\n",
+            "int r4(void) { return __builtin_eh_return_data_regno(4); }\n",
+            "void sizes(unsigned char *t) { __builtin_init_dwarf_reg_size_table(t); }\n",
+        );
+        let function = |text: &str, name: &str| {
+            let from = text.split_once(&format!("\n{name}:\n")).expect("a definition").1;
+            from.split_once("\t.size").expect("a definition").0.to_owned()
+        };
+        let x86_64 = unwinder_asm("x86_64-unknown-linux-gnu", source);
+        assert_eq!(x86_64.messages, Vec::<String>::new());
+        let text = x86_64.text();
+        assert!(function(text, "sp").contains("movl\t$7, %eax"), "{text}");
+        assert!(function(text, "r0").contains("xorl\t%eax, %eax"), "{text}");
+        assert!(function(text, "r1").contains("movl\t$1, %eax"), "{text}");
+        assert!(function(text, "r4").contains("movl\t$-1, %eax"), "{text}");
+        let sizes = function(text, "sizes");
+        assert_eq!(sizes.matches("\tmovb\t$8, ").count(), 17, "{sizes}");
+        assert!(sizes.contains("movb\t$8, 16(%rdi)"), "{sizes}");
+        assert!(!sizes.contains("17(%rdi)"), "{sizes}");
+
+        let x86 = unwinder_asm("i686-unknown-linux-gnu", source);
+        assert_eq!(x86.messages, Vec::<String>::new());
+        let text = x86.text();
+        assert!(function(text, "sp").contains("movl\t$4, %eax"), "{text}");
+        assert!(function(text, "r1").contains("movl\t$2, %eax"), "{text}");
+        let sizes = function(text, "sizes");
+        assert_eq!(sizes.matches("\tmovb\t$4, ").count(), 10, "{sizes}");
+        assert_eq!(sizes.matches("\tmovb\t$12, ").count(), 6, "{sizes}");
+        assert!(!sizes.contains("10(%"), "column 10 is left alone: {sizes}");
+
+        let aarch64 = unwinder_asm("aarch64-unknown-linux-gnu", source);
+        assert_eq!(aarch64.messages, Vec::<String>::new());
+        let text = aarch64.text();
+        assert!(function(text, "sp").contains("mov w0, #31"), "{text}");
+        assert!(function(text, "r1").contains("mov w0, #1"), "{text}");
+        let sizes = function(text, "sizes");
+        assert!(sizes.contains("[x0, #46]"), "the vector length: {sizes}");
+        assert!(!sizes.contains("[x0, #47]"), "{sizes}");
+        assert!(sizes.contains("[x0, #96]"), "the return address: {sizes}");
+
+        let riscv = unwinder_asm("riscv64-unknown-linux-gnu", source);
+        assert_eq!(riscv.messages, Vec::<String>::new());
+        let text = riscv.text();
+        assert!(function(text, "sp").contains("li a0, 2"), "{text}");
+        assert!(function(text, "r0").contains("li a0, 10"), "{text}");
+        assert!(function(text, "r4").contains("li a0, -1"), "{text}");
+        let sizes = function(text, "sizes");
+        assert!(sizes.contains(", 64(a0)"), "the return address: {sizes}");
+        assert!(!sizes.contains(", 65(a0)"), "{sizes}");
+
+        // A machine whose unwinder is not described is told so, once for each call.
+        let wasm = unwinder_asm("wasm32-unknown-unknown", source);
+        assert_eq!(wasm.errors, 5, "{:?}", wasm.messages);
+        assert!(wasm.messages[0].contains("E0871"), "{:?}", wasm.messages);
+        // And the register number is a constant, which is what gcc says too.
+        let result = unwinder_asm(
+            "x86_64-unknown-linux-gnu",
+            "int f(int n) { return __builtin_eh_return_data_regno(n); }\n",
+        );
+        assert_eq!(result.errors, 1, "{:?}", result.messages);
+        assert!(result.messages[0].contains("E0872"), "{:?}", result.messages);
+    }
+
+    /// A function that writes `__builtin_eh_return` has the frame gcc gives it on x86.
+    ///
+    /// The prologue saves every register a call preserves and then the two the handler is handed
+    /// its values in, each with the row of the unwind table that says where. The path that
+    /// returns does not load those two back, since they carry the return value. The path to the
+    /// handler stores the handler below the stack pointer it asked for, loads everything back
+    /// with the frame pointer last, moves the stack pointer to that slot through rcx and pops the
+    /// handler into rcx to jump to it. This is what gcc 13.3.0 writes for the same function.
+    #[test]
+    fn eh_return_puts_the_registers_back_and_goes_to_the_handler() {
+        let source = concat!(
+            "int leave(long offset, void *to, int go) {\n",
+            "  __builtin_unwind_init();\n",
+            "  if (!go) return 7;\n",
+            "  __builtin_eh_return(offset, to);\n",
+            "}\n",
+        );
+        let x86_64 = unwinder_asm("x86_64-unknown-linux-gnu", source);
+        assert_eq!(x86_64.messages, Vec::<String>::new());
+        let text = x86_64.text();
+        let prologue = concat!(
+            "\tpushq\t%rbx\n\t.cfi_offset 3, -24\n",
+            "\tpushq\t%r12\n\t.cfi_offset 12, -32\n",
+            "\tpushq\t%r13\n\t.cfi_offset 13, -40\n",
+            "\tpushq\t%r14\n\t.cfi_offset 14, -48\n",
+            "\tpushq\t%r15\n\t.cfi_offset 15, -56\n",
+            "\tpushq\t%rax\n\t.cfi_offset 0, -64\n",
+            "\tpushq\t%rdx\n\t.cfi_offset 1, -72\n",
+        );
+        assert!(text.contains(prologue), "{text}");
+        let (returns, handler) = text.split_once("leaq\t64(%rsp,%rdi,1), %rax").expect("{text}");
+        let returns = returns.split_once("jne").expect("{text}").1;
+        assert!(returns.contains("leaq\t-40(%rbp), %rsp"), "{returns}");
+        assert!(!returns.contains("popq\t%rax") && !returns.contains("popq\t%rdx"), "{returns}");
+        assert!(returns.contains("\tret\n"), "{returns}");
+        let leaving = concat!(
+            "\n\tmovq\t%rsi, (%rax)\n",
+            "\tmovq\t%rax, %rcx\n",
+            "\tleaq\t-56(%rbp), %rsp\n",
+            "\tpopq\t%rdx\n\t.cfi_restore 1\n",
+            "\tpopq\t%rax\n\t.cfi_restore 0\n",
+        );
+        assert!(handler.starts_with(leaving), "{handler}");
+        let jump = concat!(
+            "\tpopq\t%rbp\n\t.cfi_restore 6\n\t.cfi_def_cfa 2, 8\n",
+            "\tmovq\t%rcx, %rsp\n\t.cfi_def_cfa 7, 8\n",
+            "\tpopq\t%rcx\n\tjmp\t*%rcx\n",
+        );
+        assert!(handler.contains(jump), "{handler}");
+        assert!(!handler.contains("\tret"), "{handler}");
+
+        // i686 is the same frame with eax and edx, and ecx to jump through.
+        let x86 = unwinder_asm("i686-unknown-linux-gnu", source);
+        assert_eq!(x86.messages, Vec::<String>::new());
+        let text = x86.text();
+        assert!(text.contains("\tpushl\t%eax\n\t.cfi_offset 0, -24\n"), "{text}");
+        assert!(text.contains("\tpushl\t%edx\n\t.cfi_offset 2, -28\n"), "{text}");
+        assert!(text.contains("leal\t24(%esp,%eax,1), %eax"), "{text}");
+        let jump = concat!(
+            "\t.cfi_def_cfa 1, 4\n",
+            "\tmovl\t%ecx, %esp\n\t.cfi_def_cfa 4, 4\n",
+            "\tpopl\t%ecx\n\tjmp\t*%ecx\n",
+        );
+        assert!(text.contains(jump), "{text}");
+
+        // The machines whose frame for this is not written yet say so rather than return.
+        for target in
+            ["aarch64-unknown-linux-gnu", "riscv64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+        {
+            let result = unwinder_asm(target, source);
+            assert_eq!(result.errors, 1, "{target}: {:?}", result.messages);
+            assert!(result.messages[0].contains("E0653"), "{target}: {:?}", result.messages);
+        }
+    }
+
+    /// `__builtin_unwind_init` saves every register a call preserves on the machines whose
+    /// handler path is not written yet too, and `__builtin_dwarf_cfa` is the canonical frame
+    /// address there, which is the stack pointer the caller had before the call.
+    #[test]
+    fn unwind_init_saves_every_preserved_register_on_each_machine() {
+        let source = "void g(void *);\nvoid f(void) { __builtin_unwind_init(); g(__builtin_dwarf_cfa()); }\n";
+        let x86_64 = unwinder_asm("x86_64-unknown-linux-gnu", source);
+        assert_eq!(x86_64.messages, Vec::<String>::new());
+        let text = x86_64.text();
+        for register in ["rbx", "rbp", "r12", "r13", "r14", "r15"] {
+            assert!(text.contains(&format!("pushq\t%{register}\n")), "{register}: {text}");
+        }
+        assert!(!text.contains("pushq\t%rax"), "no eh_return, no data registers: {text}");
+        let aarch64 = unwinder_asm("aarch64-unknown-linux-gnu", source);
+        assert_eq!(aarch64.messages, Vec::<String>::new());
+        let text = aarch64.text();
+        for register in ["x19", "x21", "x23", "x25", "x27", "d8", "d10", "d12", "d14"] {
+            assert!(text.contains(register), "{register}: {text}");
+        }
+        let riscv = unwinder_asm("riscv64-unknown-linux-gnu", source);
+        assert_eq!(riscv.messages, Vec::<String>::new());
+        let text = riscv.text();
+        for register in ["s1", "s11", "fs0", "fs11"] {
+            assert!(text.contains(&format!("{register}, ")), "{register}: {text}");
+        }
+    }
+
     /// A point control does not arrive at ends the path it is on, at every level.
     ///
     /// `__builtin_unreachable()` is the promise written down, and nothing after it is compiled:

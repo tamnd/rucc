@@ -62,6 +62,7 @@ mod short;
 pub mod template;
 mod timing;
 mod typenames;
+mod unwind;
 pub mod wasm;
 pub mod x86;
 pub mod x86_64;
@@ -89,6 +90,7 @@ pub use crate::short::{
 };
 pub use crate::timing::{Timing, TimingInsts, Unit};
 pub use crate::typenames::{Lane, TypeName};
+pub use crate::unwind::{Unwinder, unwinder};
 
 /// A target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

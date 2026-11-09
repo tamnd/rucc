@@ -208,7 +208,17 @@ fn hook(func: &Func, graph: &CallGraph, node: crate::callgraph::Node) -> bool {
 /// A return reads it either as a constant or as the result of a direct call to a function already
 /// known to give one. A body with no return at all gives nothing, which is a function that does not
 /// come back.
+///
+/// Nothing either for a body with a `__builtin_eh_return` in it. That way out ends its block as
+/// though control stopped there, but the caller does carry on: at the handler, in a frame further
+/// up, and through the call it made to this function when that frame is the caller's own.
+/// `_Unwind_RaiseException` gives back `_URC_END_OF_STACK` on its one return, and a fold of its
+/// result to that number throws away every exception that was caught. gcc folds nothing here.
 fn gives(func: &Func, known: &Map<Symbol, (Imm, Type)>) -> Option<(Imm, Type)> {
+    let leaves = |block| func.insts(block).any(|inst| func[inst].opcode == Opcode::EhReturn);
+    if func.blocks().any(leaves) {
+        return None;
+    }
     let mut number: Option<(Imm, Type)> = None;
     for block in func.blocks() {
         let Some(term) = func.terminator(block) else { continue };

@@ -625,6 +625,30 @@ pub enum Opcode {
     /// instruction off the stack pointer, finished like a read of such an argument once the frame
     /// is known, and there is no frame pointer to keep for it.
     SpEntry,
+    /// `__builtin_unwind_init`, which makes the function save every register a call preserves.
+    ///
+    /// It takes nothing, answers nothing and is no instruction at all. What it does is to the
+    /// prologue: the function puts every one of those registers in its frame whether or not its
+    /// body writes it, so that the unwind table says where each of them is. libgcc's unwinder
+    /// starts every walk from such a function, reads its own registers out of that frame, and
+    /// writes the ones of the frame a handler is in back into it before `eh_return` leaves.
+    UnwindInit,
+    /// `__builtin_dwarf_cfa`, the canonical frame address of the function it is in.
+    ///
+    /// It takes nothing and answers a pointer: the stack pointer as it was before the call that
+    /// entered the function, which is the address the unwind table counts every saved register of
+    /// the frame from. That is where the caller's arguments on the stack begin on every target here,
+    /// so it is finished the way [`Opcode::SpEntry`] is once the frame is known.
+    DwarfCfa,
+    /// `__builtin_eh_return`, which leaves the function for an exception handler in another frame.
+    ///
+    /// Two operands, how far above this frame's canonical frame address the handler's stack pointer
+    /// is and the address of the handler, and no result. Every register the prologue saved is put
+    /// back from the frame, where the unwinder has written what the handler's frame holds in them,
+    /// the stack pointer is moved by the first operand and control goes to the second. It never
+    /// comes back, so the lowering puts an `unreachable_hint` behind it, and it is not a terminator
+    /// for the reason a `trap` is not one.
+    EhReturn,
     /// `__builtin_apply_args`, the address of a block holding every argument the function it is in
     /// was called with.
     ///
@@ -899,6 +923,9 @@ impl Opcode {
             Self::ReturnAddress => "return_address",
             Self::ThreadPointer => "thread_pointer",
             Self::SpEntry => "sp_entry",
+            Self::UnwindInit => "unwind_init",
+            Self::DwarfCfa => "dwarf_cfa",
+            Self::EhReturn => "eh_return",
             Self::ApplyArgs => "apply_args",
             Self::Apply => "apply",
             Self::ObjectSize => "object_size",
@@ -1056,7 +1083,9 @@ impl Opcode {
                 // are the same value and either may be moved to where the other is.
                 | Self::ThreadPointer
                 // Where this function was entered, which is one address for the whole of the call.
+                // The canonical frame address is the same kind of fact about the same call.
                 | Self::SpEntry
+                | Self::DwarfCfa
                 // A question about an address that reads nothing: the answer is a fact about where
                 // the address came from, which is the same fact wherever the question is asked.
                 | Self::ObjectSize
@@ -1268,6 +1297,8 @@ impl Opcode {
             | Self::UnreachableHint
             | Self::Trap
             | Self::LongjmpMarker
+            | Self::UnwindInit
+            | Self::EhReturn
             | Self::CapStore
             | Self::CapCopy
             | Self::CapPublish
@@ -1660,6 +1691,9 @@ static ALL: &[Opcode] = &[
     Opcode::ReturnAddress,
     Opcode::ThreadPointer,
     Opcode::SpEntry,
+    Opcode::UnwindInit,
+    Opcode::DwarfCfa,
+    Opcode::EhReturn,
     Opcode::ApplyArgs,
     Opcode::Apply,
     Opcode::ObjectSize,

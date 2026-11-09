@@ -292,6 +292,7 @@ const WORDS: &[&str] = &[
     "const",
     "volatile",
     "size_t",
+    "ptrdiff_t",
     "intmax_t",
     "uintmax_t",
     "uint16_t",

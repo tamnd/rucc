@@ -379,6 +379,14 @@ mod tests {
     /// with the fault, which is a fact about neither the values nor the program around it.
     const STOP: &[&str] = &["ud2"];
 
+    /// The mark `__builtin_eh_return` leaves where its way out to the handler goes, which
+    /// `crate::lower` writes rather than a rule.
+    ///
+    /// It is not an instruction of the machine. `crate::finish` puts the way out in front of it
+    /// once it knows what the prologue saved, and takes the mark out. Until then it reads the
+    /// register the handler's slot is in, so that nothing gives that register to anything else.
+    const MARK: &[&str] = &["eh_return"];
+
     /// The instructions that are a hint rather than a computation.
     ///
     /// The same shape of exemption the barrier gets and for a reason one step further out. A
@@ -1122,6 +1130,9 @@ mod tests {
             if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {
                 continue;
             }
+            if MARK.contains(&opcode) {
+                continue;
+            }
             if I386.contains(&opcode) || NOTRACK.contains(&opcode) || THROUGH.contains(&opcode) {
                 continue;
             }
@@ -1173,6 +1184,18 @@ mod tests {
             let form = x86_64::form(opcode).expect("an instruction this target describes");
             assert!(form.operands().is_empty(), "{opcode} has operands, so a rule could name it");
             assert!(!form.takes_mem(), "{opcode} is given an address and stopping needs none");
+        }
+    }
+
+    /// The same claim about the mark, which is given no address and writes nothing.
+    #[test]
+    fn the_instruction_exempt_from_a_rule_because_it_is_a_mark_writes_nothing() {
+        for &opcode in MARK {
+            let form = x86_64::form(opcode).expect("an instruction this target describes");
+            assert!(!form.takes_mem(), "{opcode} is given an address and a mark needs none");
+            let writes =
+                form.operands().iter().any(|operand| operand.role == rucc_target::Role::Def);
+            assert!(!writes, "{opcode} writes a register and a mark writes nothing");
         }
     }
 

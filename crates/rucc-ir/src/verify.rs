@@ -1101,6 +1101,7 @@ impl<'a> Verifier<'a> {
             | Opcode::StackSave
             | Opcode::ThreadPointer
             | Opcode::SpEntry
+            | Opcode::DwarfCfa
             | Opcode::ApplyArgs => {
                 if results == 1 && !res(0).is_ptr() {
                     self.error(format!(
@@ -1413,8 +1414,25 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
-            Opcode::Fence | Opcode::Unreachable | Opcode::UnreachableHint | Opcode::Trap => {
+            Opcode::Fence
+            | Opcode::Unreachable
+            | Opcode::UnreachableHint
+            | Opcode::Trap
+            | Opcode::UnwindInit => {
                 self.takes(opcode, arity, 0);
+            }
+            // How far to move the stack and where to go, which is an integer as wide as an address
+            // and an address.
+            Opcode::EhReturn => {
+                if self.takes(opcode, arity, 2) {
+                    if !arg(0).is_int() {
+                        self.error(format!(
+                            "eh_return takes an integer offset and this one is {}",
+                            arg(0)
+                        ));
+                    }
+                    self.pointer(opcode, arg(1), 1);
+                }
             }
             Opcode::Prefetch
             | Opcode::StackRestore

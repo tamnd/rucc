@@ -1304,6 +1304,8 @@ static TEXT: &[(&str, &[Written])] = &[
     // The instruction a program stops on. No operands and one spelling, and the name is the whole
     // of it.
     ("ud2", &[spell("ud2", &[])]),
+    // Never written: the epilogue `rucc_codegen::finish` puts in its place is.
+    ("eh_return", &[]),
     // The breakpoint `-mharden-sls=` puts after a return or an indirect jump. No operands and one
     // spelling, like the one above.
     ("int3", &[spell("int3", &[])]),
@@ -2163,6 +2165,7 @@ mod tests {
                         | Form::RetVal2Vec
                         | Form::ArgValVec
                         | Form::BrCond
+                        | Form::EhReturn
                         | Form::Align
                         | Form::Literal
                         | Form::Template

@@ -3205,6 +3205,28 @@ impl<'u> Body<'_, 'u> {
     /// `long long` is split in two on the way in. It reads or writes the area, which is why
     /// memory is clobbered, and a restore can change any register it names, which is the
     /// program's business and not the compiler's, as it is with gcc.
+    /// `__builtin_init_dwarf_reg_size_table`, one byte stored for each column the target's
+    /// unwinder keeps, at that column's offset into the table.
+    ///
+    /// The columns and the bytes are `rucc_target::unwinder`'s, which sema has already made sure
+    /// there is one of. A byte the target does not have a column for is not written, as gcc does
+    /// not write one, so the table keeps whatever the program left there.
+    fn reg_size_table(&mut self, table: Value, span: Span) {
+        let Some(unwinder) = rucc_target::unwinder(self.target().tuple.arch()) else { return };
+        let address = self.address;
+        for &(first, last, size) in unwinder.reg_sizes {
+            for column in first..=last {
+                let mut build = self.build(span);
+                let byte = build.iconst(Type::int(8), i128::from(size));
+                let at = build.iconst(address, i128::from(column));
+                let args = build.func().push_values(&[table, at]);
+                let place =
+                    build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+                build.store(byte, place, untyped(1), Flags::NONE);
+            }
+        }
+    }
+
     fn xstate(&mut self, instruction: &str, address: Value, mask: Value, span: Span) {
         let template = format!("{instruction} (%0)");
         let high = self.shift(Opcode::LShr, mask, 32, span);
@@ -7676,6 +7698,33 @@ impl<'u> Body<'_, 'u> {
             }
             ExprKind::SpEntry => {
                 Some(self.build(span).value(InstData::new(Opcode::SpEntry), Type::PTR))
+            }
+            // The three of libgcc's unwinder that are the back end's. The first is no instruction
+            // and changes what the prologue saves, the second is an address finished once the
+            // frame is known, and the third leaves the function and never comes back, which is
+            // said the way a call that does not come back says it.
+            ExprKind::UnwindInit => {
+                self.build(span).inst(InstData::new(Opcode::UnwindInit), &[]);
+                None
+            }
+            ExprKind::DwarfCfa => {
+                Some(self.build(span).value(InstData::new(Opcode::DwarfCfa), Type::PTR))
+            }
+            ExprKind::EhReturn { offset, handler } => {
+                let offset = self.value(offset);
+                let handler = self.value(handler);
+                let mut build = self.build(span);
+                let args = build.func().push_values(&[offset, handler]);
+                build.inst(InstData { args, ..InstData::new(Opcode::EhReturn) }, &[]);
+                self.build(span).inst(InstData::new(Opcode::UnreachableHint), &[]);
+                None
+            }
+            // The sizes of the registers the unwinder keeps, which are bytes the target decides and
+            // so a store of a constant for each of them, at the offset that is its column.
+            ExprKind::RegSizeTable { table } => {
+                let table = self.value(table);
+                self.reg_size_table(table, span);
+                None
             }
             // The time stamp counter, which is one instruction written here. The object `rdtscp`
             // stores into is found first, since the pointer is an argument and gcc reads its
@@ -12434,11 +12483,14 @@ impl<'a> Scan<'a> {
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
+            | ExprKind::UnwindInit
+            | ExprKind::DwarfCfa
             | ExprKind::TimeStamp { aux: None }
             | ExprKind::Eflags { value: None }
             | ExprKind::CpuModel { .. } => {}
             ExprKind::ApplyArgs => self.forbid(Never::ApplyArgs, self.tast.expr_span(id)),
-            ExprKind::Apply { function, args, .. } => {
+            ExprKind::Apply { function, args, .. }
+            | ExprKind::EhReturn { offset: function, handler: args } => {
                 self.expr(function);
                 self.expr(args);
             }
@@ -12462,6 +12514,7 @@ impl<'a> Scan<'a> {
             }
             ExprKind::Member { base, .. }
             | ExprKind::Prefetch { address: base, .. }
+            | ExprKind::RegSizeTable { table: base }
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::TimeStamp { aux: Some(base) }
             | ExprKind::Eflags { value: Some(base) }
