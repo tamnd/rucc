@@ -138,7 +138,7 @@ pub(super) fn no_headers(target: Triple) -> String {
         "{tuple} compiles against the headers of {name}, and this machine is not {name}. Pass \
          --sysroot=<dir> naming a copy of its root, the directory with usr/include in it, or pass \
          -nostdinc for a program that includes none of the library",
-        tuple = target.tuple().to_canonical_string()
+        tuple = triple(target)
     )
 }
 
@@ -185,7 +185,7 @@ pub(super) fn line(
                 "a link for {tuple} is against the C library of {name}, and this machine is \
                  not {name}. Pass --sysroot=<dir> naming a copy of its root, the directory with \
                  usr/lib/{crt} in it",
-                tuple = target.tuple().to_canonical_string(),
+                tuple = triple(target),
                 crt = crt(target.os)
             ),
         });
@@ -828,11 +828,16 @@ mod tests {
             panic!("a FreeBSD link on Linux with no sysroot was not refused");
         };
         assert!(why.contains("--sysroot=<dir>") && why.contains("usr/lib/crt1.o"), "{why}");
+        // The target as GCC spells it, and not the canonical `x86_64-freebsd.14`.
+        assert!(why.starts_with("a link for x86_64-unknown-freebsd14 is"), "{why}");
+        let headers = no_headers(bsd(Arch::Aarch64, Os::FreeBsd(14)));
+        assert!(headers.starts_with("aarch64-unknown-freebsd14 compiles"), "{headers}");
         let Err(Error::Cross { why }) =
             line(bsd(Arch::X86_64, Os::NetBsd), &opts, &[], "a.out", linux(), Ld::Lld)
         else {
             panic!("a NetBSD link on Linux with no sysroot was not refused");
         };
+        assert!(why.contains("a link for x86_64-unknown-netbsd is"), "{why}");
         assert!(why.contains("usr/lib/crt0.o"), "{why}");
 
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(15)));
