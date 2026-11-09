@@ -690,7 +690,16 @@ pub fn write(
     let mut by_target: Vec<&Alias> = aliases.iter().collect();
     by_target
         .sort_by_key(|alias| written.get(alias.target.as_str()).copied().unwrap_or(usize::MAX));
+    // A versioned name for something this file does not define, which is what `.symver` makes of
+    // a name the file only uses: gas renames the references to the first name, so the symbol
+    // the relocations are against is spelled with the version, and there is none when nothing
+    // refers to it. FreeBSD's `stdlib.h` does this to `__qsort_r_compat`.
+    let mut respelled: Map<&str, &str> = Map::default();
     for alias in by_target {
+        if alias.name.contains('@') && !symbols.contains_key(&alias.target) {
+            respelled.insert(&alias.target, &alias.name);
+            continue;
+        }
         let Some(&id) = symbols.get(&alias.target) else {
             let why =
                 format!("'{}' is aliased to '{}', which is not here", alias.name, alias.target);
@@ -741,8 +750,9 @@ pub fn write(
         if symbols.contains_key(name) || tables.contains_key(name) || places.contains_key(name) {
             continue;
         }
+        let spelled = respelled.get(name.as_str()).copied().unwrap_or(name.as_str());
         let id = obj.add_symbol(Symbol {
-            name: spell(name),
+            name: spell(spelled),
             value: 0,
             size: 0,
             // What kind of thing an undefined name is is not known here and does not have to be:
@@ -3060,6 +3070,53 @@ mod tests {
         )
         .expect_err("nothing to point at");
         assert!(matches!(error, Error::Refused { .. }), "{error:?}");
+    }
+
+    /// A versioned name for something this file does not define is what `.symver` makes of a name
+    /// the file only uses, and gas 2.42 renames the references: the call is against
+    /// `qsort_r@FBSD_1.0`, which is undefined, and there is no `__qsort_r_compat`. With nothing
+    /// referring to it there is no symbol at all, which is also what gas writes.
+    #[test]
+    fn a_versioned_name_for_something_elsewhere_renames_the_references_to_it() {
+        let aliases = [Alias {
+            name: "qsort_r@FBSD_1.0".to_owned(),
+            target: "__qsort_r_compat".to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            ifunc: false,
+        }];
+        let text = calling("__qsort_r_compat");
+        let bytes = write(
+            &text,
+            &Data::default(),
+            &aliases,
+            &target(),
+            Output::default(),
+            &Info::default(),
+        )
+        .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let versioned = file
+            .symbols()
+            .find(|s| s.name() == Ok("qsort_r@FBSD_1.0"))
+            .expect("the versioned name");
+        assert!(versioned.is_undefined() && versioned.is_global(), "a reference to another object");
+        assert!(file.symbols().all(|s| s.name() != Ok("__qsort_r_compat")), "the old name is gone");
+        let section = file.section_by_name(".text").expect("a text section");
+        let (_, reloc) = section.relocations().next().expect("one relocation");
+        assert_eq!(reloc.target(), object::RelocationTarget::Symbol(versioned.index()));
+
+        let bytes = write(
+            &Text::default(),
+            &Data::default(),
+            &aliases,
+            &target(),
+            Output::default(),
+            &Info::default(),
+        )
+        .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.symbols().all(|s| !s.name().unwrap_or_default().contains("qsort_r")));
     }
 
     #[test]

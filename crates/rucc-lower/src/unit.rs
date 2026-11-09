@@ -2031,6 +2031,26 @@ impl Unit<'_> {
                 _ => break,
             }
         }
+        // A `.symver` of a name the file does not define is a reference to the versioned name,
+        // which gas makes by renaming the references to the first name. It is kept as a second
+        // name for one that is not here, which the object writer turns into that renaming and the
+        // listing writes back as the `.symver` it came from. Only ELF has symbol versions.
+        let versioned = set
+            .reference
+            .as_ref()
+            .filter(|_| self.target.object_format == ObjectFormat::Elf && self.not_here(target));
+        if let Some(reference) = versioned {
+            let mut alias = Alias::new(self.names.intern(reference), target);
+            if let Some(SymbolRef::Func(id)) = self.module.lookup(target) {
+                (alias.linkage, alias.visibility) =
+                    (self.module[id].linkage, self.module[id].visibility);
+            } else if let Some(SymbolRef::Global(id)) = self.module.lookup(target) {
+                (alias.linkage, alias.visibility) =
+                    (self.module[id].linkage, self.module[id].visibility);
+            }
+            self.module.add_alias_over(alias);
+            return;
+        }
         if self.no_address(name, target, span) {
             return;
         }
@@ -2139,12 +2159,24 @@ impl Unit<'_> {
                         linkage,
                         visibility,
                         versioned: true,
+                        reference: None,
                     };
                     self.equated(&set, span);
                 }
                 continue;
             };
             self.diagnostics.push(Diagnostic::error(what, span).with_code("E0830"));
+        }
+    }
+
+    /// Whether the file only declares that name, or does not name it at all, so that a
+    /// reference to it is to something in another object.
+    fn not_here(&self, target: Symbol) -> bool {
+        match self.module.lookup(target) {
+            Some(SymbolRef::Func(id)) => self.module[id].is_declaration(),
+            Some(SymbolRef::Global(id)) => self.module[id].init.is_none(),
+            Some(SymbolRef::Alias(_)) => false,
+            None => true,
         }
     }
 

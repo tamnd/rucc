@@ -2271,8 +2271,12 @@ fn parse_i128(text: &str) -> Option<i128> {
 /// and gcc allowed it long before that, so a name the front end read has to come back out of the
 /// printer and go back in. Nothing is decoded here, because a name is a run of bytes either way
 /// and the file it was read from was checked for being UTF-8 when it was read.
+///
+/// `@` is in too, after the one that starts the name. A symbol version is spelled with one,
+/// `qsort_r@FBSD_1.0`, and so is a stdcall name on 32-bit Windows, `f@8`, and a module that has
+/// one goes through this reader when it is linked with `-flto`.
 fn is_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$') || byte >= 0x80
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$' | b'@') || byte >= 0x80
 }
 
 #[cfg(test)]
@@ -2726,6 +2730,18 @@ global @b : bytes 8 = {{ apart.4 @.Llbl.0 from @.Llbl.1, apart.4 @.Llbl.2 + 1 fr
         // longer, so a program that uses one has to survive the printer and the reader. The
         // reader used to stop at the first byte above ASCII and say a name was expected.
         let text = format!("{HEADER}\nglobal @été : i32 = 1, align 4, linkage(external)\n");
+        assert_eq!(round_trip(&text), text);
+    }
+
+    #[test]
+    fn a_name_with_a_version_in_it_comes_back_byte_for_byte() {
+        // What `.symver` makes, and what a stdcall name is on 32-bit Windows. The reader used to
+        // stop at the second `@` and say a `=` was expected.
+        let text = format!(
+            "{HEADER}\nalias @qsort_r@FBSD_1.0 = @__qsort_r_compat, linkage(external)\n\n\
+             func @__qsort_r_compat() -> void, linkage(external);\n\n\
+             func @f@8(i32) -> void, linkage(external);\n"
+        );
         assert_eq!(round_trip(&text), text);
     }
 
