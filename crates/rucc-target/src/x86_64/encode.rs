@@ -2669,6 +2669,13 @@ static ENCODINGS: &[Encoding] = &[
     bytes("xchgw", &RM, Word, &[0x87], pair(1, 0), NO_IMM),
     bytes("xchgl", &RM, Long, &[0x87], pair(1, 0), NO_IMM),
     bytes("xchgq", &RM, Quad, &[0x87], pair(1, 0), NO_IMM),
+    // The same exchange with the object written first. It is one instruction whichever way round
+    // the two are, and gas takes both orders. FreeBSD's `atomic_swap_int` and the `ck_pr` swaps
+    // write `xchgl %1,%0` with the object as `%0`.
+    bytes("xchgb", &MR, Byte, &[0x86], pair(0, 1), NO_IMM),
+    bytes("xchgw", &MR, Word, &[0x87], pair(0, 1), NO_IMM),
+    bytes("xchgl", &MR, Long, &[0x87], pair(0, 1), NO_IMM),
+    bytes("xchgq", &MR, Quad, &[0x87], pair(0, 1), NO_IMM),
     // The exchange between two registers, which is the same opcode with a register where the
     // address was. It is not atomic and needs no lock prefix, since nothing else can see either end
     // of it, which is why this compiler only ever reaches for the form above.

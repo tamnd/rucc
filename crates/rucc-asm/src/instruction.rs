@@ -2553,6 +2553,12 @@ mod tests {
         assert_eq!(bytes("xchg %rax, %rax"), [0x90]);
         assert_eq!(bytes("xchg %ax, %ax"), [0x66, 0x90]);
         assert_eq!(bytes("xchg %eax, %eax"), [0x87, 0xc0]);
+        assert_eq!(bytes("xchgl %eax, (%rdi)"), [0x87, 0x07]);
+        assert_eq!(bytes("xchgl (%rdi), %eax"), [0x87, 0x07], "the object may come first");
+        assert_eq!(bytes("xchgq (%rdi), %rsi"), [0x48, 0x87, 0x37]);
+        assert_eq!(bytes("xchgb (%rdi), %cl"), [0x86, 0x0f]);
+        assert_eq!(bytes("xchgw 8(%rsp), %r9w"), [0x66, 0x44, 0x87, 0x4c, 0x24, 0x08]);
+        assert_eq!(bytes("xchg (%rdi), %eax"), [0x87, 0x07], "and the width from the register");
         assert_eq!(bytes("xchg %r8d, %r8d"), [0x45, 0x87, 0xc0]);
         assert_eq!(bytes("xchg %ecx, %edx"), [0x87, 0xca]);
         assert_eq!(bytes32("xchg %eax, %eax"), [0x90]);
