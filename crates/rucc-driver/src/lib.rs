@@ -322,6 +322,17 @@ fn search_flag(arg: &str) -> Option<&'static str> {
     ["-iquote", "-isystem", "-idirafter"].into_iter().find(|flag| arg.starts_with(flag))
 }
 
+/// The root that `--sysroot=` or `-isysroot` names.
+///
+/// gcc puts the sysroot in front of each configured directory as text, so an empty one leaves
+/// `/usr/include` as it is. FreeBSD's `bsd.compat.mk` writes `--sysroot=${WORLDTMP}` for the 32-bit
+/// programs, and `WORLDTMP` is empty in a build of one directory, as for `usr.bin/ldd32`. As a path
+/// the empty string would turn `/usr/include` into `usr/include` under the current directory, and
+/// every system header would go missing. So an empty root is `/`.
+fn sysroot_dir(dir: &str) -> PathBuf {
+    PathBuf::from(if dir.is_empty() { "/" } else { dir })
+}
+
 /// The argument of a flag that may be joined to it or may be the next word.
 ///
 /// `-DFOO` and `-D FOO` are the same thing, and `at` is where the flag's own letters end.
@@ -1557,7 +1568,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-isysroot" => {
                 let dir = args.get(i).ok_or_else(|| err("-isysroot requires an argument"))?;
                 i += 1;
-                sysroot = Some(PathBuf::from(dir));
+                sysroot = Some(sysroot_dir(dir));
             }
             // A directory joined or separate, as gcc takes them. The kernel's ptrace selftests
             // write `-iquote../../../../include/uapi`.
@@ -2051,7 +2062,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 jobs = Jobs::parse(&arg[2..]).map_err(err)?;
             }
             _ if arg.starts_with("--sysroot=") => {
-                sysroot = Some(PathBuf::from(&arg["--sysroot=".len()..]));
+                sysroot = Some(sysroot_dir(&arg["--sysroot=".len()..]));
             }
             // clang's flag for the GCC a link takes `crtbegin.o` and `libgcc.a` from.
             _ if arg.starts_with("--gcc-toolchain=") => {
@@ -7819,6 +7830,21 @@ mod tests {
         assert!(dirs[1..].iter().all(|d| d.is_system), "{dirs:?}");
         let (bare, _) = compile(&["-nostdinc", "a.c"]);
         assert!(bare.search.dirs().is_empty(), "{:?}", bare.search.dirs());
+    }
+
+    /// FreeBSD's 32-bit `usr.bin/ldd32` is compiled with `--sysroot=` and nothing after it, and gcc
+    /// reads its headers from `/usr/include` all the same.
+    #[test]
+    fn an_empty_sysroot_is_the_root_as_with_gcc() {
+        assert_eq!(printed(&["--sysroot=", "-print-sysroot"]), "/");
+        assert_eq!(printed(&["-isysroot", "", "-print-sysroot"]), "/");
+        let (opts, _) = compile(&["--target=x86_64-unknown-freebsd", "--sysroot=", "-c", "a.c"]);
+        let dirs: Vec<_> = opts.search.dirs().iter().map(|d| d.path.clone()).collect();
+        let theirs = dirs.iter().filter(|dir| dir.as_os_str() != runtime::DIR);
+        assert!(theirs.into_iter().all(|dir| dir.is_absolute()), "{dirs:?}");
+        if std::path::Path::new("/usr/include").is_dir() {
+            assert!(dirs.contains(&PathBuf::from("/usr/include")), "{dirs:?}");
+        }
     }
 
     #[test]
