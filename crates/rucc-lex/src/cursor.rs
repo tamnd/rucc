@@ -215,6 +215,16 @@ impl<'a> Cursor<'a> {
         std::mem::take(&mut self.loose_splices)
     }
 
+    /// How many splices with whitespace after the backslash are noted and not taken yet.
+    pub(crate) fn loose_splice_mark(&self) -> usize {
+        self.loose_splices.len()
+    }
+
+    /// Forgets the splices noted after `mark`, which were in a comment.
+    pub(crate) fn forget_loose_splices_since(&mut self, mark: usize) {
+        self.loose_splices.truncate(mark);
+    }
+
     /// The character a trigraph at `p` stands for.
     fn trigraph_at(&self, p: usize) -> Option<u8> {
         if self.src.get(p + 1) != Some(&b'?') {

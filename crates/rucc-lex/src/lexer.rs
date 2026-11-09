@@ -500,6 +500,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn line_comment(&mut self) {
+        let mark = self.cursor.loose_splice_mark();
         if !self.options.line_comments && !self.reported_line_comment {
             // Reported and then skipped anyway, because a file that writes one writes hundreds
             // and every token after the first slash would otherwise be a second complaint about
@@ -520,6 +521,9 @@ impl<'a> Lexer<'a> {
             }
             self.cursor.bump();
         }
+        // A splice is still a splice in a comment, but gcc says nothing about whitespace after
+        // its backslash there. See [`Self::block_comment`].
+        self.cursor.forget_loose_splices_since(mark);
         // A comment becomes one space. The newline that ends it is left for the trivia loop,
         // so the next token still knows it starts a line.
         self.leading_space = true;
@@ -527,6 +531,7 @@ impl<'a> Lexer<'a> {
 
     fn block_comment(&mut self) {
         let start = self.cursor.pos();
+        let mark = self.cursor.loose_splice_mark();
         self.cursor.bump();
         self.cursor.bump();
         loop {
@@ -546,6 +551,11 @@ impl<'a> Lexer<'a> {
             }
             self.cursor.bump();
         }
+        // gcc warns about whitespace between a backslash and the line ending only outside a
+        // comment, where the splice can change what the code says. In a comment it changes
+        // nothing, and a drawing in a comment often ends a line with `\ `. FreeBSD's iicbb.c
+        // has one, and the kernel is built with `-Werror`.
+        self.cursor.forget_loose_splices_since(mark);
         // A comment is one space, and a newline inside it is part of that space rather than the
         // end of a line. So a `#define` whose body has a comment running across lines goes on
         // after it, and a `#` after the comment is a directive only when the comment itself
