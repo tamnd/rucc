@@ -568,7 +568,7 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
         return vec!["lld-link".to_owned(), "link.exe".to_owned()];
     }
     if target.os.is_bsd() {
-        return bsd::order(target, Triple::host());
+        return bsd::order(target, Triple::host(), &opts.prefixes);
     }
     if cross_sysroot(target, opts).is_some() {
         let mut names = cross_order(target);
@@ -1082,7 +1082,7 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
 /// [`preflight`] for a BSD, which is whether there is a line and whether the tree `--sysroot`
 /// named has a library directory.
 fn bsd_preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
-    bsd::line(target, opts, &[], "a.out", Triple::host())?;
+    bsd::line(target, opts, &[], "a.out", Triple::host(), bsd::Ld::Lld)?;
     if let Some(root) = &opts.sysroot {
         let lib = under(Some(root), "/usr/lib");
         if !lib.is_dir() {
@@ -1377,6 +1377,15 @@ fn spellings(path: &Path, exts: &[String]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Which linker a BSD link runs: GNU ld when the one [`find`] finds says so in its `--version`,
+/// and lld for any other and when none is found.
+fn bsd_ld(target: Triple, opts: &LinkOptions) -> bsd::Ld {
+    match find(target, opts) {
+        Ok(linker) if !is_lld(&linker.name) => bsd::reads(&reported_version(&linker.path)),
+        _ => bsd::Ld::Lld,
+    }
+}
+
 /// Whether a name is one of the spellings lld is installed under.
 fn is_lld(name: &str) -> bool {
     matches!(name, "ld.lld" | "ld64.lld" | "lld" | "lld-link" | "wasm-ld")
@@ -1599,7 +1608,7 @@ fn line_for(
         return cross_line(target, opts, items, output, &msvc_sysroot(target, opts)?);
     }
     if target.os.is_bsd() {
-        return bsd::line(target, opts, items, output, Triple::host());
+        return bsd::line(target, opts, items, output, Triple::host(), bsd_ld(target, opts));
     }
     if let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_tree(target, opts)) {
         return cross_line(target, opts, items, output, &sysroot);
@@ -1769,7 +1778,7 @@ fn relocatable_line(
     let mut args = vec!["-o".to_owned(), output.to_owned()];
     if target.os.is_bsd() {
         // The `-m` of the BSD's own line, which is none on most of them, as GCC passes it.
-        args.extend(bsd::emulation(target));
+        args.extend(bsd::relocatable(target, bsd_ld(target, opts)));
     } else if target.os == Os::Linux {
         args.extend(["-m".to_owned(), emulation(target).to_owned()]);
     } else {
@@ -4266,7 +4275,8 @@ mod tests {
                 panic!("a FreeBSD link with no sysroot was not refused");
             };
             assert!(why.contains("--sysroot=<dir>"), "{why}");
-            assert!(order(freebsd(), &cached()).iter().all(|name| name.contains("lld")));
+            // And not this machine's `ld`, which links for this machine.
+            assert!(!order(freebsd(), &cached()).contains(&"ld".to_owned()));
         }
     }
 
@@ -4293,6 +4303,46 @@ mod tests {
         let netbsd = Triple::new(Arch::Aarch64, Os::NetBsd, Env::None);
         let args = line(netbsd, &opts, &one("a.o"), "b.o").expect("a relocatable line");
         assert_eq!(args, ["-o", "b.o", "-r", "a.o"]);
+    }
+
+    /// A link for another machine with the binutils of the target in a `-B` directory, as
+    /// FreeBSD's build passes them, takes that `ld` and gives it GCC's whole line.
+    #[test]
+    #[cfg(unix)]
+    fn a_bsd_link_by_the_gnu_ld_of_a_b_directory_gets_the_line_of_gcc() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if Triple::host().is_some_and(|host| host.os.is_bsd()) {
+            return;
+        }
+        let root = a_machine("bsd-gnu-ld", &["usr/lib/crt1.o"]);
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).expect("a directory");
+        let ld = bin.join("ld");
+        let says = |text: &str| {
+            fs::write(&ld, format!("#!/bin/sh\necho '{text}'\n")).expect("a script");
+            fs::set_permissions(&ld, fs::Permissions::from_mode(0o755)).expect("executable");
+        };
+        let arm = Triple::new(Arch::Aarch64, Os::FreeBsd(14), Env::None);
+        let opts = LinkOptions {
+            sysroot: Some(root.clone()),
+            prefixes: vec![bin.clone()],
+            no_builtins_lib: true,
+            ..LinkOptions::default()
+        };
+        says("GNU ld (GNU Binutils) 2.44");
+        assert_eq!(find(arm, &opts).expect("the ld of -B").path, ld);
+        let args = line(arm, &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(args.iter().any(|arg| arg == "-maarch64fbsd"), "{args:?}");
+        let netbsd = Triple::new(Arch::X86_64, Os::NetBsd, Env::None);
+        let parts = LinkOptions { relocatable: true, ..opts.clone() };
+        let args = line(netbsd, &parts, &one("a.o"), "b.o").expect("a relocatable line");
+        assert_eq!(args, ["-o", "b.o", "-dc", "-dp", "-r", "a.o"]);
+
+        // The same file saying it is lld gets the line for lld.
+        says("LLD 19.1.7 (compatible with GNU linkers)");
+        let args = line(arm, &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(!args.iter().any(|arg| arg == "-maarch64fbsd"), "{args:?}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
