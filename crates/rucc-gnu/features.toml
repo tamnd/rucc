@@ -4450,6 +4450,271 @@ used_by = ["wasi-sdk"]
 tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::shufflevector_is_checked_in_the_words_of_gcc", "rucc::shufflevector_picks_each_lane", "rucc::with_simd128_a_shufflevector_is_one_instruction"]
 notes = "Each index is an integer constant, and lane `k` of the answer is lane `ik` of the two operands laid end to end. The answer has one lane for each index. The rules and the words are those of gcc 16. With `-msimd128` on wasm32, a shuffle of vectors of 8 or 16 bytes is one `i8x16.shuffle`."
 
+# The x86 SSE builtins that NetBSD's `<crypto/arch/x86/immintrin.h>` calls when the compiler says it is gcc, because the kernel builds with `-nostdinc` and cannot use the compiler's `<immintrin.h>`. No signature, because each is answered with a shuffle, a shift or a mask, and not called. The vector operands are any vectors of 16 bytes, read as the type the builtin takes. A count or an index vector that is not a constant is read twice, so it is a name, a constant or a cast of one.
+[[feature]]
+name = "__builtin_ia32_movhlps"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The high two `float` lanes of the second operand, then the high two of the first, as `_mm_movehl_ps`."
+
+[[feature]]
+name = "__builtin_ia32_movlhps"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The low two `float` lanes of the first operand, then the low two of the second, as `_mm_movelh_ps`."
+
+[[feature]]
+name = "__builtin_ia32_unpcklps"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The low two `float` lanes of the two operands in turn, as `_mm_unpacklo_ps`."
+
+[[feature]]
+name = "__builtin_ia32_unpckhps"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The high two `float` lanes of the two operands in turn, as `_mm_unpackhi_ps`."
+
+[[feature]]
+name = "__builtin_ia32_punpcklbw128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The low eight bytes of the two operands in turn, as `_mm_unpacklo_epi8`."
+
+[[feature]]
+name = "__builtin_ia32_punpckhbw128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The high eight bytes of the two operands in turn, as `_mm_unpackhi_epi8`."
+
+[[feature]]
+name = "__builtin_ia32_punpcklwd128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The low four `short` lanes of the two operands in turn, as `_mm_unpacklo_epi16`."
+
+[[feature]]
+name = "__builtin_ia32_punpckhwd128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The high four `short` lanes of the two operands in turn, as `_mm_unpackhi_epi16`."
+
+[[feature]]
+name = "__builtin_ia32_punpckldq128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The low two `int` lanes of the two operands in turn, as `_mm_unpacklo_epi32`."
+
+[[feature]]
+name = "__builtin_ia32_punpckhdq128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The high two `int` lanes of the two operands in turn, as `_mm_unpackhi_epi32`."
+
+[[feature]]
+name = "__builtin_ia32_punpcklqdq128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The low `long long` lane of each operand, as `_mm_unpacklo_epi64`."
+
+[[feature]]
+name = "__builtin_ia32_punpckhqdq128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The high `long long` lane of each operand, as `_mm_unpackhi_epi64`."
+
+[[feature]]
+name = "__builtin_ia32_psllwi128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `short` lane shifted left by the count, and zero for a count of 16 or more, as `_mm_slli_epi16`."
+
+[[feature]]
+name = "__builtin_ia32_pslldi128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `int` lane shifted left by the count, and zero for a count of 32 or more, as `_mm_slli_epi32`."
+
+[[feature]]
+name = "__builtin_ia32_psllqi128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `long long` lane shifted left by the count, and zero for a count of 64 or more, as `_mm_slli_epi64`."
+
+[[feature]]
+name = "__builtin_ia32_psrlwi128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `short` lane shifted right with zeros in, and zero for a count of 16 or more, as `_mm_srli_epi16`."
+
+[[feature]]
+name = "__builtin_ia32_psrldi128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `int` lane shifted right with zeros in, and zero for a count of 32 or more, as `_mm_srli_epi32`."
+
+[[feature]]
+name = "__builtin_ia32_psrlqi128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `long long` lane shifted right with zeros in, and zero for a count of 64 or more, as `_mm_srli_epi64`."
+
+[[feature]]
+name = "__builtin_ia32_pshufb128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Byte `i` is the byte of the first operand that the low four bits of byte `i` of the second name, or zero when its top bit is set, as `_mm_shuffle_epi8`."
+
+[[feature]]
+name = "__builtin_ia32_pshufd"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Lane `i` of the answer is the `int` lane that bits `2i` and `2i+1` of the immediate name, as `_mm_shuffle_epi32`."
+
+[[feature]]
+name = "__builtin_ia32_shufps"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "Two `float` lanes of the first operand and two of the second, named by the four 2 bit fields of the immediate, as `_mm_shuffle_ps`."
+
+[[feature]]
+name = "__builtin_ia32_pslldqi128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The whole vector shifted left by a count of bits that is a multiple of 8, with zero bytes in, as `_mm_slli_si128`."
+
+[[feature]]
+name = "__builtin_ia32_psrldqi128"
+kind = "builtin"
+gcc_version = "4"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The whole vector shifted right by a count of bits that is a multiple of 8, with zero bytes in, as `_mm_srli_si128`."
+
+[[feature]]
+name = "__builtin_ia32_palignr128"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = ""
+targets = ["x86-64", "x86"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
+notes = "The two operands laid end to end, the second one low, shifted right by a count of bits that is a multiple of 8, and the low 16 bytes kept, as `_mm_alignr_epi8`."
+
 # The `__builtin_elementwise_*` builtins of clang that do an integer operation on each lane. No
 # signature, because the type of the answer is the type of the operands. clang 23 refuses an
 # operand that is not an integer or a vector of integers, and two operands of different types.
