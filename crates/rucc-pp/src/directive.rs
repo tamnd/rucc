@@ -174,6 +174,11 @@ pub struct Preprocessor {
     /// What `#pragma GCC target` lines are in effect, which the extension macros follow. Set up
     /// by [`Preprocessor::predefine`], which is where the unit's extensions arrive.
     targets: TargetLines,
+    /// Where `<built-in>` is in the source map, once [`Preprocessor::predefine`] has read it.
+    ///
+    /// `-dM` asks for it, because GCC does not list `__DATE__` and `__TIME__` there, and they are
+    /// defined in that file. A program that defines one of them itself gets it listed.
+    generated: Option<Span>,
 }
 
 impl Preprocessor {
@@ -195,6 +200,11 @@ impl Preprocessor {
     /// The macros defined so far.
     pub fn macros(&self) -> &MacroTable {
         &self.macros
+    }
+
+    /// The macros defined so far as `-dM` lists them. See [`crate::dump_macros`].
+    pub fn dumped(&self, interner: &Interner) -> String {
+        crate::dump::macros(&self.macros, interner, self.generated)
     }
 
     /// The macro table, for the driver to seed with `-D` and the predefined set.
@@ -270,6 +280,7 @@ impl Preprocessor {
         // The origin is the start of `<built-in>`, which is where a warning about redefining
         // one points, and which is the truthful answer to where they came from.
         let start = cx.sources.file(file).start;
+        self.generated = Some(Span::new(start, cx.sources.file(file).end));
         for (spelling, builtin) in Builtin::ALL {
             let name = cx.interner.intern(spelling);
             self.macros.define_builtin(name, builtin, Span::new(start, start));

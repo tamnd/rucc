@@ -13,26 +13,41 @@
 //! diffed, so the order that makes a diff readable wins.
 
 use rucc_base::Interner;
+use rucc_diag::Span;
 use rucc_lex::{PpTokenKind, TokenFlags};
 
 use crate::include::spelling;
-use crate::macros::{Builtin, MacroDef, MacroTable};
+use crate::macros::{MacroDef, MacroTable};
 use crate::token::Tok;
 
 /// Every macro that is defined, as `#define` lines, sorted by name and newline terminated.
 ///
 /// Empty when nothing is defined, which cannot happen in a real compilation but is what a
 /// caller building a table by hand will see.
+///
+/// The macros whose value the preprocessor works out are not in the list, which is what GCC does.
+/// These are the ones with no body, such as `__FILE__` and `__COUNTER__`, and `__DATE__` and
+/// `__TIME__` as `generated` defines them. `generated` is where `<built-in>` is in the source map.
+/// A program that defines `__DATE__` itself gets it listed.
 #[must_use]
-pub fn macros(table: &MacroTable, interner: &Interner) -> String {
+pub fn macros(table: &MacroTable, interner: &Interner, generated: Option<Span>) -> String {
     let mut all = table.sorted();
     all.sort_by_key(|m| interner.resolve(m.name));
     let mut out = String::new();
     for def in all {
+        if worked_out(def, interner, generated) {
+            continue;
+        }
         define(&mut out, def, interner);
         out.push('\n');
     }
     out
+}
+
+/// Whether the preprocessor works out what this macro stands for, so that `-dM` leaves it out.
+fn worked_out(def: &MacroDef, interner: &Interner, generated: Option<Span>) -> bool {
+    let stamp = matches!(interner.resolve(def.name), "__DATE__" | "__TIME__");
+    def.builtin.is_some() || (stamp && generated.is_some_and(|file| file.contains(def.span.lo)))
 }
 
 /// One `#define` line, without the newline.
@@ -63,21 +78,6 @@ fn define(out: &mut String, def: &MacroDef, interner: &Interner) {
         }
         out.push(')');
     }
-    if let Some(builtin) = def.builtin {
-        // A builtin has no body to print. GCC prints the name again, which reads oddly but is
-        // the honest answer: there is no text, and what the macro stands for depends on where
-        // it is used.
-        out.push(' ');
-        out.push_str(match builtin {
-            Builtin::File => "__FILE__",
-            Builtin::FileName => "__FILE_NAME__",
-            Builtin::BaseFile => "__BASE_FILE__",
-            Builtin::Line => "__LINE__",
-            Builtin::IncludeLevel => "__INCLUDE_LEVEL__",
-            Builtin::Counter => "__COUNTER__",
-        });
-        return;
-    }
     for (at, token) in def.body.iter().enumerate() {
         // A space before the body, then whatever spacing the definition had. The first token
         // of a body never carries a leading space flag, because the space after the name is
@@ -101,10 +101,8 @@ fn text(token: rucc_lex::PpToken, interner: &Interner) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use rucc_diag::Span;
-
     use super::*;
-    use crate::macros::parse_define;
+    use crate::macros::{Builtin, parse_define};
 
     /// Builds a table from `#define` bodies written the way a user writes them.
     fn table(lines: &[&str]) -> (MacroTable, Interner) {
@@ -128,7 +126,7 @@ mod tests {
 
     fn dump(lines: &[&str]) -> String {
         let (table, interner) = table(lines);
-        macros(&table, &interner)
+        macros(&table, &interner, None)
     }
 
     #[test]
@@ -164,16 +162,23 @@ mod tests {
         assert_eq!(dump(&["C (x)"]), "#define C (x)\n");
     }
 
+    /// GCC lists none of the macros it works out the value of, so a diff of the two lists has
+    /// no line for them. `__TIME__` also made two runs of the list differ.
     #[test]
-    fn a_builtin_has_no_body_and_says_its_own_name() {
-        let mut interner = Interner::new();
-        let mut table = MacroTable::new();
+    fn a_macro_the_preprocessor_works_out_is_not_listed() {
+        let (mut table, mut interner) =
+            table(&["__DATE__ \"Jan  1 1970\"", "__TIME__ \"00:00:00\"", "N 1"]);
         for (name, builtin) in Builtin::ALL {
             table.define_builtin(interner.intern(name), builtin, Span::new(0, 1));
         }
-        let text = macros(&table, &interner);
-        assert!(text.contains("#define __FILE__ __FILE__\n"), "{text}");
-        assert!(text.contains("#define __COUNTER__ __COUNTER__\n"), "{text}");
-        assert_eq!(text.lines().count(), Builtin::ALL.len());
+        // The two stamps are in `<built-in>`, and the builtins have no body.
+        let generated = Some(Span::new(0, 100));
+        assert_eq!(macros(&table, &interner, generated), "#define N 1\n");
+        // A program that defines `__DATE__` itself gets it listed, as GCC does.
+        let text = macros(&table, &interner, None);
+        assert!(text.contains("#define __DATE__ \"Jan  1 1970\"\n"), "{text}");
+        assert!(text.contains("#define __TIME__ \"00:00:00\"\n"), "{text}");
+        assert!(!text.contains("__FILE__"), "{text}");
+        assert!(!text.contains("__COUNTER__"), "{text}");
     }
 }
