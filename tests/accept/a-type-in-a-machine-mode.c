@@ -13,6 +13,8 @@ typedef unsigned int __attribute__((mode(DI))) u64;
 typedef unsigned int __attribute__((mode(byte))) ubyte;
 typedef unsigned int __attribute__((mode(word))) uword;
 typedef unsigned int __attribute__((mode(pointer))) uptr;
+typedef int __attribute__((mode(__libgcc_cmp_return__))) cmp_return;
+typedef int __attribute__((mode(__libgcc_shift_count__))) shift_count;
 typedef float __attribute__((mode(SF))) f32;
 typedef float __attribute__((mode(DF))) f64;
 
@@ -21,6 +23,8 @@ typedef int widths[sizeof(u8) == 1 && sizeof(u16) == 2 && sizeof(u32) == 4 && si
                        : -1];
 typedef int named[sizeof(ubyte) == 1 && sizeof(uword) == sizeof(void *)
                           && sizeof(uptr) == sizeof(void *)
+                          && sizeof(cmp_return) == sizeof(void *)
+                          && sizeof(shift_count) == sizeof(void *)
                       ? 1
                       : -1];
 typedef int floats[sizeof(f32) == 4 && sizeof(f64) == 8 ? 1 : -1];

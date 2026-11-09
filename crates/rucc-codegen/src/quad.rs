@@ -94,7 +94,7 @@ const WORD: u32 = 64;
 ///
 /// The instructions are collected before any of them is touched, because a rewrite puts
 /// instructions in front of the one it replaces and the walk would otherwise see its own work.
-pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription) {
+pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, word: u32) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
@@ -103,7 +103,7 @@ pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription
             }
             Opcode::FNeg => negate(func, names, abi, inst),
             Opcode::FCmp => compare(func, names, abi, inst),
-            Opcode::FConst => constant(func, inst),
+            Opcode::FConst => constant(func, inst, word),
             Opcode::FPExt => widen(func, names, abi, inst),
             Opcode::FPTrunc => narrow(func, names, abi, inst),
             Opcode::SIToFP | Opcode::UIToFP => from_integer(func, names, abi, inst),
@@ -279,10 +279,14 @@ pub(crate) fn flipped(func: &mut Func, inst: Inst, value: Value) -> Value {
 /// assumption [`crate::wide`] makes about the halves of an integer this wide. A back end for a big
 /// endian target is where that becomes a question, and it is the same question in both passes.
 ///
+/// The bits are written a machine word at a time, `word` bytes each: two stores on a sixty four
+/// bit machine and four on i386. This pass runs after [`crate::wide`] has split every integer
+/// wider than a register, so a store wider than the word written here stays one no rule lowers.
+///
 /// The slot is a fixed size `alloca`, so it is one slot in the frame however many times control
-/// reaches it, and a constant inside a loop costs two stores a time round rather than anything that
-/// grows.
-fn constant(func: &mut Func, inst: Inst) {
+/// reaches it, and a constant inside a loop costs one store per word each time round rather than
+/// anything that grows.
+fn constant(func: &mut Func, inst: Inst, word: u32) {
     let Some(ty) = produced(func, inst) else { return };
     let Extra::Imm(imm) = func[inst].extra else { return };
     // A `_Decimal128` constant is sixteen bytes with no instruction to hold it either, and its bits
@@ -293,15 +297,23 @@ fn constant(func: &mut Func, inst: Inst) {
     let bits = func[imm].bits();
     let whole = whole();
     let slot = slot(func, inst);
-    let half = u64::from(WORD / 8);
-    let word = Type::int(WORD);
-    let low = ahead_const(func, inst, Imm::int(bits as i128, word), word);
-    write(func, inst, low, slot, MemInfo { size: half, ..whole });
-    let step = ahead_const(func, inst, Imm::int(half as i128, word), word);
-    let args = func.push_values(&[slot, step]);
-    let above = written(func, inst, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
-    let high = ahead_const(func, inst, Imm::int((bits >> WORD) as i128, word), word);
-    write(func, inst, high, above, MemInfo { size: half, align: WORD / 8, ..whole });
+    let bytes = u64::from(word.clamp(4, 8));
+    let width = u32::try_from(bytes * 8).expect("a word is four or eight bytes");
+    let int = Type::int(width);
+    let mask = u128::MAX >> (BITS - width);
+    for at in (0..BYTES).step_by(usize::try_from(bytes).expect("a word fits a usize")) {
+        let part = (bits >> (at * 8)) & mask;
+        let part = ahead_const(func, inst, Imm::int(part as i128, int), int);
+        let into = if at == 0 {
+            slot
+        } else {
+            let step = ahead_const(func, inst, Imm::int(i128::from(at), int), int);
+            let args = func.push_values(&[slot, step]);
+            written(func, inst, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+        };
+        let align = if at == 0 { whole.align } else { width / 8 };
+        write(func, inst, part, into, MemInfo { size: bytes, align, ..whole });
+    }
     let extra = Extra::Mem(func.add_mem(whole));
     becomes(func, inst, Opcode::Load, extra, &[slot]);
 }
@@ -675,7 +687,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.binary(opcode, params[0], params[1], Flags::NONE);
         build.ret(&[answer]);
-        calls(&mut func, &mut names, abi);
+        calls(&mut func, &mut names, abi, 8);
         printed(&func, &mut names)
     }
 
@@ -691,7 +703,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.fcmp(pred, params[0], params[1], Flags::NONE);
         build.ret(&[answer]);
-        calls(&mut func, &mut names, abi);
+        calls(&mut func, &mut names, abi, 8);
         printed(&func, &mut names)
     }
 
@@ -719,7 +731,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.unary(Opcode::FNeg, params[0], quad());
         build.ret(&[answer]);
-        calls(&mut func, &mut names, sysv());
+        calls(&mut func, &mut names, sysv(), 8);
         let text = printed(&func, &mut names);
         assert!(text.contains("@__negtf2"), "{text}");
         assert!(!text.contains("xor"), "no sign flip in a register: {text}");
@@ -814,7 +826,7 @@ mod tests {
         // wrote one of them into the wrong half is a different answer rather than the same zero.
         let value = build.fconst(quad(), (3u128 << 64) | 5);
         build.ret(&[value]);
-        calls(&mut func, &mut names, sysv());
+        calls(&mut func, &mut names, sysv(), 8);
         let text = printed(&func, &mut names);
         assert!(!text.contains("fconst"), "the constant is gone: {text}");
         assert_eq!(text.matches("alloca").count(), 1, "one slot: {text}");
@@ -823,6 +835,26 @@ mod tests {
         assert!(text.contains("iconst.i64 3"), "the high word above it: {text}");
         assert_eq!(text.matches("ptr_add").count(), 1, "the high word is eight bytes up: {text}");
         assert_eq!(text.matches(" = load").count(), 1, "read back as one value: {text}");
+    }
+
+    /// On i386 a word is four bytes and nothing wider than one is left to lower once this pass
+    /// runs, so the constant is four stores of an `i32`. libquadmath's tanq.c on NetBSD/i386
+    /// stopped at an eight byte store before.
+    #[test]
+    fn a_constant_on_a_machine_of_four_byte_words_is_four_stores() {
+        let mut names = Interner::new();
+        let (mut func, entry, _) = shell(&mut names, &[], &[quad()]);
+        let mut build = Builder::new(&mut func, entry);
+        let value = build.fconst(quad(), (4u128 << 96) | (3u128 << 64) | (2u128 << 32) | 1);
+        build.ret(&[value]);
+        calls(&mut func, &mut names, sysv(), 4);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i64"), "nothing wider than the word: {text}");
+        assert_eq!(text.matches("store").count(), 4, "a word at a time: {text}");
+        for word in 1..=4 {
+            assert!(text.contains(&format!("iconst.i32 {word}")), "word {word}: {text}");
+        }
+        assert_eq!(text.matches("ptr_add").count(), 3, "{text}");
     }
 
     #[test]
@@ -840,7 +872,7 @@ mod tests {
             let opcode = if to == Float::F128 { Opcode::FPExt } else { Opcode::FPTrunc };
             let answer = build.unary(opcode, params[0], Type::float(to));
             build.ret(&[answer]);
-            calls(&mut func, &mut names, sysv());
+            calls(&mut func, &mut names, sysv(), 8);
             let text = printed(&func, &mut names);
             assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
         }
@@ -861,7 +893,7 @@ mod tests {
             let mut build = Builder::new(&mut func, entry);
             let answer = build.unary(opcode, params[0], quad());
             build.ret(&[answer]);
-            calls(&mut func, &mut names, sysv());
+            calls(&mut func, &mut names, sysv(), 8);
             let text = printed(&func, &mut names);
             assert!(text.contains(&format!("@{routine}")), "{routine}: {text}");
             if extend.is_empty() {
@@ -881,7 +913,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.unary(Opcode::FPToSI, params[0], Type::int(16));
         build.ret(&[answer]);
-        calls(&mut func, &mut names, sysv());
+        calls(&mut func, &mut names, sysv(), 8);
         let text = printed(&func, &mut names);
         assert!(text.contains("@__fixtfsi"), "{text}");
         assert_eq!(text.matches(" = trunc").count(), 1, "cut down afterwards: {text}");
@@ -894,7 +926,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.unary(Opcode::SIToFP, params[0], quad());
         build.ret(&[answer]);
-        calls(&mut func, &mut names, sysv());
+        calls(&mut func, &mut names, sysv(), 8);
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "no routine is called: {text}");
         assert!(text.contains("sitofp"), "the conversion is still there to be refused: {text}");
@@ -911,7 +943,7 @@ mod tests {
         let answer = build.fcmp(FloatPred::Olt, sum, params[1], Flags::NONE);
         build.ret(&[sum]);
         let _ = answer;
-        calls(&mut func, &mut names, sysv());
+        calls(&mut func, &mut names, sysv(), 8);
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "nothing became a call: {text}");
         assert!(text.contains("fadd"), "the add is still an add: {text}");

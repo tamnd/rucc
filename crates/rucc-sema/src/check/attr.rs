@@ -215,10 +215,13 @@ enum Mode {
 
 /// The mode that name names, and [`None`] where this machine has no mode by that name.
 ///
-/// The three names that are not two letters are the ones that say what they want rather than
-/// naming a width, and they are the ones a portable header writes. `word` is the machine's natural
-/// register and `pointer` is an address, and on every target here those are the same size, which
-/// is why they give the same answer and are still written down separately.
+/// The names that are not two letters are the ones that say what they want rather than naming a
+/// width, and they are the ones a portable header writes. `word` is the machine's natural register
+/// and `pointer` is an address, and on every target here those are the same size, which is why
+/// they give the same answer and are still written down separately. `libgcc_cmp_return` and
+/// `libgcc_shift_count` are the types libgcc2.h and the i386 sfp-machine.h give a comparison
+/// result and a shift count. GCC makes both the word on every target here, because none of them
+/// changes the default of its `libgcc_cmp_return_mode` and `libgcc_shift_count_mode` hooks.
 fn named_mode(name: &str, target: &TargetInfo) -> Option<Mode> {
     // GCC's XFmode is the x87 format, which rounds to fifty three bits on i386 FreeBSD.
     let xf = if target.long_double_rounds_to_53 { Format::X87Round53 } else { Format::X87Extended };
@@ -229,7 +232,9 @@ fn named_mode(name: &str, target: &TargetInfo) -> Option<Mode> {
         "DI" => Mode::Int(64),
         "TI" => Mode::Int(128),
         "byte" => Mode::Int(8),
-        "word" | "unwind_word" | "pointer" => Mode::Int(target.pointer_width),
+        "word" | "unwind_word" | "pointer" | "libgcc_cmp_return" | "libgcc_shift_count" => {
+            Mode::Int(target.pointer_width)
+        }
         "HF" => Mode::Float(Format::Half),
         "SF" => Mode::Float(Format::Single),
         "DF" => Mode::Float(Format::Double),
