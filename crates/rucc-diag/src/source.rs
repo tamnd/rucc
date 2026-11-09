@@ -719,6 +719,11 @@ impl SourceMap {
 /// a system header, because gcc says it there too: a header warns that way on purpose, about the
 /// way it is being used.
 ///
+/// An unknown `#pragma` (E0745) in a system header goes the other way: it is dropped even under
+/// `-Wsystem-headers`, because gcc does not say it there with any of its options. A header that a
+/// system header includes is a system header too, so the `#pragma ident` of an OpenSolaris header
+/// that NetBSD's `sys/param.h` reaches is one gcc never names.
+///
 /// This is asked in three places, which are the compiler, the preprocessor and the session, and it
 /// is one function rather than three copies because the two rules have to agree about which one
 /// wins. `-w` does, and it wins by being asked first, so `-w -Wsystem-headers` is quiet.
@@ -731,7 +736,17 @@ pub fn dropped(
     if diag.severity != Severity::Warning {
         return false;
     }
-    !warnings || (!system_headers && diag.code != Some("W0331") && sources.is_system(diag.span.lo))
+    if !warnings {
+        return true;
+    }
+    if !sources.is_system(diag.span.lo) {
+        return false;
+    }
+    match diag.code {
+        Some("W0331") => false,
+        Some("E0745") => true,
+        _ => !system_headers,
+    }
 }
 
 #[cfg(test)]
@@ -775,6 +790,13 @@ mod tests {
         let asked = Diagnostic::warning("asked for", here(ids[1])).with_code("W0331");
         assert!(!dropped(&asked, &map, true, false));
         assert!(dropped(&asked, &map, false, false));
+
+        // An unknown pragma is not said in a system header, even under `-Wsystem-headers`.
+        let pragma =
+            |id| Diagnostic::warning("ignoring `#pragma ident`", here(id)).with_code("E0745");
+        assert!(dropped(&pragma(ids[1]), &map, true, false));
+        assert!(dropped(&pragma(ids[1]), &map, true, true));
+        assert!(!dropped(&pragma(ids[0]), &map, true, true));
     }
 
     #[test]
