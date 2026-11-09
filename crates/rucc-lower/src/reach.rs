@@ -483,6 +483,7 @@ impl Reach<'_> {
             | ExprKind::Jump { buffer: base, .. }
             | ExprKind::TimeStamp { aux: Some(base) }
             | ExprKind::Eflags { value: Some(base) }
+            | ExprKind::Speculation { value: base }
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),

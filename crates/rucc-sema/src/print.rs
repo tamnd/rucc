@@ -667,6 +667,7 @@ impl<'a> Printer<'a> {
             ExprKind::TimeStamp { aux: None } => "time-stamp".to_owned(),
             ExprKind::Eflags { value: Some(_) } => "eflags write".to_owned(),
             ExprKind::Eflags { value: None } => "eflags read".to_owned(),
+            ExprKind::Speculation { .. } => "speculation-safe".to_owned(),
             ExprKind::XState { op, .. } => op.instruction().to_owned(),
             ExprKind::CpuModel { object, word, test } => {
                 let asked = match test {
@@ -724,6 +725,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Jump { buffer: base, .. }
             | ExprKind::TimeStamp { aux: Some(base) }
             | ExprKind::Eflags { value: Some(base) }
+            | ExprKind::Speculation { value: base }
             | ExprKind::Cast(base)
             | ExprKind::VaArg { list: base }
             | ExprKind::VaStart { list: base }
