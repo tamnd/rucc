@@ -1331,19 +1331,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             "-MP" => opts.deps.phony = true,
             "-MG" => opts.deps.generated = true,
-            // These three take a word and only in the separated form, which is how GCC spells
-            // them and how every build system writes them.
-            "-MF" | "-MT" | "-MQ" => {
-                let value =
-                    args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
-                i += 1;
-                match arg {
-                    "-MF" => opts.deps.file = Some(value.clone()),
+            // These three take a word, as the next word or joined to the flag as GCC also
+            // accepts. FreeBSD's `bsd.dep.mk` writes the joined form, `-MF.depend.foo.o -MTfoo.o`,
+            // on every kernel and world compile.
+            _ if ["-MF", "-MT", "-MQ"].iter().any(|flag| arg.starts_with(flag)) => {
+                let value = joined_or_next(arg, 3, args, &mut i)?;
+                match &arg[..3] {
+                    "-MF" => opts.deps.file = Some(value),
                     // The whole of the difference between the two. `-MT` is for a build that has
                     // already escaped what it is passing, and `-MQ` is for one that has a name
                     // and wants it to arrive as that name.
-                    "-MT" => opts.deps.targets.push(value.clone()),
-                    _ => opts.deps.targets.push(deps::escaped(value)),
+                    "-MT" => opts.deps.targets.push(value),
+                    _ => opts.deps.targets.push(deps::escaped(&value)),
                 }
             }
             // The questions a build system asks before it compiles anything. Answered after the
@@ -2684,6 +2683,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // gcc's tail duplication pass, which `builtins.exp` in the torture suite turns off for
             // every program in that directory.
             "-ftracer" | "-fno-tracer" => {}
+            // gcc's register renaming pass, which FreeBSD's `kern.mk` turns on for every amd64
+            // kernel built with gcc.
+            "-frename-registers" | "-fno-rename-registers" => {}
             // The scheduler's own knobs, which serpent asks for with `-fsched-pressure`. Every
             // name under `-fsched-` and `-fsched2-` tunes that pass and nothing else, so the family
             // is taken whole like the two above.
@@ -10271,6 +10273,23 @@ mod tests {
         for flag in ["-MF", "-MT", "-MQ"] {
             let e = parse_args(&args(&[flag])).unwrap_err();
             assert!(e.message.contains("requires an argument"), "{}", e.message);
+        }
+    }
+
+    /// FreeBSD's `bsd.dep.mk` spelling, with the word joined to the flag.
+    #[test]
+    fn a_dependency_word_joined_to_its_flag_is_read_as_freebsd_writes_it() {
+        let (opts, _) = compile(&["-MD", "-MF.depend.k.o", "-MTk.o", "-MQa b.o", "-c", "a.c"]);
+        assert_eq!(opts.deps.file.as_deref(), Some(".depend.k.o"));
+        assert_eq!(opts.deps.targets, vec!["k.o".to_owned(), "a\\ b.o".to_owned()]);
+    }
+
+    /// `kern.mk` adds it to every amd64 kernel that gcc builds.
+    #[test]
+    fn the_register_renaming_pass_of_gcc_is_taken_and_left() {
+        for flag in ["-frename-registers", "-fno-rename-registers"] {
+            let (opts, _) = compile(&[flag, "-O2", "-c", "a.c"]);
+            assert_eq!(opts.opt_level, OptLevel::O2, "{flag}");
         }
     }
 
