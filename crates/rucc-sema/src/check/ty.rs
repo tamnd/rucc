@@ -1323,6 +1323,22 @@ impl Checker<'_> {
             };
             let declarator = ast[param.declarator];
             let span = if declarator.name.is_some() { declarator.name_span } else { param.span };
+            // One unnamed parameter of type `void` is a list with no parameters, 6.7.6.3p10, also
+            // when a typedef name says `void`. The parser takes only the keyword, since it does
+            // not know what a typedef name stands for. FreeBSD's hptmv driver writes
+            // `MV_VOID f(MV_VOID)` with `typedef void MV_VOID`.
+            if list.len() == 1
+                && declarator.name.is_none()
+                && ast[declarator.derived].is_empty()
+                && self.types.kind(self.types.canonical(ty)) == TypeKind::Void
+                && self.types.quals(self.types.canonical(ty)) == Qualifiers::NONE
+            {
+                self.scopes.pop();
+                if let Some(first) = params.iter().next() {
+                    self.built.params.insert(first, Vec::new());
+                }
+                return Vec::new();
+            }
             self.check_void_parameter(ty, declarator.name, index, span);
             // Every check of a parameter's attributes reads the two lists and nothing else, and
             // nearly every parameter a header declares has nothing in either, so a parameter with
@@ -2578,6 +2594,29 @@ mod tests {
             messages(&checker),
             ["parameter 1 ('v') has void type", "'void' must be the only parameter"]
         );
+    }
+
+    #[test]
+    fn one_unnamed_void_parameter_in_a_prototype_is_a_list_with_no_parameters() {
+        // The parser makes a prototype of `(T)` when `T` is a typedef name for `void`, since it
+        // does not know what the name stands for. The list is still `(void)`.
+        let mut fixture = Fixture::new();
+        let int = fixture.int_specs();
+        let void = fixture.keywords(&[BuiltinSet::VOID]);
+        let unnamed = fixture.declarator(None, &[]);
+        let param = ast::Param {
+            specs: Some(void),
+            declarator: unnamed,
+            attrs: rucc_ast::AttrList::EMPTY,
+            span: Span::DUMMY,
+        };
+        let params = fixture.ast.add_param_list(&[param]);
+        let call = Derived::Function { params, variadic: false, kind: ParamKind::Prototype };
+        let f = fixture.declarator(Some("f"), &[call]);
+
+        let mut checker = fixture.checker();
+        assert_eq!(built(&mut checker, int, f), "int(void)");
+        assert!(messages(&checker).is_empty(), "{:?}", messages(&checker));
     }
 
     #[test]
