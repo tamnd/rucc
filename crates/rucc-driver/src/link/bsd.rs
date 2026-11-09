@@ -12,15 +12,19 @@
 //! NetBSD's RISC-V line and its `libgcc` words are the ones in NetBSD's own copy of GCC, because
 //! upstream GCC has no RISC-V NetBSD target and NetBSD's base compiler is that copy.
 //!
-//! Three words of those lines are left off, each because lld, which is the linker a cross link
-//! here runs, refuses it or reads it differently:
+//! GCC on each BSD runs GNU ld, and the line is the one GNU ld gets. Three words of it are left
+//! off when the linker is lld, each because lld refuses it or reads it differently:
 //!
 //! - `-maarch64fbsd` on an AArch64 FreeBSD line, which lld does not know as an emulation. Clang's
 //!   FreeBSD driver passes no `-m` there either.
-//! - `-dc -dp` on a NetBSD line, which lld rejects as unknown options. They ask for common symbols
-//!   to be allocated in a relocatable link, and nothing here is one.
+//! - `-dc -dp` on a NetBSD line, which lld rejects as unknown options. They ask GNU ld to allocate
+//!   common symbols in a relocatable link too.
 //! - `-dynamic-linker` on a static OpenBSD line. lld writes a `PT_INTERP` whenever it is given a
-//!   loader, so the program would ask for `ld.so` and not be static.
+//!   loader, so the program would ask for `ld.so` and not be static. GNU ld writes one only when
+//!   the link has a shared object in it.
+//!
+//! The linker is GNU ld when `<linker> --version` starts with `GNU ld`, as `bsd.linker.mk` reads
+//! it on FreeBSD. Any other linker, and a link with no linker found, gets the line for lld.
 
 use std::path::{Path, PathBuf};
 
@@ -28,15 +32,38 @@ use rucc_target::{Arch, Os, Triple};
 
 use super::{Error, Item, LinkOptions, builtins_archive, find_file, push_items, under};
 
-/// The linkers to look for, in order. The machine's own `ld` first when this is the machine the
-/// program is for, as GCC on it would use, and lld otherwise, which links for every BSD from one
-/// binary.
-pub(super) fn order(target: Triple, host: Option<Triple>) -> Vec<String> {
-    let mut names = vec!["ld.lld".to_owned(), "lld".to_owned()];
+/// Which linker reads the line, for the three words that only GNU ld takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ld {
+    /// GNU ld, which GCC on each BSD runs and which takes the whole of GCC's line.
+    Gnu,
+    /// lld, or any linker that is not GNU ld, which gets the line without those words.
+    Lld,
+}
+
+/// The linkers to look for, in order.
+///
+/// The machine's own `ld` first when this is the machine the program is for, as GCC on it would
+/// use. For another machine, the `ld` in each `-B` directory first, because that is where GCC
+/// looks for the linker and where FreeBSD's build puts the binutils of the target: it passes
+/// `-B${WORLDTMP}/usr/bin`, or `-B` and its `CROSS_BINUTILS_PREFIX`. The `ld` on `PATH` is left
+/// alone then, because it links for this machine. lld comes last, which links for every BSD from
+/// one binary.
+pub(super) fn order(target: Triple, host: Option<Triple>, prefixes: &[PathBuf]) -> Vec<String> {
+    let mut names = Vec::new();
     if native(target, host) {
-        names.insert(0, "ld".to_owned());
+        names.push("ld".to_owned());
+    } else {
+        // A path, so that the search does not go on to `PATH` with it.
+        names.extend(prefixes.iter().map(|dir| dir.join("ld").display().to_string()));
     }
+    names.extend(["ld.lld".to_owned(), "lld".to_owned()]);
     names
+}
+
+/// Which linker `--version` says it is.
+pub(super) fn reads(version: &str) -> Ld {
+    if version.starts_with("GNU ld") { Ld::Gnu } else { Ld::Lld }
 }
 
 /// Whether the program is for this machine: the same architecture and the same BSD, whatever the
@@ -70,6 +97,20 @@ pub(super) fn emulation(target: Triple) -> Vec<String> {
         (Os::FreeBsd(_) | Os::NetBsd, Arch::Riscv64) => vec!["-melf64lriscv".to_owned()],
         _ => Vec::new(),
     }
+}
+
+/// The words of a relocatable link before `-r`: the `-m` of the line, and the words of
+/// `LINK_SPEC` that GNU ld reads in a relocatable link, `-maarch64fbsd` and NetBSD's `-dc -dp`.
+pub(super) fn relocatable(target: Triple, ld: Ld) -> Vec<String> {
+    let mut args = emulation(target);
+    if ld == Ld::Gnu {
+        match (target.os, target.arch) {
+            (Os::FreeBsd(_), Arch::Aarch64) => args.push("-maarch64fbsd".to_owned()),
+            (Os::NetBsd, _) => args.extend(["-dc".to_owned(), "-dp".to_owned()]),
+            _ => {}
+        }
+    }
+    args
 }
 
 /// The name of the system, for the messages.
@@ -126,6 +167,7 @@ pub(super) fn line(
     items: &[Item],
     output: &str,
     host: Option<Triple>,
+    ld: Ld,
 ) -> Result<Vec<String>, Error> {
     let name = system(target.os);
     let root = opts.sysroot.as_deref();
@@ -162,7 +204,7 @@ pub(super) fn line(
     if !opts.is_static || target.os == Os::DragonFly {
         args.push("--eh-frame-hdr".to_owned());
     }
-    args.extend(link_spec(target, opts, items));
+    args.extend(link_spec(target, opts, items, ld));
     if pie {
         args.push("-pie".to_owned());
     }
@@ -187,8 +229,9 @@ pub(super) fn line(
     Ok(args)
 }
 
-/// `LINK_SPEC` of the target, without the words lld refuses.
-fn link_spec(target: Triple, opts: &LinkOptions, items: &[Item]) -> Vec<String> {
+/// `LINK_SPEC` of the target, without the words lld refuses when the linker is lld.
+fn link_spec(target: Triple, opts: &LinkOptions, items: &[Item], ld: Ld) -> Vec<String> {
+    let gnu = ld == Ld::Gnu;
     let mut args = emulation(target);
     let mut push = |word: &str| args.push(word.to_owned());
     let dynamic = !opts.is_static;
@@ -213,6 +256,9 @@ fn link_spec(target: Triple, opts: &LinkOptions, items: &[Item]) -> Vec<String> 
                 }
             }
             push("-X");
+            if gnu {
+                push("-maarch64fbsd");
+            }
         }
         (Os::FreeBsd(_), Arch::Riscv64) => {
             push("-X");
@@ -253,6 +299,10 @@ fn link_spec(target: Triple, opts: &LinkOptions, items: &[Item]) -> Vec<String> 
             if opts.shared {
                 push("-shared");
             } else {
+                if gnu {
+                    push("-dc");
+                    push("-dp");
+                }
                 if entry {
                     push("-e");
                     // `NETBSD_ENTRY_POINT`, which the i386 and AArch64 headers spell with two
@@ -284,12 +334,11 @@ fn link_spec(target: Triple, opts: &LinkOptions, items: &[Item]) -> Vec<String> 
             if opts.shared {
                 push("-shared");
             }
-            if dynamic {
-                push("-Bdynamic");
+            // `%{static:-Bstatic} %{!static:-Bdynamic}`, and the loader on every line.
+            push(if dynamic { "-Bdynamic" } else { "-Bstatic" });
+            if dynamic || gnu {
                 push("-dynamic-linker");
                 push(loader);
-            } else {
-                push("-Bstatic");
             }
         }
     }
@@ -498,7 +547,14 @@ mod tests {
     /// The line with the root written as `=`, so that it can be compared as text.
     fn text(target: Triple, opts: &LinkOptions, items: &[Item]) -> String {
         let root = opts.sysroot.as_ref().expect("a sysroot").display().to_string();
-        let args = line(target, opts, items, "a.out", linux()).expect("a line");
+        let args = line(target, opts, items, "a.out", linux(), Ld::Lld).expect("a line");
+        args.join(" ").replace(&root, "=").replace('\\', "/")
+    }
+
+    /// The line GNU ld gets, written the same way.
+    fn gnu(target: Triple, opts: &LinkOptions) -> String {
+        let root = opts.sysroot.as_ref().expect("a sysroot").display().to_string();
+        let args = line(target, opts, &[], "a.out", linux(), Ld::Gnu).expect("a line");
         args.join(" ").replace(&root, "=").replace('\\', "/")
     }
 
@@ -739,7 +795,7 @@ mod tests {
         let archive = prefix.join(rucc_sysroot::link::BUILTINS);
         fs::write(&archive, b"").expect("a file");
         let opts = LinkOptions { no_builtins_lib: false, prefixes: vec![prefix], ..against(&root) };
-        let args = line(freebsd(), &opts, &[], "a.out", linux()).expect("a line");
+        let args = line(freebsd(), &opts, &[], "a.out", linux(), Ld::Lld).expect("a line");
         let at = |word: &str| args.iter().position(|arg| arg == word).expect(word);
         let ours = at(&archive.display().to_string());
         assert_eq!(args[ours - 1], "-lc");
@@ -749,19 +805,20 @@ mod tests {
     #[test]
     fn a_link_for_another_machine_needs_a_sysroot_and_its_own_machine_does_not() {
         let opts = LinkOptions { no_builtins_lib: true, ..LinkOptions::default() };
-        let Err(Error::Cross { why }) = line(freebsd(), &opts, &[], "a.out", linux()) else {
+        let Err(Error::Cross { why }) = line(freebsd(), &opts, &[], "a.out", linux(), Ld::Lld)
+        else {
             panic!("a FreeBSD link on Linux with no sysroot was not refused");
         };
         assert!(why.contains("--sysroot=<dir>") && why.contains("usr/lib/crt1.o"), "{why}");
         let Err(Error::Cross { why }) =
-            line(bsd(Arch::X86_64, Os::NetBsd), &opts, &[], "a.out", linux())
+            line(bsd(Arch::X86_64, Os::NetBsd), &opts, &[], "a.out", linux(), Ld::Lld)
         else {
             panic!("a NetBSD link on Linux with no sysroot was not refused");
         };
         assert!(why.contains("usr/lib/crt0.o"), "{why}");
 
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(15)));
-        let args = line(freebsd(), &opts, &[], "a.out", host).expect("a native line");
+        let args = line(freebsd(), &opts, &[], "a.out", host, Ld::Lld).expect("a native line");
         assert!(!args.iter().any(|arg| arg.starts_with("--sysroot")), "{args:?}");
         assert!(args.contains(&"-L/usr/lib".to_owned()), "{args:?}");
     }
@@ -770,18 +827,92 @@ mod tests {
     fn a_static_pie_is_refused_by_name() {
         let root = tree("static-pie", FREEBSD);
         let opts = LinkOptions { is_static: true, pie: Some(true), ..against(&root) };
-        let Err(Error::Cross { why }) = line(freebsd(), &opts, &[], "a.out", linux()) else {
+        let Err(Error::Cross { why }) = line(freebsd(), &opts, &[], "a.out", linux(), Ld::Lld)
+        else {
             panic!("-static-pie was not refused");
         };
         assert!(why.starts_with("-static-pie"), "{why}");
     }
 
     #[test]
+    fn gnu_ld_gets_the_three_words_that_lld_refuses() {
+        let root = tree("gnu-ld", FREEBSD);
+        let arm = bsd(Arch::Aarch64, Os::FreeBsd(14));
+        let program = gnu(arm, &against(&root));
+        assert!(program.contains("-dynamic-linker /libexec/ld-elf.so.1 -X -maarch64fbsd -o"));
+        let shared = gnu(arm, &LinkOptions { shared: true, ..against(&root) });
+        assert!(shared.contains("-Bshareable -X -maarch64fbsd -o"), "{shared}");
+
+        let netbsd = bsd(Arch::X86_64, Os::NetBsd);
+        let program = gnu(netbsd, &against(&root));
+        assert!(program.contains("--eh-frame-hdr -dc -dp -e _start -dynamic-linker"), "{program}");
+        let fixed = gnu(netbsd, &LinkOptions { is_static: true, ..against(&root) });
+        assert!(fixed.contains("-dc -dp -e _start -static -o"), "{fixed}");
+        // `%{!shared:-dc -dp ...}`, so a shared object has neither.
+        let shared = gnu(netbsd, &LinkOptions { shared: true, ..against(&root) });
+        assert!(!shared.contains("-dc") && !shared.contains("-dp"), "{shared}");
+
+        let openbsd = bsd(Arch::X86_64, Os::OpenBsd);
+        let fixed = gnu(openbsd, &LinkOptions { is_static: true, ..against(&root) });
+        assert!(fixed.contains("-e __start -Bstatic -dynamic-linker /usr/libexec/ld.so -o"));
+        // The other lines are the same for both linkers.
+        for target in [freebsd(), bsd(Arch::X86, Os::NetBsd), bsd(Arch::X86_64, Os::DragonFly)] {
+            let lld = line(target, &against(&root), &[], "a.out", linux(), Ld::Lld);
+            let same = lld.expect("a line").join(" ").replace(&root.display().to_string(), "=");
+            if target.os == Os::NetBsd {
+                assert_eq!(gnu(target, &against(&root)).replace(" -dc -dp", ""), same);
+            } else {
+                assert_eq!(gnu(target, &against(&root)), same);
+            }
+        }
+    }
+
+    #[test]
+    fn a_relocatable_link_by_gnu_ld_takes_its_words_too() {
+        let arm = bsd(Arch::Aarch64, Os::FreeBsd(14));
+        assert_eq!(relocatable(arm, Ld::Gnu), ["-maarch64fbsd"]);
+        assert!(relocatable(arm, Ld::Lld).is_empty());
+        let netbsd = bsd(Arch::Riscv64, Os::NetBsd);
+        assert_eq!(relocatable(netbsd, Ld::Gnu), ["-melf64lriscv", "-dc", "-dp"]);
+        assert_eq!(relocatable(netbsd, Ld::Lld), ["-melf64lriscv"]);
+        assert_eq!(relocatable(freebsd(), Ld::Gnu), ["-m", "elf_x86_64_fbsd"]);
+    }
+
+    #[test]
+    fn the_version_says_which_linker_it_is() {
+        assert_eq!(reads("GNU ld (GNU Binutils) 2.44\nCopyright (C) 2025"), Ld::Gnu);
+        assert_eq!(reads("GNU ld (NetBSD Binutils nb1) 2.45.1"), Ld::Gnu);
+        assert_eq!(
+            reads(
+                "LLD 19.1.7 (FreeBSD llvmorg-19.1.7-0-gcd708029e0b2-1500001) \
+             (compatible with GNU linkers)"
+            ),
+            Ld::Lld
+        );
+        assert_eq!(reads("mold 2.40.0 (compatible with GNU ld)"), Ld::Lld);
+        assert_eq!(reads(""), Ld::Lld);
+    }
+
+    #[test]
+    fn a_link_for_another_machine_looks_for_ld_in_the_b_directories_first() {
+        let dirs = [PathBuf::from("/w/usr/bin"), PathBuf::from("/x/bin")];
+        let ld = |dir: &str| Path::new(dir).join("ld").display().to_string();
+        assert_eq!(
+            order(freebsd(), linux(), &dirs),
+            [ld("/w/usr/bin"), ld("/x/bin"), "ld.lld".to_owned(), "lld".to_owned()]
+        );
+        // On the machine itself the name `ld` is looked for, in the `-B` directories and then on
+        // `PATH`.
+        let host = Some(bsd(Arch::X86_64, Os::FreeBsd(15)));
+        assert_eq!(order(freebsd(), host, &dirs), ["ld", "ld.lld", "lld"]);
+    }
+
+    #[test]
     fn the_machines_own_linker_is_first_only_on_that_machine() {
-        assert_eq!(order(freebsd(), linux()), ["ld.lld", "lld"]);
+        assert_eq!(order(freebsd(), linux(), &[]), ["ld.lld", "lld"]);
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(13)));
-        assert_eq!(order(freebsd(), host), ["ld", "ld.lld", "lld"]);
+        assert_eq!(order(freebsd(), host, &[]), ["ld", "ld.lld", "lld"]);
         let arm = Some(bsd(Arch::Aarch64, Os::FreeBsd(14)));
-        assert_eq!(order(freebsd(), arm), ["ld.lld", "lld"]);
+        assert_eq!(order(freebsd(), arm, &[]), ["ld.lld", "lld"]);
     }
 }
