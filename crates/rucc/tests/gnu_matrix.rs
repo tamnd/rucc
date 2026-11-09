@@ -543,7 +543,8 @@ fn the_freebsd_archetypes_are_unknown_to_gcc_on_linux() {
 }
 
 /// NetBSD's `cdefs.h` makes `__sysloglike` a `printf` format unless the compiler defines
-/// `__syslog_attribute__`, which rucc does not, so its `%m` is read as gnu_printf reads it.
+/// `__syslog_attribute__`. rucc defines it on NetBSD, as NetBSD's gcc does, so `__sysloglike` is
+/// the `syslog` format and its `%m` is allowed.
 #[test]
 fn the_netbsd_printf_and_syslog_forms_are_read_as_printf() {
     let got = said_with(
@@ -558,6 +559,37 @@ fn the_netbsd_printf_and_syslog_forms_are_read_as_printf() {
     );
     assert_eq!(lines_with(&got, "format '%d' expects argument of type 'int'").len(), 1, "{got}");
     assert_eq!(lines_with(&got, "warning:").len(), 1, "{got}");
+}
+
+/// NetBSD's gcc allows `%m` only in its `syslog` format, and reads the rest of that format as
+/// `printf`'s. On Linux `syslog` is not an archetype and `%m` is a `printf` conversion.
+#[test]
+fn netbsd_allows_m_only_in_the_syslog_format() {
+    let source = "int printf(const char *, ...) __attribute__((format(printf, 1, 2)));\n\
+         void sl(int, const char *, ...) __attribute__((format(syslog, 2, 3)));\n\
+         void gs(int, const char *, ...) __attribute__((format(gnu_syslog, 2, 3)));\n\
+         void f(const char *s) { printf(\"%m %s\", s); sl(3, \"%m %s\", s); gs(3, \"%#s\", s); }\n";
+    let got = said_with("syslog-netbsd", &["--target=x86_64--netbsd", "-Wall"], source);
+    assert_eq!(
+        lines_with(&got, "%m is only allowed in syslog(3) like functions").len(),
+        1,
+        "{got}"
+    );
+    assert_eq!(lines_with(&got, "'#' flag used with '%s' gnu_syslog format").len(), 1, "{got}");
+    assert_eq!(lines_with(&got, "warning:").len(), 2, "{got}");
+
+    let got = said_with("syslog-linux", &["--target=x86_64-linux-gnu", "-Wall"], source);
+    assert_eq!(
+        lines_with(&got, "'syslog' is an unrecognized format function type").len(),
+        1,
+        "{got}"
+    );
+    assert_eq!(
+        lines_with(&got, "'gnu_syslog' is an unrecognized format function type").len(),
+        1,
+        "{got}"
+    );
+    assert_eq!(lines_with(&got, "warning:").len(), 2, "{got}");
 }
 
 /// gcc says what a flag was used with as the conversion alone, so `%#lx` is not `%lx` there.
