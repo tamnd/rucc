@@ -3963,31 +3963,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `i386/gnu-user64.h`. A BSD has no such offset, so its default is the global
     // `__stack_chk_guard`, which its C library defines.
     let bsd_guard = x86 && opts.target.os.is_bsd() && guard_global.is_none();
-    if bsd_guard && i386 && opts.pic != Pic::Absolute && opts.protector != Protector::None {
-        return Err(err(format!(
-            "the stack protector is not supported in i386 position independent code for {}, \
-             whose canary is the global __stack_chk_guard",
-            opts.target
-        )));
-    }
-    let guard_global = guard_global.unwrap_or(bsd_guard && !(i386 && opts.pic != Pic::Absolute));
+    let guard_global = guard_global.unwrap_or(bsd_guard);
     let moved =
         guard_global || guard_reg.is_some() || guard_offset.is_some() || guard_symbol.is_some();
-    // A global guard in i386 position independent code is reached through `%ebx`, which the check
-    // in the epilogue runs after putting back. Nothing builds that, the kernel included, so it is
-    // refused rather than written wrong. A symbol read through a segment is not: gcc writes its
-    // address into the instruction whatever the position independence, and the kernel's probe
-    // for `%fs` runs with the compiler's default, which is PIE.
-    if i386 && opts.pic != Pic::Absolute && guard_global {
-        return Err(err(
-            "-mstack-protector-guard=global is not supported in i386 position independent code"
-                .to_owned(),
-        ));
-    }
     if (moved || kernel) && opts.target.arch == rucc_target::Arch::X86_64 || moved && i386 {
-        let table = opts.pic == Pic::Library;
         // The local copy in i386 position independent code, for the reason given below.
         let local = i386 && opts.pic != Pic::Absolute;
+        // A global guard in i386 position independent code is read through the global offset
+        // table, executable or not, since i386 reaches no name from the instruction pointer. gcc
+        // writes `__stack_chk_guard@GOT` there too. The function's own copy of the table's address
+        // is not ready when the prologue reads the guard, so the read finds the table itself.
+        let table = opts.pic == Pic::Library || local;
         let fail = if local { "__stack_chk_fail_local" } else { "__stack_chk_fail" };
         let reg = if kernel || i386 { rucc_target::Segment::Gs } else { rucc_target::Segment::Fs };
         let reg = guard_reg.unwrap_or(reg);
@@ -7363,9 +7349,16 @@ mod tests {
         let both = ["--target=x86_64-freebsd", "-mstack-protector-guard=tls"];
         let moved = guard(&[&both[..], &["-mstack-protector-guard-reg=gs"]].concat());
         assert_eq!(moved, Some(Guard::in_segment(Segment::Gs, 40)));
-        // i386 position independent code cannot reach the global guard, so the pair is refused.
-        let said = refused(&["--target=i386-freebsd", "-fPIC", "-fstack-protector", "-c", "a.c"]);
-        assert!(said.contains("not supported in i386 position independent code"), "{said}");
+        // i386 position independent code reads the global guard through the table, executable or
+        // not, and calls the hidden copy of the failure routine, as gcc does.
+        let local =
+            |table| Some(Guard { fail: "__stack_chk_fail_local", ..global(table).unwrap() });
+        for target in ["--target=i386-freebsd", "--target=i486--netbsdelf"] {
+            assert_eq!(guard(&[target, "-fPIC"]), local(true), "{target}");
+            assert_eq!(guard(&[target, "-fPIE"]), local(true), "{target}");
+            let asked = guard(&[target, "-fPIC", "-mstack-protector-guard=global"]);
+            assert_eq!(asked, local(true), "{target}");
+        }
         assert_eq!(opts(&["--target=i386-freebsd", "-fPIC"]).pic, Pic::Library);
     }
 
@@ -11380,9 +11373,10 @@ mod tests {
         let offset = ["-mstack-protector-guard-offset=24"];
         assert_eq!(guard(&offset), Some(Guard::in_segment(Segment::Gs, 24)));
 
+        // The global in i386 position independent code is read through the table.
         let line = ["--target=i686-unknown-linux-gnu", "-fPIC", "-mstack-protector-guard=global"];
-        let said = refused(&[&line[..], &["-c", "a.c"]].concat());
-        assert!(said.contains("i386 position independent code"), "{said}");
+        let got = compile(&[&line[..], &["-c", "a.c"]].concat()).0.guard.expect("the guard moved");
+        assert_eq!((got.symbol, got.table), (Some("__stack_chk_guard"), true));
         // The kernel's probe runs with the default, which is PIE, and gcc puts the symbol in the
         // instruction there too.
         let line = ["--target=i686-unknown-linux-gnu", "-fPIC", "-c", "a.c"];

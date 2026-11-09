@@ -15417,4 +15417,42 @@ away:
         assert!(!text.contains("get_pc_thunk") && !text.contains("@GOT"), "{text}");
         assert!(!text.contains("@PLT"), "{text}");
     }
+
+    /// tamnd/rucc#4095. A BSD's canary is the global `__stack_chk_guard`, which i386 position
+    /// independent code reads through the global offset table. The prologue reads it before the
+    /// function has the table's address, so each read finds the table in its own register,
+    /// through gcc's routine for that register.
+    #[test]
+    fn i386_position_independent_code_reads_a_global_canary_through_the_global_offset_table() {
+        let source = "int g(char *); int f(void) { char b[16]; return g(b); }\n";
+        let mut opts = options();
+        opts.target = "i386-unknown-freebsd15.1".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Asm;
+        opts.pic = Pic::Library;
+        opts.protector = Protector::All;
+        let guard = rucc_target::Guard::global("__stack_chk_guard", true);
+        opts.guard = Some(rucc_target::Guard { fail: "__stack_chk_fail_local", ..guard });
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        // Once in the prologue and once in the check, each time into the register it is read into.
+        assert_eq!(text.matches("__stack_chk_guard@GOT(").count(), 2, "{text}");
+        for wanted in [
+            "call\t__x86.get_pc_thunk.cx\n\taddl\t$_GLOBAL_OFFSET_TABLE_, %ecx\n",
+            "\tmovl\t__stack_chk_guard@GOT(%ecx), %ecx\n\tmovl\t(%ecx), %ecx\n",
+            "call\t__stack_chk_fail_local\n",
+        ] {
+            assert!(text.contains(wanted), "no {wanted:?} in:\n{text}");
+        }
+        // And the file carries each routine a function calls.
+        for line in text.lines() {
+            if let Some(reg) = line.strip_prefix("\tcall\t__x86.get_pc_thunk.") {
+                let body = format!("__x86.get_pc_thunk.{reg}:\nmovl (%esp), %e{reg}\nret\n");
+                assert!(text.contains(&body), "no {body:?} in:\n{text}");
+            }
+        }
+        // The assembler built in takes all of it too.
+        opts.emit = EmitKind::Object;
+        assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
 }

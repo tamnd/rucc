@@ -33,7 +33,7 @@
 //! the amount is a constant or a register. A target whose instructions do not fit those shapes
 //! needs more than a table, and it will say so by not being able to fill this in.
 
-use crate::regs::RegClass;
+use crate::regs::{PhysReg, RegClass};
 
 /// How a register of one class is moved between two registers and between a register and the
 /// frame.
@@ -336,6 +336,13 @@ pub struct FrameInsts {
     /// a call or a tail jump through it are folded into, or `None` on a target that has no such
     /// call. See [`Through`].
     pub through: Option<Through>,
+    /// The text that puts the global offset table's address in that register, or `None` on a
+    /// target where an instruction reaches the table from the instruction pointer.
+    ///
+    /// i386 position independent code reads the stack protector's guard through the table, and
+    /// the prologue reads it before anything else of the function's has the table's address. So
+    /// the guard's own register is given the address first, the way gcc gives one to `%ebx`.
+    pub table: Option<fn(PhysReg) -> String>,
 }
 
 /// A load of a whole word into a register, a call and a jump through that register, and the same
