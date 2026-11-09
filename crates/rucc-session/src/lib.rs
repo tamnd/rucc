@@ -959,8 +959,8 @@ pub enum Protector {
     /// is the same, and it is the distributions rather than the compiler that turn it on.
     #[default]
     None,
-    /// `-fstack-protector`. A function with a local array of at least eight bytes, or one whose
-    /// stack grows while it runs.
+    /// `-fstack-protector`. A function with a local array of at least `ssp-buffer-size` bytes,
+    /// which is eight unless `--param` changes it, or one whose stack grows while it runs.
     Buffers,
     /// `-fstack-protector-strong`. Any of those, and any function with a local array at all, a
     /// local holding one, or a local whose address is taken.
@@ -2487,6 +2487,10 @@ pub struct Options {
     pub stack_reuse: Option<bool>,
     /// Which functions get a stack protector, from the `-fstack-protector` family.
     pub protector: Protector,
+    /// How many bytes a local array must have to give a function a canary under the plain
+    /// `-fstack-protector`, from `--param ssp-buffer-size=`. gcc's default is 8. The NetBSD kernel
+    /// sets it to 1, so that every array counts.
+    pub ssp_buffer_size: u64,
     /// Whether a prologue takes its frame a page at a time, from `-fstack-clash-protection`.
     ///
     /// An operating system leaves one page unmapped below every stack so that a stack growing
@@ -3143,6 +3147,7 @@ impl Options {
             rewriter: String::new(),
             stack_reuse: None,
             protector: Protector::default(),
+            ssp_buffer_size: 8,
             stack_clash: false,
             plt: true,
             control: Control::default(),

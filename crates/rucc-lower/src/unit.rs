@@ -70,8 +70,8 @@ pub enum Protector {
     /// gets.
     #[default]
     None,
-    /// A function with a local array of at least eight bytes, or one whose stack grows while it
-    /// runs. `-fstack-protector`, which is the original and the narrowest.
+    /// A function with a local array of at least [`Context::buffer`] bytes, or one whose stack
+    /// grows while it runs. `-fstack-protector`, which is the original and the narrowest.
     Buffers,
     /// Any of those, and any function with a local array at all, a local holding one, or a local
     /// whose address is taken. `-fstack-protector-strong`, which is what every distribution builds
@@ -205,6 +205,9 @@ pub struct Context<'a> {
     pub visibility: IrVisibility,
     /// Which functions get a stack protector, which is `-fstack-protector` and its relatives.
     pub protector: Protector,
+    /// How many bytes of array give a function a canary under [`Protector::Buffers`], which is
+    /// gcc's `--param ssp-buffer-size` and is 8 unless the command line said otherwise.
+    pub buffer: u64,
     /// What overflows rather than being undefined, which is `-fwrapv` and its relatives.
     ///
     /// A fact about the compilation for the same reason the two above it are: what was written is
@@ -389,6 +392,7 @@ impl fmt::Debug for Context<'_> {
         f.debug_struct("Context")
             .field("visibility", &self.visibility)
             .field("protector", &self.protector)
+            .field("buffer", &self.buffer)
             .field("wrapping", &self.wrapping)
             .field("aliasing", &self.aliasing)
             .field("padding", &self.padding)
@@ -472,6 +476,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         names,
         visibility,
         protector,
+        buffer,
         wrapping,
         aliasing,
         padding,
@@ -512,6 +517,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         names,
         visibility,
         protector,
+        buffer,
         wrapping,
         aliasing,
         padding,
@@ -580,6 +586,8 @@ pub(crate) struct Unit<'a> {
     visibility: IrVisibility,
     /// Which functions get a stack protector. See [`Context::protector`].
     pub(crate) protector: Protector,
+    /// How many bytes of array count under the plain flag. See [`Context::buffer`].
+    pub(crate) buffer: u64,
     /// What wraps rather than being undefined. See [`Context::wrapping`].
     pub(crate) wrapping: Wrapping,
     /// Whether an access names the type it goes through. See [`Context::aliasing`].

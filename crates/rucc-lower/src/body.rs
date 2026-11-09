@@ -317,10 +317,6 @@ fn brace(tast: &Tast, body: StmtId, declared: Span) -> Span {
     if span.is_dummy() { declared } else { span }
 }
 
-/// How many bytes of array make a buffer worth protecting, which is gcc's `ssp-buffer-size` and
-/// which has been eight since the flag was written.
-const BUFFER: u64 = 8;
-
 /// What the pointer `__builtin_alloca` answers is aligned to.
 ///
 /// Sixteen, which is what gcc gives it and what the SysV psABI requires of the stack pointer at a
@@ -424,7 +420,8 @@ const fn order_of(order: MemOrder) -> i128 {
 /// ones left out are the ones an exploit goes looking for.
 ///
 /// ```text
-///   -fstack-protector          a local array of eight bytes or more, or a stack that grows
+///   -fstack-protector          a local array of `ssp-buffer-size` bytes or more (eight unless
+///                              `--param` says otherwise), or a stack that grows
 ///   -fstack-protector-strong   any local array, anything holding one, or an address taken
 ///   -fstack-protector-all      every function
 /// ```
@@ -468,7 +465,7 @@ fn guarded(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> Set
             let ty = tast[local].ty;
             match want {
                 Protector::Strong => escaped.contains(&local) || holds_array(types, ty),
-                _ => is_array(types, ty) && repr::size_of(types, target, ty) >= BUFFER,
+                _ => is_array(types, ty) && repr::size_of(types, target, ty) >= body.unit.buffer,
             }
         })
         .collect()

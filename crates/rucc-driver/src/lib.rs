@@ -481,6 +481,20 @@ fn warning_param(opts: &mut Options, spec: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Reads `--param ssp-buffer-size=` into `opts`, and says whether `spec` was it.
+///
+/// It is the smallest local array, in bytes, that gives a function a canary under the plain
+/// `-fstack-protector`. gcc's default is 8. The NetBSD kernel passes `--param ssp-buffer-size=1`
+/// with `-fstack-protector`, so every function with an array gets one. The other levels do not
+/// read it, as in gcc.
+fn protector_param(opts: &mut Options, spec: &str) -> Result<bool, String> {
+    let Some(("ssp-buffer-size", value)) = spec.split_once('=') else { return Ok(false) };
+    opts.ssp_buffer_size = value
+        .parse()
+        .map_err(|_| format!("invalid value '{value}' for --param ssp-buffer-size"))?;
+    Ok(true)
+}
+
 /// The names one name in `-fsanitize=` and its relatives stands for.
 ///
 /// `shift` is the two shift checks together, as gcc has it, so `-fsanitize=shift
@@ -1167,6 +1181,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 i += 1;
                 if !asan_param(&mut opts.kasan, &spec).map_err(err)?
                     && !warning_param(&mut opts, &spec).map_err(err)?
+                    && !protector_param(&mut opts, &spec).map_err(err)?
                 {
                     rucc_cost::heuristics::Param::new(&spec).map_err(|e| err(e.to_string()))?;
                     opts.params.push(spec);
@@ -1176,6 +1191,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let spec = &arg["--param=".len()..];
                 if !asan_param(&mut opts.kasan, spec).map_err(err)?
                     && !warning_param(&mut opts, spec).map_err(err)?
+                    && !protector_param(&mut opts, spec).map_err(err)?
                 {
                     rucc_cost::heuristics::Param::new(spec).map_err(|e| err(e.to_string()))?;
                     opts.params.push(spec.to_owned());
@@ -11586,5 +11602,18 @@ mod tests {
         assert_eq!(opts.min_pagesize, 0);
         let why = "invalid value 'big' for --param min-pagesize";
         assert_eq!(refused(&["-c", "--param=min-pagesize=big", "a.c"]), why);
+    }
+
+    /// `--param ssp-buffer-size=` is the smallest array that counts under the plain
+    /// `-fstack-protector`. The NetBSD kernel passes `--param ssp-buffer-size=1` (tamnd/rucc#4088).
+    #[test]
+    fn ssp_buffer_size_is_taken_in_both_spellings() {
+        assert_eq!(compile(&["-c", "a.c"]).0.ssp_buffer_size, 8);
+        let (opts, _) = compile(&["-c", "--param", "ssp-buffer-size=1", "a.c"]);
+        assert_eq!(opts.ssp_buffer_size, 1);
+        let (opts, _) = compile(&["-c", "--param=ssp-buffer-size=4", "a.c"]);
+        assert_eq!(opts.ssp_buffer_size, 4);
+        let why = "invalid value 'one' for --param ssp-buffer-size";
+        assert_eq!(refused(&["-c", "--param=ssp-buffer-size=one", "a.c"]), why);
     }
 }

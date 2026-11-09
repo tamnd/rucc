@@ -100,6 +100,19 @@ fn the_plain_flag_protects_the_functions_with_a_buffer_in_them() {
     assert_eq!(protected(&text), ["buf"], "{text}");
 }
 
+/// `--param ssp-buffer-size=` moves the line the plain flag draws. The NetBSD kernel sets it to 1,
+/// so the small array counts too. The address that got away still does not, as in gcc. The
+/// strong flag does not read the number.
+#[test]
+fn ssp_buffer_size_moves_the_line_the_plain_flag_draws() {
+    let text = asm("one", &["-fstack-protector", "--param", "ssp-buffer-size=1"], FOUR);
+    assert_eq!(protected(&text), ["buf", "small"], "{text}");
+    let text = asm("big", &["-fstack-protector", "--param=ssp-buffer-size=32"], FOUR);
+    assert_eq!(protected(&text), Vec::<&str>::new(), "{text}");
+    let text = asm("strong", &["-fstack-protector-strong", "--param=ssp-buffer-size=32"], FOUR);
+    assert_eq!(protected(&text), ["buf", "small", "taken"], "{text}");
+}
+
 /// The strong one adds the small array and the address that got away.
 ///
 /// This is the one every distribution builds with, so it is the one worth being exact about. An
