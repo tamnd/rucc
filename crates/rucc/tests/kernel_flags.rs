@@ -306,9 +306,34 @@ fn a_warning_turned_off_by_name_is_not_heard() {
     assert!(!error.status.success());
     assert!(String::from_utf8_lossy(&error.stderr).contains("error: pointer targets"));
 
-    let kept = compile(&["-Werror", "-Wno-error=pointer-sign"]);
+    let kept = compile(&["-Wall", "-Werror", "-Wno-error=pointer-sign"]);
     assert!(kept.status.success(), "{}", String::from_utf8_lossy(&kept.stderr));
     assert!(String::from_utf8_lossy(&kept.stderr).contains("warning: pointer targets"));
+}
+
+/// gcc keeps `-Wpointer-sign` off until `-Wall` or `-Wpedantic` turns it on. NetBSD builds its
+/// citrus modules with `-Werror` and no `-Wall`, and they pass a `uint32_t *` where a `wchar_t *`
+/// goes.
+#[test]
+fn the_pointer_sign_check_is_off_until_wall_or_wpedantic() {
+    let target = "--target=x86_64-unknown-linux-gnu";
+    let source = "int f(unsigned *u) { int *p = u; return *p; }\n";
+    let compile = |flags: &[&str]| {
+        let mut all = vec![target, "-c", "-o", "/dev/null"];
+        all.extend_from_slice(flags);
+        run(&all, source)
+    };
+    let quiet = compile(&["-Werror"]);
+    assert!(quiet.status.success(), "{}", String::from_utf8_lossy(&quiet.stderr));
+    assert!(quiet.stderr.is_empty(), "{}", String::from_utf8_lossy(&quiet.stderr));
+    for flags in [&["-Wall"][..], &["-Wpedantic"], &["-pedantic"], &["-Wpointer-sign"]] {
+        let out = compile(flags);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(said.contains("warning: pointer targets"), "{flags:?}: {said}");
+    }
+    let error = compile(&["-pedantic-errors"]);
+    assert!(!error.status.success());
+    assert!(String::from_utf8_lossy(&error.stderr).contains("error: pointer targets"));
 }
 
 /// `-Wno-attributes` quiets an attribute that does nothing where it was written, and the

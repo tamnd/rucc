@@ -2365,9 +2365,8 @@ impl Checker<'_> {
     ///
     /// A warning and not an error, unlike every other mismatched pointee, because the two point
     /// at the same bytes and the code that does this is usually reading a byte buffer rather
-    /// than confusing two types. gcc keeps it off until `-Wall` or `-pedantic` asks for it;
-    /// there is no such switch here yet, so it is always on, which is the noisier half of the
-    /// difference rather than the silent one.
+    /// than confusing two types. gcc keeps it off until `-Wall` or `-pedantic` asks for it, and
+    /// so does `rucc_diag::Named`, which drops it unless one of them or `-Wpointer-sign` did.
     fn pointer_sign(&mut self, target: TypeId, source: TypeId, span: Span, to: Target) {
         let (a, b) = (self.spell(target), self.spell(source));
         let message = match to {
