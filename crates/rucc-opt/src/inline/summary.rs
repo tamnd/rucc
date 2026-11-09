@@ -442,8 +442,11 @@ impl Summary {
             let waiting: Vec<Value> =
                 args.iter().copied().filter(|arg| !memo.contains_key(arg)).collect();
             if waiting.is_empty() {
+                // The walk's operands, which take a pointer cast from a constant as that constant.
+                // A test of a parameter against `(void *) 0` is one, and with only the constants
+                // here the summary kept both arms where the walk kept one.
                 let found = computed(func, inst, &|arg| {
-                    memo.get(&arg).copied().flatten().or_else(|| crate::fold::constant(func, arg))
+                    memo.get(&arg).copied().flatten().or_else(|| crate::fold::known(func, arg))
                 });
                 memo.insert(top, found);
                 stack.pop();
@@ -694,6 +697,49 @@ block0(%0: ptr):
 }
 "#;
         assert_eq!(sized(body, &[]), (2, false));
+    }
+
+    /// `classify_object_over_fdes` from libgcc's `unwind-dw2-fde.c` cut down: a test of a pointer
+    /// parameter against `(void *) 0`, which the front end writes as a cast of the constant. A call
+    /// that passes a null pointer takes one arm, and the summary has to say so as the walk does.
+    /// It kept both, and every debug build stopped on `unwind-dw2-fde-dip.c` at `-O2`.
+    #[test]
+    fn a_test_against_a_pointer_cast_from_a_constant_is_decided_too() {
+        let body = r#"
+func @classify(ptr) -> i32, linkage(internal) {
+block0(%0: ptr):
+    %1 = iconst.i64 0
+    %2 = inttoptr.ptr %1
+    %3 = icmp ne %0, %2
+    br_if %3, block1, block2
+
+block1:
+    %4 = global_addr @table
+    %5 = load.i32 %4, align 4
+    %6 = add.i32 %5, %5
+    return %6
+
+block2:
+    %7 = iconst.i32 0
+    return %7
+}
+"#;
+        let (func, layout, names) = parsed(body);
+        let entry = func.entry().expect("the fixture has a body");
+        let param = func[entry].params[0];
+        // As a call passes `(void *) 0`: the constant the pointer was cast from, with its type.
+        let null: Map<Value, (Imm, Type)> =
+            [(param, (Imm::int(0, Type::int(64)), Type::int(64)))].into_iter().collect();
+        let summary = Summary::of(&func, layout, &names, None);
+        for (values, size) in [(Map::default(), 3), (null, 0)] {
+            let estimate = summary.estimate(&func, &values).expect("the summary is exact");
+            let plain =
+                folded_size(&func, layout, Set::default(), values.clone(), Count::Plain(&names));
+            let weighed =
+                folded_size(&func, layout, Set::default(), values, Count::Weighed(&names));
+            assert_eq!((estimate.plain, estimate.weighed), (plain, weighed));
+            assert_eq!(plain, size);
+        }
     }
 
     /// The time is the walk's, each block weighed by how often it runs.
