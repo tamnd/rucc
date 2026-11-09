@@ -734,6 +734,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         remarks.push_str(&lowerings.remarks(name));
     }
 
+    if let Some(limit) = opts.stack_usage_limit {
+        diagnostics.extend(stack.rows().iter().filter_map(|row| over_the_limit(row, limit)));
+    }
     // What `#pragma GCC diagnostic` made of the command line's warnings, line by line, which is
     // looked up by where each warning is now that they are all in.
     let scoped = rucc_diag::Scoped::new(&opts.named_warnings, &diagnostic_pragmas, &sess.sources);
@@ -3556,6 +3559,23 @@ fn su_file(stack: &StackUsage, sources: &SourceMap, file: &str) -> String {
     out
 }
 
+/// The `-Wstack-usage=` warning for one function, if it has one.
+///
+/// gcc's `output_stack_usage_1`: a function that takes more stack while it runs is warned about
+/// whatever the limit, because nothing bounds what it takes, and any other function is warned
+/// about when the `.su` file's number for it is over the limit. The warning is at the function's
+/// name, as gcc puts it at the declaration.
+fn over_the_limit(row: &rucc_codegen::usage::Usage, limit: u64) -> Option<Diagnostic> {
+    let message = if row.dynamic {
+        "stack usage might be unbounded".to_owned()
+    } else if u64::from(row.bytes) > limit {
+        format!("stack usage is {} bytes", row.bytes)
+    } else {
+        return None;
+    };
+    Some(Diagnostic::warning(message, row.span()).with_code("E0867"))
+}
+
 /// A result that is nothing but one message, for the failures that happen before there is
 /// anything to compile.
 fn failure(message: String) -> Compiled {
@@ -3607,6 +3627,41 @@ mod tests {
         let mut fs = MemoryFileSystem::new();
         fs.insert("/main.c", source.to_owned().into_bytes());
         compile(opts, "/main.c", &fs)
+    }
+
+    /// NetBSD's kernel line, `-Wstack-usage=3584 -Werror`, on a function over the limit, one
+    /// under it and one with a variable length array, which gcc warns about whatever the limit.
+    #[test]
+    fn a_function_over_the_stack_usage_limit_is_warned_about_as_gcc_does() {
+        let source = "void g(char *);\n\
+                      void big(void) { char b[4000]; g(b); }\n\
+                      void small(void) { char b[100]; g(b); }\n\
+                      void grows(int n) { char b[n]; g(b); }\n";
+        let mut opts = Options::new("x86_64-unknown-netbsd".parse::<Triple>().unwrap());
+        opts.emit = EmitKind::Asm;
+        opts.stack_usage_limit = Some(3584);
+        let result = run(&opts, source);
+        let said = result.messages.join("\n");
+        assert_eq!(result.errors, 0, "{said}");
+        assert_eq!(result.messages.len(), 2, "{said}");
+        assert!(result.messages[0].starts_with("/main.c:2:6: warning: stack usage is "), "{said}");
+        assert!(result.messages[0].ends_with(" bytes [E0867]"), "{said}");
+        let bytes = result.messages[0].split(' ').nth(5).and_then(|n| n.parse::<u32>().ok());
+        assert!(bytes.is_some_and(|bytes| bytes > 4000), "{said}");
+        assert_eq!(
+            result.messages[1], "/main.c:4:6: warning: stack usage might be unbounded [E0867]",
+            "{said}"
+        );
+
+        // Under `-Werror` each is an error, and `-Wno-error=stack-usage=` keeps them warnings.
+        opts.warnings_are_errors = true;
+        assert_eq!(run(&opts, source).errors, 2);
+        opts.named_warnings.flag("no-error=stack-usage=");
+        assert_eq!(run(&opts, source).errors, 0);
+
+        // Without the limit nothing is said.
+        opts.stack_usage_limit = None;
+        assert_eq!(run(&opts, source).messages, Vec::<String>::new());
     }
 
     /// Options with the compiler's own headers on the search path and nothing else, which is

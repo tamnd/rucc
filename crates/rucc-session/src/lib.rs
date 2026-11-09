@@ -2981,6 +2981,13 @@ pub struct Options {
     /// rucc's frame rather than gcc's, which is the point: the two files side by side say which
     /// functions one compiler gives more stack than the other does.
     pub stack_usage: bool,
+    /// The most stack a function may use before it is warned about, from `-Wstack-usage=`.
+    ///
+    /// gcc's warning and gcc's numbers: a function whose usage, as the `.su` file counts it, is
+    /// over the limit is warned about, and so is every function that takes more stack while it
+    /// runs. NetBSD builds its kernel with `-Wstack-usage=3584 -Werror`. `-Wno-stack-usage` takes
+    /// the limit away again.
+    pub stack_usage_limit: Option<u64>,
     /// What the files kept beside an output are named after, from `-dumpbase`, in place of the
     /// name the output or the input would have given them.
     pub dump_base: Option<String>,
@@ -3244,6 +3251,7 @@ impl Options {
             deps: Deps::default(),
             save_temps: SaveTemps::default(),
             stack_usage: false,
+            stack_usage_limit: None,
             dump_base: None,
             dump_base_ext: None,
             dump_dir: None,
