@@ -30,6 +30,18 @@
 //! for the `__sync` names: the `__atomic` names call libatomic at sixteen bytes whatever the
 //! function is built for. `rucc-lower` makes the same choice, so an access this wide that reaches
 //! here on x86-64 is one that was meant to be the instruction.
+//!
+//! # Sixteen bytes on AArch64
+//!
+//! AArch64 has no one instruction for this in its baseline, and gcc writes the loop every manual
+//! gives: `ldaxp` reads the pair and marks the address, `stlxp` writes the new pair only if nothing
+//! else wrote there since, and the loop goes round again when something did. A pair read with
+//! `ldaxp` is only known to be one read once a store exclusive to the same address has succeeded,
+//! so when the pair is not the one expected the loop writes back what it read, as gcc 13 and later
+//! do. The large system extensions add `caspal`, which is the whole loop in one instruction, and a
+//! function built for them gets that. gcc does this for the `__sync` names, and so does
+//! `rucc-lower`, which also leaves the C11 names to libatomic at this width as it does on x86-64.
+//! See [`paired`].
 
 use rucc_base::Interner;
 use rucc_ir::{
@@ -59,6 +71,125 @@ pub fn ordered(func: &mut Func, names: &mut Interner, conv: &CallRegs) {
             exchange(func, names, pair, inst);
         }
     }
+}
+
+/// The sixteen byte integer on AArch64, the register each half of it is in and the status a store
+/// exclusive leaves.
+const WHOLE: Type = Type::int(128);
+const HALF: Type = Type::int(64);
+const STATUS: Type = Type::int(32);
+
+/// How a compare and exchange of two registers is written on AArch64.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exclusive {
+    /// The loop of `ldaxp` and `stlxp`, which every AArch64 processor has.
+    Loop,
+    /// `caspal`, for a function built for the large system extensions.
+    Casp,
+}
+
+/// Every ordered access of sixteen bytes on AArch64, as the compare and exchange of two registers
+/// written the way `how` says. A load is the exchange of zero for zero, as it is on x86 above.
+pub fn paired(func: &mut Func, names: &mut Interner, how: Exclusive) {
+    let found: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| matches!(func[inst].opcode, Opcode::Cmpxchg | Opcode::AtomicLoad))
+        .filter(|&inst| func[inst].first_result.is_some_and(|value| func[value].ty == WHOLE))
+        .collect();
+    for inst in found {
+        let results: Vec<Value> = func[inst].results().collect();
+        let (addr, expected, desired) = match (func[inst].opcode, &func[func[inst].args]) {
+            (Opcode::AtomicLoad, &[addr]) => {
+                let zero = ahead_const(func, inst, Imm::int(0, WHOLE), WHOLE);
+                (addr, zero, zero)
+            }
+            (Opcode::Cmpxchg, &[addr, expected, desired]) => (addr, expected, desired),
+            _ => continue,
+        };
+        let (got, ok) = exclusive(func, names, how, inst, addr, (expected, desired));
+        func.remove_inst(inst);
+        replace(func, results[0], got);
+        if let Some(&exchanged) = results.get(1) {
+            replace(func, exchanged, ok);
+        }
+    }
+}
+
+/// The loop of `ldaxp` and `stlxp`. Operands zero and one are the pair it read, two is the status
+/// of the store exclusive, three the address, four and five the pair it expects and six and seven
+/// the pair it puts there. The flags after `ccmp` say whether the pair read is the one expected,
+/// and nothing after them changes the flags, so the two ways out of the loop are told apart again
+/// in the IR from the pair read.
+const LOOP: &str = "0:\tldaxp\t%0, %1, [%3]\n\
+                    \tcmp\t%0, %4\n\
+                    \tccmp\t%1, %5, #0, eq\n\
+                    \tb.ne\t1f\n\
+                    \tstlxp\t%w2, %6, %7, [%3]\n\
+                    \tcbnz\t%w2, 0b\n\
+                    \tb\t2f\n\
+                    1:\tstlxp\t%w2, %0, %1, [%3]\n\
+                    \tcbnz\t%w2, 0b\n\
+                    2:";
+
+/// `caspal`, which wants each pair in an even register and the one after it. No constraint letter
+/// says that, so the pairs go through `x0` to `x3`, which are clobbered. Operands zero and one are
+/// the pair it read, two the address, three and four the pair it expects and five and six the
+/// pair it puts there.
+const CASP: &str = "mov\tx0, %3\n\
+                    \tmov\tx1, %4\n\
+                    \tmov\tx2, %5\n\
+                    \tmov\tx3, %6\n\
+                    \tcaspal\tx0, x1, x2, x3, [%2]\n\
+                    \tmov\t%0, x0\n\
+                    \tmov\t%1, x1";
+
+/// The statement, in front of `inst`, and what it found and whether it put `desired` there.
+///
+/// Each value is handed over as its two halves, worked out with a truncation and a shift that
+/// `crate::wide` splits like any other, and what it found comes back as two halves put together
+/// again. Whether it put the value there is whether what it found is what it expected.
+fn exclusive(
+    func: &mut Func,
+    names: &mut Interner,
+    how: Exclusive,
+    inst: Inst,
+    addr: Value,
+    (expected, desired): (Value, Value),
+) -> (Value, Value) {
+    let shift = ahead_const(func, inst, Imm::int(64, WHOLE), WHOLE);
+    let halves = |func: &mut Func, whole: Value| {
+        let low = ahead(func, inst, Opcode::Trunc, &[whole], HALF);
+        let top = ahead(func, inst, Opcode::LShr, &[whole, shift], WHOLE);
+        let high = ahead(func, inst, Opcode::Trunc, &[top], HALF);
+        [low, high]
+    };
+    let [want_low, want_high] = halves(func, expected);
+    let [put_low, put_high] = halves(func, desired);
+    let inputs = [addr, want_low, want_high, put_low, put_high];
+    let (template, constraints, clobbers, outputs): (_, _, _, &[Type]) = match how {
+        Exclusive::Loop => (LOOP, "=&r,=&r,=&r,r,r,r,r,r", "memory,cc", &[HALF, HALF, STATUS]),
+        Exclusive::Casp => (CASP, "=r,=r,r,r,r,r,r", "x0,x1,x2,x3,memory", &[HALF, HALF]),
+    };
+    let info = AsmInfo {
+        template: names.intern(template),
+        constraints: names.intern(constraints),
+        clobbers: names.intern(clobbers),
+        targets: BlockCallList::EMPTY,
+    };
+    let asm = func.add_asm(info);
+    let args = func.push_values(&inputs);
+    let data = InstData { args, extra: Extra::Asm(asm), ..InstData::new(Opcode::InlineAsm) };
+    let span = func.span(inst);
+    let made = func.create_inst(data, outputs, span);
+    func.insert_before(made, inst);
+    let found: Vec<Value> = func[made].results().collect();
+    let low = ahead(func, inst, Opcode::ZExt, &[found[0]], WHOLE);
+    let high = ahead(func, inst, Opcode::ZExt, &[found[1]], WHOLE);
+    let high = ahead(func, inst, Opcode::Shl, &[high, shift], WHOLE);
+    let got = ahead(func, inst, Opcode::Or, &[low, high], WHOLE);
+    let ok = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Eq), &[got, expected]);
+    (got, ok)
 }
 
 /// The two registers the instruction moves, by how wide one of them is.

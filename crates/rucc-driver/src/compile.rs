@@ -11230,6 +11230,62 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("movl\t$1, %eax"), "and at eight it is: {text}");
     }
 
+    /// tamnd/rucc#4088. The `__sync` names at sixteen bytes are written in place on AArch64, as
+    /// gcc writes them: the loop of `ldaxp` and `stlxp`, or `caspal` in a function built for the
+    /// large system extensions. The C11 names still call libatomic at this width, as on x86-64.
+    #[test]
+    fn a_sixteen_byte_sync_compare_and_swap_is_written_in_place_on_aarch64() {
+        let source = "_Bool f(__int128 *p, __int128 o, __int128 n) {\n\
+                      return __sync_bool_compare_and_swap(p, o, n);\n}\n\
+                      __int128 g(__int128 *p, __int128 o, __int128 n) {\n\
+                      return __sync_val_compare_and_swap(p, o, n);\n}\n\
+                      __int128 h(__int128 *p) { return __sync_fetch_and_add(p, 1); }\n\
+                      void k(__int128 *p) { __sync_lock_release(p); }\n";
+        let built = |march: Option<&str>, emit: EmitKind| {
+            let mut opts = options();
+            opts.emit = emit;
+            opts.target = "aarch64-unknown-freebsd".parse::<Triple>().unwrap();
+            if let Some(march) = march {
+                opts.isa = rucc_target::Isa::aarch64_march(march);
+            }
+            let ran = run(&opts, source);
+            assert_eq!(ran.messages, Vec::<String>::new(), "{march:?}");
+            ran
+        };
+        let text = built(None, EmitKind::Asm).text().to_owned();
+        for wanted in ["ldaxp\t", "stlxp\t", "ccmp\t"] {
+            assert!(text.matches(wanted).count() >= 4, "{wanted}: {text}");
+        }
+        assert!(!text.contains("caspal"), "{text}");
+        assert!(!text.contains("__sync_") && !text.contains("__atomic_"), "{text}");
+
+        let text = built(Some("armv8.1-a"), EmitKind::Asm).text().to_owned();
+        assert!(text.matches("caspal\tx0, x1, x2, x3, [").count() >= 4, "{text}");
+        assert!(!text.contains("ldaxp"), "{text}");
+
+        // Both assemble, and nothing is left to link against.
+        for march in [None, Some("armv8.1-a")] {
+            let Artifact::Object { bytes, .. } = built(march, EmitKind::Object).artifact else {
+                panic!("an object")
+            };
+            assert!(!bytes.windows(7).any(|w| w == b"__sync_"), "{march:?}");
+            assert!(!bytes.windows(9).any(|w| w == b"__atomic_"), "{march:?}");
+        }
+
+        // The C11 name still calls the library, which is what gcc and `__atomic_always_lock_free`
+        // agree on.
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-freebsd".parse::<Triple>().unwrap();
+        let c11 = "_Bool f(__int128 *p, __int128 *o, __int128 n) {\n\
+                   return __atomic_compare_exchange_n(p, o, n, 0, 5, 5);\n}\n";
+        let ran = run(&opts, c11);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        let text = ran.text();
+        assert!(text.contains("bl __atomic_compare_exchange"), "{text}");
+        assert!(!text.contains("ldaxp") && !text.contains("caspal"), "{text}");
+    }
+
     /// A memory order an operation cannot carry is read as the strongest one, and said so about.
     ///
     /// There are three ways the number is not one the operation can take: it is not a constant at

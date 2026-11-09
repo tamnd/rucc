@@ -1203,7 +1203,8 @@ pub struct TargetInfo {
     /// Sixty four on every target here. x86-64 does sixteen bytes atomically with `cmpxchg16b`,
     /// which is not in the baseline the psABI names. With `cx16` the `__sync_` names use it, as
     /// gcc's do, but the C11 names still call libatomic, and gcc answers no here too. AArch64 does
-    /// the same with its pair instructions, which nothing writes. A target
+    /// the same with its exclusive pair instructions, or `caspal` where the function has the large
+    /// system extensions. A target
     /// that answered yes for sixteen bytes and then called a library that has to take a lock for
     /// them would have two answers to one question, and the wrong one is the one in the header.
     pub lock_free_width: u32,
