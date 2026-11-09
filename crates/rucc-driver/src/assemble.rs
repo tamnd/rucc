@@ -64,7 +64,8 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
                 done(object, messages, 0, deps, preprocessed, temps)
             }
             Err((line, why)) => {
-                messages.push(format!("{name}:{line}: error: {why}"));
+                let (file, line) = source_line(&text, name, line);
+                messages.push(format!("{file}:{line}: error: {why}"));
                 done(Artifact::Nothing, messages, 1, deps, preprocessed, temps)
             }
         };
@@ -103,7 +104,8 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
             // The same shape every other diagnostic in this compiler has, so that a build log
             // reads the same whether the file that stopped it was C or assembly and so that an
             // editor which jumps to a position finds this one too.
-            messages.push(format!("{name}:{}: error: {}", trouble.line, trouble.why));
+            let (file, line) = source_line(&text, name, trouble.line);
+            messages.push(format!("{file}:{line}: error: {}", trouble.why));
             return done(Artifact::Nothing, messages, 1, deps, preprocessed, temps);
         }
     };
@@ -117,6 +119,48 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
             done(Artifact::Nothing, messages, 1, deps, preprocessed, temps)
         }
     }
+}
+
+/// The file and the line a line of the text came from, by the line markers in front of it.
+///
+/// The preprocessor leaves `# 42 "foo.S"` in front of the text of each file it reads and after
+/// each run of lines it dropped, and gas reads them and says where in the source an error is. So
+/// does this. `line` counts from one, and a text with no markers is its own source.
+fn source_line(text: &str, name: &str, line: usize) -> (String, usize) {
+    let mut file = name.to_owned();
+    let mut next = 1;
+    for raw in text.lines().take(line.saturating_sub(1)) {
+        match marker(raw) {
+            Some((number, named)) => {
+                next = number;
+                if let Some(named) = named {
+                    file = named;
+                }
+            }
+            None => next += 1,
+        }
+    }
+    (file, next)
+}
+
+/// The line number and the file name of a line marker, `# 42 "foo.S" 1` or `#line 42 "foo.S"`,
+/// and nothing for any other line.
+fn marker(raw: &str) -> Option<(usize, Option<String>)> {
+    let rest = raw.trim_start().strip_prefix('#')?;
+    let rest = rest.strip_prefix("line").unwrap_or(rest);
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let digits = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+    let number = rest[..digits].parse().ok()?;
+    let rest = rest[digits..].trim_start();
+    if rest.is_empty() {
+        return Some((number, None));
+    }
+    let named = rest.strip_prefix('"')?;
+    let end = named.find('"')?;
+    Some((number, Some(named[..end].to_owned())))
 }
 
 /// One of these, with the fields nothing here fills in left as they are.

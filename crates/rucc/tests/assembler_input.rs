@@ -329,6 +329,31 @@ fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line(
 }
 
 #[test]
+fn an_error_in_a_preprocessed_file_gives_the_line_of_the_source() {
+    // The preprocessor drops the lines of a directive and puts the text of a header in front, so
+    // the line in its output is not the line in the file. gas follows the line markers and says
+    // `wake.S:9`, and so must this. FreeBSD's acpi_wakecode.S had an error on line 71 reported on
+    // line 146.
+    let dir = dir("markers");
+    write(&dir, "wake.h", "#define ONE 1\n#define TWO 2\n\t.data\n\t.long ONE\n");
+    let text = "#include \"wake.h\"\n/* a\n   comment */\n#if TWO\n\t.text\n#endif\n\n\t.long TWO\n\
+                \tvpdpbusd %zmm1, %zmm2, %zmm3\n";
+    write(&dir, "wake.S", text);
+    let (ok, said) = run(&dir, &["-c", "wake.S"]);
+    assert!(!ok, "an instruction with no bytes behind it was accepted:\n{said}");
+    assert!(
+        said.contains("wake.S:9: error:"),
+        "the message is not on the line of the source:\n{said}"
+    );
+
+    write(&dir, "head.S", "#include \"wake.h\"\n\t.long 3\n\t.bogus\n");
+    write(&dir, "wake.h", "\t.data\n\n\t.nonsense\n");
+    let (ok, said) = run(&dir, &["-c", "head.S"]);
+    assert!(!ok, "an unknown directive was accepted:\n{said}");
+    assert!(said.contains("wake.h:3: error:"), "the message is not in the header:\n{said}");
+}
+
+#[test]
 fn a_riscv_file_assembled_under_lp64_says_soft_float_like_the_c_beside_it() {
     // The kernel builds with `-mabi=lp64`, and ld refuses to link its vDSO when the objects from
     // assembly say double float and the ones from C say soft float.
