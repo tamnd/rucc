@@ -519,6 +519,10 @@ pub struct BranchProtection {
     /// Whether a function opens with `bti c` and every label an indirect jump may reach with
     /// `bti j`, so that a machine that checks branch targets faults on a jump anywhere else.
     pub bti: bool,
+    /// Whether the code works under the guarded control stack, which gcc 15 added. A call and a
+    /// return are all that touch the return address in code this compiler writes, so nothing in
+    /// the code changes: the object says so in its property note.
+    pub gcs: bool,
 }
 
 impl SignReturn {
@@ -546,12 +550,13 @@ impl BranchProtection {
     ///
     /// # Errors
     ///
-    /// The B key and the guarded control stack, which are not written yet, and anything gcc does
-    /// not know, with the reason in words.
+    /// The B key, which is not written yet, and anything gcc does not know, with the reason in
+    /// words. `standard` is BTI and `pac-ret` here, and the driver adds the guarded control stack
+    /// for a gcc 15 or later persona, as that gcc does.
     pub fn parse(s: &str) -> Result<Self, String> {
         match s {
             "none" => return Ok(Self::default()),
-            "standard" => return Ok(Self { sign: SignReturn::NonLeaf, bti: true }),
+            "standard" => return Ok(Self { sign: SignReturn::NonLeaf, bti: true, gcs: false }),
             _ => {}
         }
         let mut out = Self::default();
@@ -561,15 +566,16 @@ impl BranchProtection {
                 "pac-ret" => out.sign = SignReturn::NonLeaf,
                 "leaf" => leaf = true,
                 "bti" => out.bti = true,
-                "b-key" | "gcs" => {
+                "gcs" => out.gcs = true,
+                "b-key" => {
                     return Err(format!(
-                        "`{part}` is not supported yet, only pac-ret, leaf and bti are"
+                        "`{part}` is not supported yet, only pac-ret, leaf, bti and gcs are"
                     ));
                 }
                 _ => {
                     return Err(format!(
                         "`{s}` is not a branch protection, which is none, standard, or pac-ret, \
-                         leaf and bti joined with +"
+                         leaf, bti and gcs joined with +"
                     ));
                 }
             }
@@ -1928,7 +1934,7 @@ mod tests {
     #[test]
     fn branch_protection_reads_the_way_gcc_does() {
         let read = |s: &str| BranchProtection::parse(s);
-        let sign = |sign, bti| Ok(BranchProtection { sign, bti });
+        let sign = |sign, bti| Ok(BranchProtection { sign, bti, gcs: false });
         assert_eq!(read("none"), sign(SignReturn::None, false));
         assert_eq!(read("standard"), sign(SignReturn::NonLeaf, true));
         assert_eq!(read("pac-ret"), sign(SignReturn::NonLeaf, false));
@@ -1936,6 +1942,8 @@ mod tests {
         assert_eq!(read("pac-ret+leaf+bti"), sign(SignReturn::All, true));
         assert_eq!(read("bti+pac-ret+leaf"), sign(SignReturn::All, true));
         assert_eq!(read("bti"), sign(SignReturn::None, true));
+        let gcs = BranchProtection { sign: SignReturn::NonLeaf, bti: true, gcs: true };
+        assert_eq!(read("pac-ret+bti+gcs"), Ok(gcs));
         assert!(read("pac-ret+b-key").unwrap_err().contains("b-key"));
         assert!(read("leaf").unwrap_err().contains("without pac-ret"));
         assert!(read("pac-ret+").is_err());

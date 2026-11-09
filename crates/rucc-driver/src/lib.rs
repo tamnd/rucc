@@ -1109,6 +1109,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // loop: the vector registers are off once the extensions they belong to are, whichever flag
     // took those away, whichever flag took them, and in whichever order they came.
     let mut general_regs_only = false;
+    // Whether the last `-mbranch-protection=` said `standard`, which takes in the guarded control
+    // stack from gcc 15 on. Weighed after the loop, because `-fgnuc-version=` may come after it.
+    let mut standard_protection = false;
     // RISC-V's `-mabi=`, which is `Some(true)` for `lp64` and `ilp32` and `Some(false)` for
     // `lp64d` and `ilp32d`, weighed after the loop against what `-march=` says the machine has.
     let mut riscv_soft: Option<bool> = None;
@@ -3022,6 +3025,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let value = &arg["-mbranch-protection=".len()..];
                 opts.branch_protection =
                     rucc_target::BranchProtection::parse(value).map_err(err)?;
+                standard_protection = value == "standard";
             }
             _ if arch == rucc_target::Arch::Aarch64
                 && arg.starts_with("-msign-return-address=") =>
@@ -3888,9 +3892,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // there for as long as SSE2 is, since that is where a `double` is kept, and on AArch64 until
     // `-mgeneral-regs-only` says otherwise.
     let sse = |name| rucc_target::Feature::named(name).is_some_and(|it| opts.isa.has(it));
+    // `+nofp` in an AArch64 `-march=` takes away the FP and SIMD registers, as
+    // `-mgeneral-regs-only` does, and a later `+fp` or `+simd` gives them back. That is the NetBSD
+    // kernel's `armv8-a+nofp+nosimd`.
+    let nofp = opts.target.arch == rucc_target::Arch::Aarch64
+        && march.is_some_and(|name| {
+            name.split('+').skip(1).fold(false, |off, modifier| match modifier {
+                "nofp" => true,
+                "fp" | "simd" => false,
+                _ => off,
+            })
+        });
     opts.vector = match opts.target.arch {
         rucc_target::Arch::X86_64 => sse("sse2"),
-        _ => !general_regs_only,
+        _ => !general_regs_only && !nofp,
     };
     // On RISC-V the float registers are the D extension's, which `-march=` names or leaves out,
     // and a unit keeps a float in them only under the convention that passes one there. Under
@@ -4161,6 +4176,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if !std_given && opts.gnuc_given && opts.target.env != rucc_target::Env::Msvc {
         opts.std = opts.gnuc.default_std();
         opts.gnu_extensions = true;
+    }
+    // gcc 15 added the guarded control stack to what `-mbranch-protection=standard` turns on.
+    if standard_protection && opts.gnuc.major >= 15 {
+        opts.branch_protection.gcs = true;
     }
     // The release the record of a coverage build claims, which is the release of the `libgcov.a`
     // the link takes. A freestanding unit and one with no system headers are left out. That is a
@@ -9970,6 +9989,36 @@ mod tests {
         assert!(said.contains("unknown option `-msse4.2`"), "{said}");
         let (opts, _) = compile(&["--target=riscv64-linux-gnu", "-march=rv64gc", "-c", "a.c"]);
         assert_eq!(opts.isa, rucc_target::Isa::NONE);
+    }
+
+    /// tamnd/rucc#4096. The NetBSD AArch64 kernel builds with `-march=armv8-a+nofp+nosimd`, which
+    /// takes the float and vector registers away, as `-mgeneral-regs-only` does.
+    #[test]
+    fn an_aarch64_march_with_nofp_takes_the_float_registers_away() {
+        const ARM: &str = "--target=aarch64-unknown-netbsd";
+        let vector = |march: &str| compile(&[ARM, march, "-c", "a.c"]).0.vector;
+        assert!(!vector("-march=armv8-a+nofp+nosimd"));
+        assert!(!vector("-march=armv8-a+crc+nofp"));
+        assert!(vector("-march=armv8-a+nofp+fp"));
+        assert!(vector("-march=armv8-a+crc"));
+        // The same modifier means nothing on another machine's `-march=`.
+        assert!(compile(&["--target=riscv64-unknown-netbsd", "-c", "a.c"]).0.vector);
+    }
+
+    /// tamnd/rucc#4096. gcc 15 put the guarded control stack in `-mbranch-protection=standard`.
+    #[test]
+    fn standard_branch_protection_has_the_guarded_control_stack_from_gcc_15() {
+        const ARM: &str = "--target=aarch64-unknown-freebsd";
+        let gcs = |line: &[&str]| {
+            let args: Vec<&str> = [ARM].iter().chain(line).chain(&["-c", "a.c"]).copied().collect();
+            compile(&args).0.branch_protection.gcs
+        };
+        assert!(gcs(&["-mbranch-protection=standard"]));
+        assert!(gcs(&["-mbranch-protection=standard", "-fgnuc-version=15.2.0"]));
+        assert!(!gcs(&["-mbranch-protection=standard", "-fgnuc-version=14.2.0"]));
+        assert!(!gcs(&["-fgnuc-version=15.2.0", "-mbranch-protection=pac-ret+bti"]));
+        assert!(gcs(&["-fgnuc-version=14.2.0", "-mbranch-protection=bti+gcs"]));
+        assert!(!gcs(&["-mbranch-protection=standard", "-mbranch-protection=bti"]));
     }
 
     /// tamnd/rucc#2006. `-march=` on AArch64 decides the CRC32 extension, which is what

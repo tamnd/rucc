@@ -3459,6 +3459,9 @@ fn output(opts: &Options, target: &TargetInfo, indirect: bool) -> rucc_object::O
         if opts.branch_protection.sign != SignReturn::None {
             arm |= rucc_object::Property::PAC;
         }
+        if opts.branch_protection.gcs {
+            arm |= rucc_object::Property::GCS;
+        }
     }
     rucc_object::Output {
         sections: rucc_object::Sections {
@@ -3673,6 +3676,21 @@ mod tests {
         let mut fs = MemoryFileSystem::new();
         fs.insert("/main.c", source.to_owned().into_bytes());
         compile(opts, "/main.c", &fs)
+    }
+
+    /// tamnd/rucc#4096. The guarded control stack is the third bit of the AArch64 feature word,
+    /// beside BTI and PAC, as gcc 15 writes it for `-mbranch-protection=standard`.
+    #[test]
+    fn the_guarded_control_stack_is_a_bit_of_the_aarch64_property_note() {
+        let mut opts = options();
+        opts.target = "aarch64-unknown-freebsd".parse::<Triple>().unwrap();
+        let target = TargetInfo::new(opts.target);
+        opts.branch_protection = rucc_target::BranchProtection::parse("pac-ret+bti+gcs").unwrap();
+        let arm = output(&opts, &target, false).property.arm;
+        let all = rucc_object::Property::BTI | rucc_object::Property::PAC;
+        assert_eq!(arm, all | rucc_object::Property::GCS);
+        opts.branch_protection.gcs = false;
+        assert_eq!(output(&opts, &target, false).property.arm, all);
     }
 
     /// An object names its source file without the directory, as gcc's `.file` does, both when
