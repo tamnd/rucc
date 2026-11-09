@@ -362,7 +362,7 @@ impl Parser<'_> {
     }
 
     /// The arguments of a call, with the opening parenthesis already consumed.
-    fn call_arguments(&mut self) -> ExprList {
+    pub(crate) fn call_arguments(&mut self) -> ExprList {
         let mut args = Vec::new();
         if !self.cursor.at_punct(Punct::RParen) {
             loop {
