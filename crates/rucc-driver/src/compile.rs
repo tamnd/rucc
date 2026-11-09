@@ -4059,6 +4059,20 @@ mod tests {
         assert!(text.contains("put"), "{text}");
     }
 
+    /// gcc's guard name, which a program defines to keep the header out. FreeBSD's kernel does
+    /// that in aesni_os.h, since its own `malloc` is a macro of three arguments and the
+    /// declaration in the header would call it with one.
+    #[test]
+    fn the_shipped_mm_malloc_stays_out_when_its_gcc_guard_is_defined() {
+        let text = shipped(concat!(
+            "#define _MM_MALLOC_H_INCLUDED 1\n",
+            "#define malloc(size, type, flags) kmalloc(size, type, flags)\n",
+            "#include <xmmintrin.h>\n",
+            "__m128 add(__m128 a, __m128 b) { return _mm_add_ps(a, b); }\n",
+        ));
+        assert!(text.contains("add"), "{text}");
+    }
+
     /// `<xmmintrin.h>` is the next rung of the chain and pulls the other two in behind it, so a
     /// program that includes this one alone has to get all three. What the intrinsics answer is
     /// checked the same way `<mmintrin.h>` next door is checked and for the same reason: a
