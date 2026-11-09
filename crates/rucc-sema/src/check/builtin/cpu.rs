@@ -43,10 +43,11 @@
 //! a program asking about a feature the compiler has never heard of is asking a question whose
 //! answer it cannot use.
 //!
-//! # Only on x86-64
+//! # Only on x86
 //!
-//! The objects are libgcc's for x86 and nothing on another target defines them, so a call there
-//! would link against a name no library has. It is refused where it is written instead.
+//! The objects are libgcc's for x86, on x86-64 and on i386 both, and the words have the same
+//! layout on the two. Nothing on another target defines them, so a call there would link against
+//! a name no library has. It is refused where it is written instead.
 
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
@@ -292,7 +293,7 @@ impl Checker<'_> {
     /// What a call to one of the three becomes, if the name is one of them.
     ///
     /// Answers nothing for every other call in the program, and nothing for `__builtin_cpu_init`
-    /// on x86-64 either, since the call already made is the answer there. Taken after the call has
+    /// on x86 either, since the call already made is the answer there. Taken after the call has
     /// been checked, for the reason `check/builtin/trap.rs` gives: the rows carry signatures, so
     /// the prototype is what reports a call with the wrong number of arguments, and the type the
     /// answer has is the one the row gives it.
@@ -315,8 +316,8 @@ impl Checker<'_> {
             _ => return None,
         };
         let spelled = spelled.to_owned();
-        if self.cx.target.tuple.arch().as_str() != "x86_64" {
-            let what = format!("`{spelled}` is only available on x86-64");
+        if !matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") {
+            let what = format!("`{spelled}` is only available on x86");
             let note = "what it reads is written by the x86 half of libgcc, and nothing on this \
                         target defines it";
             self.report(Diagnostic::error(what, span).with_code(CODE).note(note, span));

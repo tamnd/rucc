@@ -8642,7 +8642,7 @@ decl #0 x : int object external static defined
         ] {
             let result = run(&opts, source);
             assert!(
-                result.messages.iter().any(|m| m.contains("only available on x86-64")),
+                result.messages.iter().any(|m| m.contains("only available on x86")),
                 "{source}{:?}",
                 result.messages
             );
@@ -15128,6 +15128,99 @@ block2:
                 result.messages
             );
         }
+    }
+
+    /// longlong.h writes its i386 `udiv_qrnnd` with the outputs cast, `"=a" ((USItype) (q))`, for
+    /// a `q` that is an `unsigned long`. gcc takes a cast off an output where it changes no bit,
+    /// and libquadmath's printf/divrem.c on NetBSD/i386 needs that. A cast that changes the width
+    /// is still not an object, and gcc refuses it.
+    #[test]
+    fn an_asm_output_cast_to_a_type_of_its_own_width_is_the_object() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "i486--netbsdelf".parse::<Triple>().unwrap();
+        let source = "typedef unsigned int USItype;\n\
+                      void f(unsigned long *q, unsigned long *r, unsigned long n1,\n\
+                             unsigned long n0, unsigned long d) {\n\
+                        unsigned long a, b;\n\
+                        __asm__(\"divl %4\" : \"=a\" ((USItype) (a)), \"=d\" ((USItype) (b))\n\
+                                : \"0\" ((USItype) (n0)), \"1\" ((USItype) (n1)),\n\
+                                  \"rm\" ((USItype) (d)));\n\
+                        *q = a;\n\
+                        *r = b;\n\
+                      }\n";
+        let ran = run(&opts, source);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        assert!(ran.text().contains("divl %"), "{}", ran.text());
+
+        // Two casts, one of them to a pointer of the same width, are taken off in turn.
+        let ran = run(&opts, "void f(long x) { __asm__(\"\" : \"=r\" ((int) (void *) x)); }\n");
+        assert_eq!(ran.messages, Vec::<String>::new());
+
+        for source in [
+            "void f(int x) { __asm__(\"\" : \"=r\" ((char) x)); }\n",
+            "void f(int x) { __asm__(\"\" : \"=r\" ((float) x)); }\n",
+            "void f(long long x) { __asm__(\"\" : \"=r\" ((int) x)); }\n",
+        ] {
+            let said = run(&opts, source).messages.join("\n");
+            assert!(said.contains("lvalue required in 'asm' statement"), "{source}{said}");
+        }
+        let said = run(
+            &opts,
+            "const int g = 1;\nvoid f(void) { __asm__(\"\" : \"=r\" ((unsigned) g)); }\n",
+        )
+        .messages
+        .join("\n");
+        assert!(said.contains("read-only variable 'g' used as 'asm' output"), "{said}");
+    }
+
+    /// A `__float128` constant is written into the frame a word at a time and read back. On i386
+    /// the word is four bytes, and libquadmath's tanq.c and x2y2m1q.c on NetBSD/i386 stopped at
+    /// "no rule lowers `store.i64`" before.
+    #[test]
+    fn a_float128_constant_on_i386_is_written_four_bytes_at_a_time() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "i486--netbsdelf".parse::<Triple>().unwrap();
+        // At -O2, as libquadmath is built, the conversions of 0 and -1 are folded into constants.
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let source = "__float128 f(__float128 x) {\n\
+                        __float128 y[2], z = 0;\n\
+                        y[0] = z;\n\
+                        y[1] = -1;\n\
+                        return x + y[0] + y[1];\n\
+                      }\n";
+        let ran = run(&opts, source);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        let text = ran.text();
+        let high = ["$-1073807360,", "$3221159936,", "$0xbfff0000,"];
+        assert!(high.iter().any(|word| text.contains(word)), "the high word of -1: {text}");
+        assert!(text.contains("\tcall\t__addtf3"), "{text}");
+    }
+
+    /// On i386 the two words libgcc fills in are where they are on x86-64, so
+    /// `__builtin_cpu_supports` and `__builtin_cpu_is` read them the same way. libgfortran's
+    /// matmul files call both on NetBSD/i386. In position independent code the object is reached
+    /// through the global offset table, since libgcc.a is linked into the shared object.
+    #[test]
+    fn the_cpu_builtins_read_the_libgcc_words_on_i386_too() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "i486--netbsdelf".parse::<Triple>().unwrap();
+        let source = "int f(void) { return __builtin_cpu_supports(\"avx2\") + __builtin_cpu_is(\"intel\"); }\n\
+                      void g(void) { __builtin_cpu_init(); }\n";
+        let ran = run(&opts, source);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        let text = ran.text();
+        assert!(text.contains("__cpu_model"), "{text}");
+        assert!(text.contains("$1024"), "avx2 is bit 10 of the fourth word: {text}");
+        assert!(text.contains("$1,"), "intel is vendor 1: {text}");
+        assert!(text.contains("\tcall\t__cpu_indicator_init"), "{text}");
+
+        opts.pic = Pic::Library;
+        let ran = run(&opts, source);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        assert!(ran.text().contains("__cpu_model@GOT"), "{}", ran.text());
     }
 
     /// An `asm` at file scope whose template is directives is the whole of what the incbin

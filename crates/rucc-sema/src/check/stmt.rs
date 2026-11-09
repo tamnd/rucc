@@ -44,7 +44,9 @@ use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{Encoding, Remarks, StringLiteral};
-use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_record, is_void};
+use rucc_types::{
+    IntegerInfo, Qualifiers, TypeId, compatible, is_integer, is_pointer, is_record, is_void,
+};
 
 use crate::asm::{Asm, AsmOperand, AsmOperandList, FileAsm, LabelList, in_a_register};
 use crate::check::expr::Target;
@@ -53,7 +55,7 @@ use crate::check::switch::Switched;
 use crate::check::{Checker, Promoted};
 use crate::decl::{DeclId, DeclList};
 use crate::eval;
-use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::stmt::{Case, Stmt, StmtId};
 use crate::tast::{Const, Label, LabelId, StrId};
 
@@ -1166,7 +1168,10 @@ impl Checker<'_> {
             constraint = self.asm_matching(constraint, named, span);
         }
         let text = spelling(&self.tast[constraint]);
-        let value = self.expr(operand.value);
+        let mut value = self.expr(operand.value);
+        if output {
+            value = self.uncast_output(value);
+        }
         let ty = self.tast[value].ty;
         let lvalue = matches!(self.tast[value].category, Category::Lvalue | Category::Bitfield);
 
@@ -1230,6 +1235,48 @@ impl Checker<'_> {
         // and a variable into its value.
         let value = if output || memory || record { value } else { self.value(value) };
         AsmOperand { name: operand.name, constraint, value, memory }
+    }
+
+    /// An output written as a cast of an object, as the object, where the cast changes nothing.
+    ///
+    /// gcc strips such a cast before it asks for an lvalue, and `longlong.h` relies on it: on
+    /// i386 its `udiv_qrnnd` writes `"=a" ((USItype) (q))` for a `q` that is an `unsigned long`.
+    /// The cast is a check that the object has the width of a register. So a cast is taken off
+    /// only where it is one gcc calls a no-op: between integers or pointers of the same width,
+    /// or to a type the object already has. A cast that changes the width stays, and the output
+    /// is then refused as gcc refuses it.
+    fn uncast_output(&mut self, value: ExprId) -> ExprId {
+        let ExprKind::Cast(operand) = self.tast[value].kind else { return value };
+        let inner = match self.tast[operand].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            ExprKind::Cast(_) => self.uncast_output(operand),
+            _ => return value,
+        };
+        let object = self.tast[inner].category == Category::Lvalue;
+        if object && self.same_width(self.tast[value].ty, self.tast[inner].ty) {
+            inner
+        } else {
+            value
+        }
+    }
+
+    /// Whether a conversion from `from` to `to` keeps every bit as it is, which is gcc's
+    /// `tree_nop_conversion_p` for the types C has.
+    fn same_width(&mut self, to: TypeId, from: TypeId) -> bool {
+        let bits = |ty: TypeId| {
+            if is_pointer(&self.types, ty) {
+                return Some(self.cx.target.pointer_width);
+            }
+            rucc_types::integer_info(&self.types, ty, self.cx.target).map(|info| info.width)
+        };
+        let widths = (bits(to), bits(from));
+        match widths {
+            (Some(to), Some(from)) => to == from,
+            _ => {
+                let (to, from) = (self.types.unqualified(to), self.types.unqualified(from));
+                compatible(&self.types, to, from)
+            }
+        }
     }
 
     /// An input's constraint with the output it is tied to by name, `"[sum]"`, tied to it by

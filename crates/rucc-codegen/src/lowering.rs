@@ -375,7 +375,7 @@ impl Step {
             Self::Bytes => expand::bytes(func, conv.byte_swaps),
             Self::Counts => expand::counts(func, counts),
             Self::Maths => maths::calls(func, names, conv.abi, fused),
-            Self::Quads => quad::calls(func, names, conv.abi),
+            Self::Quads => quad::calls(func, names, conv.abi, conv.word),
             Self::Floats => expand::floats(func, conv.word),
             Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned, goal),
             Self::Rounds => expand::rounds(func, conv.stack_align, conv.word),
