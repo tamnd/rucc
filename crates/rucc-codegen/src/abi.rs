@@ -1291,8 +1291,15 @@ fn by_runtime(
     what: Copying,
 ) -> u32 {
     let Copying { from, up, count, span, linked } = what;
-    let routine = capability::libcall(rucc_ir::Opcode::Memcpy, "big")
-        .expect("the runtime copies a block too large to unroll");
+    // On a target whose library may have no `memcpy`, the routine is `memmove`. The two sides do
+    // not overlap, so that is right too.
+    let (opcode, mode) = if conv.copies_by_moving {
+        (rucc_ir::Opcode::Memmove, "any")
+    } else {
+        (rucc_ir::Opcode::Memcpy, "big")
+    };
+    let routine =
+        capability::libcall(opcode, mode).expect("the runtime copies a block too large to unroll");
 
     // Where the copy goes, which is a distance up the outgoing area and so is the stack pointer
     // plus that distance. A `lea` rather than an add, because the stack pointer is not this

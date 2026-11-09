@@ -398,7 +398,9 @@ impl Step {
             Self::Maths => maths::calls(func, names, conv.abi, built.fused),
             Self::Quads => quad::calls(func, names, conv.abi, conv.word),
             Self::Floats => expand::floats(func, conv.word),
-            Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned, goal),
+            Self::Bulk => {
+                expand::bulk(func, names, conv.word, conv.unaligned, goal, conv.copies_by_moving)
+            }
             Self::Rounds => expand::rounds(func, conv.stack_align, conv.word),
             Self::Varargs => varargs::lists(func, conv),
             Self::Forks if !cmov => forks::branches(func),

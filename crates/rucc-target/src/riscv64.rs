@@ -294,6 +294,7 @@ pub static LP64D: CallRegs = CallRegs {
     shared_positions: false,
     slotted: false,
     frameless: false,
+    copies_by_moving: false,
     int_returns: &INT_RETURNS,
     sse_returns: &FP_RETURNS,
     x87_returns: &NO_X87,

@@ -55,3 +55,11 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `wasm32-none` | 4 | 2 | no | freestanding wasm, which is the second back end without the libc question |
 
 45 rows. The plan reaches tier 1 on 10, tier 2 on 21, tier 3 on 8 and recognizes 6, which is 39 targets that compile and link.
+
+## Plan 9
+
+The two Plan 9 rows follow kencc, which is `6c` on amd64 and `7c` on arm64, and `-fkencc` turns on its dialect. A program that mixes objects from rucc and from kencc must work, so the data model, the struct layout, the calling convention and the reserved registers are those of kencc.
+
+Integer work never uses a vector register on these targets. A struct copy, a struct assignment, a `memset` and an initialiser are general register moves, and a copy too large to write out is a call. rucc does not vectorize loops on any target. The 9front kernel does not save the vector registers on entry, so this rule is necessary for kernel code. The rule applies to all code on these targets, and not only to the kernel, which answers open question 8 of the plan. kencc does the same, and the cost is small, because most copies in the tree are of small structs. A `float` or a `double` still goes in a vector register, as in kencc, and kernel code that uses one must save the state itself.
+
+A copy that is too large to write out calls `memmove`, and never `memcpy`. A fill calls `memset`. The C library of Plan 9 has a `memcpy`, but it is `memmove` under a second name, and a kernel or a library that gives only `memmove` must link.

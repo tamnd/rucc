@@ -79,5 +79,12 @@ fn render() -> String {
         counts[3],
         rucc_tuple::planned_working_count()
     ));
+    out.push_str(PLAN9);
     out
 }
+
+/// What the two Plan 9 rows promise beyond the table, per 08 and 09.3 of the rucc-plan9 plan.
+const PLAN9: &str = "\n## Plan 9\n\n\
+The two Plan 9 rows follow kencc, which is `6c` on amd64 and `7c` on arm64, and `-fkencc` turns on its dialect. A program that mixes objects from rucc and from kencc must work, so the data model, the struct layout, the calling convention and the reserved registers are those of kencc.\n\n\
+Integer work never uses a vector register on these targets. A struct copy, a struct assignment, a `memset` and an initialiser are general register moves, and a copy too large to write out is a call. rucc does not vectorize loops on any target. The 9front kernel does not save the vector registers on entry, so this rule is necessary for kernel code. The rule applies to all code on these targets, and not only to the kernel, which answers open question 8 of the plan. kencc does the same, and the cost is small, because most copies in the tree are of small structs. A `float` or a `double` still goes in a vector register, as in kencc, and kernel code that uses one must save the state itself.\n\n\
+A copy that is too large to write out calls `memmove`, and never `memcpy`. A fill calls `memset`. The C library of Plan 9 has a `memcpy`, but it is `memmove` under a second name, and a kernel or a library that gives only `memmove` must link.\n";
