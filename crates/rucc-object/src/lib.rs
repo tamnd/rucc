@@ -82,6 +82,7 @@ mod coff;
 mod elf;
 mod file;
 mod macho;
+pub mod plan9;
 mod section;
 mod source;
 pub mod wasm;
