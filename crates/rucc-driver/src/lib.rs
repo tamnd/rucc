@@ -1318,6 +1318,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // `rucc_diag::Named::pedantic_errors` for why it is not `-Werror`.
             "-pedantic-errors" => {
                 opts.pedantic = true;
+                opts.named_warnings.flag("pedantic");
                 opts.named_warnings.pedantic_errors();
             }
             "-P" => opts.line_markers = false,
@@ -1417,7 +1418,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-trigraphs" => opts.trigraphs = true,
             // `-Wpedantic` is the same flag under the name the `-W` family gives it, which is
             // the spelling a build system that groups its warning flags tends to write.
-            "-pedantic" | "-Wpedantic" => opts.pedantic = true,
+            // Recorded by name too, because it turns on `-Wpointer-sign` as `-Wall` does.
+            "-pedantic" | "-Wpedantic" => {
+                opts.pedantic = true;
+                opts.named_warnings.flag("pedantic");
+            }
             // Both directions, because a build that needs this for one directory turns it back
             // off for the next one rather than leaving it on for the whole tree.
             "-fpermissive" => opts.permissive = true,
@@ -3345,8 +3350,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // accepted, because gcc accepts it too, but `-Werror=` and `-Wno-error=` of one are
             // not. What they say about a warning this compiler gives is recorded by name, so
             // `-Wno-pointer-sign` quiets the warning gcc files under that name. The format checks are
-            // off until `-Wformat` or `-Wall` asks for them, as in gcc. `-Wall` turns on nothing
-            // else yet, which #485 is about.
+            // off until `-Wformat` or `-Wall` asks for them, as in gcc, and `-Wpointer-sign` until
+            // `-Wall` or `-Wpedantic` does. `-Wall` turns on nothing else yet, which #485 is about.
             _ if arg.starts_with("-W") => {
                 let name = &arg["-W".len()..];
                 opts.named_warnings.flag(name);

@@ -152,6 +152,13 @@ const QUIET: &[(&str, &str)] = &[
     ("unknown-pragmas", "unknown-pragmas"),
 ];
 
+/// The options gcc leaves off until they are named or `-Wall` or `-Wpedantic` is given. Sorted.
+///
+/// `-Wpointer-sign` is one: gcc's `c.opt` has it `LangEnabledBy(C ObjC,Wall || Wpedantic)`.
+/// NetBSD builds `lib/i18n_module` with `-Werror` and without `-Wall`, and its citrus modules pass
+/// a `uint32_t *` where a `wchar_t *` goes, which gcc compiles silently.
+const ALL_OR_PEDANTIC: &[&str] = &["pointer-sign"];
+
 /// The options gcc leaves off until they are named or `-Wextra` is given, which `-Wall` does
 /// not turn on. Sorted.
 const EXTRA: &[&str] = &["maybe-musttail-local-addr"];
@@ -273,13 +280,17 @@ impl Named {
     /// is. The name has to be asked for itself or through its group, and the group must not have
     /// been turned off, since `-Wno-format` silences `-Wformat-extra-args` along with the rest.
     /// One of [`OWN`] asked for itself is asked for whatever its group was told, one of
-    /// [`NAMED_ONLY`] is only asked for by name, and one of [`EXTRA`] by name or by `-Wextra`.
+    /// [`NAMED_ONLY`] is only asked for by name, one of [`EXTRA`] by name or by `-Wextra`, and one
+    /// of [`ALL_OR_PEDANTIC`] by name, by `-Wall` or by `-Wpedantic`.
     fn asked(&self, name: &str) -> bool {
         if NAMED_ONLY.binary_search(&name).is_ok() {
             return self.on.contains(name);
         }
         if EXTRA.binary_search(&name).is_ok() {
             return self.on.contains(name) || self.on.contains("extra");
+        }
+        if ALL_OR_PEDANTIC.binary_search(&name).is_ok() {
+            return self.on.contains(name) || self.all || self.on.contains("pedantic");
         }
         let Ok(at) = QUIET.binary_search_by(|&(known, _)| known.cmp(name)) else { return true };
         if self.on.contains(name) && OWN.contains(&name) {
@@ -591,14 +602,38 @@ mod tests {
     #[test]
     fn no_error_of_a_name_keeps_that_warning_a_warning_under_werror() {
         let mut named = Named::default();
-        assert!(named.promoted(&warning("E0673"), true));
-        named.flag("no-error=pointer-sign");
-        assert!(!named.promoted(&warning("E0673"), true));
-        assert!(!named.silenced(&warning("E0673")));
+        assert!(named.promoted(&warning("E0770"), true));
+        named.flag("no-error=deprecated-declarations");
+        assert!(!named.promoted(&warning("E0770"), true));
+        assert!(!named.silenced(&warning("E0770")));
         // A warning with no option is not reached by any name.
         named.flag("no-all");
         assert!(named.promoted(&warning("E0001"), true));
         assert!(!named.silenced(&warning("E0001")));
+    }
+
+    /// gcc 16 compiles `int *p = (unsigned *)0;` silently with no flags, and says the pointers
+    /// differ in signedness under `-Wall`, `-Wpedantic` or `-Wpointer-sign`. `-Wno-error=` of
+    /// the name does not turn it on, and `-Werror=` does.
+    #[test]
+    fn the_pointer_sign_check_waits_for_wall_or_wpedantic() {
+        assert!(ALL_OR_PEDANTIC.windows(2).all(|pair| pair[0] < pair[1]));
+        let heard = |flags: &[&str]| {
+            let mut named = Named::default();
+            for flag in flags {
+                named.flag(flag);
+            }
+            !named.silenced(&warning("E0673"))
+        };
+        assert!(!heard(&[]));
+        assert!(!heard(&["no-error=pointer-sign"]));
+        assert!(!heard(&["extra", "format"]));
+        assert!(heard(&["all"]));
+        assert!(heard(&["pedantic"]));
+        assert!(heard(&["pointer-sign"]));
+        assert!(heard(&["error=pointer-sign"]));
+        assert!(!heard(&["all", "no-pointer-sign"]));
+        assert!(!heard(&["all", "no-all"]));
     }
 
     /// The format checks are quiet by default and heard under `-Wall` or `-Wformat`, as in gcc
