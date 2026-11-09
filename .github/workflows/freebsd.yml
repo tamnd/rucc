@@ -62,7 +62,7 @@ jobs:
           mem: ${{ steps.size.outputs.mem }}
           prepare: |
             set -e
-            pkg install -y bash curl git gcc binutils
+            pkg install -y bash curl git gcc binutils zip
             curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             cat > /root/ci.env <<'EOF'
             . /root/.cargo/env
@@ -107,7 +107,9 @@ jobs:
           rucc=$CARGO_TARGET_DIR/debug/rucc
           "$rucc" --print-config
           "$rucc" --version
-          "$rucc" -dumpmachine
+          # The release of this machine, with its minor number, as the base system's cc says it.
+          want="x86_64-unknown-freebsd$(uname -r | cut -d- -f1)"
+          test "$("$rucc" -dumpmachine)" = "$want"
       # The milestone is a program that rucc compiles, the system's ld links and the system's
       # loader runs, with no flag that names a directory.
       - name: hello world with the system's ld
@@ -122,3 +124,18 @@ jobs:
           "$rucc" -v hello.c -o hello
           file hello
           ./hello | grep -q '^hello$'
+      # The script that the release job runs in its FreeBSD VM, run here on the debug binary. The
+      # release is the first run of it on FreeBSD otherwise, and a release that stops in its last
+      # step is the worst place to find that tar, date or git differ here. zip is installed for it.
+      # The checkout belongs to the runner's user and the VM runs as root, so git is told that the
+      # directory is safe.
+      - name: the release archive
+        if: always()
+        shell: freebsd {0}
+        run: |
+          set -e
+          . /root/ci.env
+          git config --global --add safe.directory "$PWD"
+          bash .github/package.sh rucc-check-x86_64-unknown-freebsd "$CARGO_TARGET_DIR/debug/rucc" /var/tmp/dist
+          ls -l /var/tmp/dist
+          cd /var/tmp/dist && sha256sum -c rucc-check-x86_64-unknown-freebsd.tar.gz.sha256
