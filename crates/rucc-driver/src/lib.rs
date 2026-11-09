@@ -1062,6 +1062,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut isa = rucc_target::Choices::new();
     let mut isa_flag: Option<&str> = None;
     let mut march: Option<&str> = None;
+    let mut tuned = false;
     // What `-fexceptions` and `-fno-exceptions` last said, if either was written. It is kept apart
     // from the field because `-fnon-call-exceptions` turns exceptions on only when neither was,
     // which is gcc's rule and is why `-fno-exceptions -fnon-call-exceptions` defines no
@@ -3285,7 +3286,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // target's processors. `-mtune=` says what to schedule for and changes nothing a
             // program can see.
             _ if arg.starts_with("-march=") => march = Some(&arg["-march=".len()..]),
-            _ if arg.starts_with("-mtune=") || arg.starts_with("-mcpu=") => {}
+            _ if arg.starts_with("-mtune=") => tuned = true,
+            _ if arg.starts_with("-mcpu=") => {}
             // The calling convention, which is not safe to ignore. Taken when it names the one
             // the target already uses and refused otherwise. The 32 bit ones are taken for the
             // compat vDSO of the riscv kernel, which is four files of assembly.
@@ -3814,6 +3816,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // machine is the target's. Anywhere else gcc is a cross compiler, which has no way to ask the
     // processor and refuses the value, and the kernel's `CONFIG_CC_HAS_MARCH_NATIVE` is that
     // answer.
+    opts.tuned = tuned || march.is_some();
     let host = if cfg!(target_arch = "x86_64") {
         Some(rucc_target::Arch::X86_64)
     } else if cfg!(target_arch = "aarch64") {
@@ -9984,6 +9987,21 @@ mod tests {
         // And `-march=` written before the target is still read for it.
         let (opts, _) = compile(&["-march=armv8-a+crc", "--target=aarch64-linux-gnu", "-c", "a.c"]);
         assert!(opts.isa.has(rucc_target::Feature::aarch64("crc").expect("a feature")));
+    }
+
+    /// tamnd/rucc#4088. NetBSD's gcc says it tunes for `nocona` until `-march=` or `-mtune=`
+    /// names a processor, so the driver says whether either did.
+    #[test]
+    fn a_march_or_an_mtune_says_the_unit_is_tuned() {
+        let tuned = |line: &[&str]| {
+            let args = [&["--target=x86_64-unknown-netbsd", "-c", "a.c"][..], line].concat();
+            compile(&args).0.tuned
+        };
+        assert!(!tuned(&[]));
+        assert!(!tuned(&["-m32", "-O2"]));
+        assert!(tuned(&["-mtune=generic"]));
+        assert!(tuned(&["-march=x86-64-v2"]));
+        assert!(tuned(&["-m32", "-march=i386"]));
     }
 
     #[test]

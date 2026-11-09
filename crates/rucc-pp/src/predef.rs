@@ -174,6 +174,9 @@ pub struct Predef {
     /// Whether `-mstrict-align` was given, which takes `__ARM_FEATURE_UNALIGNED` away on AArch64
     /// as it does in gcc.
     pub strict_align: bool,
+    /// Whether `-march=` or `-mtune=` named a processor to tune for, which takes away the default
+    /// tuning a BSD gcc was configured with.
+    pub tuned: bool,
     /// What `-mbranch-protection=` asked for, which decides `__ARM_FEATURE_BTI_DEFAULT` and
     /// `__ARM_FEATURE_PAC_DEFAULT` on AArch64. The kernel's assembly reads both to write the same
     /// note the compiler writes for C.
@@ -231,6 +234,7 @@ impl Predef {
             vector: true,
             soft_float: false,
             strict_align: false,
+            tuned: false,
             branch_protection: BranchProtection::default(),
             protector: Protector::None,
             address: false,
@@ -276,6 +280,7 @@ impl Predef {
             vector: opts.vector,
             soft_float: opts.soft_float,
             strict_align: opts.strict_align,
+            tuned: opts.tuned,
             branch_protection: opts.branch_protection,
             protector: opts.protector,
             address: opts.kasan.on,
@@ -645,6 +650,26 @@ fn optimization(d: &mut Defs, opts: &Predef) {
     d.flag_if(math.associative(trapping), "__ASSOCIATIVE_MATH__");
 }
 
+/// What gcc says on x86 in both widths, beside the processor and its extensions.
+///
+/// The two named address spaces and `__float80` are there in every dialect, although `__seg_fs`
+/// and `__seg_gs` are keywords in the GNU ones only. That is gcc 13 on Linux, and the BSD rows of
+/// the reference say the same. clang has its own list, so the Apple and MSVC rows keep theirs.
+///
+/// NetBSD's gcc is configured to tune for `nocona`, and says so when the command line names no
+/// processor. A `-march=` or a `-mtune=` replaces the default, as the driver specs of that gcc have
+/// it.
+fn x86(d: &mut Defs, triple: &Triple, opts: &Predef) {
+    let clang = triple.os == Os::Darwin || triple.env == Env::Msvc;
+    if !clang {
+        d.flag("__SEG_FS");
+        d.flag("__SEG_GS");
+        let float80 = if triple.arch == Arch::X86_64 { "16" } else { "12" };
+        d.set("__SIZEOF_FLOAT80__", float80);
+    }
+    d.flag_if(triple.os == Os::NetBsd && !opts.tuned, "__tune_nocona__");
+}
+
 /// The architecture, the operating system and the object format.
 fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // The macros a target with no backend predefines are not written down here. They are a
@@ -687,6 +712,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             }
             d.flag("__k8");
             d.flag("__k8__");
+            x86(d, &triple, opts);
             // Which code model, which is the small one unless `-mcmodel=kernel` said otherwise.
             // A kernel header reads the second to know its addresses are in the top 2 GiB.
             d.flag(match opts.code_model {
@@ -815,6 +841,8 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             if opts.gnu_extensions {
                 d.flag("i386");
             }
+            d.flag("__GCC_ASM_FLAG_OUTPUTS__");
+            x86(d, &triple, opts);
         }
         // clang defines all four spellings, and wasi-libc's `wasi/api.h` stops with `#error`
         // without `__wasm32__`.
@@ -3824,5 +3852,35 @@ mod tests {
         }
         // A freestanding ELF target keeps `__ELF__`.
         assert!(has(&set_for("x86_64-unknown-none"), "#define __ELF__ 1"));
+    }
+
+    /// tamnd/rucc#4088. gcc names the two address spaces and the x87 type on x86 in both widths,
+    /// and NetBSD's gcc names the processor it tunes for until a flag names another. The values
+    /// are what the reference gcc of FreeBSD 15.1 and NetBSD 11 give, with and without `-m32`.
+    #[test]
+    fn x86_names_its_address_spaces_its_x87_type_and_the_netbsd_tuning() {
+        for (triple, float80) in [
+            ("x86_64-unknown-freebsd", "16"),
+            ("i686-unknown-linux-gnu", "12"),
+            ("x86_64-unknown-netbsd", "16"),
+            ("i486--netbsdelf", "12"),
+        ] {
+            let set = set_for(triple);
+            assert!(has(&set, "#define __SEG_FS 1"), "{triple}");
+            assert!(has(&set, "#define __SEG_GS 1"), "{triple}");
+            assert!(has(&set, &format!("#define __SIZEOF_FLOAT80__ {float80}")), "{triple}");
+            assert!(has(&set, "#define __GCC_ASM_FLAG_OUTPUTS__ 1"), "{triple}");
+            let netbsd = triple.contains("netbsd");
+            assert_eq!(has(&set, "#define __tune_nocona__ 1"), netbsd, "{triple}");
+        }
+        let triple: Triple = "x86_64-unknown-netbsd".parse().unwrap();
+        let tuned = Predef { tuned: true, ..Predef::new() };
+        assert!(!built_in(&TargetInfo::new(triple), &tuned).contains("__tune_nocona__"));
+        // clang has its own list, and an aarch64 has no x87 and no segments.
+        for triple in ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "aarch64-unknown-netbsd"] {
+            let set = set_for(triple);
+            assert!(!set.contains("__SEG_FS") && !set.contains("__SIZEOF_FLOAT80__"), "{triple}");
+            assert!(!set.contains("__tune_"), "{triple}");
+        }
     }
 }

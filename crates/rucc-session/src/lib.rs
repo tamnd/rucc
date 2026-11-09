@@ -2539,6 +2539,9 @@ pub struct Options {
     /// the Pentium Pro on. `-march=i486`, `-march=i586`, `-march=k6` and the rest of what came
     /// before it turn it off, and then a select is a branch, as gcc writes it.
     pub cmov: bool,
+    /// Whether `-march=` or `-mtune=` named a processor, which is what decides whether a gcc
+    /// configured with a default tuning still says it. NetBSD's x86 gcc says `__tune_nocona__`.
+    pub tuned: bool,
     /// What an automatic object with no initializer starts out holding, from
     /// `-ftrivial-auto-var-init=`. `None` is `uninitialized`, which is the default, and otherwise
     /// the byte every byte of it is, zero for `zero` and `0xfe` for `pattern`.
@@ -3174,6 +3177,7 @@ impl Options {
             speculation: Speculation::default(),
             jump_tables: true,
             cmov: true,
+            tuned: false,
             auto_var_init: None,
             profile: false,
             hook: Hook::default(),
