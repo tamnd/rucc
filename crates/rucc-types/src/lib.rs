@@ -96,7 +96,7 @@ pub use crate::classify::{
     is_real, is_real_floating, is_record, is_scalar, is_vector, is_void, lanes, pointee,
     pointee_as_written, real_part,
 };
-pub use crate::compat::{adjust_parameter, compatible, composite};
+pub use crate::compat::{adjust_parameter, compatible, compatible_pointees, composite};
 pub use crate::convert::{
     mask_of, promote, promote_bit_field, usual_arithmetic, vectors_convertible,
 };
@@ -2166,6 +2166,41 @@ mod tests {
             sse_regparm: false,
         });
         assert!(!compatible(&types, returns_int, takes_int));
+    }
+
+    /// An old style definition is held to its parameters when it is redeclared and not when a
+    /// pointer to it is taken, which is where gcc compares it as a function declared with `()`.
+    #[test]
+    fn a_pointer_to_an_old_style_definition_converts_as_one_to_a_function_declared_with_parens() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let char_ = types.int(IntKind::Char);
+        let void = types.void();
+        let defined = types.function(FunctionType {
+            ret: void,
+            params: vec![long],
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+        });
+        let takes_int = prototype(&mut types, vec![int], false);
+        let takes_two = prototype(&mut types, vec![int, int], false);
+        assert!(!compatible(&types, defined, takes_int), "a redeclaration is still refused");
+        assert!(compatible_pointees(&types, defined, takes_int));
+        assert!(compatible_pointees(&types, takes_two, defined));
+        // What a call through `()` could not have passed is still another function.
+        let takes_char = prototype(&mut types, vec![char_], false);
+        let variadic = prototype(&mut types, vec![int], true);
+        assert!(!compatible_pointees(&types, defined, takes_char));
+        assert!(!compatible_pointees(&types, variadic, defined));
+        // And two prototypes are compared as they always are.
+        assert!(!compatible_pointees(&types, takes_int, takes_two));
+        assert!(!compatible_pointees(&types, int, long));
     }
 
     /// gcc's rule: a function of one convention and a function of the other are never

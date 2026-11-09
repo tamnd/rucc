@@ -35,6 +35,37 @@ pub fn compatible(types: &Types, left: TypeId, right: TypeId) -> bool {
     same(types, left, right, &mut assumed)
 }
 
+/// Whether a pointer to `left` converts to a pointer to `right` without a word, as gcc decides it.
+///
+/// That is [`compatible`] except for an old style definition. 6.7.6.3p15 holds its parameters to
+/// a prototype, which is what a redeclaration is checked against, but its type is still one with
+/// no prototype, and gcc compares a pointer to it as it would a pointer to any function declared
+/// with `()`. So `__morecore = r_alloc_sbrk`, with a hook taking a `ptrdiff_t` and a definition
+/// whose identifier is a `long`, is taken in silence on i386, where the two differ, and NetBSD's
+/// libmalloc builds with `-Werror` on that.
+#[must_use]
+pub fn compatible_pointees(types: &Types, left: TypeId, right: TypeId) -> bool {
+    if compatible(types, left, right) {
+        return true;
+    }
+    let (left, right) = (types.canonical(left), types.canonical(right));
+    let (TypeKind::Function(a), TypeKind::Function(b)) = (types.kind(left), types.kind(right))
+    else {
+        return false;
+    };
+    let (a, b) = (types.signature(a), types.signature(b));
+    if a.prototyped && b.prototyped || types.quals(left) != types.quals(right) {
+        return false;
+    }
+    // Forgetting what an old style definition knows about its parameters leaves the type every
+    // other declaration with `()` has.
+    let forget = |signature: &FunctionType| match signature.prototyped {
+        true => signature.clone(),
+        false => FunctionType { params: Vec::new(), ..signature.clone() },
+    };
+    functions(types, &forget(a), &forget(b), &mut Vec::new())
+}
+
 /// The composite type of two compatible types, 6.2.7p3, and [`None`] when they are not
 /// compatible.
 ///
