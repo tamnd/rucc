@@ -1266,6 +1266,18 @@ impl<'a> Eval<'a> {
                         left.offset - right.offset
                     }
                     (Const::Int(left), Const::Int(right)) => left - right,
+                    // An address into nothing is a number, so it measures against a pointer that
+                    // folded to one. That is the old `offsetof` spelled as a difference, as in
+                    // `(char *)&((struct S *)0)->m - (char *)((struct S *)0)`, which gcc folds
+                    // to the member's offset.
+                    (
+                        Const::Address(Address { base: Base::Absolute, offset }),
+                        Const::Int(number),
+                    ) => offset - number,
+                    (
+                        Const::Int(number),
+                        Const::Address(Address { base: Base::Absolute, offset }),
+                    ) => number - offset,
                     // Two labels, which are two places in one function's code, and the distance
                     // between them is a number once the code is laid out even though neither
                     // address is. Only the bare labels: an offset from one is not a place a jump
@@ -2213,6 +2225,30 @@ mod tests {
             "a difference is a number, since the two cancel whatever the linker does with them"
         );
         assert!(messages(&c).is_empty());
+    }
+
+    #[test]
+    fn an_address_into_nothing_less_a_null_pointer_is_the_offset_of_the_member() {
+        let mut f = Fixture::new();
+        let x = f.field(f.int_specs(), "x");
+        let y = f.field(f.int_specs(), "y");
+        let specs = f.record("S", &[x, y]);
+        let zero = f.int(0, IntKind::Int);
+        let null = f.cast(specs, &[pointer()], zero);
+        let member = f.arrow(null, "y");
+        let taken = f.unary(UnaryOp::AddrOf, member);
+        let high = f.cast(f.builtin(BuiltinSet::CHAR), &[pointer()], taken);
+        let zero = f.int(0, IntKind::Int);
+        let low = f.cast(f.builtin(BuiltinSet::CHAR), &[pointer()], zero);
+        let distance = f.binary(BinaryOp::Sub, high, low);
+
+        let mut c = f.checker();
+        assert_eq!(
+            value(&mut c, distance),
+            Ok(Const::Int(4)),
+            "the old offsetof is a difference of two pointers that both fold to numbers"
+        );
+        assert_eq!(messages(&c), Vec::<String>::new());
     }
 
     #[test]
