@@ -9999,6 +9999,50 @@ nop
         assert!(why.why.contains("nothing pushed"), "{why}");
     }
 
+    /// A string move with its two operands written out, as NetBSD's `busfunc.S` writes it, is the
+    /// instruction without them, with a prefix for a segment other than `ds` on the string read
+    /// and for an address of thirty two bit registers, as gas writes them.
+    #[test]
+    fn a_netbsd_string_move_with_its_operands_is_the_bytes_gas_writes() {
+        for (line, want) in [
+            ("movsb %ds:(%rsi), %es:(%rdi)", &[0xa4][..]),
+            ("movsw %ds:(%rsi), %es:(%rdi)", &[0x66, 0xa5]),
+            ("movsl %ds:(%rsi), %es:(%rdi)", &[0xa5]),
+            ("movsq %ds:(%rsi), %es:(%rdi)", &[0x48, 0xa5]),
+            ("movsb (%rsi), (%rdi)", &[0xa4]),
+            ("movsb %fs:(%rsi), %es:(%rdi)", &[0x64, 0xa4]),
+            ("movsl (%esi), (%edi)", &[0x67, 0xa5]),
+            ("rep movsq %ds:(%rsi), %es:(%rdi)", &[0xf3, 0x48, 0xa5]),
+        ] {
+            let read = assembled(&format!("\t.text\n\t{line}\n"));
+            assert_eq!(bytes(&read, ".text"), want, "{line}");
+        }
+        for (line, said) in [
+            ("movsb %ds:(%rsi), %fs:(%rdi)", "through %es"),
+            ("movsb (%rdi), (%rsi)", "(%rsi)"),
+            ("movsb (%rsi), (%edi)", "two widths"),
+            ("movs (%rsi), (%rdi)", "how wide"),
+        ] {
+            let why = refused(&format!("\t.text\n\t{line}\n"));
+            assert!(why.why.contains(said), "{line}: {why}");
+        }
+    }
+
+    /// NetBSD's locore.S reaches its variables before paging as `((name) - KERNBASE)`, and the
+    /// KERNBASE genassym writes is `-2147483648`, so the address is the name minus a negative
+    /// number. gas reads the second minus as the sign of the number and adds 2^31.
+    #[test]
+    fn a_name_minus_a_negative_number_is_the_name_plus_the_number() {
+        let read = assembled("\t.code32\n\tmovl %eax, ((boothowto) - -2147483648)\n");
+        assert_eq!(bytes(&read, ".text")[..2], [0x89, 0x05]);
+        assert_eq!(
+            relocs(&read, ".text"),
+            [(2, "boothowto", Reference::Address { bytes: 4 }, 2_147_483_648)]
+        );
+        let read = assembled("\tmovq $1, foo + -8(%rip)\n");
+        assert_eq!(relocs(&read, ".text")[0].3, -8 - 8);
+    }
+
     /// The forms NetBSD's `busfunc.S`, `cpufunc.S`, `cpu_rng.c` and `aes_via.c` write. A string
     /// through a port with its operands written out is the instruction without them, `monitor` and
     /// `mwait` take their registers at sixty four bits as well, and the VIA PadLock instructions

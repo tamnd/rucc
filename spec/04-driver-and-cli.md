@@ -259,7 +259,7 @@ Two things are deliberately not copied. gcc warns under `-Wmissing-profile` when
 
 ## 4.8 Debug info
 
-`-g`, `-g0` through `-g3`, `-gdwarf-5` (the default), `-gdwarf-4`, `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz`, `-gz=none`, `-gz=zlib`, `-gz=zlib-gnu`, `-gz=zstd`. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission.
+`-g`, `-g0` through `-g3`, `-gdwarf-5` (the default, except on NetBSD where it is `-gdwarf-4`), `-gdwarf-4`, `-gsplit-dwarf`, `-gno-split-dwarf`, `-fdebug-prefix-map=`, `-ffile-prefix-map=`, `-gz`, `-gz=none`, `-gz=zlib`, `-gz=zlib-gnu`, `-gz=zstd`. `-fno-eliminate-unused-debug-types` and friends are accepted. Document 11 owns the emission.
 
 The levels are a request for how much, and this compiler writes one amount, so `-g1` through `-g3` and the `-ggdb` spellings are `-g` and `-g0` is off. `-gdwarf-4` and `-gdwarf-5` turn debug information on as well as choosing the version, as they do in gcc, and the last one on the line wins. Any other version is refused, because a debugger handed version 5 when it was told version 3 is a worse outcome than a build that stopped.
 
