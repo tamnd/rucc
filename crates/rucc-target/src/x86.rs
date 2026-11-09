@@ -601,7 +601,25 @@ pub static FRAME: FrameInsts = FrameInsts {
     thunks: Some(THUNKS),
     // The load in front of a call here is the thirty two bit one, which the fold does not know.
     through: None,
+    table: Some(table_base),
 };
+
+/// The two instructions that put the global offset table's address in that register, such as
+/// `%esi`, which is what gcc writes for `%ebx` at the top of a function:
+///
+/// ```text
+/// call    __x86.get_pc_thunk.si
+/// addl    $_GLOBAL_OFFSET_TABLE_, %esi
+/// ```
+///
+/// The routine is named after the register without its `e`, as gcc names it, and reads its own
+/// return address into that register.
+#[must_use]
+pub fn table_base(reg: PhysReg) -> String {
+    let reg = GPR_NAMES[usize::from(reg.number())];
+    let short = reg.strip_prefix('e').unwrap_or(reg);
+    format!("call\t__x86.get_pc_thunk.{short}\naddl\t$_GLOBAL_OFFSET_TABLE_, %{reg}")
+}
 
 /// What the speculation hardening flags rewrite branches into on i386.
 ///

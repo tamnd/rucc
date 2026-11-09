@@ -2026,7 +2026,9 @@ impl Writer<'_> {
     /// Reads the word the canary is a copy of into a register.
     ///
     /// One load, except for a global guard in code that may end up in a shared library, where the
-    /// word's address is read out of the global offset table into the same register first.
+    /// word's address is read out of the global offset table into the same register first. On
+    /// i386 the table's own address goes into the register before that, see
+    /// [`rucc_target::FrameInsts::table`].
     ///
     /// The address of a word in a thread's block names no register at all, because where that
     /// block begins is something only the machine knows and the segment register is what holds it.
@@ -2039,7 +2041,7 @@ impl Writer<'_> {
     fn read_guard(&mut self, into: PhysReg, guard: &Guard) -> Vec<Inst> {
         let class = self.conv.int_class;
         let load = self.opcode(self.insts.moves(class).expect("a class to load").load);
-        let mut out = Vec::with_capacity(2);
+        let mut out = Vec::with_capacity(3);
         if let Some(canary) = self.insts.canary {
             let address = match guard.symbol {
                 None => {
@@ -2063,7 +2065,16 @@ impl Writer<'_> {
             (Some(mem), _) => mem,
             (None, name) => {
                 let symbol = self.names.intern(name.expect("only a named guard is in the table"));
-                let at = Mem::got(symbol);
+                let mut at = Mem::got(symbol);
+                // i386 reaches the slot from the table's address, which goes into the same
+                // register first. Nothing else of the function's may have it yet.
+                if let Some(table) = self.insts.table {
+                    let opcode = self.opcode(x86_64::TEMPLATE);
+                    let text = self.names.intern(&table(into));
+                    let inst = self.func.build_loose(opcode).symbol(text);
+                    out.push(inst.operand(Operand::write(Reg::physical(into), class)).finish());
+                    at = at.from_table(Operand::read(Reg::physical(into), class));
+                }
                 out.push(
                     self.func.build_loose(load).def(Reg::physical(into), class).mem(at).finish(),
                 );

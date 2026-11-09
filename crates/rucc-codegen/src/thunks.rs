@@ -170,28 +170,40 @@ pub fn bodies(
 /// `crate::lower`, and looked for by [`pc_thunk`].
 pub const TABLE_BASE: &str = "call\t__x86.get_pc_thunk.bx\naddl\t$_GLOBAL_OFFSET_TABLE_, %ebx";
 
-/// The routine [`TABLE_BASE`] calls, which reads its own return address into `%ebx`, when some
-/// function in `funcs` calls it, and nothing otherwise.
+/// The routines [`TABLE_BASE`] and the stack protector's read of its guard call, each of which
+/// reads its own return address into one register, for each that some function in `funcs` calls,
+/// and nothing when none does.
 ///
-/// Written the way gcc writes it: hidden, and in a group of its own so that the link keeps one copy
-/// out of however many objects carry it. The name is gcc's too, so an object from either compiler
-/// can be linked with the other's and the two copies are still one.
+/// Written the way gcc writes them: hidden, and each in a group of its own so that the link keeps
+/// one copy out of however many objects carry it. The names are gcc's too, so an object from either
+/// compiler can be linked with the other's and the two copies are still one.
 #[must_use]
 pub fn pc_thunk(funcs: &[mir::Func], names: &Interner) -> Option<String> {
-    let called = funcs.iter().any(|func| {
-        func.blocks().any(|block| {
-            func.insts(block)
-                .any(|inst| func[inst].symbol.is_some_and(|text| names.resolve(text) == TABLE_BASE))
+    let mut called = std::collections::BTreeSet::new();
+    for func in funcs {
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let Some(text) = func[inst].symbol else { continue };
+                for line in names.resolve(text).lines() {
+                    if let Some(reg) = line.strip_prefix("call\t__x86.get_pc_thunk.") {
+                        called.insert(reg.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let thunks: Vec<String> = called
+        .into_iter()
+        .map(|reg| {
+            let name = format!("__x86.get_pc_thunk.{reg}");
+            format!(
+                ".section .text.{name},\"axG\",@progbits,{name},comdat\n.globl {name}\n\
+                 .hidden {name}\n.type {name}, @function\n{name}:\nmovl (%esp), %e{reg}\nret\n\
+                 .size {name}, .-{name}"
+            )
         })
-    });
-    let name = "__x86.get_pc_thunk.bx";
-    called.then(|| {
-        format!(
-            ".section .text.{name},\"axG\",@progbits,{name},comdat\n.globl {name}\n\
-             .hidden {name}\n.type {name}, @function\n{name}:\nmovl (%esp), %ebx\nret\n\
-             .size {name}, .-{name}"
-        )
-    })
+        .collect();
+    (!thunks.is_empty()).then(|| thunks.join("\n"))
 }
 
 #[cfg(test)]

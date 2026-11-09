@@ -263,6 +263,7 @@ pub static FRAME: FrameInsts = FrameInsts {
         call: ("call_reg", "call_mem"),
         jump: ("jmp_reg", "jmp_mem"),
     }),
+    table: None,
 };
 
 /// What the x86 speculation hardening flags rewrite branches into, with the names gcc and the
