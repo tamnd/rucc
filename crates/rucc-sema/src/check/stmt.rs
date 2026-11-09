@@ -1395,6 +1395,12 @@ impl Checker<'_> {
     /// `%[x]`, `%w[x]` and `%l[x]` all one reference and the letter in the middle none of this
     /// walk's business. `%%` is a percent sign and is stepped over whole, so the brackets in
     /// `%%[x]` are two characters of assembly and not a name.
+    ///
+    /// `%cc` is the one modifier of two letters. gcc 15 added it as `%c` that also takes a
+    /// constant that is not a valid address in position independent code. Where gcc takes the
+    /// operand at all, it prints it as `%c` does, so it is written here as `%c` and nothing after
+    /// this sees the second letter. FreeBSD's `sdt.h` writes `.quad %cc0` for every probe when the
+    /// compiler says it is gcc 15.
     fn asm_numbers(&mut self, text: String, names: &[(String, usize)], span: Span) -> String {
         let chars: Vec<char> = text.chars().collect();
         let mut out = String::with_capacity(text.len());
@@ -1405,6 +1411,12 @@ impl Checker<'_> {
             index += 1;
             if ch != '%' {
                 continue;
+            }
+            if chars.get(index) == Some(&'c')
+                && chars.get(index + 1) == Some(&'c')
+                && chars.get(index + 2).is_some_and(|&next| next == '[' || next.is_ascii_digit())
+            {
+                index += 1;
             }
             let letter = chars.get(index).copied();
             let open = match letter {
