@@ -481,6 +481,19 @@ fn warning_param(opts: &mut Options, spec: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Reads the word of `-MF`, `-MT` or `-MQ` into `opts`, which is the same whichever way the
+/// command line spelled it.
+fn dependency_word(opts: &mut Options, flag: &str, value: &str) {
+    match flag {
+        "-MF" => opts.deps.file = Some(value.to_owned()),
+        // The whole of the difference between the two. `-MT` is for a build that has already
+        // escaped what it is passing, and `-MQ` is for one that has a name and wants it to arrive
+        // as that name.
+        "-MT" => opts.deps.targets.push(value.to_owned()),
+        _ => opts.deps.targets.push(deps::escaped(value)),
+    }
+}
+
 /// The names one name in `-fsanitize=` and its relatives stands for.
 ///
 /// `shift` is the two shift checks together, as gcc has it, so `-fsanitize=shift
@@ -1331,20 +1344,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             "-MP" => opts.deps.phony = true,
             "-MG" => opts.deps.generated = true,
-            // These three take a word and only in the separated form, which is how GCC spells
-            // them and how every build system writes them.
+            // These three take a word, either as the next argument or joined to the flag, as GCC
+            // takes them. FreeBSD's bsd.dep.mk writes the joined form, `-MF.depend.main.o`, on
+            // every unit it compiles.
             "-MF" | "-MT" | "-MQ" => {
                 let value =
                     args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
                 i += 1;
-                match arg {
-                    "-MF" => opts.deps.file = Some(value.clone()),
-                    // The whole of the difference between the two. `-MT` is for a build that has
-                    // already escaped what it is passing, and `-MQ` is for one that has a name
-                    // and wants it to arrive as that name.
-                    "-MT" => opts.deps.targets.push(value.clone()),
-                    _ => opts.deps.targets.push(deps::escaped(value)),
-                }
+                dependency_word(&mut opts, arg, value);
+            }
+            _ if arg.len() > 3 && ["-MF", "-MT", "-MQ"].contains(&&arg[..3]) => {
+                dependency_word(&mut opts, &arg[..3], &arg[3..]);
             }
             // The questions a build system asks before it compiles anything. Answered after the
             // loop, because each one is about the target or the library search and the command
@@ -10272,6 +10282,21 @@ mod tests {
             let e = parse_args(&args(&[flag])).unwrap_err();
             assert!(e.message.contains("requires an argument"), "{}", e.message);
         }
+    }
+
+    /// GCC takes the word of all three joined to the flag too, and FreeBSD's bsd.dep.mk writes
+    /// `-MD -MF.depend.main.o` on every unit.
+    #[test]
+    fn the_word_of_mf_mt_and_mq_may_be_joined_to_the_flag() {
+        let (opts, _) = compile(&["-MD", "-MF.depend.main.o", "-c", "a.c"]);
+        assert!(opts.deps.emit);
+        assert_eq!(opts.deps.file.as_deref(), Some(".depend.main.o"));
+        let (opts, _) = compile(&["-MM", "-MTa b.o", "-MQa b.o", "a.c"]);
+        assert_eq!(opts.deps.targets, vec!["a b.o".to_owned(), "a\\ b.o".to_owned()]);
+        let (joined, _) = compile(&["-MM", "-MFdep.d", "-MTx.o", "a.c"]);
+        let (separate, _) = compile(&["-MM", "-MF", "dep.d", "-MT", "x.o", "a.c"]);
+        assert_eq!(joined.deps.file, separate.deps.file);
+        assert_eq!(joined.deps.targets, separate.deps.targets);
     }
 
     /// Kbuild's spelling, which is how busybox and the kernel ask for every dependency file.
