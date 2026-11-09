@@ -226,6 +226,9 @@ pub struct FrameInsts {
     /// addresses into their readers has to know which instruction that is to read it as a base and
     /// an index at a scale of one.
     pub sum: &'static str,
+    /// Jumps to the address in a register, which is how the way out of a `__builtin_eh_return`
+    /// goes to the handler once the frame is given back.
+    pub jump_reg: &'static str,
     /// Returns to the caller.
     pub ret: &'static str,
     /// Returns to the caller and takes the immediate's count of bytes of arguments off the stack

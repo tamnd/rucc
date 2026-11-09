@@ -3210,11 +3210,10 @@ name = "__builtin_eh_return"
 kind = "builtin"
 gcc_version = "2.95"
 status = "implemented"
-targets = ["x86-64", "x86"]
 signature = "void(ptrdiff_t, void *)"
 used_by = ["libgcc"]
 tests = ["rucc-driver::eh_return_puts_the_registers_back_and_goes_to_the_handler", "rucc::eh_return::a_handler_two_frames_up_is_reached_with_its_registers"]
-notes = "libgcc's uw_install_context leaves through it. The function also saves the two registers the handler gets its values in, and only this way out loads them back. The other way out returns the way any function does. It then puts every saved register back from the frame, sets the stack pointer to the canonical frame address plus the offset, and jumps to the handler, as gcc does. x86-64 and i686 only for now: AArch64 and RISC-V 64 refuse it in the back end."
+notes = "libgcc's uw_install_context leaves through it. The function also saves the registers the handler gets its values in, and only this way out loads them back. The other way out returns the way any function does. It then puts every saved register back from the frame, sets the stack pointer to the canonical frame address plus the offset, and jumps to the handler, as gcc does. On x86-64 and i686 the handler is stored below the new stack pointer and popped into a register to jump through. On AArch64 and RISC-V 64 the new stack pointer goes in x5 or a4 and the handler in x6 or a5, as gcc 14 does on AArch64. Windows x64 refuses it in the back end."
 
 [[feature]]
 name = "__builtin_dwarf_sp_column"

@@ -1019,6 +1019,8 @@ static TEXT: &[(&str, &[Written])] = &[
         ],
     ),
     ("trap", &[spell("brk", &[Lit(1)])]),
+    // Never written: the epilogue `rucc_codegen::finish` puts in its place is.
+    ("eh_return", &[]),
     ("fence", &[spell("dmb", &[Barrier(0b1011)])]),
     ("fence_acquire", &[spell("dmb", &[Barrier(0b1001)])]),
     // The ordered accesses, and the read modify writes as loops of an exclusive load and an

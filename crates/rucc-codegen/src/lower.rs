@@ -4999,6 +4999,14 @@ impl<'a> Lowering<'a> {
 
         if own_return {
             own(self, word, reg);
+        } else if returning && self.on_riscv64() {
+            // The record is the caller's `s0` and then `ra`, the same shape as on AArch64 and for
+            // the same reason: a call leaves the address in a register, so the target gives no
+            // distance from the frame for it. It is a word above where the frame pointer points.
+            // The distance from the target is nothing here, and reading there gave the caller's
+            // `s0` back as the address, which sent the unwinder in libgcc nowhere.
+            let at = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(word);
+            self.out.build(block, load).at(span).def(reg, self.gpr).mem(at).finish();
         } else if returning && self.on_aarch64() {
             // A return address a callee signed has the signature in its top bits, which is no
             // address anybody can use, so it is stripped on the way out whether or not this file
@@ -5094,9 +5102,14 @@ impl<'a> Lowering<'a> {
     /// the two the handler's values are in included, moves the stack pointer to `%rcx` and takes
     /// the handler off with a jump to it. gcc 13.3 writes the same on x86-64 and i686.
     ///
-    /// Only x86 for now, and not Windows x64, whose unwind codes describe a frame pointer that is
-    /// set after the pushes. AArch64 and RISC-V 64 refuse the third, so libgcc's unwinder cannot
-    /// yet be built for them with rucc.
+    /// AArch64 and RISC-V keep the return address in a register, so nothing is stored. The sum of
+    /// the canonical frame address and the offset, which is where the stack pointer is to end up,
+    /// goes into `x5` or `a4`, and the handler into `x6` or `a5`. The marker reads both, and
+    /// [`crate::finish`] writes in front of it the epilogue that puts back every saved register,
+    /// `x0` to `x3` or `a0` to `a3` included, moves the stack pointer and jumps to the handler.
+    ///
+    /// Not on Windows, whose unwind codes describe a frame pointer that is set after the pushes,
+    /// or pairs that are not the ones written here.
     fn unwind(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
@@ -5119,8 +5132,59 @@ impl<'a> Lowering<'a> {
                     .finish();
                 self.stack.arguments.push((made, 0));
             }
+            _ if self.on_aarch64() || self.on_riscv64() => {
+                let args = self.source[self.source[inst].args].to_vec();
+                let (&[offset, handler], Some(moves), false) =
+                    (args.as_slice(), self.selector.frame.moves(self.gpr), self.conv.unwind_codes)
+                else {
+                    return Err(self.unsupported(inst));
+                };
+                let (sum, mov) = (self.named(self.selector.frame.sum), self.named(moves.mov));
+                let offset = self.reg_of(offset)?;
+                let handler = self.reg_of(handler)?;
+                // The canonical frame address, finished with the incoming arguments as
+                // `__builtin_dwarf_cfa` is, and the offset added to it.
+                let cfa = self.out.new_vreg(self.gpr);
+                let made = self
+                    .out
+                    .build(block, lea)
+                    .at(span)
+                    .def(cfa, self.gpr)
+                    .mem(mir::Mem::at(sp))
+                    .finish();
+                self.stack.arguments.push((made, 0));
+                let to = self.out.new_vreg(self.gpr);
+                self.out
+                    .build(block, sum)
+                    .at(span)
+                    .def(to, self.gpr)
+                    .uses(cfa, self.gpr)
+                    .uses(offset, self.gpr)
+                    .finish();
+                let (pinned, data) = if self.on_aarch64() {
+                    let data = (0..4).map(aarch64::x).collect();
+                    ([aarch64::x(5), aarch64::x(6)], data)
+                } else {
+                    let data = (10..14).map(riscv64::x).collect();
+                    ([riscv64::x(14), riscv64::x(15)], data)
+                };
+                let [at, jump] = pinned.map(mir::Reg::physical);
+                self.copy(block, span, mov, at, to);
+                self.copy(block, span, mov, jump, handler);
+                let marker = self.named("eh_return");
+                let made = self
+                    .out
+                    .build(block, marker)
+                    .at(span)
+                    .operand(mir::Operand::read(at, self.gpr))
+                    .operand(mir::Operand::read(jump, self.gpr))
+                    .finish();
+                self.stack.eh_returns.push(made);
+                self.stack.walks_frames = true;
+                self.stack.eh_data = data;
+            }
             _ => {
-                if self.on_aarch64() || self.on_riscv64() || self.conv.late_frame_pointer {
+                if self.conv.late_frame_pointer {
                     return Err(self.unsupported(inst));
                 }
                 let args = self.source[self.source[inst].args].to_vec();
