@@ -338,7 +338,7 @@ pub fn preprocess(opts: &Options, name: &str, assembly: bool, fs: &dyn FileSyste
     // to: the table at the end is the one the file left behind, so a `#define` inside an
     // `#ifdef` that was false is correctly absent.
     let text = if opts.dumps.macros {
-        rucc_pp::dump_macros(pp.macros(), &sess.interner)
+        pp.dumped(&sess.interner)
     } else {
         rucc_pp::print(
             file,
@@ -627,6 +627,30 @@ mod tests {
         // The predefined set is in there too, because it is defined the same way everything
         // else is, which is the whole reason this output can be diffed against GCC's.
         assert!(dumped.text.contains("#define __x86_64__ 1\n"), "{}", dumped.text);
+    }
+
+    /// GCC does not list the macros it works out the value of, and `__TIME__` made two runs of
+    /// the list differ. One the program defines itself is listed.
+    #[test]
+    fn dash_dm_leaves_out_the_macros_the_preprocessor_works_out() {
+        let mut opts = options();
+        opts.dumps.macros = true;
+        let dumped = run(&opts, &[("/main.c", "int x;\n")]);
+        for name in [
+            "__FILE__",
+            "__LINE__",
+            "__DATE__",
+            "__TIME__",
+            "__COUNTER__",
+            "__INCLUDE_LEVEL__",
+            "__BASE_FILE__",
+            "__FILE_NAME__",
+        ] {
+            assert!(!dumped.text.contains(&format!("#define {name} ")), "{name}");
+        }
+        assert!(dumped.text.contains("#define __STDC__ 1\n"), "{}", dumped.text);
+        let own = run(&opts, &[("/main.c", "#undef __DATE__\n#define __DATE__ \"now\"\n")]);
+        assert!(own.text.contains("#define __DATE__ \"now\"\n"), "{}", own.text);
     }
 
     #[test]
