@@ -355,6 +355,96 @@ fn port_string(word: &str, args: &[String], mode: Mode) -> Option<Result<Written
     Some(port_string_bytes(word, letter, inward, port.trim(), string.trim(), mode))
 }
 
+/// `movsb %ds:(%rsi), %es:(%rdi)` and the other widths, a string move with its two operands
+/// written out, which NetBSD's `busfunc.S` writes for each of its `bus_space_copy_region`
+/// functions. As with [`port_string`] the operands say nothing the opcode does not: the string is
+/// read from `si` and written to `di`, and the one thing the line may choose is a segment other
+/// than `ds` for the one that is read. A line whose operands are not two addresses is left to the
+/// rest of this file.
+fn moved_string(word: &str, args: &[String], mode: Mode) -> Option<Result<Written, String>> {
+    let stem = word.strip_prefix("rep ").unwrap_or(word);
+    let letter = stem.strip_prefix("movs")?;
+    if !matches!(letter, "" | "b" | "w" | "l" | "q") {
+        return None;
+    }
+    let [from, to] = args else { return None };
+    let (from, to) = (from.trim(), to.trim());
+    if !from.ends_with(')') || !to.ends_with(')') {
+        return None;
+    }
+    Some(moved_string_bytes(word, letter, from, to, mode))
+}
+
+/// [`moved_string`] once the line is known to be one.
+fn moved_string_bytes(
+    word: &str,
+    letter: &str,
+    from: &str,
+    to: &str,
+    mode: Mode,
+) -> Result<Written, String> {
+    if letter.is_empty() {
+        return Err(format!(
+            "'{word}' says neither by its letter nor by a register how wide the string is"
+        ));
+    }
+    let (override_byte, read) = string_place(word, from, "si", "%ds", false, mode)?;
+    let (_, written_to) = string_place(word, to, "di", "%es", true, mode)?;
+    if read != written_to {
+        return Err(format!("'{word}' reads and writes through addresses of two widths"));
+    }
+    let mut written = full(word, &[], mode)?;
+    if let Some(byte) = override_byte {
+        crate::source::prefixed(&mut written, byte)?;
+    }
+    Ok(written)
+}
+
+/// The segment prefix a string operand asks for, and whether its register is the 64 or the 32
+/// bit one. The string is at `register` and nowhere else, and through `default` unless `fixed` is
+/// false, in which case it may go through another segment and the prefix for that comes back.
+fn string_place(
+    word: &str,
+    string: &str,
+    register: &str,
+    default: &str,
+    fixed: bool,
+    mode: Mode,
+) -> Result<(Option<u8>, char), String> {
+    let (segment, address) = match string.split_once(':') {
+        Some((segment, address)) if segment.trim().starts_with('%') => {
+            (Some(segment.trim()), address.trim())
+        }
+        _ => (None, string),
+    };
+    let widths: &[char] = if mode == Mode::Bits64 { &['r', 'e'] } else { &['e'] };
+    let named =
+        address.strip_prefix("(%").and_then(|inside| inside.strip_suffix(')')).and_then(|inside| {
+            widths.iter().copied().find(|&width| inside.strip_prefix(width) == Some(register))
+        });
+    let Some(width) = named else {
+        let wanted: Vec<String> =
+            widths.iter().map(|width| format!("(%{width}{register})")).collect();
+        return Err(format!("'{word}' moves the string at {}", wanted.join(" or ")));
+    };
+    let override_byte = match segment {
+        None => None,
+        Some(segment) if segment == default => None,
+        Some(segment) if fixed => {
+            return Err(format!("'{word}' writes the string through {default}, and not {segment}"));
+        }
+        Some(segment) => Some(match segment {
+            "%es" => 0x26,
+            "%cs" => 0x2E,
+            "%ss" => 0x36,
+            "%fs" => 0x64,
+            "%gs" => 0x65,
+            _ => return Err(format!("'{segment}' is not a segment register")),
+        }),
+    };
+    Ok((override_byte, width))
+}
+
 /// [`port_string`] once the line is known to be one.
 fn port_string_bytes(
     word: &str,
@@ -372,37 +462,8 @@ fn port_string_bytes(
     if !matches!(port.replace(' ', "").as_str(), "%dx" | "(%dx)") {
         return Err(format!("'{word}' goes through the port in %dx and no other"));
     }
-    let (segment, address) = match string.split_once(':') {
-        Some((segment, address)) if segment.trim().starts_with('%') => {
-            (Some(segment.trim()), address.trim())
-        }
-        _ => (None, string),
-    };
     let (register, default) = if inward { ("di", "%es") } else { ("si", "%ds") };
-    let widths: &[&str] = if mode == Mode::Bits64 { &["r", "e"] } else { &["e"] };
-    let named = address.strip_prefix("(%").and_then(|inside| inside.strip_suffix(')')).is_some_and(
-        |inside| widths.iter().any(|width| inside.strip_prefix(width) == Some(register)),
-    );
-    if !named {
-        let wanted: Vec<String> =
-            widths.iter().map(|width| format!("(%{width}{register})")).collect();
-        return Err(format!("'{word}' moves the string at {}", wanted.join(" or ")));
-    }
-    let override_byte = match segment {
-        None => None,
-        Some(segment) if segment == default => None,
-        Some(segment) if inward => {
-            return Err(format!("'{word}' writes the string through %es, and not {segment}"));
-        }
-        Some(segment) => Some(match segment {
-            "%es" => 0x26,
-            "%cs" => 0x2E,
-            "%ss" => 0x36,
-            "%fs" => 0x64,
-            "%gs" => 0x65,
-            _ => return Err(format!("'{segment}' is not a segment register")),
-        }),
-    };
+    let (override_byte, _) = string_place(word, string, register, default, inward, mode)?;
     let mut written = full(word, &[], mode)?;
     if let Some(byte) = override_byte {
         crate::source::prefixed(&mut written, byte)?;
@@ -518,6 +579,9 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
         return far;
     }
     if let Some(string) = port_string(word, args, mode) {
+        return string;
+    }
+    if let Some(string) = moved_string(word, args, mode) {
         return string;
     }
     let mut mask = Opmask::default();
@@ -2143,8 +2207,10 @@ fn apart(text: &str) -> Result<(i64, Option<String>, Option<String>), String> {
             _ => {}
         }
         // Not at the start of a term, where a sign belongs to the number behind it rather than
-        // joining it to anything, and not inside brackets, where it is part of one term.
-        if at == start || depth > 0 || !matches!(ch, '+' | '-') {
+        // joining it to anything, and not inside brackets, where it is part of one term. Spaces
+        // before the sign do not end the start: NetBSD's locore.S writes `((x) - KERNBASE)` with
+        // a KERNBASE of `-2147483648`, which is `- -2147483648` and is the name plus 2^31.
+        if text[start..at].trim().is_empty() || depth > 0 || !matches!(ch, '+' | '-') {
             continue;
         }
         fold(&text[start..at], sign)?;

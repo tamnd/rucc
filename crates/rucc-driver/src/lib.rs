@@ -1009,6 +1009,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // Whether `-static-pie` was written, which is the one way to ask for a static program that
     // moves itself. `-static` with `-pie` is not that, and is weighed after the loop.
     let mut static_pie = false;
+    // Whether `-gdwarf-4` or `-gdwarf-5` named a version, which is weighed after the loop against
+    // the target's default.
+    let mut dwarf_named = false;
     // `-fhardened`, which is weighed after the loop against each flag the line names.
     let mut hardened = false;
     let mut query: Option<Query> = None;
@@ -1293,14 +1296,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // The version of DWARF to write. We write 5 by default and 4 when asked, which is what a
             // kernel with `CONFIG_DEBUG_INFO_DWARF4` asks for. Like gcc, naming a version also turns
             // debug information on. Any other version is refused rather than handed over as a file
-            // the build's tools cannot read.
-            "-gdwarf" | "-gdwarf-5" => {
+            // the build's tools cannot read. `-gdwarf` with no number is the target's default.
+            "-gdwarf" => opts.debug_info = true,
+            "-gdwarf-5" => {
                 opts.debug_info = true;
                 opts.dwarf_version = 5;
+                dwarf_named = true;
             }
             "-gdwarf-4" => {
                 opts.debug_info = true;
                 opts.dwarf_version = 4;
+                dwarf_named = true;
             }
             // Whether a local's place follows it about or is said once for the whole function. The
             // assignments flags are gcc's finer way of doing the first, which here is the same.
@@ -3489,6 +3495,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         && opts.target.os != rucc_target::Os::NetBsd
     {
         link.pie = Some(false);
+    }
+
+    // NetBSD's own GCC writes DWARF 4 unless told otherwise, because its `ctfconvert` reads 2, 3
+    // and 4 and refuses 5, and the kernel build runs every object through it after `-g`. So there
+    // the default is 4 and a version on the line still wins.
+    if !dwarf_named && opts.target.os == rucc_target::Os::NetBsd {
+        opts.dwarf_version = 4;
     }
 
     // The word size against the target. On x86 the other size is the other machine, as it is for
@@ -6776,6 +6789,21 @@ mod tests {
         assert_eq!(dirs, [root.join("usr/include"), PathBuf::from(runtime::DIR)]);
         assert_eq!(opts.search.missing_system(), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// NetBSD's GCC writes DWARF 4 by default, because the kernel build runs every object
+    /// through a `ctfconvert` that refuses 5. A version on the line still wins, in either order.
+    #[test]
+    fn netbsd_writes_dwarf_4_unless_a_version_is_named() {
+        let version = |line: &[&str]| compile(line).0.dwarf_version;
+        let netbsd = "--target=x86_64--netbsd";
+        assert_eq!(version(&[netbsd, "-g", "-c", "a.c"]), 4);
+        assert_eq!(version(&["-gdwarf", netbsd, "-c", "a.c"]), 4);
+        assert_eq!(version(&["-gdwarf-5", netbsd, "-c", "a.c"]), 5);
+        assert_eq!(version(&[netbsd, "-gdwarf-5", "-gdwarf-4", "-c", "a.c"]), 4);
+        assert_eq!(version(&["--target=x86_64-unknown-freebsd", "-g", "-c", "a.c"]), 5);
+        assert_eq!(version(&["--target=x86_64-linux-gnu", "-gdwarf", "-c", "a.c"]), 5);
+        assert_eq!(version(&["--target=x86_64-linux-gnu", "-gdwarf-4", "-c", "a.c"]), 4);
     }
 
     #[test]
