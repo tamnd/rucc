@@ -496,6 +496,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Protector::All => LowerProtector::All,
                                 Protector::Explicit => LowerProtector::Explicit,
                             },
+                            ssp_buffer_size: opts.ssp_buffer_size,
                             wrapping: rucc_lower::Wrapping {
                                 signed: opts.wrapping.signed,
                                 pointer: opts.wrapping.pointer,

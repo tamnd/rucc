@@ -481,6 +481,20 @@ fn warning_param(opts: &mut Options, spec: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Reads `--param ssp-buffer-size=` into `opts`, and says whether `spec` was it.
+///
+/// The fewest bytes an array needs for `-fstack-protector` to protect the function it is in. gcc
+/// takes 1 to 65536 and starts at 8. NetBSD passes `--param ssp-buffer-size=1` on every unit of its
+/// userland, so refusing it refused the whole build.
+fn protector_param(opts: &mut Options, spec: &str) -> Result<bool, String> {
+    let Some(("ssp-buffer-size", value)) = spec.split_once('=') else { return Ok(false) };
+    opts.ssp_buffer_size =
+        value.parse().ok().filter(|size| (1..=65536).contains(size)).ok_or_else(|| {
+            format!("invalid value '{value}' for --param ssp-buffer-size, which takes 1 to 65536")
+        })?;
+    Ok(true)
+}
+
 /// The names one name in `-fsanitize=` and its relatives stands for.
 ///
 /// `shift` is the two shift checks together, as gcc has it, so `-fsanitize=shift
@@ -1167,6 +1181,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 i += 1;
                 if !asan_param(&mut opts.kasan, &spec).map_err(err)?
                     && !warning_param(&mut opts, &spec).map_err(err)?
+                    && !protector_param(&mut opts, &spec).map_err(err)?
                 {
                     rucc_cost::heuristics::Param::new(&spec).map_err(|e| err(e.to_string()))?;
                     opts.params.push(spec);
@@ -1176,6 +1191,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let spec = &arg["--param=".len()..];
                 if !asan_param(&mut opts.kasan, spec).map_err(err)?
                     && !warning_param(&mut opts, spec).map_err(err)?
+                    && !protector_param(&mut opts, spec).map_err(err)?
                 {
                     rucc_cost::heuristics::Param::new(spec).map_err(|e| err(e.to_string()))?;
                     opts.params.push(spec.to_owned());
@@ -11586,5 +11602,22 @@ mod tests {
         assert_eq!(opts.min_pagesize, 0);
         let why = "invalid value 'big' for --param min-pagesize";
         assert_eq!(refused(&["-c", "--param=min-pagesize=big", "a.c"]), why);
+    }
+
+    /// `--param ssp-buffer-size=` is the size of array that `-fstack-protector` protects. NetBSD
+    /// passes 1 on every unit of its userland, in the spelling with a space.
+    #[test]
+    fn ssp_buffer_size_is_taken_in_both_spellings() {
+        assert_eq!(compile(&["-c", "a.c"]).0.ssp_buffer_size, 8);
+        let (opts, _) = compile(&["-c", "--param", "ssp-buffer-size=1", "a.c"]);
+        assert_eq!(opts.ssp_buffer_size, 1);
+        let (opts, _) = compile(&["-c", "--param=ssp-buffer-size=65536", "a.c"]);
+        assert_eq!(opts.ssp_buffer_size, 65536);
+        for bad in ["0", "65537", "big"] {
+            let why = format!(
+                "invalid value '{bad}' for --param ssp-buffer-size, which takes 1 to 65536"
+            );
+            assert_eq!(refused(&["-c", &format!("--param=ssp-buffer-size={bad}"), "a.c"]), why);
+        }
     }
 }

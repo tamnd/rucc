@@ -2487,6 +2487,10 @@ pub struct Options {
     pub stack_reuse: Option<bool>,
     /// Which functions get a stack protector, from the `-fstack-protector` family.
     pub protector: Protector,
+    /// How many bytes an array has to have for `-fstack-protector` to protect the function it is
+    /// in, from `--param ssp-buffer-size=`. Eight unless the line says otherwise, as in gcc.
+    /// NetBSD passes 1 on every unit of its userland.
+    pub ssp_buffer_size: u64,
     /// Whether a prologue takes its frame a page at a time, from `-fstack-clash-protection`.
     ///
     /// An operating system leaves one page unmapped below every stack so that a stack growing
@@ -3143,6 +3147,7 @@ impl Options {
             rewriter: String::new(),
             stack_reuse: None,
             protector: Protector::default(),
+            ssp_buffer_size: 8,
             stack_clash: false,
             plt: true,
             control: Control::default(),

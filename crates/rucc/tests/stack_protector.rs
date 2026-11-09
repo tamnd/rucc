@@ -100,6 +100,19 @@ fn the_plain_flag_protects_the_functions_with_a_buffer_in_them() {
     assert_eq!(protected(&text), ["buf"], "{text}");
 }
 
+/// `--param ssp-buffer-size=` moves the size the plain flag protects, as in gcc. NetBSD passes 1
+/// on every unit of its userland, which takes in the small array, and a size above the big one
+/// leaves nothing protected.
+#[test]
+fn the_buffer_size_param_moves_what_the_plain_flag_protects() {
+    let text = asm("ssp-one", &["-fstack-protector", "--param", "ssp-buffer-size=1"], FOUR);
+    assert_eq!(protected(&text), ["buf", "small"], "{text}");
+    let text = asm("ssp-big", &["-fstack-protector", "--param=ssp-buffer-size=17"], FOUR);
+    assert!(protected(&text).is_empty(), "{text}");
+    let text = asm("ssp-strong", &["-fstack-protector-strong", "--param=ssp-buffer-size=17"], FOUR);
+    assert_eq!(protected(&text), ["buf", "small", "taken"], "{text}");
+}
+
 /// The strong one adds the small array and the address that got away.
 ///
 /// This is the one every distribution builds with, so it is the one worth being exact about. An

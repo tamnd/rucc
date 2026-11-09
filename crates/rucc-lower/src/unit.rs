@@ -205,6 +205,9 @@ pub struct Context<'a> {
     pub visibility: IrVisibility,
     /// Which functions get a stack protector, which is `-fstack-protector` and its relatives.
     pub protector: Protector,
+    /// How many bytes an array needs for [`Protector::Buffers`] to protect the function it is in,
+    /// which is gcc's `--param ssp-buffer-size=` and is eight unless the line says otherwise.
+    pub ssp_buffer_size: u64,
     /// What overflows rather than being undefined, which is `-fwrapv` and its relatives.
     ///
     /// A fact about the compilation for the same reason the two above it are: what was written is
@@ -389,6 +392,7 @@ impl fmt::Debug for Context<'_> {
         f.debug_struct("Context")
             .field("visibility", &self.visibility)
             .field("protector", &self.protector)
+            .field("ssp_buffer_size", &self.ssp_buffer_size)
             .field("wrapping", &self.wrapping)
             .field("aliasing", &self.aliasing)
             .field("padding", &self.padding)
@@ -472,6 +476,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         names,
         visibility,
         protector,
+        ssp_buffer_size,
         wrapping,
         aliasing,
         padding,
@@ -512,6 +517,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         names,
         visibility,
         protector,
+        ssp_buffer_size,
         wrapping,
         aliasing,
         padding,
@@ -580,6 +586,8 @@ pub(crate) struct Unit<'a> {
     visibility: IrVisibility,
     /// Which functions get a stack protector. See [`Context::protector`].
     pub(crate) protector: Protector,
+    /// How big an array the plain protector protects. See [`Context::ssp_buffer_size`].
+    pub(crate) ssp_buffer_size: u64,
     /// What wraps rather than being undefined. See [`Context::wrapping`].
     pub(crate) wrapping: Wrapping,
     /// Whether an access names the type it goes through. See [`Context::aliasing`].
