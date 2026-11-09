@@ -659,8 +659,17 @@ impl Reader {
             if byte == b'"' {
                 quoted = !quoted;
             }
-            if alternate && !quoted && starts(byte) && (at == 0 || !word_byte(bytes[at - 1])) {
-                let end = name_end(line, at);
+            // A `$` may start a name elsewhere and is not part of a parameter's name, so a `$` in
+            // front of a number, as in `addq $8,%rsp`, is no name at all. It goes through as the
+            // character it is below, since stopping here for a name of no characters would never
+            // move on: FreeBSD's support.S hung on that line.
+            let end = name_end(line, at);
+            if alternate
+                && !quoted
+                && starts(byte)
+                && end > at
+                && (at == 0 || !word_byte(bytes[at - 1]))
+            {
                 if let Some(value) = look(&line[at..end]) {
                     // `&` on either side of a name joins it to what is there, and goes.
                     if out.ends_with('&') {
@@ -1358,6 +1367,16 @@ PFX_REX b b
         assert!(deep.why.contains("deep"), "{}", deep.why);
         let twice = read(".macro m\n.endm\n.macro M\n.endm", Arch::X86_64).unwrap_err();
         assert!(twice.why.contains("already defined"), "{}", twice.why);
+    }
+
+    #[test]
+    fn altmacro_passes_an_immediate_in_a_body_through() {
+        // FreeBSD's support.S has `addq $8,%rsp` in a macro under `.altmacro`, and reading the
+        // `$` as the start of a parameter's name of no characters never moved past it.
+        same(
+            ".altmacro\n.macro pop8 n\naddq $8,%rsp\n.long n\n.endm\npop8 1\npop8 2\n",
+            "addq $8,%rsp\n.long 1\naddq $8,%rsp\n.long 2\n",
+        );
     }
 
     #[test]
