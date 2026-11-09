@@ -557,7 +557,7 @@ pub fn finish(
     // the handler's values are in as well, then go to the handler rather than return. Each is
     // written in front of the marker the lowering left, and the marker comes out.
     for &marker in &stack.eh_returns {
-        for inst in writer.handler_exit(frame) {
+        for inst in writer.handler_exit(frame, marker) {
             writer.func.insert_before(marker, inst);
         }
         writer.func.remove_inst(marker);
@@ -2111,7 +2111,7 @@ impl Writer<'_> {
         }
         // The pushes of the registers a `__builtin_eh_return` hands its values in are the last
         // ones, and this way out leaves them where they are. See [`Frame::handed`].
-        let kept = frame.pushed_int().len() - frame.handed();
+        let kept = frame.pushed_int().count() - frame.handed();
         let pushed = u32::try_from(kept).expect("a frame");
         if frame.frame_pointer() {
             // No row for either of these. The address is counted from the frame pointer here and
@@ -2140,7 +2140,8 @@ impl Writer<'_> {
                 self.row(inst, CfiOp::DefCfaOffset(below));
             }
         }
-        for regs in frame.pushed_int().take(kept).rev() {
+        let pops: Vec<&[PhysReg]> = frame.pushed_int().take(kept).collect();
+        for regs in pops.into_iter().rev() {
             let inst = self.pop_int(regs);
             out.push(inst);
             for &reg in regs {
@@ -2242,7 +2243,10 @@ impl Writer<'_> {
     /// jumped to. gcc 13.3 writes these instructions on x86-64 and i686, and the same rows: once
     /// the frame pointer is back, the canonical frame address is said to be a word above `%rcx`,
     /// and then a word above the stack pointer.
-    fn handler_exit(&mut self, frame: &Frame) -> Vec<Inst> {
+    fn handler_exit(&mut self, frame: &Frame, marker: Inst) -> Vec<Inst> {
+        if self.record().is_some() {
+            return self.handler_jump(frame, marker);
+        }
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
         let int = self.conv.int_class;
@@ -2256,7 +2260,7 @@ impl Writer<'_> {
             let inst = self.restore_sse(save.reg, save.at);
             out.push(inst);
         }
-        let pushed = u32::try_from(frame.pushed_int().len()).expect("a frame");
+        let pushed = u32::try_from(frame.pushed_int().count()).expect("a frame");
         let lea = self.opcode(self.insts.lea);
         out.push(self.address(lea, sp, fp, -offset(push * pushed)));
         for regs in frame.pushed_int().rev() {
@@ -2277,8 +2281,79 @@ impl Writer<'_> {
         let number = self.dwarf(int, sp);
         self.row(inst, CfiOp::DefCfa { reg: number, offset: word });
         out.push(self.pop(rcx));
-        let jump = self.opcode("jmp_reg");
+        let jump = self.opcode(self.insts.jump_reg);
         let inst = self.func.build_loose(jump).uses(Reg::physical(rcx), int).finish();
+        out.push(inst);
+        if described {
+            self.row(inst, CfiOp::RestoreState);
+            self.row(inst, CfiOp::RememberState);
+        }
+        let closing = ending(self.func.declared);
+        if !closing.is_dummy() {
+            for &inst in &out {
+                self.func.set_span(inst, closing);
+            }
+        }
+        out
+    }
+
+    /// The way out through a `__builtin_eh_return` on a machine that keeps the return address in a
+    /// register and saves it with the frame pointer, which is AArch64 and RISC-V.
+    ///
+    /// The lowering left the stack pointer the handler wants in the first register the marker
+    /// reads and the handler in the second. This puts back every register the prologue saved, the
+    /// ones the handler is handed its values in included, and the frame record last. Then the
+    /// stack pointer goes to the first register and the jump to the second. The rows are the ones
+    /// the ordinary epilogue writes for the same loads.
+    ///
+    /// gcc 14 writes this on AArch64, with the same two registers. gcc 13 on RISC-V stores the
+    /// handler into the slot of `ra`, adds the offset to the stack pointer in `a4` and returns.
+    /// The handler starts with the same registers and the same stack pointer either way.
+    fn handler_jump(&mut self, frame: &Frame, marker: Inst) -> Vec<Inst> {
+        let sp = self.conv.stack_pointer;
+        let fp = self.conv.frame_pointer;
+        let int = self.conv.int_class;
+        let sse = self.conv.sse_class;
+        let push = self.conv.push;
+        let described = !self.func.cfi.is_empty();
+        assert!(
+            frame.frame_pointer() && !frame.late(),
+            "a `__builtin_eh_return` keeps a frame record"
+        );
+        let read: Vec<PhysReg> =
+            self.func[self.func[marker].operands].iter().filter_map(|op| op.reg.phys()).collect();
+        let &[to, handler] = read.as_slice() else {
+            panic!("the mark of a `__builtin_eh_return` reads the stack pointer and the handler");
+        };
+        let mut out = Vec::new();
+        for save in frame.saved_sse() {
+            let inst = self.restore_sse(save.reg, save.at);
+            out.push(inst);
+            self.restored(inst, sse, save.reg);
+        }
+        let pushed = u32::try_from(frame.pushed_int().count()).expect("a frame");
+        let lea = self.opcode(self.insts.lea);
+        out.push(self.address(lea, sp, fp, -offset(push * pushed)));
+        for regs in frame.pushed_int().rev() {
+            let inst = self.pop_int(regs);
+            out.push(inst);
+            for &reg in regs {
+                self.restored(inst, int, reg);
+            }
+        }
+        let inst = self.pop_frame();
+        out.push(inst);
+        self.restored(inst, int, fp);
+        if let Some(link) = self.record() {
+            self.restored(inst, int, link);
+        }
+        let number = self.dwarf(int, sp);
+        let at = offset(self.conv.return_address) + offset(frame.home());
+        self.row(inst, CfiOp::DefCfa { reg: number, offset: at });
+        let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
+        out.push(self.two(mov, sp, to));
+        let jump = self.opcode(self.insts.jump_reg);
+        let inst = self.func.build_loose(jump).uses(Reg::physical(handler), int).finish();
         out.push(inst);
         if described {
             self.row(inst, CfiOp::RestoreState);
@@ -2296,7 +2371,7 @@ impl Writer<'_> {
     /// How many pushes the prologue made, the frame pointer's included, which on a machine that
     /// pushes two at a time is fewer than the registers they saved.
     fn pushes(&self, frame: &Frame) -> i32 {
-        let saved = i32::try_from(frame.pushed_int().len()).expect("a frame");
+        let saved = i32::try_from(frame.pushed_int().count()).expect("a frame");
         saved + i32::from(frame.frame_pointer())
     }
 

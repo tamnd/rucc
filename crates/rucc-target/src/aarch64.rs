@@ -221,6 +221,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     imm: "mov_ri_64",
     lea: "lea_64",
     sum: "add_rr_64",
+    jump_reg: "br",
     ret: "ret",
     ret_pop: None,
     iret: None,

@@ -124,7 +124,7 @@ fn plain(form: Form) -> Timing {
         JumpReg | Call | Ret => (2, Unit::Branch),
         RetVal | RetVal2 | RetValFp | RetVal2Fp | RetVal3Fp | RetVal4Fp | ArgVal | ArgValFp
         | BrCond => (0, Unit::Free),
-        Barrier | Trap | Nop | Template => (1, Unit::Fixed),
+        Barrier | Trap | EhReturn | Nop | Template => (1, Unit::Fixed),
         // An acquiring load and a releasing store, which cost what the plain ones do when nothing
         // is waiting on them.
         Acquire => (LOAD, Unit::Load),

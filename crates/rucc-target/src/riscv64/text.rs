@@ -478,6 +478,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("probe_64", &[spell("sd", &[Fixed(ZERO), Mem])]),
     ("nop", &[spell("nop", &[])]),
     ("trap", &[spell("ebreak", &[])]),
+    // Never written: the epilogue `rucc_codegen::finish` puts in its place is.
+    ("eh_return", &[]),
     // Reads and writes before it ordered with reads and writes after it, which is what a C
     // fence asks for.
     ("fence", &[spell("fence", &[Arg::Order(3), Arg::Order(3)])]),

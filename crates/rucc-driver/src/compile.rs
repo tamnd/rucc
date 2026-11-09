@@ -10968,6 +10968,13 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// handler stores the handler below the stack pointer it asked for, loads everything back
     /// with the frame pointer last, moves the stack pointer to that slot through rcx and pops the
     /// handler into rcx to jump to it. This is what gcc 13.3.0 writes for the same function.
+    ///
+    /// AArch64 and RISC-V save the same registers, the four data registers last, in pairs. The
+    /// path to the handler puts the new stack pointer in x5 or a4 and the handler in x6 or a5,
+    /// loads everything back, moves the stack pointer and jumps through the register. That is
+    /// gcc 14.2.0's way out on AArch64. gcc 13.3.0 on RISC-V stores the handler in the slot of
+    /// `ra` and returns through it instead, which comes to the same place. The path that returns
+    /// does not load the data registers back on either machine, so the 7 stays in x0 or a0.
     #[test]
     fn eh_return_puts_the_registers_back_and_goes_to_the_handler() {
         let source = concat!(
@@ -11025,14 +11032,67 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
         assert!(text.contains(jump), "{text}");
 
-        // The machines whose frame for this is not written yet say so rather than return.
-        for target in
-            ["aarch64-unknown-linux-gnu", "riscv64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
-        {
-            let result = unwinder_asm(target, source);
-            assert_eq!(result.errors, 1, "{target}: {:?}", result.messages);
-            assert!(result.messages[0].contains("E0653"), "{target}: {:?}", result.messages);
-        }
+        let aarch64 = unwinder_asm("aarch64-unknown-linux-gnu", source);
+        assert_eq!(aarch64.messages, Vec::<String>::new());
+        let text = aarch64.text();
+        let saved = concat!(
+            "\tstp x0, x1, [sp, #-16]!\n\t.cfi_offset 0, -112\n\t.cfi_offset 1, -104\n",
+            "\tstp x2, x3, [sp, #-16]!\n\t.cfi_offset 2, -128\n\t.cfi_offset 3, -120\n",
+        );
+        assert!(text.contains(saved), "{text}");
+        let (returns, handler) = text.split_once("add x2, sp, #192").expect("{text}");
+        assert!(returns.contains("mov w0, #7"), "{returns}");
+        assert!(returns.contains("add sp, x29, #-80"), "{returns}");
+        assert!(!returns.contains("ldp x0, x1"), "the return value stays: {returns}");
+        assert!(handler.contains("add x0, x2, x0\n\tmov x5, x0\n"), "{handler}");
+        assert!(handler.contains("mov x6, x1\n"), "{handler}");
+        assert!(handler.contains("add sp, x29, #-112\n\tldp x2, x3, [sp], #16\n"), "{handler}");
+        assert!(handler.contains("ldp x0, x1, [sp], #16\n"), "{handler}");
+        let jump = "\t.cfi_def_cfa 31, 0\n\tmov sp, x5\n\tbr x6\n";
+        assert!(handler.contains(jump), "{handler}");
+        assert!(!handler.contains("\tret"), "{handler}");
+
+        let riscv = unwinder_asm("riscv64-unknown-linux-gnu", source);
+        assert_eq!(riscv.messages, Vec::<String>::new());
+        let text = riscv.text();
+        // s11 is the odd one of the registers a call preserves, so it has a push of its own and
+        // the data registers start a pair, which is what the ordinary way out skips.
+        assert!(text.contains("\tsd s11, 0(sp)\n\t.cfi_offset 27, -112\n"), "{text}");
+        let saved = "\tsd a0, 0(sp)\n\tsd a1, 8(sp)\n\t.cfi_offset 10, -128\n";
+        assert!(text.contains(saved), "{text}");
+        let (returns, handler) = text.split_once("addi a2, sp, 240").expect("{text}");
+        assert!(returns.contains("li a0, 7"), "{returns}");
+        assert!(returns.contains("addi sp, s0, -96\n\tld s11, 0(sp)\n"), "{returns}");
+        assert!(!returns.contains("ld a0"), "the return value stays: {returns}");
+        assert!(handler.contains("add a0, a2, a0\n\tmv a4, a0\n"), "{handler}");
+        assert!(handler.contains("mv a5, a1\n"), "{handler}");
+        assert!(handler.contains("addi sp, s0, -128\n\tld a2, 0(sp)\n"), "{handler}");
+        let jump = "\t.cfi_def_cfa 2, 0\n\tmv sp, a4\n\tjr a5\n";
+        assert!(handler.contains(jump), "{handler}");
+        assert!(!handler.contains("\tret"), "{handler}");
+
+        // Windows x64 moves the frame pointer after the pushes, which this frame is not written
+        // for, so it says so rather than return.
+        let result = unwinder_asm("x86_64-pc-windows-msvc", source);
+        assert_eq!(result.errors, 1, "{:?}", result.messages);
+        assert!(result.messages[0].contains("E0653"), "{:?}", result.messages);
+    }
+
+    /// The return address on RISC-V is the word above where `s0` points, as on AArch64.
+    ///
+    /// The frame record is the caller's `s0` and then `ra`, and a call leaves the address in a
+    /// register, so the target has no distance from the frame for it. Reading at the frame
+    /// pointer itself gave the caller's `s0` back, and the unwinder in libgcc, which starts from
+    /// its own return address, then found no frame to walk.
+    #[test]
+    fn the_return_address_on_riscv_is_above_the_saved_frame_pointer() {
+        let source = "void g(void *); void back(void) { g(__builtin_return_address(0)); }\n";
+        let riscv = unwinder_asm("riscv64-unknown-linux-gnu", source);
+        assert_eq!(riscv.messages, Vec::<String>::new());
+        let text = riscv.text();
+        assert!(text.contains("\tsd ra, 8(sp)\n"), "{text}");
+        assert!(text.contains("\tld a0, 8(s0)\n"), "{text}");
+        assert!(!text.contains("\tld a0, 0(s0)\n"), "{text}");
     }
 
     /// `__builtin_unwind_init` saves every register a call preserves on the machines whose

@@ -325,7 +325,8 @@ pub struct Layout<'a> {
     /// `_Unwind_SetGR`, and the way out through the handler loads them back from there. The way
     /// out through the return leaves them alone, since one of them is where the function's own
     /// answer is. That is what gcc does on x86-64: `%rax` and `%rdx` are pushed last and the `ret`
-    /// path takes them off the stack without reading them. See [`Frame::handed`].
+    /// path takes them off the stack without reading them. On AArch64 and RISC-V they are x0 to
+    /// x3 and a0 to a3, pushed as two pairs. See [`Frame::handed`].
     pub eh_data: &'a [PhysReg],
 }
 
@@ -363,6 +364,11 @@ impl<'a> Layout<'a> {
         }
     }
 }
+
+/// The pushes of a frame's general purpose registers, one or two registers to each. See
+/// [`Frame::pushed_int`].
+pub type Pushes<'a> =
+    std::iter::Chain<std::slice::Chunks<'a, PhysReg>, std::slice::Chunks<'a, PhysReg>>;
 
 /// What a function's stack looks like while it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -584,7 +590,10 @@ impl Frame {
         // short of aligned when the function starts, and one push further off for every push. The
         // frame pointer is a push like any other here, which is why this is asked after the frames
         // that keep one without being asked to have said so.
-        let pushed = u32::from(frame_pointer) + groups(saved_int.len(), layout.pairs);
+        let handed = if layout.naked { 0 } else { layout.eh_data.len() };
+        let pushed = u32::from(frame_pointer)
+            + groups(saved_int.len() - handed, layout.pairs)
+            + groups(handed, layout.pairs);
         let entry = wrap(conv.stack_align, conv.return_address);
         let after = (entry + wrap(conv.stack_align, push * pushed)) % conv.stack_align;
 
@@ -678,7 +687,7 @@ impl Frame {
             popped: layout.popped,
             interrupt: layout.interrupt,
             clears: layout.interrupt.is_some() && !layout.leaf,
-            handed: if layout.naked { 0 } else { layout.eh_data.len() },
+            handed,
         }
     }
 
@@ -693,8 +702,15 @@ impl Frame {
 
     /// The same registers as the pushes that put them on the stack, one or two to a push, in the
     /// order the prologue makes them. See [`Layout::pairs`].
-    pub fn pushed_int(&self) -> std::slice::Chunks<'_, PhysReg> {
-        self.saved_int.chunks(if self.pairs { 2 } else { 1 })
+    ///
+    /// The registers a `__builtin_eh_return` hands its values in start a push of their own, so
+    /// that the ordinary epilogue can leave all of them and none of the others on the stack. On
+    /// RISC-V the eleven saved registers leave the last of them alone in its push, and the four
+    /// that follow are two pairs. See [`Frame::handed`].
+    pub fn pushed_int(&self) -> Pushes<'_> {
+        let size = if self.pairs { 2 } else { 1 };
+        let (kept, handed) = self.saved_int.split_at(self.saved_int.len() - self.handed);
+        kept.chunks(size).chain(handed.chunks(size))
     }
 
     /// How many of the pushes [`Frame::pushed_int`] gives are the registers a `__builtin_eh_return`
@@ -704,7 +720,7 @@ impl Frame {
     /// front of the jump to the handler pops all of them.
     #[must_use]
     pub fn handed(&self) -> usize {
-        self.handed
+        if self.pairs { self.handed.div_ceil(2) } else { self.handed }
     }
 
     /// The vector registers the prologue stores into the frame, and where each of them goes.

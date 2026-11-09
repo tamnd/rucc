@@ -40,10 +40,10 @@ use crate::riscv64::{FPR, GPR, f, x};
 
 use Form::{
     Address, Alu, AluI, Amo, AmoNegated, ArgVal, ArgValFp, Barrier, BrCond, Call, CmpSet,
-    CompareSwap, CompareSwapMasked, Convert, FAlu, FCmpSet, FConvert, FMove, FMulAdd, FUnary,
-    FpToInt, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp, LoadImm, Move,
-    Nop, Pop, PopPair, Probe, Push, PushPair, Ret, RetVal, RetVal2, RetVal2Fp, RetValFp, Select,
-    Store, StoreFp, Template, Test, Trap, Unary,
+    CompareSwap, CompareSwapMasked, Convert, EhReturn, FAlu, FCmpSet, FConvert, FMove, FMulAdd,
+    FUnary, FpToInt, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp, LoadImm,
+    Move, Nop, Pop, PopPair, Probe, Push, PushPair, Ret, RetVal, RetVal2, RetVal2Fp, RetValFp,
+    Select, Store, StoreFp, Template, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -141,6 +141,17 @@ pub enum Form {
     Nop,
     /// A stop the program cannot step past.
     Trap,
+    /// Where `__builtin_eh_return` leaves the function, with the stack pointer the handler wants in
+    /// `a4` and the handler in `a5`.
+    ///
+    /// It encodes to nothing and never reaches the output. `rucc_codegen::finish` writes in front
+    /// of it the epilogue that puts back every saved register, the ones the handler is handed its
+    /// values in included, then moves the stack pointer and jumps to the handler, and takes it out.
+    /// Until then the two reads pinned to those registers tell the allocator to have the values
+    /// there and keep them alive that far. Neither is a register a call preserves or one the
+    /// handler is handed a value in, so nothing that epilogue puts back writes over them, and
+    /// a4 is the one gcc 13 adds to the stack pointer.
+    EhReturn,
     /// A fence between the memory accesses before it and the ones after it.
     Barrier,
     /// An `amo` instruction. What was there, the register holding the address and the value the
@@ -199,6 +210,10 @@ static FP_TO_GPR: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read
 static TWO_FP_TO_ONE: [OperandDesc; 3] =
     [OperandDesc::write(GPR), OperandDesc::read(FPR), OperandDesc::read(FPR)];
 static RET_VAL: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(x(10)))];
+static EH_RETURN: [OperandDesc; 2] = [
+    OperandDesc::read(GPR).with(Constraint::Fixed(x(14))),
+    OperandDesc::read(GPR).with(Constraint::Fixed(x(15))),
+];
 static RET_VAL_2: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(x(11)))];
 static RET_VAL_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(f(10)))];
 static RET_VAL_2_FP: [OperandDesc; 1] = [OperandDesc::read(FPR).with(Constraint::Fixed(f(11)))];
@@ -257,6 +272,7 @@ impl Form {
             AmoNegated => &AMO_NEGATED,
             CompareSwap => &COMPARE_SWAP,
             CompareSwapMasked => &COMPARE_SWAP_MASKED,
+            EhReturn => &EH_RETURN,
             Jump | Jcc | JumpAway | Call | Ret | Nop | Trap | Barrier | Probe | Template => &NONE,
         }
     }
@@ -563,6 +579,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // Everything else.
     ("nop", Nop),
     ("trap", Trap),
+    // The place `__builtin_eh_return` leaves from, which the epilogue it becomes replaces.
+    ("eh_return", EhReturn),
     ("fence", Barrier),
     ("fence_acquire", Barrier),
     ("fence_release", Barrier),
@@ -642,10 +660,12 @@ mod tests {
 
     #[test]
     fn the_only_fixed_registers_are_the_ones_the_convention_names() {
+        // And the two the way out through `__builtin_eh_return` reads, a4 and a5, which have to be
+        // registers the frame does not save and load back.
         for &(name, form) in INSTS {
             let fixed =
                 form.operands().iter().any(|op| matches!(op.constraint, Constraint::Fixed(_)));
-            assert_eq!(fixed, name.starts_with("ret_val"), "{name}");
+            assert_eq!(fixed, name.starts_with("ret_val") || name == "eh_return", "{name}");
         }
     }
 }
