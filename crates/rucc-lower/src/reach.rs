@@ -479,6 +479,7 @@ impl Reach<'_> {
             | ExprKind::ConvertVector { operand: base }
             | ExprKind::Prefetch { address: base, .. }
             | ExprKind::RegSizeTable { table: base }
+            | ExprKind::ApplyReturn { result: base }
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::ConstantP { value: base }
             | ExprKind::Jump { buffer: base, .. }
@@ -670,7 +671,9 @@ impl Reach<'_> {
     /// name to a function declared `noreturn`.
     fn stops(&self, id: ExprId) -> bool {
         match self.tast[id].kind {
-            ExprKind::Unreachable | ExprKind::EhReturn { .. } => true,
+            ExprKind::Unreachable | ExprKind::EhReturn { .. } | ExprKind::ApplyReturn { .. } => {
+                true
+            }
             ExprKind::Comma { rhs, .. } => self.stops(rhs),
             ExprKind::Call { callee, .. } => {
                 let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } =

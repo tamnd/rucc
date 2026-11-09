@@ -12902,6 +12902,50 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(applied.matches("x64.movaps_rm").count() >= 4, "{applied}");
     }
 
+    /// `__builtin_return` leaves with what the block holds, each register the answer travels in
+    /// read from where the block has it: a word from 0, a vector from 16, and a pair of one of each
+    /// from both. A function that answers nothing, and one whose answer goes back in memory, read
+    /// nothing. And like `__builtin_apply_args`, it keeps an `always_inline` function from being
+    /// inlined, with gcc's error.
+    #[test]
+    fn the_block_a_call_came_back_with_is_given_back_in_the_registers_the_answer_travels_in() {
+        let source = concat!(
+            "long l(void *r) { __builtin_return(r); }\n",
+            "double d(void *r) { __builtin_return(r); }\n",
+            "struct p { long a; double b; };\n",
+            "struct p s(void *r) { __builtin_return(r); }\n",
+            "void v(void *r) { __builtin_return(r); }\n",
+            "struct b { long w[5]; };\n",
+            "struct b m(void *r) { __builtin_return(r); }\n",
+        );
+        let text = asm(source);
+        let at = |name: &str| {
+            let (_, rest) = text.split_once(&format!("\n{name}:")).expect("the function");
+            rest.split_once("\tret").expect("a return").0.to_owned()
+        };
+        assert!(at("l").contains("(%rdi), %rax"), "{}", at("l"));
+        assert!(at("d").contains("16(%rdi), %xmm0"), "{}", at("d"));
+        assert!(at("s").contains("(%rdi), %rax"), "{}", at("s"));
+        assert!(at("s").contains("16(%rdi), %xmm0"), "{}", at("s"));
+        assert!(!at("v").contains("(%rdi)"), "{}", at("v"));
+        assert!(at("m").contains("%rdi, %rax"), "{}", at("m"));
+        assert!(!at("m").contains("(%rdi)"), "{}", at("m"));
+
+        let source = concat!(
+            "static inline __attribute__((always_inline)) int g(void *r) {\n",
+            "  __builtin_return(r);\n",
+            "}\n",
+            "int f(void *r) { return g(r); }\n",
+        );
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let result = run(&opts, source);
+        assert!(result.failed(), "{:?}", result.messages);
+        let error = "function 'g' can never be inlined because it uses '__builtin_return' or \
+                     '__builtin_apply_args'";
+        assert!(result.messages.iter().any(|m| m.contains(error)), "{:?}", result.messages);
+    }
+
     /// A `_Decimal64` crosses a call in an integer register on Windows x64, by position, and comes
     /// back in `%rax`, which is where gcc puts it there. tamnd/rucc#2145.
     #[test]
