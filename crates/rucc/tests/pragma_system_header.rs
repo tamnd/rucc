@@ -81,3 +81,30 @@ fn the_rest_of_the_header_is_quiet_and_the_main_file_is_told_the_pragma_does_not
     assert_eq!(warnings(&dir, &["-w"]), Vec::<String>::new());
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// gcc 13 and 14 do not say that they ignore an unknown pragma in a system header, under any
+/// option, and a header that a system header includes is one too, however it was found. NetBSD's
+/// `sys/param.h` reaches the OpenSolaris `sys/note.h` this way in the dtrace modules, which build
+/// with `-Wall -Wsystem-headers`, and its `#pragma ident` is said by neither compiler.
+#[test]
+fn an_unknown_pragma_in_a_system_header_is_not_said_even_under_dash_wsystem_headers() {
+    let dir = std::env::temp_dir().join(format!("rucc-system-pragma-{}", std::process::id()));
+    for sub in ["sys", "inc"] {
+        std::fs::create_dir_all(dir.join(sub)).expect("a temporary directory can be created");
+    }
+    let files = [
+        ("sys/param.h", "#include <note.h>\n"),
+        ("inc/note.h", "#pragma ident \"%Z%%M%\"\nint inner = 1 << 40;\n"),
+        ("m.c", "#include <param.h>\n#pragma ident \"main\"\n"),
+    ];
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).expect("the fixture can be written");
+    }
+    let shift = "left shift count >= width of type";
+    let flags = ["-Wall", "-Wsystem-headers", "-Iinc", "-isystem", "sys"];
+    assert_eq!(
+        warnings(&dir, &flags),
+        [format!("inc/note.h:2: {shift}"), "m.c:2: ignoring `#pragma ident`".to_owned()]
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
