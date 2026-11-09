@@ -1493,12 +1493,30 @@ impl TargetInfo {
     /// The code generator only ever reads it, for thread-local storage.
     #[must_use]
     pub fn keeps_register_for_the_program(&self, name: &str) -> bool {
+        if self.extern_registers().contains(&name) {
+            return true;
+        }
         match self.tuple.arch() {
             tuple::Arch::Aarch64 => matches!(name, "x18" | "sp"),
             tuple::Arch::X86_64 => name == "rsp",
             tuple::Arch::X86 => name == "esp",
             tuple::Arch::Riscv64 => matches!(name, "sp" | "tp"),
             _ => false,
+        }
+    }
+
+    /// The registers that kencc gives to `extern register` variables, in the order it gives them.
+    ///
+    /// `6c` starts at `R15` and `7c` at `R27`, and each goes down one register for each variable
+    /// in the unit. `6l` and `7l` never use them, and the kernel keeps `m` and `up` in the first
+    /// two. The code generator never gives these to a value on a Plan 9 target, so a program may
+    /// read and write them. Empty for every other target.
+    #[must_use]
+    pub fn extern_registers(&self) -> &'static [&'static str] {
+        match (self.tuple.arch(), self.tuple.os()) {
+            (tuple::Arch::X86_64, tuple::Os::Plan9) => &["r15", "r14"],
+            (tuple::Arch::Aarch64, tuple::Os::Plan9) => &["x27", "x26"],
+            _ => &[],
         }
     }
 

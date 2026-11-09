@@ -155,6 +155,7 @@ pub static HAND: &[(Opcode, &str)] = &[
     // register rather than about one: which register it is is a string beside the instruction and
     // a pattern matches on an opcode and a type, so no rule could name it.
     (Opcode::RegisterValue, "`crate::lower`, as one move out of the register the program named"),
+    (Opcode::SetRegister, "`crate::lower`, as one move into the register the program named"),
     // A hint, which is built here for a reason of the same shape and one step stronger: which of
     // the four instructions it is comes out of a number in the builtin's arguments, and a pattern
     // matches on an opcode and a type and could not see it.

@@ -381,6 +381,9 @@ pub struct Checker<'a> {
     /// return type, or that it wrote none, which is what `typeof` of the declared name is spelled
     /// with. See `Checker::spelled_with`.
     pub(in crate::check) first_spellings: rucc_base::hash::Map<DeclId, Option<(Symbol, TypeId)>>,
+    /// The register each kencc `extern register` variable of the unit has, by its name, in the
+    /// order of declaration. See `TargetInfo::extern_registers`.
+    pub(in crate::check) extern_registers: Vec<(Symbol, crate::StrId)>,
     /// The typedef name that each anonymous member was written with, by the record that holds
     /// it and the type of the member, under `-fplan9-extensions`. gcc takes the name as a member
     /// name, so two anonymous members that reach the same typedef name are duplicates.
@@ -474,6 +477,7 @@ impl<'a> Checker<'a> {
             pending_uses: Vec::new(),
             incomplete_tentative: Vec::new(),
             first_spellings: rucc_base::hash::Map::default(),
+            extern_registers: Vec::new(),
             anonymous_spellings: rucc_base::hash::Map::default(),
             typeof_spellings: rucc_base::hash::Map::default(),
             annotations: annotate::Annotations::default(),

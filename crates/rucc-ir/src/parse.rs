@@ -3000,9 +3000,10 @@ global @x : cap = 0, align 8, linkage(internal)
             let kind = opcode.extra_kind();
             let expected = match opcode {
                 Opcode::IConst | Opcode::FConst | Opcode::Splat => ExtraKind::Imm,
-                Opcode::GlobalAddr | Opcode::TargetIntrinsic | Opcode::RegisterValue => {
-                    ExtraKind::Symbol
-                }
+                Opcode::GlobalAddr
+                | Opcode::TargetIntrinsic
+                | Opcode::RegisterValue
+                | Opcode::SetRegister => ExtraKind::Symbol,
                 Opcode::ICmp => ExtraKind::IntPred,
                 Opcode::FCmp => ExtraKind::FloatPred,
                 Opcode::Fence => ExtraKind::Order,

@@ -4370,6 +4370,41 @@ impl<'u> Body<'_, 'u> {
         ))
     }
 
+    /// A plain assignment to a kencc `extern register` variable, which is a write of the register.
+    ///
+    /// The target keeps the register for the program, so the write is all there is to it, and the
+    /// value of the assignment is the value written. A compound assignment is refused, because
+    /// nothing in the tree writes one.
+    fn set_register(
+        &mut self,
+        op: Option<BinaryOp>,
+        name: &str,
+        lhs: ExprId,
+        rhs: ExprId,
+        want: bool,
+        span: Span,
+    ) -> Option<Value> {
+        if op.is_some() {
+            self.unsupported("a compound assignment to an 'extern register' variable", span);
+            return None;
+        }
+        let ty = self.tast()[lhs].ty;
+        let fits = repr::value_type(self.types(), self.target(), ty)
+            .is_some_and(|value| value.is_ptr() || (value.is_scalar() && value.is_int()));
+        if !fits {
+            self.unsupported("an object of this type kept in a named register", span);
+            return None;
+        }
+        let value = self.eval(rhs)?;
+        let symbol = self.unit.names.intern(name);
+        let mut build = self.build(span);
+        let args = build.func().push_values(&[value]);
+        let data =
+            InstData { args, extra: Extra::Symbol(symbol), ..InstData::new(Opcode::SetRegister) };
+        build.inst(data, &[]);
+        want.then_some(value)
+    }
+
     /// The initializer of one declaration in a declaration statement.
     fn init(&mut self, decl: DeclId) {
         let tast = self.tast();
@@ -10632,6 +10667,11 @@ impl<'u> Body<'_, 'u> {
         span: Span,
     ) -> Option<Value> {
         let ty = self.tast()[lhs].ty;
+        if let Some(name) = self.global_register_name(lhs) {
+            if self.target().extern_registers().contains(&name.as_str()) {
+                return self.set_register(op, &name, lhs, rhs, want, span);
+            }
+        }
         let place = self.place(lhs);
         let Some(op) = op else {
             if repr::value_type(self.types(), self.target(), ty).is_none() {

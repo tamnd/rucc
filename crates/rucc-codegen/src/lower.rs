@@ -2578,6 +2578,10 @@ impl<'a> Lowering<'a> {
                     self.register_value(inst)?;
                     continue;
                 }
+                Opcode::SetRegister => {
+                    self.set_register(inst)?;
+                    continue;
+                }
                 // Where a frame is and what it returns to, built here for the same reason and one
                 // more. The reason is the same: what the walk starts from is the frame pointer,
                 // which is not a register a rule pattern can bind, and there is nothing in reading
@@ -5491,11 +5495,54 @@ impl<'a> Lowering<'a> {
     /// the question is asked, at the same table `asm` asks about clobbers at. The sigil gcc
     /// allows in front of it is taken off here, because what the name is written with is syntax.
     fn register_value(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        let ty = self.source[result].ty;
+        let (held, file) = self.held_in(inst, ty)?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let mov = self.selector.frame.moves(file).expect("a class the target says how to move").mov;
+        let mov = self.named(mov);
+        let into = self.new_reg(result);
+        self.out
+            .build(block, mov)
+            .at(span)
+            .operand(mir::Operand::write(into, file))
+            .operand(
+                mir::Operand::read(mir::Reg::physical(held), file).with(Constraint::Fixed(held)),
+            )
+            .finish();
+        Ok(())
+    }
+
+    /// A write of a named machine register, which is kencc's `extern register` on the left of an
+    /// assignment. It is one move into the register. The target never gives the register to a
+    /// value, so what the move leaves there is still there at the next read.
+    fn set_register(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let &value =
+            self.source[self.source[inst].args].first().ok_or_else(|| self.unsupported(inst))?;
+        let ty = self.source[value].ty;
+        let (held, file) = self.held_in(inst, ty)?;
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let mov = self.selector.frame.moves(file).expect("a class the target says how to move").mov;
+        let mov = self.named(mov);
+        let from = self.reg_of(value)?;
+        self.out
+            .build(block, mov)
+            .at(span)
+            .operand(
+                mir::Operand::write(mir::Reg::physical(held), file).with(Constraint::Fixed(held)),
+            )
+            .operand(mir::Operand::read(from, file))
+            .finish();
+        Ok(())
+    }
+
+    /// The machine register the payload of `inst` names and its file, for a value of type `ty`.
+    fn held_in(&self, inst: Inst, ty: Type) -> Result<(PhysReg, RegClass), Unsupported> {
         let Extra::Symbol(symbol) = self.source[inst].extra else {
             return Err(self.unsupported(inst));
         };
-        let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
-        let ty = self.source[result].ty;
         let bits = if ty.is_ptr() { self.address_bits() } else { ty.bits() };
         if bits > self.address_bits() {
             return Err(self.unsupported(inst));
@@ -5526,20 +5573,7 @@ impl<'a> Lowering<'a> {
         if self.x87_held(ty) || self.class_of(ty) != file {
             return Err(self.unsupported(inst));
         }
-        let block = self.at.expect("a block is being filled");
-        let span = self.source.span(inst);
-        let mov = self.selector.frame.moves(file).expect("a class the target says how to move").mov;
-        let mov = self.named(mov);
-        let into = self.new_reg(result);
-        self.out
-            .build(block, mov)
-            .at(span)
-            .operand(mir::Operand::write(into, file))
-            .operand(
-                mir::Operand::read(mir::Reg::physical(held), file).with(Constraint::Fixed(held)),
-            )
-            .finish();
-        Ok(())
+        Ok((held, file))
     }
 
     /// A conversion that converts nothing: the result is the operand under another type.

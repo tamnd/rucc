@@ -34,6 +34,9 @@ pub struct DeclSpecs {
     /// it stand beside `auto`, `register` or `static`, and `static constexpr int x = 1;` is a
     /// declaration people write.
     pub constexpr: bool,
+    /// Whether this is kencc's `extern register`, which puts a variable in a register for the
+    /// whole program. The storage class is then [`StorageClass::Register`].
+    pub extern_register: bool,
     /// What type was named.
     pub ty: TypeSpec,
     /// The qualifiers, which may be written before or after the type.
@@ -120,6 +123,7 @@ impl DeclSpecs {
             storage: None,
             thread_local: false,
             constexpr: false,
+            extern_register: false,
             ty: TypeSpec::None,
             quals: Quals::NONE,
             func: FuncSpecs::NONE,

@@ -1413,9 +1413,10 @@ impl Checker<'_> {
                 return self.poison(span);
             }
         }
-        if let Some(name) = self.register_object(operand) {
+        if let Some((name, global)) = self.register_object(operand) {
+            let what = if global { "global register variable" } else { "register variable" };
             self.report(
-                Diagnostic::error(format!("address of register variable '{name}' requested"), span)
+                Diagnostic::error(format!("address of {what} '{name}' requested"), span)
                     .with_code("E0506"),
             );
             return self.poison(span);
@@ -1445,7 +1446,7 @@ impl Checker<'_> {
     /// A member of a structure is as much in a register as the structure is, so the walk goes
     /// down through `.` and stops at anything else, which is how `p->x` is left alone: that
     /// member is wherever `p` points, whatever `p` itself was declared as.
-    fn register_object(&self, operand: ExprId) -> Option<String> {
+    fn register_object(&self, operand: ExprId) -> Option<(String, bool)> {
         let mut object = operand;
         while let ExprKind::Member { base, .. } = self.tast[object].kind {
             object = base;
@@ -1454,7 +1455,8 @@ impl Checker<'_> {
         if !self.registers.contains(&decl) {
             return None;
         }
-        Some(self.tast[decl].name.map_or("", |name| self.text(name)).to_owned())
+        let global = self.tast[decl].duration != StorageDuration::Automatic;
+        Some((self.tast[decl].name.map_or("", |name| self.text(name)).to_owned(), global))
     }
 
     /// `++operand` and the three others, which are one rule with two spellings of the word.

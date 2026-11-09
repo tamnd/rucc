@@ -786,6 +786,20 @@ impl Parser<'_> {
         }
         if let Some(storage) = storage_keyword(word) {
             self.cursor.bump();
+            // kencc's `extern register`, in either order, which is one storage class there.
+            let pair = (specs.storage, storage);
+            if self.cx.kencc
+                && !specs.extern_register
+                && matches!(
+                    pair,
+                    (Some(StorageClass::Extern), StorageClass::Register)
+                        | (Some(StorageClass::Register), StorageClass::Extern)
+                )
+            {
+                specs.storage = Some(StorageClass::Register);
+                specs.extern_register = true;
+                return true;
+            }
             if let Some(previous) = specs.storage {
                 if previous == storage {
                     let message = format!("duplicate `{}`", storage.spelling());
