@@ -1629,6 +1629,8 @@ impl TargetInfo {
             (tuple::Arch::X86_64, _, _) => Some(&x86_64::SYSV),
             // Windows on AArch64 reserves `x18`, passes every argument of a variadic function in
             // the x registers and homes them at the top of the callee's frame.
+            // kencc's convention, which is not AAPCS64. See [`aarch64::PLAN9`].
+            (tuple::Arch::Aarch64, tuple::Os::Plan9, _) => Some(&aarch64::PLAN9),
             (tuple::Arch::Aarch64, tuple::Os::Windows, _) => Some(&aarch64::WINDOWS),
             (tuple::Arch::Aarch64, os, _) if os.is_darwin() => Some(&aarch64::DARWIN),
             (tuple::Arch::Aarch64, _, _) => Some(&aarch64::AAPCS64),
