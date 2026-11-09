@@ -3332,6 +3332,32 @@ mod tests {
         assert!(why.contains("vpdpbusd"), "{why}");
     }
 
+    /// The instructions FreeBSD's kernel writes by hand that had no row, each checked against
+    /// what GNU as 2.42 writes for the same line.
+    #[test]
+    fn the_string_tlb_and_avx512_instructions_of_the_freebsd_kernel_are_read() {
+        let lines: &[(&str, &[u8])] = &[
+            ("smovb", &[0xa4]),
+            ("smovq", &[0x48, 0xa5]),
+            ("invlpgb", &[0x0f, 0x01, 0xfe]),
+            ("tlbsync", &[0x0f, 0x01, 0xff]),
+            ("vpandd %zmm1, %zmm2, %zmm3", &[0x62, 0xf1, 0x6d, 0x48, 0xdb, 0xd9]),
+            ("vpandd 64(%rdx), %zmm17, %zmm18", &[0x62, 0xe1, 0x75, 0x40, 0xdb, 0x52, 0x01]),
+            ("vpandd %xmm1, %xmm2, %xmm3", &[0x62, 0xf1, 0x6d, 0x08, 0xdb, 0xd9]),
+            ("vpcmpb $1, %zmm1, %zmm2, %k1", &[0x62, 0xf3, 0x6d, 0x48, 0x3f, 0xc9, 0x01]),
+            ("vpcmpb $4, 64(%rax), %zmm20, %k2", &[0x62, 0xf3, 0x5d, 0x40, 0x3f, 0x50, 0x01, 0x04]),
+            ("vpcmpub $2, %zmm1, %zmm2, %k3", &[0x62, 0xf3, 0x6d, 0x48, 0x3e, 0xd9, 0x02]),
+            ("vshufi32x4 $0x44, %zmm1, %zmm2, %zmm3", &[0x62, 0xf3, 0x6d, 0x48, 0x43, 0xd9, 0x44]),
+            (
+                "vshufi32x4 $0x4e, 128(%rsp), %zmm17, %zmm30",
+                &[0x62, 0x63, 0x75, 0x40, 0x43, 0x74, 0x24, 0x02, 0x4e],
+            ),
+        ];
+        for &(line, want) in lines {
+            assert_eq!(bytes(line), want, "{line}");
+        }
+    }
+
     /// The AVX-512 instructions the intrinsics in the runtime headers write, each checked against
     /// what GNU as writes for the same line.
     #[test]
