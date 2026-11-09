@@ -196,11 +196,17 @@ mod tests {
 
     /// Every header has to be idempotent and has to name itself in its own guard, because a
     /// program includes `<stddef.h>` forty times and a guard copied from a neighbour is the
-    /// way one of them silently stops working.
+    /// way one of them silently stops working. A header that a program keeps out by defining its
+    /// guard first has gcc's name for the guard: FreeBSD's aesni_os.h defines
+    /// `_MM_MALLOC_H_INCLUDED`.
     #[test]
     fn every_header_guards_itself_under_its_own_name() {
+        let gcc = [("mm_malloc.h", "_MM_MALLOC_H_INCLUDED")];
         for &(name, text) in HEADERS {
-            let guard = format!("__RUCC_{}", name.trim_end_matches(".h").to_uppercase());
+            let guard = match gcc.iter().find(|&&(header, _)| header == name) {
+                Some(&(_, guard)) => guard.to_owned(),
+                None => format!("__RUCC_{}", name.trim_end_matches(".h").to_uppercase()),
+            };
             assert!(text.contains(&guard), "{name} does not mention {guard}");
         }
     }

@@ -9,8 +9,10 @@
  * are built on the ordinary allocator, so `free` would work too, but a program that relies
  * on that stops working on a target where they are not the same allocator. */
 
-#ifndef __RUCC_MM_MALLOC_H
-#define __RUCC_MM_MALLOC_H
+/* The guard is gcc's name for it. A program that must not get this header defines it first:
+ * FreeBSD's aesni_os.h does, because the kernel's `malloc` is a macro of three arguments. */
+#ifndef _MM_MALLOC_H_INCLUDED
+#define _MM_MALLOC_H_INCLUDED
 
 #include <stddef.h>
 
