@@ -2371,6 +2371,9 @@ pub struct Options {
     /// driver takes it for preprocessing and assembling and nothing else, and the target is the
     /// `riscv32` row of the table, which gives the macros and the ELF class of the object.
     pub rv32: bool,
+    /// The RISC-V `-march=` as written, which decides the extension macros. `None` is the default
+    /// machine, `rv64gc`, which is what gcc on FreeBSD and NetBSD builds for.
+    pub riscv_arch: Option<String>,
     /// Whether a value may be kept on the x87 stack, which `-mno-80387` and `-msoft-float` turn
     /// off. That is the eighty bit `long double`.
     pub x87: bool,
@@ -3145,6 +3148,7 @@ impl Options {
             vector: true,
             soft_float: false,
             rv32: false,
+            riscv_arch: None,
             x87: true,
             x87_return: true,
             guard: None,

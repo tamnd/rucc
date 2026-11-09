@@ -171,6 +171,8 @@ pub struct Predef {
     /// Whether a float argument travels in the integer registers, which is RISC-V's `-mabi=lp64`
     /// and decides `__riscv_float_abi_soft`.
     pub soft_float: bool,
+    /// The RISC-V `-march=` as written, or `None` for `rv64gc`. It decides the extension macros.
+    pub riscv_arch: Option<String>,
     /// Whether `-mstrict-align` was given, which takes `__ARM_FEATURE_UNALIGNED` away on AArch64
     /// as it does in gcc.
     pub strict_align: bool,
@@ -233,6 +235,7 @@ impl Predef {
             wasm: wasm::Cpu::default().features(),
             vector: true,
             soft_float: false,
+            riscv_arch: None,
             strict_align: false,
             tuned: false,
             branch_protection: BranchProtection::default(),
@@ -279,6 +282,7 @@ impl Predef {
             wasm: opts.wasm,
             vector: opts.vector,
             soft_float: opts.soft_float,
+            riscv_arch: opts.riscv_arch.clone(),
             strict_align: opts.strict_align,
             tuned: opts.tuned,
             branch_protection: opts.branch_protection,
@@ -593,9 +597,15 @@ fn atomics(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);
     let wasm = target.tuple.arch() == tuple::Arch::Wasm32;
     let llong = if target.pointer_width == 64 || x86 || wasm { "2" } else { "1" };
-    for name in
-        ["BOOL", "CHAR", "CHAR16_T", "CHAR32_T", "WCHAR_T", "SHORT", "INT", "LONG", "POINTER"]
-    {
+    // RISC-V has no atomic instruction narrower than a word, and gcc 13 is the first release that
+    // writes the loop over a word for one rather than calling libatomic. Before it, the byte and
+    // the half word are only sometimes lock free and have no `__sync` compare and swap.
+    let riscv = matches!(target.tuple.arch(), tuple::Arch::Riscv64 | tuple::Arch::Riscv32);
+    let narrow = if riscv && opts.gnuc.major < 13 { "1" } else { "2" };
+    for name in ["BOOL", "CHAR", "CHAR16_T", "SHORT"] {
+        d.set(&format!("__GCC_ATOMIC_{name}_LOCK_FREE"), narrow);
+    }
+    for name in ["CHAR32_T", "WCHAR_T", "INT", "LONG", "POINTER"] {
         d.set(&format!("__GCC_ATOMIC_{name}_LOCK_FREE"), "2");
     }
     // `char8_t` is a type of C23 alone, as `__CHAR8_TYPE__` is, and gcc 15 is the first release
@@ -608,9 +618,11 @@ fn atomics(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.set("__GCC_ATOMIC_LLONG_LOCK_FREE", llong);
     d.set("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL", "1");
     // What `__sync_bool_compare_and_swap` works on, one macro per width in bytes. Every target
-    // here has the instruction at all four, and glibc reads these rather than the `__atomic_*`
-    // set because they are the older question and the answer is the same one.
-    for width in [1, 2, 4, 8] {
+    // here has it at all four, apart from the narrow widths that RISC-V gcc 12 leaves to
+    // libatomic. glibc reads these rather than the `__atomic_*` set because they are the older
+    // question and the answer is the same one.
+    let widths: &[u32] = if narrow == "1" { &[4, 8] } else { &[1, 2, 4, 8] };
+    for width in widths {
         d.flag(&format!("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_{width}"));
     }
     // The two flag bits an x86 memory order can carry, for the hardware lock elision prefixes.
@@ -741,11 +753,14 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__AARCH64EL__");
             d.flag("__GCC_ASM_FLAG_OUTPUTS__");
             d.set("__ARM_ARCH", "8");
-            d.set("__ARM_ARCH_PROFILE", "'A'");
+            // gcc writes the profile and the float formats as numbers, and clang as a character
+            // and in hex. Both are the same value to an `#if`.
+            let clang = triple.os == Os::Darwin || triple.env == Env::Msvc;
+            d.set("__ARM_ARCH_PROFILE", if clang { "'A'" } else { "65" });
             d.set("__ARM_64BIT_STATE", "1");
             d.set("__ARM_ALIGN_MAX_PWR", "28");
             if opts.vector {
-                d.set("__ARM_FP", "0xe");
+                d.set("__ARM_FP", if clang { "0xe" } else { "14" });
                 d.set("__ARM_NEON", "1");
             }
             if !opts.strict_align {
@@ -1005,7 +1020,8 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__syslog_attribute__");
             if triple.arch == Arch::Riscv64 {
                 d.flag("__riscv__");
-                d.flag_if(!opts.vector, "_SOFT_FLOAT");
+                let isa = RiscvIsa::new(opts.riscv_arch.as_deref(), opts.gnuc.major);
+                d.flag_if(!isa.has("f"), "_SOFT_FLOAT");
             }
             d.flag("__ELF__");
         }
@@ -1110,32 +1126,181 @@ fn unix(d: &mut Defs, opts: &Predef) {
     d.flag_if(opts.gnu_extensions, "unix");
 }
 
+/// The RISC-V macros, for a machine whose registers are `xlen` bits wide.
+///
+/// The extensions come from `-march=`, which gcc reads for the macros and the ABI does not change.
+/// The kernel's `-mabi=lp64` with the default machine still has the D extension, so gcc gives
+/// `__riscv_flen` and the fused multiply add macros there, and says the float ABI is soft.
+fn riscv(d: &mut Defs, opts: &Predef, xlen: u32) {
+    let isa = RiscvIsa::new(opts.riscv_arch.as_deref(), opts.gnuc.major);
+    d.flag("__riscv");
+    d.set("__riscv_xlen", &xlen.to_string());
+    if isa.has("d") {
+        d.set("__riscv_flen", "64");
+    } else if isa.has("f") {
+        d.set("__riscv_flen", "32");
+    }
+    d.flag(if opts.soft_float { "__riscv_float_abi_soft" } else { "__riscv_float_abi_double" });
+    if isa.has("f") {
+        d.flag("__riscv_fdiv");
+        d.flag("__riscv_fsqrt");
+    }
+    // A fused multiply add is one instruction for each float width the machine has.
+    let fma: &[&str] = match (isa.has("f"), isa.has("d")) {
+        (_, true) => &["", "F", "F32", "F64", "F32x"],
+        (true, false) => &["F", "F32"],
+        _ => &[],
+    };
+    for name in fma {
+        d.set(&format!("__FP_FAST_FMA{name}"), "1");
+    }
+    if isa.has("m") {
+        d.flag("__riscv_mul");
+        d.flag("__riscv_div");
+        d.flag("__riscv_muldiv");
+    }
+    d.flag_if(isa.has("a"), "__riscv_atomic");
+    d.flag_if(isa.has("c"), "__riscv_compressed");
+    // gcc 12 is the first release with a macro for each extension, with the version of the
+    // extension as its value, and gcc 14 the first with the tuning macro.
+    if opts.gnuc.major >= 12 {
+        d.flag("__riscv_arch_test");
+        for (name, version) in &isa.extensions {
+            d.set(&format!("__riscv_{name}"), &version.to_string());
+        }
+    }
+    d.flag_if(opts.gnuc.major >= 14, "__riscv_misaligned_slow");
+    // Position independent code is gcc's own code model. gcc 10 calls it `pic`, gcc 11 and 12 call
+    // it `pic` and `medany`, and gcc 13 calls it `medany` alone. The kernel's `setup_vm` reads
+    // `medany`, since it runs before the kernel is where it was linked.
+    let pic = opts.pic != Pic::Absolute;
+    d.flag_if(pic && opts.gnuc.major < 13, "__riscv_cmodel_pic");
+    if pic && opts.gnuc.major < 11 {
+        // `pic` alone.
+    } else if pic || opts.code_model == CodeModel::Medany {
+        d.set("__riscv_cmodel_medany", "1");
+    } else {
+        d.set("__riscv_cmodel_medlow", "1");
+    }
+}
+
+/// The RISC-V extensions a unit is built for, with the version gcc gives each in its macro.
+struct RiscvIsa {
+    extensions: Vec<(&'static str, u32)>,
+}
+
+impl RiscvIsa {
+    /// The extensions `-march=` names, as gcc reads them for its macros.
+    ///
+    /// The single letters come after `rv64` or `rv32` and before the first `_`, and the longer
+    /// names come after each `_`. `g` is `imafd` with `zicsr` and `zifencei`. A version written
+    /// after a name, as in `i2p1`, is skipped, and so is a name this compiler has no version for.
+    /// F needs `zicsr` and D needs F, and gcc 15 also names the parts that `a`, `c` and `m` are
+    /// made of. With no `-march=`, the machine is `rv64gc`.
+    fn new(march: Option<&str>, gcc: u32) -> RiscvIsa {
+        let march = march.unwrap_or("rv64gc");
+        let rest = march.strip_prefix("rv64").or_else(|| march.strip_prefix("rv32"));
+        let rv32 = march.starts_with("rv32");
+        let mut parts = rest.unwrap_or("gc").split('_');
+        let mut names: Vec<&str> = Vec::new();
+        let letters = parts.next().unwrap_or_default();
+        let mut chars = letters.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            if c.is_ascii_digit() {
+                // A version, `2p1` or `2`, which belongs to the letter before it.
+                while chars.next_if(|(_, c)| c.is_ascii_digit() || *c == 'p').is_some() {}
+                continue;
+            }
+            if c == 'g' {
+                names.extend(["i", "m", "a", "f", "d", "zicsr", "zifencei"]);
+            } else {
+                names.push(&letters[at..at + c.len_utf8()]);
+            }
+        }
+        names.extend(parts.map(without_version));
+        let has = |names: &[&str], name: &str| names.contains(&name);
+        if has(&names, "d") {
+            names.push("f");
+        }
+        if has(&names, "f") {
+            names.push("zicsr");
+        }
+        if gcc >= 15 {
+            if has(&names, "a") {
+                names.extend(["zaamo", "zalrsc"]);
+            }
+            if has(&names, "m") {
+                names.push("zmmul");
+            }
+            if has(&names, "c") {
+                names.push("zca");
+                if has(&names, "d") {
+                    names.push("zcd");
+                }
+                if rv32 && has(&names, "f") {
+                    names.push("zcf");
+                }
+            }
+        }
+        let mut extensions: Vec<(&'static str, u32)> = Vec::new();
+        for name in names {
+            if let Some(&known) = RISCV_VERSIONS.iter().find(|(known, _)| *known == name) {
+                if !extensions.contains(&known) {
+                    extensions.push(known);
+                }
+            }
+        }
+        RiscvIsa { extensions }
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.extensions.iter().any(|(known, _)| *known == name)
+    }
+}
+
+/// A longer extension name without the version written after it, which is `2` or `2p0`.
+fn without_version(part: &str) -> &str {
+    let digits =
+        |text: &str| text.len() - text.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let minor = digits(part);
+    let rest = &part[..part.len() - minor];
+    match rest.strip_suffix('p') {
+        Some(major) if minor > 0 && digits(major) > 0 => &major[..major.len() - digits(major)],
+        _ => rest,
+    }
+}
+
+/// The version of each extension that gcc gives as the value of its macro, major times a million
+/// plus minor times a thousand. They are those of the 20191213 specification, which is gcc's
+/// default from gcc 12 on.
+const RISCV_VERSIONS: &[(&str, u32)] = &[
+    ("i", 2001000),
+    ("e", 2000000),
+    ("m", 2000000),
+    ("a", 2001000),
+    ("f", 2002000),
+    ("d", 2002000),
+    ("c", 2000000),
+    ("h", 1000000),
+    ("zicsr", 2000000),
+    ("zifencei", 2000000),
+    ("zihintpause", 2000000),
+    ("zaamo", 1000000),
+    ("zalrsc", 1000000),
+    ("zmmul", 1000000),
+    ("zca", 1000000),
+    ("zcd", 1000000),
+    ("zcf", 1000000),
+    ("zba", 1000000),
+    ("zbb", 1000000),
+    ("zbs", 1000000),
+    ("svinval", 1000000),
+];
+
 /// The stack protector level and the control flow protection mode, with the values gcc 16 gives.
 ///
 /// These are defined for assembly too, as gcc does, because an assembly file that has `endbr64`
 /// at each entry and the property note only when `__CET__` says so is the usual way to write one.
-/// The RISC-V macros, for a machine whose registers are `xlen` bits wide.
-fn riscv(d: &mut Defs, opts: &Predef, xlen: u32) {
-    d.flag("__riscv");
-    d.set("__riscv_xlen", &xlen.to_string());
-    // The float registers, for as long as a unit may keep a `double` in one. A unit built for a
-    // machine without the D extension, or for the convention that passes a float in the integer
-    // registers, has none, which is how the kernel builds.
-    if opts.vector {
-        d.set("__riscv_flen", "64");
-    }
-    d.flag(if opts.soft_float { "__riscv_float_abi_soft" } else { "__riscv_float_abi_double" });
-    d.flag("__riscv_muldiv");
-    d.flag("__riscv_atomic");
-    d.flag("__riscv_compressed");
-    // The kernel's `setup_vm` reads the second, since it runs before the kernel is where it was
-    // linked.
-    match opts.code_model {
-        CodeModel::Medany => d.set("__riscv_cmodel_medany", "1"),
-        _ => d.set("__riscv_cmodel_medlow", "1"),
-    }
-}
-
 fn hardening(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     match opts.protector {
         Protector::None => {}
@@ -2193,10 +2358,11 @@ mod tests {
     }
 
     #[test]
-    fn the_riscv_kernel_has_no_float_registers_and_the_medany_model() {
+    fn the_riscv_kernel_has_the_soft_float_abi_and_the_medany_model() {
         let triple: Triple = "riscv64-linux-gnu".parse().expect("riscv64");
         let target = TargetInfo::new(triple);
-        let hosted = built_in(&target, &Predef::new());
+        let absolute = Predef { pic: Pic::Absolute, ..Predef::new() };
+        let hosted = built_in(&target, &absolute);
         for line in [
             "#define __riscv_flen 64",
             "#define __riscv_float_abi_double 1",
@@ -2204,16 +2370,205 @@ mod tests {
         ] {
             assert!(has(&hosted, line), "{line}");
         }
-        let kernel = Predef {
-            vector: false,
-            soft_float: true,
-            code_model: CodeModel::Medany,
-            ..Predef::new()
-        };
+        // The kernel passes `-mabi=lp64` and keeps the machine, which still has the D extension.
+        let kernel =
+            Predef { vector: false, soft_float: true, code_model: CodeModel::Medany, ..absolute };
         let kernel = built_in(&target, &kernel);
         assert!(has(&kernel, "#define __riscv_float_abi_soft 1"), "{kernel}");
         assert!(has(&kernel, "#define __riscv_cmodel_medany 1"), "{kernel}");
-        assert!(!kernel.contains("__riscv_flen") && !kernel.contains("__riscv_cmodel_medlow"));
+        assert!(has(&kernel, "#define __riscv_flen 64"), "{kernel}");
+        assert!(!kernel.contains("__riscv_float_abi_double") && !kernel.contains("cmodel_medlow"));
+    }
+
+    /// tamnd/rucc#4088. The RISC-V macros of each gcc release, from the bsd-predef reference of
+    /// gcc 10, 12, 14 and 15.
+    #[test]
+    fn the_riscv_extension_macros_follow_the_gcc_release() {
+        let claiming = |triple: &str, major: u32| {
+            let triple: Triple = triple.parse().expect("a triple");
+            let gnuc = GnucVersion { major, minor: 0, patch: 0 };
+            let opts = Predef { gnuc, pic: Pic::Absolute, ..Predef::new() };
+            built_in(&TargetInfo::new(triple), &opts)
+        };
+        let base = [
+            "__riscv_div 1",
+            "__riscv_mul 1",
+            "__riscv_muldiv 1",
+            "__riscv_fdiv 1",
+            "__riscv_fsqrt 1",
+            "__riscv_atomic 1",
+            "__riscv_compressed 1",
+            "__riscv_flen 64",
+            "__FP_FAST_FMA 1",
+            "__FP_FAST_FMAF 1",
+            "__FP_FAST_FMAF32 1",
+            "__FP_FAST_FMAF32x 1",
+            "__FP_FAST_FMAF64 1",
+        ];
+        let named = [
+            "__riscv_arch_test 1",
+            "__riscv_i 2001000",
+            "__riscv_m 2000000",
+            "__riscv_a 2001000",
+            "__riscv_f 2002000",
+            "__riscv_d 2002000",
+            "__riscv_c 2000000",
+            "__riscv_zicsr 2000000",
+            "__riscv_zifencei 2000000",
+        ];
+        let parts = [
+            "__riscv_zaamo 1000000",
+            "__riscv_zalrsc 1000000",
+            "__riscv_zca 1000000",
+            "__riscv_zcd 1000000",
+            "__riscv_zmmul 1000000",
+        ];
+        let narrow = [
+            "__GCC_ATOMIC_BOOL_LOCK_FREE",
+            "__GCC_ATOMIC_CHAR_LOCK_FREE",
+            "__GCC_ATOMIC_CHAR16_T_LOCK_FREE",
+            "__GCC_ATOMIC_SHORT_LOCK_FREE",
+        ];
+        let gcc10 = claiming("riscv64-unknown-netbsd", 10);
+        for line in base {
+            assert!(has(&gcc10, &format!("#define {line}")), "{line}");
+        }
+        for line in named.iter().chain(&parts).chain(&["__riscv_misaligned_slow 1"]) {
+            assert!(!has(&gcc10, &format!("#define {line}")), "{line}");
+        }
+        for name in narrow {
+            assert!(has(&gcc10, &format!("#define {name} 1")), "{name}");
+        }
+        assert!(!gcc10.contains("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 "));
+        assert!(!gcc10.contains("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2 "));
+        assert!(has(&gcc10, "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4 1"));
+
+        let gcc12 = claiming("riscv64-unknown-netbsd", 12);
+        for line in base.iter().chain(&named) {
+            assert!(has(&gcc12, &format!("#define {line}")), "{line}");
+        }
+        assert!(!gcc12.contains("__riscv_misaligned_slow"));
+
+        let gcc14 = claiming("riscv64-unknown-freebsd", 14);
+        for line in base.iter().chain(&named).chain(&["__riscv_misaligned_slow 1"]) {
+            assert!(has(&gcc14, &format!("#define {line}")), "{line}");
+        }
+        for line in parts {
+            assert!(!has(&gcc14, &format!("#define {line}")), "{line}");
+        }
+        for name in narrow {
+            assert!(has(&gcc14, &format!("#define {name} 2")), "{name}");
+        }
+        assert!(has(&gcc14, "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_1 1"));
+
+        let gcc15 = claiming("riscv64-unknown-freebsd", 15);
+        for line in base.iter().chain(&named).chain(&parts) {
+            assert!(has(&gcc15, &format!("#define {line}")), "{line}");
+        }
+        // Other machines keep the narrow atomics whatever the release.
+        let arm = claiming("aarch64-unknown-netbsd", 10);
+        assert!(has(&arm, "#define __GCC_ATOMIC_CHAR_LOCK_FREE 2"), "{arm}");
+    }
+
+    /// tamnd/rucc#4088 and tamnd/rucc#4096. The extensions come from `-march=`, as the FreeBSD
+    /// kernel and the `lp64d` row of the reference write it.
+    #[test]
+    fn the_riscv_extension_macros_follow_the_march() {
+        let built = |march: &str, soft_float: bool| {
+            let triple: Triple = "riscv64-unknown-freebsd".parse().expect("a triple");
+            let gnuc = GnucVersion { major: 15, minor: 0, patch: 0 };
+            let opts =
+                Predef { gnuc, soft_float, riscv_arch: Some(march.to_owned()), ..Predef::new() };
+            built_in(&TargetInfo::new(triple), &opts)
+        };
+        let kernel = built("rv64imafdch_zifencei_svinval", true);
+        for line in [
+            "__riscv_h 1000000",
+            "__riscv_svinval 1000000",
+            "__riscv_zifencei 2000000",
+            "__riscv_zicsr 2000000",
+            "__riscv_flen 64",
+            "__riscv_float_abi_soft 1",
+            "__FP_FAST_FMA 1",
+        ] {
+            assert!(has(&kernel, &format!("#define {line}")), "{line}");
+        }
+        // gcc reads `imafdc` as it is written, with no `zifencei`.
+        let lp64d = built("rv64imafdc", false);
+        assert!(has(&lp64d, "#define __riscv_zicsr 2000000"), "{lp64d}");
+        assert!(!lp64d.contains("__riscv_zifencei"), "{lp64d}");
+        // No float registers, no compressed instructions, and versions written in the string.
+        let imac = built("rv64i2p1m2p0a2p1c_zicsr2p0", true);
+        assert!(has(&imac, "#define __riscv_i 2001000"), "{imac}");
+        assert!(has(&imac, "#define __riscv_zicsr 2000000"), "{imac}");
+        assert!(has(&imac, "#define __riscv_compressed 1"), "{imac}");
+        for name in ["__riscv_flen", "__riscv_fdiv", "__FP_FAST_FMA", "__riscv_d ", "__riscv_f "] {
+            assert!(!imac.contains(name), "{name}");
+        }
+        let single = built("rv64imafc", true);
+        assert!(has(&single, "#define __riscv_flen 32"), "{single}");
+        assert!(has(&single, "#define __FP_FAST_FMAF 1"), "{single}");
+        assert!(!single.contains("#define __FP_FAST_FMA 1"), "{single}");
+        assert_eq!(without_version("zicsr2p0"), "zicsr");
+        assert_eq!(without_version("zicsr2"), "zicsr");
+        assert_eq!(without_version("zbkb"), "zbkb");
+    }
+
+    /// tamnd/rucc#4088. Position independent code is its own code model to gcc. gcc 10 says `pic`,
+    /// gcc 12 says `pic` beside `medany`, and gcc 13 and later say `medany` alone.
+    #[test]
+    fn position_independent_riscv_code_is_the_medany_model() {
+        let built = |major: u32, pic: Pic| {
+            let triple: Triple = "riscv64-unknown-freebsd".parse().expect("a triple");
+            let gnuc = GnucVersion { major, minor: 0, patch: 0 };
+            built_in(&TargetInfo::new(triple), &Predef { gnuc, pic, ..Predef::new() })
+        };
+        for pic in [Pic::Library, Pic::Executable] {
+            let gcc15 = built(15, pic);
+            assert!(has(&gcc15, "#define __riscv_cmodel_medany 1"), "{gcc15}");
+            assert!(!gcc15.contains("cmodel_medlow") && !gcc15.contains("cmodel_pic"));
+            let gcc12 = built(12, pic);
+            assert!(has(&gcc12, "#define __riscv_cmodel_pic 1"), "{gcc12}");
+            assert!(has(&gcc12, "#define __riscv_cmodel_medany 1"), "{gcc12}");
+            let gcc10 = built(10, pic);
+            assert!(has(&gcc10, "#define __riscv_cmodel_pic 1"), "{gcc10}");
+            assert!(!gcc10.contains("cmodel_medany") && !gcc10.contains("cmodel_medlow"));
+        }
+        let absolute = built(12, Pic::Absolute);
+        assert!(has(&absolute, "#define __riscv_cmodel_medlow 1"), "{absolute}");
+        assert!(!absolute.contains("cmodel_pic") && !absolute.contains("cmodel_medany"));
+    }
+
+    /// tamnd/rucc#4096. NetBSD's `_SOFT_FLOAT` says the machine has no float registers, which
+    /// `-march=` decides and `-mabi=lp64` does not.
+    #[test]
+    fn netbsd_soft_float_follows_the_machine_and_not_the_abi() {
+        let built = |march: Option<&str>| {
+            let triple: Triple = "riscv64-unknown-netbsd".parse().expect("a triple");
+            let opts = Predef {
+                soft_float: true,
+                vector: false,
+                riscv_arch: march.map(str::to_owned),
+                ..Predef::new()
+            };
+            built_in(&TargetInfo::new(triple), &opts)
+        };
+        assert!(!built(None).contains("_SOFT_FLOAT"));
+        assert!(has(&built(Some("rv64imac")), "#define _SOFT_FLOAT 1"));
+    }
+
+    /// tamnd/rucc#4088. gcc writes the AArch64 profile and float formats as numbers, and clang
+    /// writes a character and hex.
+    #[test]
+    fn gcc_writes_the_aarch64_profile_and_float_formats_as_numbers() {
+        for triple in ["aarch64-unknown-netbsd", "aarch64-unknown-freebsd", "aarch64-linux-gnu"] {
+            let text = set_for(triple);
+            assert!(has(&text, "#define __ARM_ARCH_PROFILE 65"), "{triple}");
+            assert!(has(&text, "#define __ARM_FP 14"), "{triple}");
+        }
+        let apple = set_for("aarch64-apple-darwin");
+        assert!(has(&apple, "#define __ARM_ARCH_PROFILE 'A'"), "{apple}");
+        assert!(has(&apple, "#define __ARM_FP 0xe"), "{apple}");
     }
 
     #[test]

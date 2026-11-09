@@ -3915,6 +3915,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             return Err(err("-mabi=ilp32 and -mabi=ilp32d need a 32 bit machine in -march="));
         }
         opts.rv32 = rv32;
+        opts.riscv_arch = march.map(str::to_owned);
         let soft = riscv_soft.unwrap_or(false);
         if !soft && !double {
             return Err(err(
@@ -3985,6 +3986,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // so does this, in its words.
     if opts.nop_mcount && opts.pic != Pic::Absolute {
         return Err(err("'-mnop-mcount' is not implemented for '-fPIC'".to_owned()));
+    }
+    // NetBSD's gcc for RISC-V is configured for medany, and says so when no `-mcmodel=` is given.
+    // The code is the same under either, so only the macro changes.
+    let cmodel_given = args.iter().any(|arg| arg.starts_with("-mcmodel="));
+    if !cmodel_given
+        && opts.target.arch == rucc_target::Arch::Riscv64
+        && opts.target.os == rucc_target::Os::NetBsd
+    {
+        cmodel = rucc_target::CodeModel::Medany;
     }
     opts.code_model = cmodel;
     // The canary's place, when a flag moved it or the code model did, once both it and the
@@ -11259,6 +11269,16 @@ mod tests {
             assert!(!opts.soft_float && opts.vector);
             assert_eq!(opts.code_model, rucc_target::CodeModel::Small);
         }
+        let (opts, _) = compile(&[RV, "-march=rv64imafdc", "-c", "a.c"]);
+        assert_eq!(opts.riscv_arch.as_deref(), Some("rv64imafdc"));
+        assert_eq!(compile(&[RV, "-c", "a.c"]).0.riscv_arch, None);
+        // NetBSD's gcc is configured for medany, and a `-mcmodel=` still says which.
+        const NETBSD: &str = "--target=riscv64--netbsd";
+        assert_eq!(compile(&[NETBSD, "-c", "a.c"]).0.code_model, rucc_target::CodeModel::Medany);
+        let medlow = compile(&[NETBSD, "-mcmodel=medlow", "-c", "a.c"]).0;
+        assert_eq!(medlow.code_model, rucc_target::CodeModel::Small);
+        let freebsd = compile(&["--target=riscv64-unknown-freebsd", "-c", "a.c"]).0;
+        assert_eq!(freebsd.code_model, rucc_target::CodeModel::Small);
         let no_d = refused(&[RV, "-march=rv64imac", "-c", "a.c"]);
         assert!(no_d.contains("subsume the 'D' extension"), "{no_d}");
         assert!(refused(&[RV, "-march=rv32gc", "-c", "a.c"]).contains("-mabi=ilp32"));
