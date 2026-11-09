@@ -859,6 +859,7 @@ mod tests {
         for target in [freebsd(), bsd(Arch::X86, Os::NetBsd), bsd(Arch::X86_64, Os::DragonFly)] {
             let lld = line(target, &against(&root), &[], "a.out", linux(), Ld::Lld);
             let same = lld.expect("a line").join(" ").replace(&root.display().to_string(), "=");
+            let same = same.replace('\\', "/");
             if target.os == Os::NetBsd {
                 assert_eq!(gnu(target, &against(&root)).replace(" -dc -dp", ""), same);
             } else {
