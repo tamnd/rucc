@@ -392,6 +392,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 no_builtin: &opts.no_builtin,
                 short_enums: opts.short_enums,
                 ms_extensions: sess.ms_extensions(),
+                plan9_extensions: sess.plan9_extensions(),
+                kencc: opts.kencc,
                 trapping_math: opts.trapping_math,
                 isa: opts.isa,
                 x87: opts.x87,

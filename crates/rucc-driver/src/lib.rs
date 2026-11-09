@@ -1937,6 +1937,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // build has it off.
             "-fms-extensions" => opts.ms_extensions = Some(true),
             "-fno-ms-extensions" => opts.ms_extensions = Some(false),
+            // The Plan 9 reading of an anonymous member, and the whole kencc dialect, which
+            // includes it.
+            "-fplan9-extensions" => opts.plan9_extensions = true,
+            "-fno-plan9-extensions" => opts.plan9_extensions = false,
+            "-fkencc" => opts.kencc = true,
+            "-fno-kencc" => opts.kencc = false,
             // Both directions of this one are recorded, and what they decide is whether lowering
             // names the type each access goes through. Turning it off is the front end leaving the
             // name off rather than a pass being told to ignore one it can see, which is one
