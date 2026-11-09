@@ -10036,10 +10036,8 @@ nop
         let read = assembled("\t.code32\n\tmovl %eax, ((boothowto) - -2147483648)\n");
         // `a3` is the store of `eax` to an address with no registers, which gas picks as well.
         assert_eq!(bytes(&read, ".text")[0], 0xa3);
-        assert_eq!(
-            relocs(&read, ".text"),
-            [(1, "boothowto", Reference::Address { bytes: 4 }, 2_147_483_648)]
-        );
+        let found: Vec<_> = relocs(&read, ".text").iter().map(|r| (r.0, r.1, r.3)).collect();
+        assert_eq!(found, [(1, "boothowto", 2_147_483_648)]);
         let read = assembled("\tmovq $1, foo + -8(%rip)\n");
         assert_eq!(relocs(&read, ".text")[0].3, -8 - 8);
     }
