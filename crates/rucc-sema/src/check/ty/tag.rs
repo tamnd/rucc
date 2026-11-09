@@ -294,15 +294,27 @@ impl Checker<'_> {
             let mut reached = Vec::new();
             match decl.name {
                 Some(name) => reached.push(name),
-                None if decl.bits.is_none() => self.reached_through(decl.ty, &mut reached),
+                None if decl.bits.is_none() => {
+                    self.reached_through(decl.ty, &mut reached);
+                    // Under `-fplan9-extensions` the typedef name of the member names it too.
+                    if let Some((name, _)) = spelled.filter(|_| self.plan9_named(decl.ty)) {
+                        self.anonymous_spellings.insert((id, decl.ty), name);
+                        reached.push(name);
+                    }
+                }
                 None => {}
             }
-            if let Some(&twice) = reached.iter().find(|&&name| !named.insert(name)) {
-                let spelled = self.text(twice).to_owned();
-                self.report(
-                    Diagnostic::error(format!("duplicate member '{spelled}'"), at)
-                        .with_code("E0548"),
-                );
+            // gcc reports each name that is already there, and drops the member.
+            let twice: Vec<Symbol> =
+                reached.iter().copied().filter(|&name| !named.insert(name)).collect();
+            if !twice.is_empty() {
+                for name in twice {
+                    let spelled = self.text(name).to_owned();
+                    self.report(
+                        Diagnostic::error(format!("duplicate member '{spelled}'"), at)
+                            .with_code("E0548"),
+                    );
+                }
                 continue;
             }
             // Kept for the debug information, which names the typedef where the program did.
@@ -683,9 +695,19 @@ impl Checker<'_> {
         for field in &self.types.record_info(id).fields {
             match field.name {
                 Some(name) => out.push(name),
-                None => self.reached_through(field.ty, out),
+                None => {
+                    self.reached_through(field.ty, out);
+                    out.extend(self.anonymous_spellings.get(&(id, field.ty)));
+                }
             }
         }
+    }
+
+    /// Whether an anonymous member of type `ty` is named by its typedef name, which is the case
+    /// for a record under `-fplan9-extensions`.
+    fn plan9_named(&self, ty: TypeId) -> bool {
+        self.cx.plan9_extensions
+            && matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Record(_))
     }
 
     /// The width of a bit-field, folded and measured against the type it was declared in.

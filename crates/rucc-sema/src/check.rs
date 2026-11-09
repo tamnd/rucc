@@ -55,7 +55,9 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::{DEFAULT_ERROR_LIMIT, Diagnostic, Errors, Severity, Span};
 use rucc_session::Std;
 use rucc_target::{Isa, Lane, TargetInfo, TypeName};
-use rucc_types::{ArrayLen, FloatKind, IntKind, RecordKind, TypeId, TypeKind, Types, int_width};
+use rucc_types::{
+    ArrayLen, FloatKind, IntKind, RecordId, RecordKind, TypeId, TypeKind, Types, int_width,
+};
 
 use crate::convert::Conv;
 use crate::decl::{
@@ -379,6 +381,10 @@ pub struct Checker<'a> {
     /// return type, or that it wrote none, which is what `typeof` of the declared name is spelled
     /// with. See `Checker::spelled_with`.
     pub(in crate::check) first_spellings: rucc_base::hash::Map<DeclId, Option<(Symbol, TypeId)>>,
+    /// The typedef name that each anonymous member was written with, by the record that holds
+    /// it and the type of the member, under `-fplan9-extensions`. gcc takes the name as a member
+    /// name, so two anonymous members that reach the same typedef name are duplicates.
+    pub(in crate::check) anonymous_spellings: rucc_base::hash::Map<(RecordId, TypeId), Symbol>,
     /// The typedef name the operand of each `typeof(expr)` checked so far is spelled with, by
     /// the expression, so that `typeof(p->m)` keeps the name `m` was written with. See
     /// `Checker::spelled_with`.
@@ -468,6 +474,7 @@ impl<'a> Checker<'a> {
             pending_uses: Vec::new(),
             incomplete_tentative: Vec::new(),
             first_spellings: rucc_base::hash::Map::default(),
+            anonymous_spellings: rucc_base::hash::Map::default(),
             typeof_spellings: rucc_base::hash::Map::default(),
             annotations: annotate::Annotations::default(),
             advice: advice::Advice::default(),
