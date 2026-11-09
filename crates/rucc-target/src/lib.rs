@@ -1591,7 +1591,9 @@ impl TargetInfo {
             // position independent is a flag and not the target.
             (tuple::Arch::X86, tuple::Os::Windows, tuple::Env::Msvc) => Some(&x86::MSVC32),
             (tuple::Arch::X86, tuple::Os::Windows, _) => Some(&x86::MINGW32),
-            (tuple::Arch::X86, _, _) => x86::regparm(0, reg_struct_return(target)),
+            (tuple::Arch::X86, _, _) => {
+                x86::regparm(0, reg_struct_return(target)).map(|regs| on_boundary(target, regs))
+            }
             (tuple::Arch::Riscv64, _, _) => Some(&riscv64::LP64D),
             _ => None,
         };
@@ -1668,7 +1670,8 @@ impl TargetInfo {
         if self.tuple.arch() != tuple::Arch::X86 || self.tuple.os() == tuple::Os::Windows {
             return (registers == 0).then_some(self);
         }
-        self.call_regs = Some(x86::regparm(registers, self.reg_struct_return)?);
+        self.call_regs =
+            Some(on_boundary(self.tuple, x86::regparm(registers, self.reg_struct_return)?));
         self.regparm = registers;
         Some(self)
     }
@@ -1695,7 +1698,7 @@ impl TargetInfo {
             return self;
         }
         if let Some(regs) = x86::regparm(self.regparm, in_registers) {
-            self.call_regs = Some(regs);
+            self.call_regs = Some(on_boundary(self.tuple, regs));
             self.reg_struct_return = in_registers;
         }
         self
@@ -1814,6 +1817,24 @@ fn has_float128(target: TargetTuple) -> bool {
 pub(crate) fn reg_struct_return(target: TargetTuple) -> bool {
     target.arch() == tuple::Arch::X86
         && matches!(target.os(), tuple::Os::FreeBsd | tuple::Os::OpenBsd)
+}
+
+/// The convention with the stack kept on the boundary the target's GCC keeps it on when no
+/// `-mpreferred-stack-boundary=` says, where that is not the convention's own.
+///
+/// i386 NetBSD keeps it on four bytes. NetBSD's own GCC, which is the compiler of its base
+/// system, sets `PREFERRED_STACK_BOUNDARY_DEFAULT` to `MIN_STACK_BOUNDARY` in
+/// `external/gpl3/gcc/dist/gcc/config/i386/netbsd-elf.h` under the comment "Preserve i386
+/// psABI", and the boundary a function counts on at its entry follows it. So a function there
+/// does not count on more than four bytes, and a frame with a local that needs more is realigned
+/// by its prologue. Upstream GCC's header does not have the line, and every other i386 system
+/// keeps the sixteen bytes.
+fn on_boundary(target: TargetTuple, regs: &'static CallRegs) -> &'static CallRegs {
+    if target.arch() == tuple::Arch::X86 && target.os() == tuple::Os::NetBsd {
+        regs.aligned_to(4)
+    } else {
+        regs
+    }
 }
 
 /// The granule a `_BitInt` wider than 64 bits is laid out in, in bits.
@@ -2078,6 +2099,32 @@ mod tests {
             assert_eq!(target.long_double_rounds_to_53, rounds, "{spelling}");
             // The storage is the x87 format whichever it is.
             assert_eq!(target.long_double_format, Format::X87Extended, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn i386_netbsd_keeps_the_stack_on_four_bytes() {
+        // NetBSD's GCC sets `PREFERRED_STACK_BOUNDARY_DEFAULT` to `MIN_STACK_BOUNDARY` in its
+        // `i386/netbsd-elf.h`. The other i386 systems keep the sixteen bytes of the psABI.
+        let boundary = |target: &TargetInfo| {
+            let regs = target.call_regs.expect("a convention");
+            (regs.stack_align, regs.trusted_align)
+        };
+        let netbsd = TargetInfo::new("i486--netbsdelf".parse().unwrap());
+        assert_eq!(boundary(&netbsd), (4, 4));
+        // `-mregparm=` and `-freg-struct-return` choose another convention and keep the boundary.
+        let regparm = netbsd.clone().with_regparm(3).expect("regparm 3");
+        assert_eq!(boundary(&regparm), (4, 4));
+        assert_eq!(regparm.call_regs.expect("regparm").int_args.len(), 3);
+        assert_eq!(boundary(&netbsd.clone().with_reg_struct_return(true)), (4, 4));
+        for spelling in [
+            "i386-unknown-freebsd14",
+            "i386-unknown-openbsd",
+            "i686-unknown-linux-gnu",
+            "x86_64--netbsd",
+        ] {
+            let target = TargetInfo::new(spelling.parse().unwrap());
+            assert_eq!(boundary(&target), (16, 16), "{spelling}");
         }
     }
 
