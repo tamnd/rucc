@@ -243,6 +243,15 @@ fn items(module: &Module, unit: usize) -> Vec<(Symbol, Item)> {
     }
     for id in module.aliases() {
         let alias = &module[id];
+        // A versioned name for something the unit does not define is a reference, which is what
+        // `.symver` makes of a name a header only declares. FreeBSD's `stdlib.h` gives every file
+        // that includes it one for `__qsort_r_compat`, and two of those are not two definitions.
+        let defined = match module.lookup(alias.target) {
+            Some(SymbolRef::Func(target)) => !module[target].is_declaration(),
+            Some(SymbolRef::Global(target)) => !module[target].is_declaration(),
+            Some(SymbolRef::Alias(_)) => true,
+            None => false,
+        };
         out.push((
             alias.name,
             Item {
@@ -250,7 +259,7 @@ fn items(module: &Module, unit: usize) -> Vec<(Symbol, Item)> {
                 kind: Kind::Alias,
                 linkage: alias.linkage,
                 visibility: alias.visibility,
-                defined: true,
+                defined,
                 size: 0,
                 align: 0,
             },
@@ -500,5 +509,21 @@ func @maybe() -> i32, linkage(external);
         let base = Isa::baseline();
         let error = joined(&[("a.o", A, base), ("bad.o", "func @", base)], base).unwrap_err();
         assert!(error.starts_with("bad.o: line "), "{error}");
+    }
+
+    /// A second name for something no unit defines is a reference, which is what `.symver` in
+    /// FreeBSD's `stdlib.h` gives every file that includes it, and two of them are not two
+    /// definitions.
+    #[test]
+    fn a_second_name_for_something_from_elsewhere_is_not_a_definition() {
+        let unit = "alias @qsort_r@FBSD_1.0 = @elsewhere, linkage(external)\n\n\
+                    func @elsewhere() -> i32, linkage(external);\n";
+        let base = Isa::baseline();
+        let (module, mut names) =
+            joined(&[("a.o", unit, base), ("b.o", unit, base)], base).expect("two references join");
+        assert!(matches!(
+            lookup(&module, &mut names, "qsort_r@FBSD_1.0"),
+            Some(SymbolRef::Alias(_))
+        ));
     }
 }

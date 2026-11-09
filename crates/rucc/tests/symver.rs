@@ -239,3 +239,53 @@ fn the_attribute_is_checked_in_gcc_s_words() {
     assert!(!ok);
     assert!(err.contains("error: symver is only supported on ELF platforms"), "{err}");
 }
+
+/// FreeBSD's `__sym_compat` as `stdlib.h` and `libgen.h` write it: a `.symver` of a name the file
+/// only declares. gas 2.42 and gcc 13 make that a reference to the versioned name, so the call and
+/// the address are against an undefined `qsort_r@FBSD_1.0` and `__qsort_r_compat` is not in the
+/// object. With nothing using it there is no symbol at all, and the listing keeps the `.symver`
+/// for gas to do the same. `@@` is a default version, which only the definition can give, and gas
+/// turns it down.
+#[test]
+fn a_symver_of_a_name_from_elsewhere_is_a_versioned_reference() {
+    const DECLARED: &str = "void __qsort_r_compat(void);\n\
+        __asm__(\".symver __qsort_r_compat, qsort_r@FBSD_1.0\");\n";
+    let used = format!(
+        "{DECLARED}void f(void) {{ __qsort_r_compat(); }}\nvoid (*p)(void) = __qsort_r_compat;\n"
+    );
+    let unused = format!("{DECLARED}int main(void) {{ return 0; }}\n");
+    let has = |bytes: &[u8], name: &str| {
+        let spelled = format!("\0{name}\0");
+        bytes.windows(spelled.len()).any(|window| window == spelled.as_bytes())
+    };
+    for target in ["x86_64-unknown-freebsd15.1", "aarch64-unknown-freebsd15.1", TARGET] {
+        let dir = dir("reference");
+        std::fs::write(dir.join("used.c"), &used).expect("the fixture can be written");
+        std::fs::write(dir.join("unused.c"), &unused).expect("the fixture can be written");
+        let flag = format!("--target={target}");
+        let (ok, _, err) = run(&dir, &[&flag, "-O2", "-c", "used.c", "-o", "used.o"]);
+        assert!(ok, "{target}: {err}");
+        let (ok, _, err) = run(&dir, &[&flag, "-O2", "-c", "unused.c", "-o", "unused.o"]);
+        assert!(ok, "{target}: {err}");
+        let used = std::fs::read(dir.join("used.o")).expect("the object was written");
+        let unused = std::fs::read(dir.join("unused.o")).expect("the object was written");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(has(&used, "qsort_r@FBSD_1.0"), "{target}: the versioned reference");
+        assert!(!has(&used, "__qsort_r_compat"), "{target}: no symbol under the old name");
+        assert!(!has(&unused, "qsort_r@FBSD_1.0"), "{target}: nothing when nothing uses it");
+        assert!(!has(&unused, "__qsort_r_compat"), "{target}: nothing when nothing uses it");
+    }
+    let (ok, text, err) = assembly("listing", "x86_64-unknown-freebsd15.1", &[], &used);
+    assert!(ok, "{err}");
+    assert!(text.contains("\t.symver\t__qsort_r_compat,qsort_r@FBSD_1.0\n"), "{text}");
+
+    let triple = used.replace("qsort_r@FBSD", "qsort_r@@@FBSD");
+    let (ok, text, err) = assembly("triple", TARGET, &[], &triple);
+    assert!(ok, "{err}");
+    assert!(text.contains("\t.symver\t__qsort_r_compat,qsort_r@FBSD_1.0\n"), "{text}");
+
+    let default = used.replace("qsort_r@FBSD", "qsort_r@@FBSD");
+    let (ok, _, err) = assembly("default", TARGET, &[], &default);
+    assert!(!ok);
+    assert!(err.contains("'qsort_r@@FBSD_1.0' is aliased to undefined symbol"), "{err}");
+}

@@ -200,6 +200,11 @@ pub(crate) struct Set {
     /// Whether this came from a `.symver`, whose new name is bound the way the name it stands for
     /// is rather than the way the directives said, since none of them can name it.
     pub versioned: bool,
+    /// What a `.symver` makes of a name the file does not define, which is a reference to the
+    /// versioned name rather than a second name for an address. gas spells it with one `@` for
+    /// `@` and for `@@@`, and turns `@@` down, since a default version is something only the
+    /// object that defines the name can give. Nothing for `.set`, and nothing for `@@`.
+    pub reference: Option<String>,
 }
 
 /// Reads a template and gives back the globals it defines, in the order it defined them.
@@ -313,7 +318,7 @@ struct Assembler<'a> {
     starts: Vec<u64>,
     /// The names a `.set` or a `.symver` equated to another name, in the order they were
     /// written, and whether it was a `.symver`.
-    sets: Vec<(String, String, bool)>,
+    sets: Vec<(String, String, bool, Option<String>)>,
     /// The one being filled in.
     open: Option<Open>,
     /// Where every label of this block is.
@@ -559,7 +564,7 @@ impl<'a> Assembler<'a> {
         if !is_a_name(thing) {
             return Err(unsupported(format!("a '.set' of '{name}' to '{thing}'")));
         }
-        self.sets.push((name.to_owned(), thing.to_owned(), false));
+        self.sets.push((name.to_owned(), thing.to_owned(), false, None));
         Ok(())
     }
 
@@ -568,9 +573,14 @@ impl<'a> Assembler<'a> {
     /// What gas does with one is add a symbol spelled with the `@` in it at the first name's
     /// address, and the linker reads the version off the spelling when a version script builds a
     /// shared library. That is an alias under a name no C program can write, so it goes where a
-    /// `.set` goes. `@@@` is `@@` when the name is defined in the file, and an alias is only ever
-    /// of a name that is, so it is written as `@@`. xz's liblzma keeps its old symbol versions
-    /// this way when the compiler has no `symver` attribute.
+    /// `.set` goes. `@@@` is `@@` when the name is defined in the file, so the second name is
+    /// written as `@@`. xz's liblzma keeps its old symbol versions this way when the compiler has
+    /// no `symver` attribute.
+    ///
+    /// A name the file only declares has no address for a second name to be at. gas then renames
+    /// the references to it instead, so a call to the name is a call to the versioned name, and
+    /// that is kept beside the second name for when the walk finds out which of the two it is.
+    /// FreeBSD's `stdlib.h` does this to `__qsort_r_compat` with `qsort_r@FBSD_1.0`.
     fn symver(&mut self, operands: &str) -> Result<(), Failed> {
         let parts = split(operands);
         let [name, versioned] = parts.as_slice() else {
@@ -582,16 +592,20 @@ impl<'a> Assembler<'a> {
         let Some((bare, version)) = versioned.split_once('@') else {
             return Err(unsupported(format!("a '.symver' of '{name}' to '{versioned}'")));
         };
-        let (at, node) = match version.strip_prefix("@@").or_else(|| version.strip_prefix('@')) {
-            Some(node) => ("@@", node),
-            None => ("@", version),
+        let (at, node, reference) = match version.strip_prefix("@@") {
+            Some(node) => ("@@", node, Some(node)),
+            None => match version.strip_prefix('@') {
+                Some(node) => ("@@", node, None),
+                None => ("@", version, Some(version)),
+            },
         };
         // The version may be empty. `sctp_connectx@` is how LTP's sctp library names the copy a
         // version script is to give the base version, and gas writes it out as it is spelled.
         if !is_a_name(name) || !is_a_name(bare) || !(node.is_empty() || is_a_name(node)) {
             return Err(unsupported(format!("a '.symver' of '{name}' to '{versioned}'")));
         }
-        self.sets.push((format!("{bare}{at}{node}"), name.to_owned(), true));
+        let reference = reference.map(|node| format!("{bare}@{node}"));
+        self.sets.push((format!("{bare}{at}{node}"), name.to_owned(), true, reference));
         Ok(())
     }
 
@@ -872,7 +886,7 @@ impl<'a> Assembler<'a> {
             .chain(self.visibility.keys())
             .filter(|name| {
                 !self.pieces.iter().any(|piece| piece.name.as_ref() == Some(*name))
-                    && !self.sets.iter().any(|(set, _, _)| set == *name)
+                    && !self.sets.iter().any(|(set, ..)| set == *name)
             })
             .collect();
         undefined.sort();
@@ -886,12 +900,13 @@ impl<'a> Assembler<'a> {
         let sets = self
             .sets
             .iter()
-            .map(|(name, target, versioned)| Set {
+            .map(|(name, target, versioned, reference)| Set {
                 name: name.clone(),
                 target: target.clone(),
                 linkage: self.linkage.get(name).copied().unwrap_or(Linkage::Internal),
                 visibility: self.visibility.get(name).copied().unwrap_or(Visibility::Default),
                 versioned: *versioned,
+                reference: reference.clone(),
             })
             .collect();
         Ok(Assembled { pieces: self.pieces, sets, inexact: self.inexact })
@@ -1643,6 +1658,7 @@ gSize:
                     linkage: Linkage::Weak,
                     visibility: Visibility::Default,
                     versioned: false,
+                    reference: None,
                 },
                 Set {
                     name: "two".to_owned(),
@@ -1650,6 +1666,7 @@ gSize:
                     linkage: Linkage::Internal,
                     visibility: Visibility::Default,
                     versioned: false,
+                    reference: None,
                 },
             ]
         );
@@ -1678,7 +1695,8 @@ gSize:
     }
 
     /// `.symver` is a second name spelled with its version, and `@@@` is written as `@@`. An empty
-    /// version is a spelling gas takes, and a name with no `@` at all is not.
+    /// version is a spelling gas takes, and a name with no `@` at all is not. Each also says what
+    /// a reference is called if the name turns out to be one the file does not define.
     #[test]
     fn a_symver_is_a_second_name_with_the_version_in_its_spelling() {
         let template = concat!(
@@ -1693,6 +1711,10 @@ gSize:
             [("f@XZ_5.2.2", "f_522"), ("f@@XZ_5.2", "f_52"), ("g@@V1", "g"), ("h@", "h_0")]
         );
         assert!(sets.iter().all(|set| set.versioned));
+        // What each is when the name it stands for is not defined here: one `@` for `@` and for
+        // `@@@`, as gas writes the reference, and nothing for `@@`, which gas turns down.
+        let references: Vec<_> = sets.iter().map(|set| set.reference.as_deref()).collect();
+        assert_eq!(references, [Some("f@XZ_5.2.2"), None, Some("g@V1"), Some("h@")]);
 
         for (template, want) in [
             (".symver f\n", "a '.symver' that is not a name and a versioned name"),
