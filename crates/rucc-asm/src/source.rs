@@ -602,7 +602,7 @@ struct Reader {
     /// asking the linker, the way `.lcomm` does. Every name is local until something says
     /// otherwise, so the binding alone cannot tell these apart.
     said_local: Set<usize>,
-    /// The local names set to a name no file here defines, with that name and what was added to
+    /// The names set to a name no file here defines, with that name and what was added to
     /// it. A reference to one is a reference to the other name, and the set name itself is left
     /// out of the table, as gas does. Linux 6.12's `header.S` sets `pecompat_fstart` to
     /// `setup_size`, which only the linker script gives a value.
@@ -4895,7 +4895,7 @@ impl Reader {
             let mut done = Vec::new();
             for (at, (sym, sum, line)) in self.sets.iter().enumerate() {
                 if let Ok(residue) = self.reduce(sum) {
-                    done.push((at, *sym, self.settled(*sym, &residue, *line)?));
+                    done.push((at, *sym, self.settled(&residue, *line)?));
                 }
             }
             if done.is_empty() {
@@ -4923,7 +4923,7 @@ impl Reader {
     }
 
     /// What one `.set` came out as.
-    fn settled(&self, sym: usize, residue: &Residue, line: usize) -> Result<Settled, Trouble> {
+    fn settled(&self, residue: &Residue, line: usize) -> Result<Settled, Trouble> {
         match residue.left.as_slice() {
             [] => Ok(Settled::At(Held::Absolute(residue.constant as u64))),
             // `.set alias, real`, which is how a file gives something a second name without a
@@ -4932,11 +4932,12 @@ impl Reader {
                 part: *part,
                 offset: (*offset + residue.constant) as u64,
             })),
-            // A name the linker has to find, which this one stands in for. A name another file can
-            // see would have to be in the table with a value, and there is none to give it.
-            [Left { coeff: 1, what: What::Symbol(name), at: None }]
-                if self.syms[sym].binding == Binding::Local =>
-            {
+            // A name the linker has to find, which this one stands in for. Every use of it is a
+            // use of that name, and the set name is left out of the table, global or weak as well
+            // as local: gas and `llvm-mc` both do so, having no value to give it. FreeBSD's
+            // `__weak_reference` in `sha1c.c` makes `SHA_Init` a weak `_libmd_SHA_Init`, which
+            // `sha0c.c` defines.
+            [Left { coeff: 1, what: What::Symbol(name), at: None }] => {
                 Ok(Settled::Outside(name.clone(), residue.constant))
             }
             _ => Err(Trouble {
@@ -8498,6 +8499,23 @@ _tls$tlv$init:
         assert_eq!(addends, [(0, "setup_size", 8 - 0x1000), (4, "setup_size", 6)]);
         assert!(out.names.iter().all(|n| n.name != "pecompat_fstart" && n.name != "second"));
         assert_eq!(name(&out, "setup_size").at, Held::Undefined);
+    }
+
+    #[test]
+    fn a_weak_name_set_to_a_name_from_elsewhere_is_left_out_like_a_local_one() {
+        // FreeBSD's `__weak_reference(_libmd_SHA_Init, SHA_Init)` in `lib/libmd/sha1c.c`, where
+        // `_libmd_SHA_Init` is defined by `sha0c.c`. `llvm-mc` leaves `SHA_Init` out of the table
+        // and makes `_libmd_SHA_Init` an undefined global, and a use goes to that name.
+        let out = assembled(
+            "\t.weak SHA_Init\n\t.equ SHA_Init, _libmd_SHA_Init\n\t.globl g\n\t.set g, \
+             real + 4\n\t.quad SHA_Init\n\t.quad g\n",
+        );
+        let relocs = relocated(&out, ".text");
+        let addends: Vec<(usize, &str, i64)> =
+            relocs.iter().map(|(at, name, _, addend)| (*at, name.as_str(), *addend)).collect();
+        assert_eq!(addends, [(0, "_libmd_SHA_Init", 0), (8, "real", 4)]);
+        assert!(out.names.iter().all(|n| n.name != "SHA_Init" && n.name != "g"));
+        assert_eq!(name(&out, "_libmd_SHA_Init").at, Held::Undefined);
     }
 
     #[test]
