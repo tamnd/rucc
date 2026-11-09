@@ -241,7 +241,7 @@ impl Shape {
             Shape { write: true, thread: true, ..alloc }
         } else if let Some(array) = Array::of(name) {
             Shape { write: true, array: Some(array), ..alloc }
-        } else if name.starts_with(".note") && name != ".note.GNU-stack" {
+        } else if crate::section::holds_notes(name) {
             Shape { note: true, ..bits }
         } else {
             bits
