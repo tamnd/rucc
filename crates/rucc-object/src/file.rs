@@ -209,6 +209,21 @@ impl Flavour {
         }
     }
 
+    /// The type and flags of a section the program named that holds notes, on the one format
+    /// that has a type for them. See [`crate::holds_notes`]. A section the name says is zeros is
+    /// left as it is.
+    fn noted(self, name: &str, holds: Holds) -> Option<SectionFlags> {
+        let written = match holds {
+            Holds::Written | Holds::Shared => true,
+            Holds::ReadOnly => false,
+            Holds::Zero => return None,
+        };
+        match self {
+            Flavour::Elf if crate::section::holds_notes(name) => Some(elf::noted(written)),
+            Flavour::Elf | Flavour::Coff | Flavour::MachO => None,
+        }
+    }
+
     /// The flags of a section a variable written `shared` is in, which are those of a written
     /// one and the flag that has every process running the image share it, `"dws"` as the
     /// assembler reads it. Only COFF has that flag, and anywhere else the section is a written
@@ -1222,11 +1237,15 @@ fn put(
         // wants what it named rather than what would have been chosen. Its flags are what the
         // variable holds, which is the answer gcc gives, except for the three names the startup
         // code calls what it finds in, which have a section type of their own and are gathered by
-        // the linker whether or not they carry it. Two variables naming one section share it, in
-        // the order they were written, and the first one is what made it.
-        Place::Named(name, _) => {
+        // the linker whether or not they carry it, and a name that starts with `.note`, which has
+        // the type of a note so that the linker puts it in `PT_NOTE`. Two variables naming one
+        // section share it, in the order they were written, and the first one is what made it.
+        Place::Named(name, holds) => {
             let section = made(obj, named, name, kind_of(&object.place));
             if let Some(flags) = Array::of(name).and_then(|array| flavour.gathered(array)) {
+                obj.section_mut(section).flags = flags;
+            }
+            if let Some(flags) = flavour.noted(name, *holds) {
                 obj.section_mut(section).flags = flags;
             }
             if let (Place::Named(_, Holds::Shared), Some(flags)) = (&object.place, flavour.shared())
@@ -2486,6 +2505,34 @@ mod tests {
             };
             assert_eq!((sh_type, sh_flags), (kind, flags), "{name}");
             assert_eq!(section.size(), 4, "{name}");
+        }
+    }
+
+    /// A note the program put in a `.note` section, which GNU as types `SHT_NOTE` from the name.
+    ///
+    /// The linker puts only sections of that type in `PT_NOTE`, so a brand note of the ordinary
+    /// type is in the file and a loader that walks the segment does not find it. `.note.GNU-stack`
+    /// is an ordinary section to gas, and `.notes` is a name that only starts with the word.
+    #[test]
+    fn a_variable_in_a_note_section_is_a_note() {
+        let alloc = elf::SHF_ALLOC;
+        let write = elf::SHF_ALLOC | elf::SHF_WRITE;
+        for (name, holds, kind, flags) in [
+            (".note.tag", Holds::ReadOnly, elf::SHT_NOTE, alloc),
+            (".note.netbsd.pax", Holds::Written, elf::SHT_NOTE, write),
+            (".note", Holds::ReadOnly, elf::SHT_NOTE, alloc),
+            (".notes", Holds::ReadOnly, elf::SHT_NOTE, alloc),
+            (".note.GNU-stack", Holds::ReadOnly, elf::SHT_PROGBITS, alloc),
+            (".mine.note", Holds::ReadOnly, elf::SHT_PROGBITS, alloc),
+        ] {
+            let bytes = holding(variable("x", Place::Named(name.to_owned(), holds)));
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            let section = file.section_by_name(name).unwrap_or_else(|| panic!("{name}"));
+            let SectionFlags::Elf { sh_type, sh_flags } = section.flags() else {
+                panic!("{name} is not an elf section");
+            };
+            assert_eq!((sh_type, sh_flags), (kind, flags), "{name}");
+            assert_eq!(section.data().expect("the bytes").len(), 4, "{name}");
         }
     }
 

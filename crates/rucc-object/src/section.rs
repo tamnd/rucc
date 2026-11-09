@@ -795,6 +795,17 @@ impl Place {
     }
 }
 
+/// Whether a section of this name holds notes, which is what GNU as decides from the name alone.
+///
+/// A name that starts with `.note` gets the type `SHT_NOTE` when the `.section` line gives no type,
+/// and gcc never gives one. The linker puts only sections of that type in the `PT_NOTE` segment,
+/// and a loader finds a note such as an ABI tag by walking that segment. `.note.GNU-stack` is the
+/// exception: gas makes it an ordinary section, and it only marks the stack as not executable.
+#[must_use]
+pub fn holds_notes(name: &str) -> bool {
+    name.starts_with(".note") && name != ".note.GNU-stack"
+}
+
 /// A section holding function addresses for a C runtime to call rather than data for the program
 /// to read.
 ///

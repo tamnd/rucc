@@ -16,7 +16,9 @@
 use std::fmt::Write as _;
 
 use rucc_mir as mir;
-use rucc_object::{Alias, Array, Binding, Holds, Place, Property, Sections, Visibility};
+use rucc_object::{
+    Alias, Array, Binding, Holds, Place, Property, Sections, Visibility, holds_notes,
+};
 use rucc_target::{ObjectFormat, TargetInfo};
 use rucc_tuple::Arch;
 
@@ -412,7 +414,9 @@ impl Directives {
             // The type is `@progbits` for almost every name a program writes, and the three it is
             // not for are the ones the startup code calls what it finds in. A section of the wrong
             // type under the right name is gathered by the linker all the same and then called by
-            // nobody, which is a program whose constructors silently do not run.
+            // nobody, which is a program whose constructors silently do not run. A name that starts
+            // with `.note` is `@note`, which is the type GNU as gives the line gcc writes with no
+            // type, and only a section of that type goes in the `PT_NOTE` segment.
             //
             // The flags are what the variable holds, which is how gcc writes them: `"a"` for a
             // constant with no address in it, `"aw"` for the rest, and `@nobits` only where the
@@ -424,6 +428,8 @@ impl Directives {
                     Holds::Zero => ("aw", "@nobits"),
                 };
                 let kind = Array::of(name).map_or(kind, Array::asm);
+                let noted = holds_notes(name) && !matches!(holds, Holds::Zero);
+                let kind = if noted { "@note" } else { kind };
                 let _ = writeln!(out, "\t.section\t{name},\"{flags}\",{kind}");
             }
             (Directives::Coff | Directives::CoffI386, Place::Named(name, holds)) => {
@@ -985,6 +991,26 @@ mod tests {
         for (name, want) in cases {
             let mut out = String::new();
             let place = Place::Named(name.to_owned(), Holds::Written);
+            Directives::Elf.section(&mut out, &place, "x", Sections::default());
+            assert_eq!(out, want, "{name}");
+        }
+    }
+
+    /// A section whose name starts with `.note` is written as a note, which is the type GNU as
+    /// gives the line gcc writes for it with no type. `.note.GNU-stack` is an ordinary section to
+    /// gas, and a name with `note` later in it is not a note.
+    #[test]
+    fn a_note_section_says_it_holds_notes() {
+        let cases = [
+            (".note.tag", Holds::ReadOnly, "\t.section\t.note.tag,\"a\",@note\n"),
+            (".note.netbsd.pax", Holds::Written, "\t.section\t.note.netbsd.pax,\"aw\",@note\n"),
+            (".notes", Holds::ReadOnly, "\t.section\t.notes,\"a\",@note\n"),
+            (".note.GNU-stack", Holds::ReadOnly, "\t.section\t.note.GNU-stack,\"a\",@progbits\n"),
+            (".mine.note", Holds::ReadOnly, "\t.section\t.mine.note,\"a\",@progbits\n"),
+        ];
+        for (name, holds, want) in cases {
+            let mut out = String::new();
+            let place = Place::Named(name.to_owned(), holds);
             Directives::Elf.section(&mut out, &place, "x", Sections::default());
             assert_eq!(out, want, "{name}");
         }

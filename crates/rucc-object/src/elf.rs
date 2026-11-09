@@ -285,6 +285,13 @@ pub(crate) fn gathered(array: Array) -> SectionFlags {
     }
 }
 
+/// The type and flags of a named section that holds notes, which is what GNU as gives the line gcc
+/// writes for it: `SHT_NOTE`, allocated, and writable when the variable in it is.
+pub(crate) fn noted(written: bool) -> SectionFlags {
+    let sh_flags = if written { elf::SHF_ALLOC | elf::SHF_WRITE } else { elf::SHF_ALLOC };
+    SectionFlags::Elf { sh_type: elf::SHT_NOTE, sh_flags }
+}
+
 /// The flags a record of where a patcher's room is has, which say it belongs to a text section.
 ///
 /// `SHF_LINK_ORDER` is what ties the two together, and which section is `sh_link`, which the writer
