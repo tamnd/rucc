@@ -1248,17 +1248,34 @@ impl Checker<'_> {
     ///
     /// An argument beyond a prototype takes the default argument promotions, so nothing in the
     /// list is ever a `char` or a `float`, and asking for one reads the wrong number of bytes.
+    ///
+    /// What is compared is the type without its qualifiers, as gcc does, since a `const int`
+    /// was passed as an `int` and reads back as one. An enumeration is compared through the
+    /// type it is represented in: one held in an `int` or an `unsigned int` is passed as that,
+    /// and only one narrower than an `int`, from a packed enumeration, is promoted.
     fn va_arg_promotion(&mut self, ty: TypeId, span: Span) {
         if !is_arithmetic(&self.types, ty) {
             return;
         }
         let target = self.cx.target;
-        let promoted = if self.types.canonical(ty) == self.types.float(FloatKind::Float) {
+        let canonical = self.types.canonical(ty);
+        let unqualified = self.types.unqualified(canonical);
+        let passed = match self.types.kind(unqualified) {
+            TypeKind::Enum(id) => match self.types.enum_info(id).underlying {
+                Some(underlying) => {
+                    let underlying = self.types.canonical(underlying);
+                    self.types.unqualified(underlying)
+                }
+                None => return,
+            },
+            _ => unqualified,
+        };
+        let promoted = if unqualified == self.types.float(FloatKind::Float) {
             self.types.float(FloatKind::Double)
         } else {
-            rucc_types::promote(&mut self.types, ty, target)
+            rucc_types::promote(&mut self.types, unqualified, target)
         };
-        if promoted == ty {
+        if promoted == passed {
             return;
         }
         let (from, to) = (self.spell(ty), self.spell(promoted));
@@ -2322,6 +2339,54 @@ mod tests {
         // An argument beyond a prototype takes the default argument promotions, so nothing in
         // the list is ever a `char` and asking for one reads the wrong number of bytes.
         assert_eq!(message(&c), "'char' is promoted to 'int' when passed through '...'");
+    }
+
+    /// gcc compares the type without its qualifiers, and an enumeration through what holds it.
+    #[test]
+    fn va_arg_does_not_warn_for_a_qualified_type_or_an_enumeration_held_in_an_int() {
+        let mut f = Fixture::new();
+        let signed_tag = f.name("S");
+        let unsigned_tag = f.name("U");
+        let packed_tag = f.name("P");
+        let mut c = f.checker();
+
+        let int = c.types.int(IntKind::Int);
+        let unsigned = c.types.int(IntKind::UInt);
+        let short = c.types.int(IntKind::Short);
+        let uchar = c.types.int(IntKind::UChar);
+        let float = c.types.float(FloatKind::Float);
+        let enumeration = |c: &mut Checker<'_>, tag, underlying| {
+            let id = c.types.declare_enum(Some(tag));
+            c.types.complete_enum(id, underlying, false);
+            c.types.enumeration(id)
+        };
+        let signed_enum = enumeration(&mut c, signed_tag, int);
+        let unsigned_enum = enumeration(&mut c, unsigned_tag, unsigned);
+        let packed_enum = enumeration(&mut c, packed_tag, uchar);
+        let konst = rucc_types::Qualifiers::CONST;
+        let const_int = c.types.qualified(int, konst);
+        let volatile_unsigned = c.types.qualified(unsigned, rucc_types::Qualifiers::VOLATILE);
+        let const_enum = c.types.qualified(unsigned_enum, konst);
+
+        for ty in [const_int, volatile_unsigned, signed_enum, unsigned_enum, const_enum] {
+            c.va_arg_promotion(ty, Span::DUMMY);
+        }
+        assert_eq!(messages(&c), Vec::<String>::new());
+
+        // What would have been promoted still is, qualified or not.
+        let const_short = c.types.qualified(short, konst);
+        let const_float = c.types.qualified(float, konst);
+        for ty in [const_short, const_float, packed_enum] {
+            c.va_arg_promotion(ty, Span::DUMMY);
+        }
+        assert_eq!(
+            messages(&c),
+            [
+                "'const short' is promoted to 'int' when passed through '...'",
+                "'const float' is promoted to 'double' when passed through '...'",
+                "'enum P' is promoted to 'int' when passed through '...'",
+            ]
+        );
     }
 
     #[test]
