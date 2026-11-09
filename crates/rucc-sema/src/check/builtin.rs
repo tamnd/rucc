@@ -89,6 +89,7 @@ mod thread;
 mod trap;
 mod tsc;
 mod unreachable;
+mod unwind;
 mod xstate;
 
 pub use size::{open_to_pointer, unbounded_member};
@@ -399,6 +400,10 @@ impl Checker<'_> {
             // pointer is what a header would have made `size_t`, and it has to be the one
             // `sizeof` produces or a program that hands one to the other converts for nothing.
             "size_t" => return Some(self.size_type()),
+            // Its signed partner, which is the integer gcc's `__builtin_eh_return` takes its offset
+            // in: the type of the pointer's mode, which is `long` on LP64, `int` on i386 and `long
+            // long` on Windows, and so the one `ptrdiff_t` is on each of them.
+            "ptrdiff_t" => return Some(self.ptrdiff()),
             // Not a fixed kind either, and for a different reason: `intmax_t` is the widest
             // standard integer type, which is `long` where that is sixty four bits wide and `long
             // long` where it is not. `rucc_pp::predef` writes `__INTMAX_TYPE__` out of the same

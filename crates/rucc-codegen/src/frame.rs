@@ -311,6 +311,22 @@ pub struct Layout<'a> {
     /// frame that grows keeps counting on the call alignment, as one on i686 Windows does, where gcc
     /// reaches its arguments through a second register and realigns it all the same.
     pub forced: bool,
+    /// Whether the function saves every register its convention says a callee keeps, whether or
+    /// not it writes them, which is what `__builtin_unwind_init` asks for.
+    ///
+    /// libgcc's unwinder reads the registers of the function that called it back out of that
+    /// function's frame, through the rows its prologue wrote, so every one of them has to be in
+    /// the frame and in the rows. gcc saves them all for the same reason.
+    pub saves_kept: bool,
+    /// The registers a `__builtin_eh_return` hands the handler its values in, which the prologue
+    /// saves after the others and only that way out puts back. Nothing for every other function.
+    ///
+    /// The personality routine writes the values into the places this saved them, through
+    /// `_Unwind_SetGR`, and the way out through the handler loads them back from there. The way
+    /// out through the return leaves them alone, since one of them is where the function's own
+    /// answer is. That is what gcc does on x86-64: `%rax` and `%rdx` are pushed last and the `ret`
+    /// path takes them off the stack without reading them. See [`Frame::handed`].
+    pub eh_data: &'a [PhysReg],
 }
 
 impl<'a> Layout<'a> {
@@ -342,6 +358,8 @@ impl<'a> Layout<'a> {
             interrupt: None,
             vectors: true,
             forced: false,
+            saves_kept: false,
+            eh_data: &[],
         }
     }
 }
@@ -371,6 +389,7 @@ pub struct Frame {
     popped: u32,
     interrupt: Option<bool>,
     clears: bool,
+    handed: usize,
 }
 
 impl Frame {
@@ -659,6 +678,7 @@ impl Frame {
             popped: layout.popped,
             interrupt: layout.interrupt,
             clears: layout.interrupt.is_some() && !layout.leaf,
+            handed: if layout.naked { 0 } else { layout.eh_data.len() },
         }
     }
 
@@ -675,6 +695,16 @@ impl Frame {
     /// order the prologue makes them. See [`Layout::pairs`].
     pub fn pushed_int(&self) -> std::slice::Chunks<'_, PhysReg> {
         self.saved_int.chunks(if self.pairs { 2 } else { 1 })
+    }
+
+    /// How many of the pushes [`Frame::pushed_int`] gives are the registers a `__builtin_eh_return`
+    /// hands the handler its values in, which are the last of them. See [`Layout::eh_data`].
+    ///
+    /// The ordinary epilogue starts that many pushes higher up and does not pop them. The one in
+    /// front of the jump to the handler pops all of them.
+    #[must_use]
+    pub fn handed(&self) -> usize {
+        self.handed
     }
 
     /// The vector registers the prologue stores into the frame, and where each of them goes.
@@ -971,7 +1001,14 @@ fn saved(
             used.push((int, at));
         }
     }
-    let wanted = |class: RegClass, at: PhysReg| used.contains(&(class, at));
+    // A function that wants every kept register saved wants each of them as though it wrote it.
+    // See [`Layout::saves_kept`].
+    let every = |class: RegClass, at: PhysReg| {
+        layout.saves_kept
+            && ((class == conv.int_class && conv.int_saved.contains(&at))
+                || (class == conv.sse_class && conv.sse_saved.contains(&at)))
+    };
+    let wanted = |class: RegClass, at: PhysReg| used.contains(&(class, at)) || every(class, at);
     // In the convention's order rather than the order the function happened to reach for them, so
     // that two functions saving the same registers get the same prologue.
     let kept = |at: PhysReg| !(layout.frame_pointer && at == conv.frame_pointer);
@@ -1003,6 +1040,11 @@ fn saved(
     if conv.unwind_codes && layout.pairs {
         adjacent(&mut saved_int, conv.int_saved, kept);
     }
+    // And the registers a `__builtin_eh_return` hands its values in, last of all, so that the
+    // ordinary epilogue can leave them on the stack by starting higher up. See
+    // [`Layout::eh_data`].
+    saved_int.retain(|at| !layout.eh_data.contains(at));
+    saved_int.extend_from_slice(layout.eh_data);
     let saved_sse = conv
         .sse_saved
         .iter()

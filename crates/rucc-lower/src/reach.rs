@@ -422,11 +422,14 @@ impl Reach<'_> {
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
+            | ExprKind::UnwindInit
+            | ExprKind::DwarfCfa
             | ExprKind::TimeStamp { aux: None }
             | ExprKind::Eflags { value: None }
             | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
-            ExprKind::Apply { function, args, .. } => {
+            ExprKind::Apply { function, args, .. }
+            | ExprKind::EhReturn { offset: function, handler: args } => {
                 self.expr(function);
                 self.expr(args);
             }
@@ -474,6 +477,7 @@ impl Reach<'_> {
             | ExprKind::Abs { operand: base }
             | ExprKind::ConvertVector { operand: base }
             | ExprKind::Prefetch { address: base, .. }
+            | ExprKind::RegSizeTable { table: base }
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::ConstantP { value: base }
             | ExprKind::Jump { buffer: base, .. }
@@ -664,7 +668,7 @@ impl Reach<'_> {
     /// name to a function declared `noreturn`.
     fn stops(&self, id: ExprId) -> bool {
         match self.tast[id].kind {
-            ExprKind::Unreachable => true,
+            ExprKind::Unreachable | ExprKind::EhReturn { .. } => true,
             ExprKind::Comma { rhs, .. } => self.stops(rhs),
             ExprKind::Call { callee, .. } => {
                 let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } =

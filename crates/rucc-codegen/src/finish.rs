@@ -453,6 +453,7 @@ pub fn finish(
     let wrap = wrap
         .filter(|_| plain && !writer.hooked && writer.signing.is_none())
         .filter(|_| stack.dynamic.is_empty() && stack.grown.is_empty())
+        .filter(|_| stack.eh_returns.is_empty())
         .filter(|_| wrappable(writer.func, frame, conv));
     if wrap.is_some() {
         writer.sink(&mut moves, frame, entry);
@@ -551,6 +552,15 @@ pub fn finish(
         for inst in epilogue {
             writer.func.append_inst(block, inst);
         }
+    }
+    // And the ways out to a handler, which put back what the others put back and the registers
+    // the handler's values are in as well, then go to the handler rather than return. Each is
+    // written in front of the marker the lowering left, and the marker comes out.
+    for &marker in &stack.eh_returns {
+        for inst in writer.handler_exit(frame) {
+            writer.func.insert_before(marker, inst);
+        }
+        writer.func.remove_inst(marker);
     }
 
     // Last of everything, because the blocks a probing prologue made have to come in front of the
@@ -2099,7 +2109,10 @@ impl Writer<'_> {
                 self.restored(inst, sse, save.reg);
             }
         }
-        let pushed = u32::try_from(frame.pushed_int().len()).expect("a frame");
+        // The pushes of the registers a `__builtin_eh_return` hands its values in are the last
+        // ones, and this way out leaves them where they are. See [`Frame::handed`].
+        let kept = frame.pushed_int().len() - frame.handed();
+        let pushed = u32::try_from(kept).expect("a frame");
         if frame.frame_pointer() {
             // No row for either of these. The address is counted from the frame pointer here and
             // this is what moves the stack pointer rather than the frame pointer, so the rule that
@@ -2127,7 +2140,7 @@ impl Writer<'_> {
                 self.row(inst, CfiOp::DefCfaOffset(below));
             }
         }
-        for regs in frame.pushed_int().rev() {
+        for regs in frame.pushed_int().take(kept).rev() {
             let inst = self.pop_int(regs);
             out.push(inst);
             for &reg in regs {
@@ -2211,6 +2224,66 @@ impl Writer<'_> {
         // of the body was. That is the hole the prologue used to have, at the other end, and gcc
         // fills it the same way it fills the other one, with the brace. A function whose body this
         // does not know is left alone and keeps covering those bytes with the last row before them.
+        let closing = ending(self.func.declared);
+        if !closing.is_dummy() {
+            for &inst in &out {
+                self.func.set_span(inst, closing);
+            }
+        }
+        out
+    }
+
+    /// The way out of a function through a `__builtin_eh_return`, which is the epilogue of a frame
+    /// that keeps a frame pointer with every push taken off and a jump to the handler at the end.
+    ///
+    /// The lowering left the address the caller's stack pointer is to end up at less one word in
+    /// `%rcx`, with the handler stored there. So after the registers and the frame pointer are put
+    /// back, the stack pointer goes to `%rcx` and the handler comes off it into `%rcx` and is
+    /// jumped to. gcc 13.3 writes these instructions on x86-64 and i686, and the same rows: once
+    /// the frame pointer is back, the canonical frame address is said to be a word above `%rcx`,
+    /// and then a word above the stack pointer.
+    fn handler_exit(&mut self, frame: &Frame) -> Vec<Inst> {
+        let sp = self.conv.stack_pointer;
+        let fp = self.conv.frame_pointer;
+        let int = self.conv.int_class;
+        let push = self.conv.push;
+        let word = offset(self.conv.word);
+        let rcx = x86_64::RCX;
+        let described = !self.func.cfi.is_empty();
+        assert!(frame.frame_pointer() && !frame.late(), "a `__builtin_eh_return` keeps rbp early");
+        let mut out = Vec::new();
+        for save in frame.saved_sse() {
+            let inst = self.restore_sse(save.reg, save.at);
+            out.push(inst);
+        }
+        let pushed = u32::try_from(frame.pushed_int().len()).expect("a frame");
+        let lea = self.opcode(self.insts.lea);
+        out.push(self.address(lea, sp, fp, -offset(push * pushed)));
+        for regs in frame.pushed_int().rev() {
+            let inst = self.pop_int(regs);
+            out.push(inst);
+            for &reg in regs {
+                self.restored(inst, int, reg);
+            }
+        }
+        let inst = self.pop_frame();
+        out.push(inst);
+        self.restored(inst, int, fp);
+        let number = self.dwarf(int, rcx);
+        self.row(inst, CfiOp::DefCfa { reg: number, offset: word });
+        let mov = self.opcode(self.insts.moves(int).expect("a move").mov);
+        let inst = self.two(mov, sp, rcx);
+        out.push(inst);
+        let number = self.dwarf(int, sp);
+        self.row(inst, CfiOp::DefCfa { reg: number, offset: word });
+        out.push(self.pop(rcx));
+        let jump = self.opcode("jmp_reg");
+        let inst = self.func.build_loose(jump).uses(Reg::physical(rcx), int).finish();
+        out.push(inst);
+        if described {
+            self.row(inst, CfiOp::RestoreState);
+            self.row(inst, CfiOp::RememberState);
+        }
         let closing = ending(self.func.declared);
         if !closing.is_dummy() {
             for &inst in &out {

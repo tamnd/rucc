@@ -1527,6 +1527,15 @@ pub struct Stack {
     /// How many bytes of argument area the caller gave the function, which is where a `musttail`
     /// call that passes arguments on the stack writes them. See [`abi::Arrived::area`].
     pub incoming: u32,
+    /// Whether the function saves every register a callee keeps, which a `__builtin_unwind_init`
+    /// in it asks for. See [`crate::frame::Layout::saves_kept`].
+    pub saves_kept: bool,
+    /// The registers a `__builtin_eh_return` in the function hands the handler its values in, and
+    /// nothing when there is none. See [`crate::frame::Layout::eh_data`].
+    pub eh_data: Vec<PhysReg>,
+    /// Where each `__builtin_eh_return` in the function leaves it, as the marker [`crate::finish`]
+    /// writes the way out to the handler in front of and then takes out.
+    pub eh_returns: Vec<mir::Inst>,
 }
 
 impl Stack {
@@ -1541,15 +1550,22 @@ impl Stack {
     /// down there: whatever it called and whatever that called, or a signal handler on the same
     /// stack. Every one of those has written over the red zone by the time control arrives, so a
     /// value this function left there would not be there any more.
+    ///
+    /// A function that saves every register a callee keeps and ends in a call is not a leaf
+    /// either. On AArch64 the frame pointer is one of those registers, and it is saved in a pair
+    /// with the link register, so the epilogue loads the link register back and the call cannot
+    /// become a jump.
     #[must_use]
     pub fn layout<'a>(&'a self, base: Layout<'a>) -> Layout<'a> {
         Layout {
-            leaf: !self.kept && !self.saves_place,
+            leaf: !self.kept && !self.saves_place && !(self.saves_kept && !self.tails.is_empty()),
             outgoing: self.calls.unwrap_or(0),
             locals: &self.locals,
             grows: self.grown_at.is_some(),
             home: self.home,
             popped: self.popped,
+            saves_kept: self.saves_kept,
+            eh_data: &self.eh_data,
             ..base
         }
     }
@@ -2439,6 +2455,13 @@ impl<'a> Lowering<'a> {
                 // the caller's argument area, which only the frame knows the distance to.
                 Opcode::SpEntry => {
                     self.sp_entry(inst)?;
+                    continue;
+                }
+                // The three of libgcc's unwinder that are about this function's frame, built here
+                // for the reason the one above is: what they answer and what they do are about
+                // the frame, and only the frame knows the distances. See [`Self::unwind`].
+                Opcode::UnwindInit | Opcode::DwarfCfa | Opcode::EhReturn => {
+                    self.unwind(inst)?;
                     continue;
                 }
                 // What a named machine register holds, built here for the reason above written
@@ -5052,6 +5075,89 @@ impl<'a> Lowering<'a> {
         let made =
             self.out.build(block, lea).at(span).def(reg, self.gpr).mem(mir::Mem::at(sp)).finish();
         self.stack.arguments.push((made, 0));
+        Ok(())
+    }
+
+    /// `__builtin_unwind_init`, `__builtin_dwarf_cfa` and `__builtin_eh_return`, which are what
+    /// libgcc's unwinder is written with.
+    ///
+    /// The first writes nothing. It makes the frame save every register a callee keeps, so that
+    /// the rows of the prologue say where each one is, which is what `uw_init_context` reads them
+    /// back from. The second is the canonical frame address, the stack pointer the caller had
+    /// before the call. On every machine here that is where the caller's arguments on the stack
+    /// start, so it is the address of the first of them, finished the way [`Self::sp_entry`] is.
+    ///
+    /// The third leaves the function for the handler. The handler is stored one word below the
+    /// canonical frame address plus the offset, which is where the caller's stack pointer is to
+    /// end up, and that address goes into `%rcx`. Then a marker reads `%rcx`, and
+    /// [`crate::finish`] writes in front of it the epilogue that puts back every saved register,
+    /// the two the handler's values are in included, moves the stack pointer to `%rcx` and takes
+    /// the handler off with a jump to it. gcc 13.3 writes the same on x86-64 and i686.
+    ///
+    /// Only x86 for now, and not Windows x64, whose unwind codes describe a frame pointer that is
+    /// set after the pushes. AArch64 and RISC-V 64 refuse the third, so libgcc's unwinder cannot
+    /// yet be built for them with rucc.
+    fn unwind(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let lea = self.named(self.selector.frame.lea);
+        let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
+        match self.source[inst].opcode {
+            Opcode::UnwindInit => {
+                self.stack.saves_kept = true;
+            }
+            Opcode::DwarfCfa => {
+                let result =
+                    self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+                let reg = self.new_reg(result);
+                let made = self
+                    .out
+                    .build(block, lea)
+                    .at(span)
+                    .def(reg, self.gpr)
+                    .mem(mir::Mem::at(sp))
+                    .finish();
+                self.stack.arguments.push((made, 0));
+            }
+            _ => {
+                if self.on_aarch64() || self.on_riscv64() || self.conv.late_frame_pointer {
+                    return Err(self.unsupported(inst));
+                }
+                let args = self.source[self.source[inst].args].to_vec();
+                let (&[offset, handler], Some(moves)) =
+                    (args.as_slice(), self.selector.frame.moves(self.gpr))
+                else {
+                    return Err(self.unsupported(inst));
+                };
+                let (store, mov) = (self.named(moves.store), self.named(moves.mov));
+                let offset = self.reg_of(offset)?;
+                let handler = self.reg_of(handler)?;
+                let word = i32::try_from(self.conv.word).expect("a word of a few bytes");
+                // The canonical frame address plus the offset, one word down, finished with the
+                // incoming arguments so that the frame's distance up to them is added in.
+                let slot = self.out.new_vreg(self.gpr);
+                let index = Some(mir::Operand::read(offset, self.gpr));
+                let mem = mir::Mem { index, ..mir::Mem::at(sp) }.plus(-word);
+                let made =
+                    self.out.build(block, lea).at(span).def(slot, self.gpr).mem(mem).finish();
+                self.stack.arguments.push((made, 0));
+                let at = mir::Mem::at(mir::Operand::read(slot, self.gpr));
+                self.out.build(block, store).at(span).uses(handler, self.gpr).mem(at).finish();
+                let rcx = mir::Reg::physical(x86_64::RCX);
+                self.copy(block, span, mov, rcx, slot);
+                let marker = self.named("eh_return");
+                let made = self
+                    .out
+                    .build(block, marker)
+                    .at(span)
+                    .operand(mir::Operand::read(rcx, self.gpr))
+                    .finish();
+                self.stack.eh_returns.push(made);
+                self.stack.walks_frames = true;
+                // `%eax` and `%edx` on i686 are the same numbers.
+                self.stack.eh_data = vec![x86_64::RAX, x86_64::RDX];
+            }
+        }
         Ok(())
     }
 

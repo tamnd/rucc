@@ -3186,6 +3186,67 @@ tests = ["rucc-driver::sponentry_is_the_stack_pointer_the_function_was_entered_w
 notes = "A clang builtin that gcc never had, AArch64 only. mingw-w64 defines setjmp on ARM64 Windows as _setjmp(buf, __builtin_sponentry()), so no header that includes setjmp.h compiles for that target without it. The answer is where the caller's arguments on the stack start, so it is lowered as the address of the first incoming stack argument and finished when the frame is laid out. Asking for it on another target is refused in check/builtin/entry.rs, as clang refuses it."
 
 [[feature]]
+name = "__builtin_unwind_init"
+kind = "builtin"
+gcc_version = "2.95"
+status = "implemented"
+signature = "void(void)"
+used_by = ["libgcc"]
+tests = ["rucc-driver::eh_return_puts_the_registers_back_and_goes_to_the_handler", "rucc::eh_return::a_handler_two_frames_up_is_reached_with_its_registers"]
+notes = "libgcc's uw_init_context calls it before it reads the registers of its caller back out of the frame. The function then saves every register a call preserves, and its unwind table says where each one is. Lowered as a node that only marks the frame; the back end makes the saves."
+
+[[feature]]
+name = "__builtin_dwarf_cfa"
+kind = "builtin"
+gcc_version = "2.95"
+status = "implemented"
+signature = "void *(void)"
+used_by = ["libgcc"]
+tests = ["rucc-driver::eh_return_puts_the_registers_back_and_goes_to_the_handler", "rucc::eh_return::a_handler_two_frames_up_is_reached_with_its_registers"]
+notes = "The canonical frame address of the function: the stack pointer of the caller just before the call. On x86-64, i686, AArch64 and RISC-V 64 that is the address of the first incoming stack argument, so it is lowered the way __builtin_sponentry is and finished when the frame is laid out."
+
+[[feature]]
+name = "__builtin_eh_return"
+kind = "builtin"
+gcc_version = "2.95"
+status = "implemented"
+targets = ["x86-64", "x86"]
+signature = "void(ptrdiff_t, void *)"
+used_by = ["libgcc"]
+tests = ["rucc-driver::eh_return_puts_the_registers_back_and_goes_to_the_handler", "rucc::eh_return::a_handler_two_frames_up_is_reached_with_its_registers"]
+notes = "libgcc's uw_install_context leaves through it. The function also saves the two registers the handler gets its values in, and only this way out loads them back. The other way out returns the way any function does. It then puts every saved register back from the frame, sets the stack pointer to the canonical frame address plus the offset, and jumps to the handler, as gcc does. x86-64 and i686 only for now: AArch64 and RISC-V 64 refuse it in the back end."
+
+[[feature]]
+name = "__builtin_dwarf_sp_column"
+kind = "builtin"
+gcc_version = "2.95"
+status = "implemented"
+signature = "unsigned int(void)"
+used_by = ["libgcc"]
+tests = ["rucc-driver::the_unwinder_columns_are_the_ones_gcc_answers_with"]
+notes = "The DWARF column of the stack pointer: 7 on x86-64, 4 on i686, 31 on AArch64 and 2 on RISC-V 64, measured with gcc 13.3. Folded to a constant, so it is also accepted where gcc wants a constant and does not take it."
+
+[[feature]]
+name = "__builtin_eh_return_data_regno"
+kind = "builtin"
+gcc_version = "2.95"
+status = "implemented"
+signature = "int(int)"
+used_by = ["libgcc"]
+tests = ["rucc-driver::the_unwinder_columns_are_the_ones_gcc_answers_with"]
+notes = "The DWARF column of the register the handler gets its nth value in, or -1 past the last one: rax and rdx on x86-64, eax and edx on i686, x0 to x3 on AArch64 and a0 to a3 on RISC-V 64. The argument has to be a constant, as gcc wants."
+
+[[feature]]
+name = "__builtin_init_dwarf_reg_size_table"
+kind = "builtin"
+gcc_version = "2.95"
+status = "implemented"
+signature = "void(void *)"
+used_by = ["libgcc"]
+tests = ["rucc-driver::the_unwinder_columns_are_the_ones_gcc_answers_with"]
+notes = "Writes the number of bytes the unwinder keeps for each column into the table, one byte for each column. The bytes are the stores gcc 13.3 makes at -O2 on each target, and a column gcc does not write is not written."
+
+[[feature]]
 name = "__builtin_cpu_init"
 kind = "builtin"
 gcc_version = "4.8"

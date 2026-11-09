@@ -848,6 +848,12 @@ impl Checker<'_> {
         if let Some(value) = self.sponentry_builtin(function, signature.ret, span) {
             return value;
         }
+        // The six libgcc's DWARF unwinder is written with, three of which are facts about the
+        // target and three of which are the back end saving every register, saying where the frame
+        // is and leaving for a handler in another one. In `check/builtin/unwind.rs`.
+        if let Some(value) = self.unwind_builtin(function, &args, signature.ret, span) {
+            return value;
+        }
         // The time stamp counter, which is one instruction written where the call was and not a
         // call to anything. In `check/builtin/tsc.rs`, with why an object that reads it has to
         // carry the instruction itself.

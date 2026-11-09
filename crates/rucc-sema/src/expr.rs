@@ -528,6 +528,27 @@ pub enum ExprKind {
     /// Only AArch64 has it. It is a node for the same reason the one above is, and what it answers
     /// is where the caller's arguments on the stack begin. See `check/builtin/entry.rs`.
     SpEntry,
+    /// `__builtin_unwind_init()`, which makes the function save every register a call preserves,
+    /// so that libgcc's unwinder can find all of them in its frame. See `check/builtin/unwind.rs`.
+    UnwindInit,
+    /// `__builtin_dwarf_cfa()`, the canonical frame address of the function it is in.
+    DwarfCfa,
+    /// `__builtin_eh_return(offset, handler)`, which puts back every register the function saved,
+    /// moves the stack pointer `offset` bytes above the canonical frame address and goes to
+    /// `handler`. It never comes back.
+    EhReturn {
+        /// How far to move the stack, already a `long`.
+        offset: ExprId,
+        /// Where to go, already a `void *`.
+        handler: ExprId,
+    },
+    /// `__builtin_init_dwarf_reg_size_table(table)`, which writes the size of each register the
+    /// unwinder keeps into the bytes at `table`. Which bytes and what in them is a fact about the
+    /// target, which the lowering reads from `rucc_target::unwinder`.
+    RegSizeTable {
+        /// The table, already a `void *`.
+        table: ExprId,
+    },
     /// `__builtin_ia32_rdtsc()` and `__builtin_ia32_rdtscp(aux)`, the processor's time stamp
     /// counter.
     ///

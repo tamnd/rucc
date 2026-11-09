@@ -659,6 +659,10 @@ impl<'a> Printer<'a> {
             ExprKind::Trap => "trap".to_owned(),
             ExprKind::ThreadPointer => "thread-pointer".to_owned(),
             ExprKind::SpEntry => "sp-entry".to_owned(),
+            ExprKind::UnwindInit => "unwind-init".to_owned(),
+            ExprKind::DwarfCfa => "dwarf-cfa".to_owned(),
+            ExprKind::EhReturn { .. } => "eh-return".to_owned(),
+            ExprKind::RegSizeTable { .. } => "reg-size-table".to_owned(),
             ExprKind::TimeStamp { aux: Some(_) } => "time-stamp aux".to_owned(),
             ExprKind::TimeStamp { aux: None } => "time-stamp".to_owned(),
             ExprKind::Eflags { value: Some(_) } => "eflags write".to_owned(),
@@ -696,11 +700,14 @@ impl<'a> Printer<'a> {
             | ExprKind::FrameAddress { .. }
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
+            | ExprKind::UnwindInit
+            | ExprKind::DwarfCfa
             | ExprKind::TimeStamp { aux: None }
             | ExprKind::Eflags { value: None }
             | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
-            ExprKind::Apply { function, args, .. } => {
+            ExprKind::Apply { function, args, .. }
+            | ExprKind::EhReturn { offset: function, handler: args } => {
                 self.expr(function);
                 self.expr(args);
             }
@@ -725,6 +732,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Abs { operand: base }
             | ExprKind::ConvertVector { operand: base }
             | ExprKind::Prefetch { address: base, .. }
+            | ExprKind::RegSizeTable { table: base }
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::ConstantP { value: base }
             | ExprKind::ByteSwap { operand: base }

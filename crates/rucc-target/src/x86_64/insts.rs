@@ -47,9 +47,9 @@ use Form::{
     ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi,
     CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, CmpXchgFlags,
     Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide,
-    Exchange, FusedVec, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm,
-    LoadVec, Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87,
-    Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl,
+    EhReturn, Exchange, FusedVec, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load,
+    LoadImm, LoadVec, Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push,
+    PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl,
     ShiftDouble, ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
     StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore,
     StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR,
@@ -608,6 +608,18 @@ pub enum Form {
     /// memory and stopping the program have nothing to do with each other. No rule selects one,
     /// because there is nothing about stopping that a proof over bitvectors could discharge.
     Trap,
+    /// Where `__builtin_eh_return` leaves the function, with the address the handler was stored at
+    /// in `rcx`.
+    ///
+    /// A fourth form that encodes to nothing, and one that never reaches the output either: it is
+    /// a place in the body that `rucc_codegen::finish` takes out and writes the other epilogue in,
+    /// the one that puts back the registers the unwinder wrote into the frame and leaves on the
+    /// stack the handler is on. Until then the operand is the point of it, a read pinned to `rcx`,
+    /// which is how the allocator is told to have the address there and keep it alive that far.
+    /// `rcx` because it is neither a register a call preserves nor one the unwinder hands the
+    /// handler a value in, so nothing the epilogue puts back is written over by it, and because it
+    /// is what gcc uses.
+    EhReturn,
     /// A landing pad, which reads nothing, writes nothing and says that the address it is at is
     /// one an indirect call or jump is allowed to arrive at.
     ///
@@ -1176,6 +1188,9 @@ static RET_VAL: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixe
 // convention that has a second register to come back in. Written here for the reason above and
 // held against the convention by the same test.
 static RET_VAL_2: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(RDX))];
+// Where the handler of an exception was stored, which the other epilogue makes the stack pointer
+// before it pops the handler off it. `rcx` on i386 too, where it is `ecx` and numbered the same.
+static EH_RETURN: [OperandDesc; 1] = [OperandDesc::read(GPR).with(Constraint::Fixed(RCX))];
 // An argument is unconstrained here and constrained where it is built, because which register the
 // third argument is in is a fact about the convention and about the two arguments before it, and
 // none of that is available to a table of shapes. The class is the same reason: an argument in a
@@ -1342,6 +1357,7 @@ impl Form {
             AluMi | UnaryM | StoreImm => &ALU_MI,
             RetVal => &RET_VAL,
             RetVal2 => &RET_VAL_2,
+            EhReturn => &EH_RETURN,
             ArgVal => &ARG_VAL,
             BrCond => &BR_COND,
             Call | CallMem => &CALL,
@@ -2422,6 +2438,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // The instruction a program stops on, which `__builtin_trap` asks for. Nothing selects one:
     // `rucc_codegen::lower` writes it by name where the builtin stood.
     ("ud2", Trap),
+    // The place `__builtin_eh_return` leaves from, which the epilogue it becomes replaces.
+    ("eh_return", EhReturn),
     // The breakpoint `-mharden-sls=` puts behind a return or an indirect jump. Nothing selects one
     // either, and nothing reaches it but a processor speculating past the branch in front of it.
     ("int3", Trap),
@@ -2788,7 +2806,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 831);
+        assert_eq!(described, 832);
     }
 
     #[test]
@@ -2864,6 +2882,7 @@ mod tests {
                             | Spin
                             | Prefetch
                             | Trap
+                            | EhReturn
                             | Align
                             | Literal
                             | Template
