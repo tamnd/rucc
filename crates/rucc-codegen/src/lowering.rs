@@ -65,7 +65,7 @@ use rucc_target::{CallRegs, CountInst};
 
 use crate::switch::{Force, Lowered};
 use crate::{
-    decimal, divide, expand, fills, forks, half, locked, maths, quad, retry, rolled, switch,
+    brain, decimal, divide, expand, fills, forks, half, locked, maths, quad, retry, rolled, switch,
     varargs, wide, widths,
 };
 
@@ -108,6 +108,15 @@ pub enum Step {
     /// lost by running it this early: the widths it is written for are the widths the machine has,
     /// so a check at any other width is refused by name either way round.
     Overflows,
+    /// Anything at all at the brain float format, as `float` arithmetic and integer work on its
+    /// bits, with every value left at it moved as a half.
+    ///
+    /// Above the decimals, because a conversion between a decimal and a brain float goes through a
+    /// binary format that step has a routine for, and above the half floats, because what it leaves
+    /// is a half's loads, stores and moves and the conversions to and from `float` that the steps
+    /// below already know. The integer work it writes is at thirty two bits, at sixty four, or at a
+    /// hundred and twenty eight for a `__int128`, which the splitting below takes as it takes any.
+    BrainFloats,
     /// Anything on a decimal float, as a call to libgcc's routine for it.
     ///
     /// Above the half floats, because a conversion between a decimal and a `_Float16` is one routine
@@ -200,6 +209,7 @@ impl Step {
         Self::Rolled,
         Self::Orderings,
         Self::Overflows,
+        Self::BrainFloats,
         Self::Decimals,
         Self::HalfFloats,
         Self::Widths,
@@ -226,6 +236,7 @@ impl Step {
             Self::Rolled => "rolled",
             Self::Orderings => "orderings",
             Self::Overflows => "overflows",
+            Self::BrainFloats => "brain-floats",
             Self::Decimals => "decimals",
             Self::HalfFloats => "half-floats",
             Self::Halves => "halves",
@@ -253,6 +264,7 @@ impl Step {
             Self::Rolled => "a copy or fill gcc writes as a string instruction",
             Self::Orderings => "an ordered load or store",
             Self::Overflows => "arithmetic that reports whether it overflowed",
+            Self::BrainFloats => "the brain float format",
             Self::Decimals => "a decimal float",
             Self::HalfFloats => "the half float format",
             Self::Halves => "an integer wider than a register",
@@ -279,9 +291,9 @@ impl Step {
     /// dump which of those happened.
     ///
     /// Empty for [`Step::Rounds`], which rewrites an operand rather than taking an instruction out,
-    /// and empty for the four that work by type rather than by opcode: an integer of forty bits,
-    /// one of a hundred and twenty eight, a quad float and a half float are all spelled with the
-    /// same opcodes as anything else, and what makes them the construct is the type on the values.
+    /// and empty for the five that work by type rather than by opcode: an integer of forty bits,
+    /// one of a hundred and twenty eight, a quad float, a half float and a brain float are all
+    /// spelled with the same opcodes as anything else, and what makes them the construct is the type on the values.
     #[must_use]
     pub const fn opcodes(self) -> &'static [Opcode] {
         match self {
@@ -297,7 +309,12 @@ impl Step {
                 Opcode::UMulOverflow,
                 Opcode::SMulOverflow,
             ],
-            Self::Decimals | Self::HalfFloats | Self::Halves | Self::Widths | Self::Rounds => &[],
+            Self::BrainFloats
+            | Self::Decimals
+            | Self::HalfFloats
+            | Self::Halves
+            | Self::Widths
+            | Self::Rounds => &[],
             Self::Divisions => &[Opcode::SDiv, Opcode::UDiv, Opcode::SRem, Opcode::URem],
             Self::Bytes => &[Opcode::Bswap, Opcode::Bitreverse],
             Self::Counts => &[Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop],
@@ -370,6 +387,7 @@ impl Step {
                 }
             }
             Self::Overflows => expand::overflows(func, conv.word * 8),
+            Self::BrainFloats => brain::floats(func),
             Self::Decimals => decimal::calls(func, names, conv.abi),
             Self::HalfFloats => half::calls(func, names, conv.abi, built.converts),
             Self::Halves => return wide::halves(func, names, conv),
@@ -689,6 +707,8 @@ mod tests {
                 "rolled",
                 "orderings",
                 "overflows",
+                // Ahead of the decimals and the half floats, which take what it leaves.
+                "brain-floats",
                 // Ahead of the half floats, which would otherwise widen a decimal's `_Float16`.
                 "decimals",
                 // Ahead of the integer splitting, because the calls it writes take and give back

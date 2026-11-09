@@ -342,7 +342,8 @@ mod tests {
                 (8, 8),
                 (16, 16),
                 (2, 2),
-                (16, 16)
+                (16, 16),
+                (2, 2)
             ]
         );
         assert_eq!(
@@ -361,7 +362,8 @@ mod tests {
                 (8, 8),
                 (16, 16),
                 (2, 2),
-                (16, 16)
+                (16, 16),
+                (2, 2)
             ]
         );
         // The i386 rows, read off gcc 13 the same way. `_Float64x` is the twelve byte `long
@@ -383,7 +385,8 @@ mod tests {
                 (8, 8),
                 (16, 16),
                 (2, 2),
-                (16, 16)
+                (16, 16),
+                (2, 2)
             ]
         );
         assert_eq!(
@@ -402,14 +405,15 @@ mod tests {
                 (8, 8),
                 (16, 16),
                 (2, 2),
-                (16, 16)
+                (16, 16),
+                (2, 2)
             ]
         );
     }
 
     #[test]
     fn every_floating_type_has_a_slot_of_its_own_and_a_name_of_its_own() {
-        // Thirteen types and thirteen ids, which is what makes `_Float64` and `double` two types that
+        // Fifteen types and fifteen ids, which is what makes `_Float64` and `double` two types that
         // `_Generic` can tell apart rather than one type with two spellings.
         let types = Types::new();
         let mut seen = Vec::new();
@@ -439,6 +443,7 @@ mod tests {
                 "_Decimal128",
                 "__fp16",
                 "_Decimal64x",
+                "__bf16",
             ]
         );
     }
@@ -1613,6 +1618,25 @@ mod tests {
         let double = types.float(FloatKind::Double);
         assert_eq!(usual_arithmetic(&mut types, fp16, double, &linux), Some(double));
         assert_eq!(usual_arithmetic(&mut types, fp16, half, &linux), Some(float));
+    }
+
+    #[test]
+    fn a_brain_float_is_not_promoted_and_does_not_meet_a_float16() {
+        // gcc 15 for x86_64-unknown-freebsd15.1: `b + b` is a `__bf16`, `b + f` a `float`, `b + 1`
+        // a `__bf16`, and `b + h` for a `_Float16` is refused as invalid operands.
+        let mut types = Types::new();
+        let linux = linux();
+        let brain = types.float(FloatKind::BFloat16);
+        let float = types.float(FloatKind::Float);
+        let half = types.float(FloatKind::Float16);
+        let int = types.int(IntKind::Int);
+        assert_eq!(promote(&mut types, brain, &linux), brain);
+        assert_eq!(usual_arithmetic(&mut types, brain, brain, &linux), Some(brain));
+        assert_eq!(usual_arithmetic(&mut types, brain, float, &linux), Some(float));
+        assert_eq!(usual_arithmetic(&mut types, int, brain, &linux), Some(brain));
+        assert_eq!(usual_arithmetic(&mut types, brain, half, &linux), None);
+        assert_eq!(usual_arithmetic(&mut types, half, brain, &linux), None);
+        assert_eq!(layout(&types, brain, &linux).map(|it| (it.size, it.align)), Ok((2, 2)));
     }
 
     #[test]

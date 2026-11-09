@@ -2186,7 +2186,13 @@ impl<'a> Verifier<'a> {
         // a narrowing, so `_Decimal64` from `double` is `fpext` and `double` from it is `fptrunc`.
         let decimal = |ty: Type| ty.lane().format().is_some_and(Float::is_decimal);
         let across = a == b && decimal(to) != decimal(from) && decimal(to) == wider;
-        let ok = across || if wider { a > b } else { a < b };
+        // A half and a brain float are both sixteen bits. Toward the brain float is a narrowing,
+        // which is libgcc's `__trunchfbf2`, so the half from one is a widening.
+        let brain = |ty: Type| ty.lane().format() == Some(Float::BF16);
+        let half = |ty: Type| ty.lane().format() == Some(Float::F16);
+        let sixteen =
+            a == b && ((brain(to) && half(from) && !wider) || (half(to) && brain(from) && wider));
+        let ok = across || sixteen || if wider { a > b } else { a < b };
         if !ok {
             let way = if wider { "wider" } else { "narrower" };
             self.error(format!(

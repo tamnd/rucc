@@ -292,6 +292,9 @@ fn floating(types: &mut Types, left: TypeId, right: TypeId, target: &TargetInfo)
             let rank = |kind: FloatKind| (float_width(kind, target), kind.tie_break());
             if rank(a) >= rank(b) { a } else { b }
         }
+        // Neither format holds the other, and gcc says the operands are invalid.
+        (Some(FloatKind::BFloat16), Some(FloatKind::Float16))
+        | (Some(FloatKind::Float16), Some(FloatKind::BFloat16)) => return None,
         (Some(a), Some(b)) => {
             if float_rank(a, target) >= float_rank(b, target) {
                 a

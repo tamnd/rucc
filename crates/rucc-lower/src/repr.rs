@@ -48,7 +48,7 @@ pub(crate) fn value_type(types: &Types, target: &TargetInfo, id: TypeId) -> Opti
 }
 
 /// The floating point format of a real floating type, and [`None`] for one the IR has no format
-/// for, which today is `__bf16` and the double-double.
+/// for, which today is the double-double.
 #[must_use]
 pub(crate) fn format_of(kind: FloatKind, target: &TargetInfo) -> Option<Float> {
     ir_format(float_format(kind, target))
@@ -56,8 +56,7 @@ pub(crate) fn format_of(kind: FloatKind, target: &TargetInfo) -> Option<Float> {
 
 /// The IR's name for a floating point format, and [`None`] for one it has no type for.
 ///
-/// Two of them today. `__bf16` has no IR type because nothing selects on one yet. The
-/// double-double has none because it is a pair of doubles rather than a format, so an IR value in
+/// One of them today. The double-double has none because it is a pair of doubles rather than a format, so an IR value in
 /// it would be a value no arithmetic rule covers, and the front end has to hold one in memory and
 /// call into the runtime the way `spec/cross-compile/06-abis.md` says PowerPC compilers do. No
 /// target here chooses it, so the [`None`] is unreachable rather than untested.
@@ -76,7 +75,8 @@ pub(crate) fn ir_format(format: rucc_base::float::Format) -> Option<Float> {
         Format::Decimal32 => Some(Float::D32),
         Format::Decimal64 => Some(Float::D64),
         Format::Decimal128 => Some(Float::D128),
-        Format::BFloat16 | Format::DoubleDouble => None,
+        Format::BFloat16 => Some(Float::BF16),
+        Format::DoubleDouble => None,
     }
 }
 

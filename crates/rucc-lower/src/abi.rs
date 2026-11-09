@@ -344,8 +344,9 @@ fn travel(
         Pass::Ignore => Vec::new(),
         Pass::Direct => match repr::value_type(types, target, ty) {
             Some(ty) => vec![ty],
-            // A scalar the IR has no type for, which is `__bf16` today. It is reported wherever
-            // it is used rather than here, and a pointer keeps the shape of the walk.
+            // A scalar the IR has no type for, which is the double-double, which no target here
+            // has. It is reported wherever it is used rather than here, and a pointer keeps the
+            // shape of the walk.
             None => vec![Type::PTR],
         },
         Pass::Pieces(slots) => {
@@ -384,8 +385,7 @@ pub(crate) fn slot_type(slot: Slot) -> Type {
         Slot::Vector { size, .. } => Type::vector(Type::int(8), size.max(2)),
         Slot::Float { format, .. } => match repr::ir_format(format) {
             Some(format) => Type::float(format),
-            // A format the IR has no type for, which is `__bf16` in an aggregate. Sixteen bits
-            // of it travel in whatever holds sixteen bits.
+            // A format the IR has no type for, which no target here has in an aggregate.
             None => Type::float(Float::F16),
         },
     }

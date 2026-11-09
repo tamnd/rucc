@@ -10,6 +10,11 @@
 //! registers there and on Arm and nowhere else. `arm_fp16.h` and `arm_neon.h` build `float16_t`
 //! out of it.
 //!
+//! x86-64 and AArch64 have `__bf16`, the brain float, which is the top half of a `float`. gcc 13
+//! made it an arithmetic type on both. `arm_neon.h` and the AVX-512 headers build their vectors of
+//! it out of it. gcc 15 has it on RISC-V too, and rucc does not yet, because it cannot move a half
+//! there (tamnd/rucc#4276).
+//!
 //! x86 and PowerPC have one more, `__float128`, which is gcc's older name for `_Float128` and the
 //! one code written before C23 reaches for. gcc has it on those two and nowhere else, and
 //! `__SIZEOF_FLOAT128__` is defined exactly where it is. wasm32 has it too, because clang has it
@@ -82,6 +87,8 @@ pub enum TypeName {
     Float128,
     /// `__fp16`, half precision that the promotions make a `float`.
     Fp16,
+    /// `__bf16`, the brain float.
+    BFloat16,
     /// A polynomial scalar of this many bits, which C reads as the unsigned integer of the same
     /// size and gcc's debug information describes as a base type of its own.
     Poly(u8),
@@ -137,17 +144,24 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__Poly64_t", TypeName::Poly(64)),
     ("__Poly128_t", TypeName::Poly(128)),
     ("__fp16", TypeName::Fp16),
+    ("__bf16", TypeName::BFloat16),
 ];
 
 /// The name x86, PowerPC and wasm32 have for quad precision.
 const FLOAT128: &[(&str, TypeName)] = &[("__float128", TypeName::Float128)];
+
+/// x86-64's, which are quad precision's old name and the brain float. gcc has `__bf16` on i386 as
+/// well, and rucc does not yet, as it has no `_Float16` there either.
+const X86_64: &[(&str, TypeName)] =
+    &[("__float128", TypeName::Float128), ("__bf16", TypeName::BFloat16)];
 
 /// The names `arch` has before anything is read, and what each one is.
 #[must_use]
 pub(crate) fn type_names(arch: Arch) -> &'static [(&'static str, TypeName)] {
     match arch {
         Arch::Aarch64 => AARCH64,
-        Arch::X86_64 | Arch::X86 | Arch::PowerPc64 | Arch::Wasm32 => FLOAT128,
+        Arch::X86_64 => X86_64,
+        Arch::X86 | Arch::PowerPc64 | Arch::Wasm32 => FLOAT128,
         _ => &[],
     }
 }
@@ -183,5 +197,18 @@ mod tests {
         assert!(!has(Arch::Aarch64));
         assert!(!has(Arch::Riscv64));
         assert!(type_names(Arch::Arm).is_empty());
+    }
+
+    #[test]
+    fn the_brain_float_is_a_name_where_gcc_computes_with_it() {
+        let has = |arch| type_names(arch).iter().any(|&(name, _)| name == "__bf16");
+        for arch in [Arch::X86_64, Arch::Aarch64] {
+            assert!(has(arch), "{arch:?}");
+        }
+        for arch in
+            [Arch::X86, Arch::Riscv64, Arch::PowerPc64, Arch::Wasm32, Arch::Arm, Arch::S390x]
+        {
+            assert!(!has(arch), "{arch:?}");
+        }
     }
 }

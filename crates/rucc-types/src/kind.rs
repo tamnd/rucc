@@ -282,6 +282,10 @@ impl IntKind {
 /// AArch64 only. It is binary16 like `_Float16` and is a type to store a value in rather than one
 /// to compute in: the promotions make it a `float` wherever it is a value, so `h + h` is a
 /// `float` where the same sum of two `_Float16` is a `_Float16`.
+///
+/// `__bf16` is the brain float, which gcc has on x86-64, AArch64 and RISC-V. It has eight bits of
+/// precision and the exponent of a `float`, so it is not a subset of `_Float16` nor `_Float16` of
+/// it, and gcc refuses an operation on the two. With anything else it ranks below `float`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FloatKind {
     /// `_Float16`, always the binary16 format.
@@ -318,6 +322,8 @@ pub enum FloatKind {
     /// `_Decimal64x`, the decimal format wider than decimal64, which is decimal128. It is not
     /// the same type as `_Decimal128`, and loses to it in an operation on both.
     Decimal64x,
+    /// `__bf16`, the brain float format.
+    BFloat16,
 }
 
 impl FloatKind {
@@ -326,7 +332,7 @@ impl FloatKind {
     /// Not in rank order, because there is no such order to put them in: which of `long double`
     /// and `_Float64x` is the wider one is a question about the target, and on Apple the answer
     /// is the second.
-    pub const ALL: [FloatKind; 14] = [
+    pub const ALL: [FloatKind; 15] = [
         FloatKind::Float16,
         FloatKind::Float,
         FloatKind::Float32,
@@ -341,6 +347,7 @@ impl FloatKind {
         FloatKind::Decimal128,
         FloatKind::Fp16,
         FloatKind::Decimal64x,
+        FloatKind::BFloat16,
     ];
 
     /// A dense index, so that one of these can select a slot in a fixed size array.
@@ -360,6 +367,7 @@ impl FloatKind {
             FloatKind::Decimal128 => 11,
             FloatKind::Fp16 => 12,
             FloatKind::Decimal64x => 13,
+            FloatKind::BFloat16 => 14,
         }
     }
 
@@ -410,6 +418,8 @@ impl FloatKind {
             // Never an operand of the conversions either, because the promotions have made it
             // a `float` before they run.
             FloatKind::Fp16 => 7,
+            // The only type of its format, so it never ties.
+            FloatKind::BFloat16 => 15,
         }
     }
 
@@ -431,6 +441,7 @@ impl FloatKind {
             FloatKind::Decimal128 => "_Decimal128",
             FloatKind::Fp16 => "__fp16",
             FloatKind::Decimal64x => "_Decimal64x",
+            FloatKind::BFloat16 => "__bf16",
         }
     }
 }

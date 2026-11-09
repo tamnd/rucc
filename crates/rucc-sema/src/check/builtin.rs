@@ -475,6 +475,7 @@ impl Checker<'_> {
         match kind {
             FloatKind::Float16 => target.has_float16,
             FloatKind::Fp16 => target.type_names().iter().any(|&(name, _)| name == "__fp16"),
+            FloatKind::BFloat16 => target.type_names().iter().any(|&(name, _)| name == "__bf16"),
             FloatKind::Float128 => target.has_float128,
             FloatKind::Float64x => target.float64x_format.is_some(),
             FloatKind::Decimal32
