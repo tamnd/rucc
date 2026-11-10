@@ -513,7 +513,7 @@ impl Out<'_> {
         let size = frame.size.unwrap_or(0);
         if frame.fp {
             self.emit(Self::op("MOV", 0)?, reg(FP), oreg(RSP, size));
-            self.from_sp(size, FP)?;
+            self.above_sp(size, FP)?;
         }
         let mut released = false;
         for (at, l) in body.iter().enumerate() {
@@ -681,7 +681,7 @@ impl Out<'_> {
                     _ => r(n)?,
                 };
                 if let (Op::X(d), "add" | "sub", Op::Sp, [Op::Imm(0)]) = (d, m, n, rest) {
-                    return self.from_sp(0, gpr(*d, line)?);
+                    return self.above_sp(0, gpr(*d, line)?);
                 }
                 let from = self.second(rest, line)?;
                 let rd = if matches!(d, Op::Sp) { RSP } else { r(d)? };
@@ -761,7 +761,7 @@ impl Out<'_> {
                 [Op::F(d, _), Op::F(s, _)] => {
                     self.emit(Self::op("FMOVD", line)?, freg(*s), freg(*d));
                 }
-                [Op::X(d), Op::Sp] => self.from_sp(0, gpr(*d, line)?)?,
+                [Op::X(d), Op::Sp] => self.above_sp(0, gpr(*d, line)?)?,
                 [Op::Sp, _] => {
                     return Err(trouble(line, "a change of sp in the body of a function"));
                 }
@@ -1063,7 +1063,7 @@ impl Out<'_> {
     /// `rd = sp + offset`. 7l takes the constant 0 for the zero register, so `ADD $0, RSP, Rd`
     /// matches the register form of `ADD` and gives zero. The zero offset is a `MOV` from a
     /// `D_SP` operand, which 7l writes as `add rd, sp, #0`.
-    fn from_sp(&mut self, offset: i64, rd: u8) -> Result<(), Trouble> {
+    fn above_sp(&mut self, offset: i64, rd: u8) -> Result<(), Trouble> {
         if offset == 0 {
             self.emit(Self::op("MOV", 0)?, sp(), reg(rd));
         } else {
