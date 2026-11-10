@@ -180,7 +180,7 @@ impl Line {
 }
 
 /// The number of a CSR GNU as knows by name, for the ones a kernel or a program reads: the float
-/// status, the counters, and the supervisor and machine registers.
+/// status, the counters, and the supervisor, hypervisor and machine registers.
 fn csr_named(name: &str) -> Option<i64> {
     Some(match name {
         "fflags" => 0x001,
@@ -198,6 +198,31 @@ fn csr_named(name: &str) -> Option<i64> {
         "sip" => 0x144,
         "stimecmp" => 0x14d,
         "satp" => 0x180,
+        // The hypervisor extension's registers, and the ones it gives the guest's supervisor.
+        "vsstatus" => 0x200,
+        "vsie" => 0x204,
+        "vstvec" => 0x205,
+        "vsscratch" => 0x240,
+        "vsepc" => 0x241,
+        "vscause" => 0x242,
+        "vstval" => 0x243,
+        "vsip" => 0x244,
+        "vstimecmp" => 0x24d,
+        "vsatp" => 0x280,
+        "hstatus" => 0x600,
+        "hedeleg" => 0x602,
+        "hideleg" => 0x603,
+        "hie" => 0x604,
+        "htimedelta" => 0x605,
+        "hcounteren" => 0x606,
+        "hgeie" => 0x607,
+        "henvcfg" => 0x60a,
+        "htval" => 0x643,
+        "hip" => 0x644,
+        "hvip" => 0x645,
+        "htinst" => 0x64a,
+        "hgatp" => 0x680,
+        "hgeip" => 0xe12,
         "mstatus" => 0x300,
         "misa" => 0x301,
         "medeleg" => 0x302,
@@ -397,6 +422,36 @@ mod tests {
         assert_eq!(read_ok("csrr a0, sstatus").values, [Gpr(10), Imm(0x100)]);
         assert_eq!(read_ok("csrw 0x105, a0").values, [Imm(0x105), Gpr(10)]);
         assert_eq!(read_ok("csrrs a0, time, zero").values, [Gpr(10), Imm(0xc01), Gpr(0)]);
+        // The hypervisor's registers that FreeBSD's vmm names, with the numbers GNU as 2.42 gives
+        // them under `-march=rv64gch_sstc`.
+        for (name, number) in [
+            ("hstatus", 0x600),
+            ("hedeleg", 0x602),
+            ("hideleg", 0x603),
+            ("hie", 0x604),
+            ("htimedelta", 0x605),
+            ("hcounteren", 0x606),
+            ("hgeie", 0x607),
+            ("henvcfg", 0x60a),
+            ("htval", 0x643),
+            ("hip", 0x644),
+            ("hvip", 0x645),
+            ("htinst", 0x64a),
+            ("hgatp", 0x680),
+            ("hgeip", 0xe12),
+            ("vsstatus", 0x200),
+            ("vsie", 0x204),
+            ("vstvec", 0x205),
+            ("vsscratch", 0x240),
+            ("vsepc", 0x241),
+            ("vscause", 0x242),
+            ("vstval", 0x243),
+            ("vsip", 0x244),
+            ("vstimecmp", 0x24d),
+            ("vsatp", 0x280),
+        ] {
+            assert_eq!(read_ok(&format!("csrr a0, {name}")).values, [Gpr(10), Imm(number)]);
+        }
         // Only a CSR instruction reads one, so anywhere else the name is a symbol.
         assert_eq!(read_ok("call time").symbol.as_deref(), Some("time"));
         let held = Mem(Addr { base: 10, offset: Offset::Imm(0) });
