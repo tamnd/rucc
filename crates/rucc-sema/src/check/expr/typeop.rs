@@ -2194,6 +2194,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
         };
         let function = c.types.function(signature);
         let record = tagged(&mut c, tag, &[]);
@@ -2569,6 +2570,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
         };
         let ty = c.types.function(signature);
         c.declare_object(fname, ty, Span::DUMMY);

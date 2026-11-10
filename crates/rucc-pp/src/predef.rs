@@ -850,6 +850,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             if opts.branch_protection.gcs {
                 d.set("__ARM_FEATURE_GCS_DEFAULT", "1");
             }
+            if !clang && opts.gnuc.major >= 14 {
+                sme(d);
+            }
         }
         Arch::Riscv64 => riscv(d, opts, 64),
         Arch::X86 => {
@@ -1158,6 +1161,29 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 
 /// What gcc's `builtin_define_std ("unix")` defines: `__unix` and `__unix__`, and `unix` too
 /// unless a strict mode keeps the name for the program.
+/// The keyword attributes of the AArch64 Scalable Matrix Extension, which gcc 14 and later
+/// define on every AArch64 target, with SME or without it.
+///
+/// Each one is a scoped attribute in the `arm` namespace, and `__extension__` keeps a C mode
+/// without `[[...]]` from warning about it. The two `__ARM_STATE_` macros say that the compiler
+/// knows the state, so that a header can write `__arm_inout("za")`. The checker reads the
+/// attributes as gcc built without SME does, and refuses what needs SME to build. gcc also defines
+/// `__ARM_NEON_SVE_BRIDGE` here, which is a promise of `<arm_neon_sve_bridge.h>` and the SVE
+/// types, and this compiler has neither yet, so it is left out. tamnd/rucc#4225.
+fn sme(d: &mut Defs) {
+    d.set("__ARM_STATE_ZA", "1");
+    d.set("__ARM_STATE_ZT0", "1");
+    for name in ["streaming", "streaming_compatible", "locally_streaming"] {
+        d.set(&format!("__arm_{name}"), &format!("[[__extension__ arm::{name}]]"));
+    }
+    for name in ["new", "in", "out", "inout", "preserves"] {
+        d.set(
+            &format!("__arm_{name}(...)"),
+            &format!("[[__extension__ arm::{name}(__VA_ARGS__)]]"),
+        );
+    }
+}
+
 fn unix(d: &mut Defs, opts: &Predef) {
     d.flag("__unix");
     d.flag("__unix__");
@@ -3995,6 +4021,37 @@ mod tests {
         for triple in ["x86_64-unknown-freebsd15.1", "riscv64-unknown-freebsd15.1"] {
             assert!(!set_for(triple).contains("__ARM_FP16_"), "{triple}");
         }
+    }
+
+    /// tamnd/rucc#4225. gcc 14 defines the SME keyword attributes on every AArch64 target, and
+    /// gcc 13 does not. clang defines none of them as macros.
+    #[test]
+    fn the_sme_keyword_attributes_are_macros_from_gcc_14_on() {
+        let gcc = |major: u32| Predef {
+            gnuc: GnucVersion { major, minor: 0, patch: 0 },
+            ..Predef::new()
+        };
+        for triple in ["aarch64-unknown-freebsd15.1", "aarch64-unknown-netbsd10.2"] {
+            let target = TargetInfo::new(triple.parse().expect("a triple"));
+            let text = built_in(&target, &gcc(14));
+            for line in [
+                "#define __ARM_STATE_ZA 1",
+                "#define __ARM_STATE_ZT0 1",
+                "#define __arm_streaming [[__extension__ arm::streaming]]",
+                "#define __arm_locally_streaming [[__extension__ arm::locally_streaming]]",
+                "#define __arm_inout(...) [[__extension__ arm::inout(__VA_ARGS__)]]",
+                "#define __arm_new(...) [[__extension__ arm::new(__VA_ARGS__)]]",
+            ] {
+                assert!(has(&text, line), "{triple}: {line}");
+            }
+            assert!(!text.contains("__ARM_NEON_SVE_BRIDGE"), "{triple}");
+            let old = built_in(&target, &gcc(13));
+            assert!(!old.contains("__ARM_STATE_") && !old.contains("__arm_"), "{triple}");
+        }
+        let apple = TargetInfo::new("aarch64-apple-darwin".parse().expect("a triple"));
+        assert!(!built_in(&apple, &gcc(14)).contains("__arm_streaming"));
+        let x86 = TargetInfo::new("x86_64-unknown-freebsd15.1".parse().expect("a triple"));
+        assert!(!built_in(&x86, &gcc(14)).contains("__ARM_STATE_ZA"));
     }
 
     #[test]

@@ -679,4 +679,64 @@ pub struct FunctionType {
     /// incompatible pointer, since the caller and the callee would look for the value in two
     /// different places.
     pub sse_regparm: bool,
+    /// What the function does with the Scalable Matrix Extension, from the AArch64 keyword
+    /// attributes `__arm_streaming`, `__arm_streaming_compatible`, `__arm_in`, `__arm_out`,
+    /// `__arm_inout` and `__arm_preserves`.
+    ///
+    /// gcc holds each of them against a type without it, as it does [`Self::nocf`], because a
+    /// caller and a callee that disagree about the processor mode or about who keeps the ZA
+    /// array lose what is in the registers.
+    pub sme: Sme,
+}
+
+/// What a function type says about the Scalable Matrix Extension of AArch64.
+///
+/// The ACLE writes these as keyword attributes of the function type. The mode is what the
+/// processor is in while the function runs, and the two shares say what the function does with
+/// the state of its caller: the ZA array, and the ZT0 register of SME2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Sme {
+    /// The processor mode the function runs in.
+    pub mode: SmeMode,
+    /// How the function shares the ZA array with its caller, or [`None`] when it does not.
+    pub za: Option<SmeShare>,
+    /// How the function shares ZT0 with its caller, or [`None`] when it does not.
+    pub zt0: Option<SmeShare>,
+}
+
+impl Sme {
+    /// A function that says nothing about SME, which is every function on every other target.
+    pub const NONE: Sme = Sme { mode: SmeMode::Normal, za: None, zt0: None };
+
+    /// Whether the function shares some SME state with its caller.
+    #[must_use]
+    pub const fn shares(self) -> bool {
+        self.za.is_some() || self.zt0.is_some()
+    }
+}
+
+/// The processor mode a function runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SmeMode {
+    /// The ordinary mode, which is what a function with no attribute runs in.
+    #[default]
+    Normal,
+    /// Streaming mode, from `__arm_streaming`.
+    Streaming,
+    /// Either mode, from `__arm_streaming_compatible`: the function runs in the mode it was
+    /// called in.
+    Compatible,
+}
+
+/// How a function shares a piece of SME state with its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SmeShare {
+    /// `__arm_in`: the function reads the state and does not change it for the caller.
+    In,
+    /// `__arm_out`: the function gives the caller new state.
+    Out,
+    /// `__arm_inout`: the function reads the state and gives it back changed.
+    Inout,
+    /// `__arm_preserves`: the function does not use the state and keeps it as it was.
+    Preserves,
 }

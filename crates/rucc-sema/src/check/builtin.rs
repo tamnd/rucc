@@ -342,6 +342,7 @@ impl Checker<'_> {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
         }))
     }
 

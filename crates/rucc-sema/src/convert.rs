@@ -590,6 +590,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
         };
         let function = f.types.function(signature);
         let designator =

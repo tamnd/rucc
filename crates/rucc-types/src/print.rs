@@ -372,6 +372,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: crate::Sme::NONE,
         };
         let function = types.function(signature);
         let pointer = types.pointer(function);
@@ -396,6 +397,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: crate::Sme::NONE,
         };
         let native = FunctionType { convention: rucc_target::Convention::Target, ..ms.clone() };
         let ms = types.function(ms);
@@ -425,6 +427,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: crate::Sme::NONE,
         };
         let untracked = FunctionType { nocf: true, ..plain.clone() };
         let both = FunctionType { convention: rucc_target::Convention::Ms, ..untracked.clone() };
@@ -473,6 +476,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: crate::Sme::NONE,
         };
         let function = types.function(takes_an_int.clone());
         let to_int = types.pointer(int);
@@ -521,6 +525,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: crate::Sme::NONE,
         };
         let old = FunctionType {
             ret: int,
@@ -532,6 +537,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: crate::Sme::NONE,
         };
         let prototyped = types.function(prototyped);
         let old = types.function(old);
@@ -556,6 +562,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: crate::Sme::NONE,
         };
         let function = types.function(signature);
         let pointer = types.pointer(function);
