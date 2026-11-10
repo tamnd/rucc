@@ -1949,6 +1949,9 @@ fn va_list(target: TargetTuple) -> Option<VaList> {
         // Windows passes every argument in one place and spills the register ones next to the
         // stack ones, so the list is an address, and Apple does the same on AArch64.
         (_, tuple::Os::Windows) => Some(VaList::CharPointer),
+        // kencc gives every argument a slot, and the `u.h` of each Plan 9 architecture defines
+        // `va_list` as a `char *` that walks them.
+        (_, tuple::Os::Plan9) => Some(VaList::CharPointer),
         (tuple::Arch::Aarch64, os) if os.is_darwin() => Some(VaList::CharPointer),
         (tuple::Arch::Aarch64, _) => Some(VaList::Aapcs),
         // The x32 ABI's list is the same structure with four byte pointers in it, which is what
@@ -2480,6 +2483,11 @@ mod tests {
         assert_eq!(arm_win.va_list, Some(VaList::CharPointer));
         let riscv = TargetInfo::new("riscv64-unknown-linux-gnu".parse().unwrap());
         assert_eq!(riscv.va_list, Some(VaList::VoidPointer));
+        // Plan 9's `u.h` says `char *` on every architecture, which is what kencc's slots need.
+        for triple in ["x86_64-plan9", "aarch64-plan9"] {
+            let plan9 = TargetInfo::new(triple.parse().unwrap());
+            assert_eq!(plan9.va_list, Some(VaList::CharPointer), "{triple}");
+        }
     }
 
     #[test]
