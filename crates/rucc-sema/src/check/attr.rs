@@ -2416,7 +2416,8 @@ impl Checker<'_> {
     /// `nocf_check` is a function type attribute too and lands where a convention does, so it is
     /// read here as well, after the convention. See [`Self::untracked`]. So is `indirect_return`,
     /// which is [`FunctionType::indirect_return`], `sseregparm`, which is
-    /// [`FunctionType::sse_regparm`], and `callee_pop_aggregate_return` last, which is
+    /// [`FunctionType::sse_regparm`], the AArch64 SME attributes, which are
+    /// [`FunctionType::sme`], and `callee_pop_aggregate_return` last, which is
     /// [`FunctionType::return_pointer_popped`].
     pub(in crate::check) fn convened(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
         if !self.spelled_in(&[attrs]).any(CONVENED) {
@@ -2435,6 +2436,7 @@ impl Checker<'_> {
             None => ty,
         };
         let ty = self.sse_registers(ty, attrs, false);
+        let ty = self.sme_typed(ty, attrs, false);
         let ty = self.popping(ty, attrs, false);
         self.never_returning(ty, attrs)
     }
@@ -2501,6 +2503,7 @@ impl Checker<'_> {
             }
         }
         let pointee = self.sse_registers(pointee, attrs, true);
+        let pointee = self.sme_typed(pointee, attrs, true);
         let pointee = self.popping(pointee, attrs, true);
         // `void (*__noreturn enter)(u64)`, read as [`Self::never_returning`] reads it after the
         // declarator.

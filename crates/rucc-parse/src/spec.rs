@@ -362,6 +362,11 @@ impl Parser<'_> {
     fn standard_attributes(&mut self, out: &mut Vec<Attribute>) {
         self.cursor.bump();
         self.cursor.bump();
+        // gcc lets `__extension__` open the list, so that a header can write a scoped
+        // attribute in a C mode that has no `[[...]]` and still not get a pedantic warning. The
+        // AArch64 SME macros of gcc 14 do this: `__arm_streaming` is
+        // `[[__extension__ arm::streaming]]`.
+        self.cursor.eat_keyword(Keyword::Extension);
         loop {
             if self.cursor.at_punct(Punct::RBracket) || self.cursor.is_eof() {
                 break;

@@ -497,10 +497,15 @@ impl Checker<'_> {
         if emitted {
             self.sse_refused_definition(merged, name, span);
         }
+        // gcc refuses an SME definition even where it is not emitted, and the calls only in a
+        // function it builds.
+        let refused = self.sme_refused_definition(merged, &[specs.attrs], span);
+        let quiet = std::mem::replace(&mut self.sme_quiet, refused || !emitted);
         let forwards = !emitted || self.tast[id].linkage == Linkage::Internal;
         let outer = self.defining.replace(id);
         let (stmt, params) = self.function_body(ty, name, span, params, body, forwards);
         self.defining = outer;
+        self.sme_quiet = quiet;
         let mut node = self.tast[id].clone();
         node.params = params;
         node.body = Some(stmt);

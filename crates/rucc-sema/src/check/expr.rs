@@ -330,6 +330,7 @@ impl Checker<'_> {
                     indirect_return: false,
                     return_pointer_popped: None,
                     sse_regparm: false,
+                    sme: rucc_types::Sme::NONE,
                 })
             }
         };
@@ -725,6 +726,7 @@ impl Checker<'_> {
         self.check_inlined_target(callee, span);
         self.check_interrupt_call(callee, span);
         self.sse_refused_call(callee, &signature, span);
+        self.sme_refused_call(&signature, span);
 
         // The message is put together only for a call that has the wrong count, since every call
         // to a prototyped function comes through here. tamnd/rucc-kernel#109.
@@ -3110,6 +3112,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -3144,6 +3147,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -3188,6 +3192,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -3782,6 +3787,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: rucc_types::Sme::NONE,
         });
         let void = c.types.void();
         let constant = c.types.qualified(void, Qualifiers::CONST.with(Qualifiers::VOLATILE));

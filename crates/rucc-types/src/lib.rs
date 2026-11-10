@@ -103,7 +103,7 @@ pub use crate::convert::{
 pub use crate::granule::{GRANULE, Keying, Tally, measure, measure_all, report as granule_report};
 pub use crate::kind::{
     ArrayLen, EnumId, FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, RecordId,
-    RecordKind, Type, TypeKind, VlaId,
+    RecordKind, Sme, SmeMode, SmeShare, Type, TypeKind, VlaId,
 };
 pub use crate::layout::{
     IntegerInfo, Layout, LayoutError, align, float_format, float_width, int_width, integer_info,
@@ -722,6 +722,7 @@ mod tests {
                 indirect_return: false,
                 return_pointer_popped: None,
                 sse_regparm: false,
+                sme: Sme::NONE,
             })
         };
         let a = make(&mut types, vec![int, long], false);
@@ -747,6 +748,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         });
         let plain = types.function(FunctionType {
             ret: int,
@@ -758,6 +760,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         });
         assert_ne!(sugar, plain);
         assert_eq!(types.canonical(sugar), plain);
@@ -1020,6 +1023,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         });
         assert_eq!(layout(&types, function, &linux), Err(LayoutError::Function));
         let pointer_to_function = types.pointer(function);
@@ -1998,6 +2002,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         })
     }
 
@@ -2014,6 +2019,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         })
     }
 
@@ -2192,6 +2198,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         });
         assert!(!compatible(&types, returns_int, takes_int));
     }
@@ -2215,6 +2222,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         });
         let takes_int = prototype(&mut types, vec![int], false);
         let takes_two = prototype(&mut types, vec![int, int], false);
@@ -2248,6 +2256,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         };
         let native = types.function(FunctionType {
             convention: rucc_target::Convention::Target,
@@ -2264,6 +2273,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         });
         assert!(!compatible(&types, native, ms));
         let (to_native, to_ms) = (types.pointer(native), types.pointer(ms));
@@ -2291,6 +2301,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         };
         let plain = types.function(FunctionType { nocf: false, ..signature.clone() });
         let untracked = types.function(signature);
@@ -2304,6 +2315,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         });
         assert!(!compatible(&types, plain, untracked));
         let (to_plain, to_untracked) = (types.pointer(plain), types.pointer(untracked));
@@ -2331,6 +2343,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: true,
+            sme: Sme::NONE,
         };
         let plain = types.function(FunctionType { sse_regparm: false, ..signature.clone() });
         let sse = types.function(signature.clone());
@@ -2343,6 +2356,45 @@ mod tests {
         let merged = composite(&mut types, old, sse).expect("the two agree");
         let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
         assert!(types.signature(id).sse_regparm);
+    }
+
+    /// gcc holds the AArch64 SME mode and state of a function against a type without them, and
+    /// two that share ZA in different ways are two types. tamnd/rucc#4225.
+    #[test]
+    fn a_function_with_another_sme_mode_or_state_is_another_type() {
+        let mut types = Types::new();
+        let void = types.void();
+        let signature = FunctionType {
+            ret: void,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+            sme: Sme::NONE,
+        };
+        let with =
+            |types: &mut Types, sme: Sme| types.function(FunctionType { sme, ..signature.clone() });
+        let plain = with(&mut types, Sme::NONE);
+        let streaming = with(&mut types, Sme { mode: SmeMode::Streaming, ..Sme::NONE });
+        let either = with(&mut types, Sme { mode: SmeMode::Compatible, ..Sme::NONE });
+        let za_in = with(&mut types, Sme { za: Some(SmeShare::In), ..Sme::NONE });
+        let za_inout = with(&mut types, Sme { za: Some(SmeShare::Inout), ..Sme::NONE });
+        for (a, b) in [(plain, streaming), (plain, either), (streaming, either)] {
+            assert!(!compatible(&types, a, b));
+        }
+        assert!(!compatible(&types, plain, za_in));
+        assert!(!compatible(&types, za_in, za_inout));
+        let (to_plain, to_streaming) = (types.pointer(plain), types.pointer(streaming));
+        assert!(!compatible(&types, to_plain, to_streaming));
+        let again = with(&mut types, Sme { za: Some(SmeShare::In), ..Sme::NONE });
+        assert!(compatible(&types, za_in, again));
+        let merged = composite(&mut types, za_in, again).expect("the two agree");
+        let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+        assert_eq!(types.signature(id).sme.za, Some(SmeShare::In));
     }
 
     /// gcc 13 takes a pointer to an `indirect_return` function for a pointer to a plain one in
@@ -2361,6 +2413,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         };
         let jumps = types.function(FunctionType { indirect_return: true, ..plain.clone() });
         let plain = types.function(plain);
@@ -2390,6 +2443,7 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
+            sme: Sme::NONE,
         };
         let kept =
             types.function(FunctionType { return_pointer_popped: Some(false), ..plain.clone() });
