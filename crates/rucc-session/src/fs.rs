@@ -187,6 +187,10 @@ pub struct SearchPath {
     no_current_dir: bool,
     /// Why the target's own system directories are not on here, when somebody knows.
     missing_system: Option<String>,
+    /// The root of the target's name space, where an absolute name is looked for first. A
+    /// Plan 9 program writes `#include "/amd64/include/ureg.h"`, which is a name in the tree
+    /// that `--sysroot=` names and not on the host.
+    root: Option<PathBuf>,
 }
 
 impl SearchPath {
@@ -355,6 +359,21 @@ impl SearchPath {
         });
     }
 
+    /// Puts the target's name space at `root`. An absolute name is then looked for under
+    /// `root` first, and an absolute directory for which `under` gives a directory under `root`
+    /// is changed to that one.
+    pub fn set_root(&mut self, root: PathBuf, under: impl Fn(&Path) -> bool) {
+        for dir in &mut self.dirs {
+            if is_absolute(&dir.path) {
+                let mapped = rooted(&root, &dir.path);
+                if under(&mapped) {
+                    dir.path = mapped;
+                }
+            }
+        }
+        self.root = Some(root);
+    }
+
     /// Every directory, in search order.
     pub fn dirs(&self) -> &[Dir] {
         &self.dirs
@@ -391,6 +410,18 @@ impl SearchPath {
     ) -> Option<Found> {
         let as_path = Path::new(name);
         if is_absolute(as_path) {
+            if let Some(root) = &self.root {
+                let path = rooted(root, as_path);
+                if let Ok(bytes) = open(fs, &path) {
+                    return Some(Found {
+                        name: name.to_owned(),
+                        path,
+                        is_system: false,
+                        next: 0,
+                        bytes,
+                    });
+                }
+            }
             let bytes = open(fs, as_path).ok()?;
             return Some(Found {
                 path: as_path.to_path_buf(),
@@ -496,6 +527,13 @@ fn display(path: &Path) -> String {
 /// root whatever host is compiling it, so a leading separator counts here as well.
 fn is_absolute(path: &Path) -> bool {
     path.is_absolute() || path.has_root()
+}
+
+/// The absolute `path` of the target's name space, as a path under `root`.
+fn rooted(root: &Path, path: &Path) -> PathBuf {
+    let mut out = root.to_path_buf();
+    out.extend(path.components().filter(|c| matches!(c, std::path::Component::Normal(_))));
+    out
 }
 
 #[cfg(test)]
@@ -755,6 +793,23 @@ mod tests {
         let found = search.resolve(&fs, "/gen/config.h", IncludeForm::Angled, None, 0).unwrap();
         assert_eq!(norm(&found.name), "/gen/config.h");
         assert!(search.tried("/gen/config.h", IncludeForm::Angled, None, 0).is_empty());
+    }
+
+    #[test]
+    fn an_absolute_name_and_directory_are_under_the_root_of_the_target() {
+        let fs = fs_with(&["/root/amd64/include/ureg.h", "/root/sys/src/cmd/6c/6.out.h"]);
+        let mut search = SearchPath::new();
+        search.push_bracket("/sys/src/cmd");
+        search.push_bracket("/elsewhere");
+        search.set_root(PathBuf::from("/root"), |dir| dir == Path::new("/root/sys/src/cmd"));
+        assert_eq!(norm(&search.dirs()[0].path.to_string_lossy()), "/root/sys/src/cmd");
+        assert_eq!(norm(&search.dirs()[1].path.to_string_lossy()), "/elsewhere");
+        let name = "/amd64/include/ureg.h";
+        let found = search.resolve(&fs, name, IncludeForm::Quoted, None, 0).unwrap();
+        assert_eq!(found.name, name);
+        assert_eq!(norm(&found.path.to_string_lossy()), "/root/amd64/include/ureg.h");
+        let found = search.resolve(&fs, "6c/6.out.h", IncludeForm::Quoted, None, 0).unwrap();
+        assert_eq!(norm(&found.name), "/root/sys/src/cmd/6c/6.out.h");
     }
 
     #[test]

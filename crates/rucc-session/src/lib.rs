@@ -2658,6 +2658,12 @@ pub struct Options {
     /// typedef name, a member name is found breadth first as `cc/dcl.c` finds it, and the rest
     /// of the kencc dialect is read. The kencc driver turns it on.
     pub kencc: bool,
+    /// Whether a `-fkencc` unit goes through the ANSI C preprocessor, from
+    /// `-fno-kencc-preprocessor`.
+    ///
+    /// The kencc driver sets it for `-p`, which runs `/bin/cpp` on the file before the compiler
+    /// reads it. `#` and `##` are then operators, and the rest of the language stays kencc.
+    pub ansi_preprocessor: bool,
     /// Whether a tentative definition is offered to the linker as a common symbol, from
     /// `-fcommon` and `-fno-common`.
     ///
@@ -3234,6 +3240,7 @@ impl Options {
             ms_extensions: None,
             plan9_extensions: false,
             kencc: false,
+            ansi_preprocessor: false,
             common: None,
             zero_initialized_in_bss: true,
             strict_aliasing: true,

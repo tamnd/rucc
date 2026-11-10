@@ -1943,6 +1943,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-plan9-extensions" => opts.plan9_extensions = false,
             "-fkencc" => opts.kencc = true,
             "-fno-kencc" => opts.kencc = false,
+            // kencc `-p`: the ANSI C preprocessor reads the file, and the compiler reads kencc.
+            "-fno-kencc-preprocessor" => opts.ansi_preprocessor = true,
+            "-fkencc-preprocessor" => opts.ansi_preprocessor = false,
             // Both directions of this one are recorded, and what they decide is whether lowering
             // names the type each access goes through. Turning it off is the front end leaving the
             // name off rather than a pass being told to ignore one it can see, which is one
@@ -4277,6 +4280,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         opts.std = opts.gnuc.default_std();
         opts.gnu_extensions = true;
     }
+    // kencc is C89 with some of C99, so `()` declares a function with no prototype, as in
+    // `double atof();` in postscript and `threadmain()` in mandel.c. C23 would read it as
+    // `(void)`.
+    if !std_given && opts.kencc && opts.std >= Std::C23 {
+        opts.std = Std::C17;
+    }
     // gcc 15 added the guarded control stack to what `-mbranch-protection=standard` turns on.
     if standard_protection && opts.gnuc.major >= 15 {
         opts.branch_protection.gcs = true;
@@ -4405,6 +4414,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // directory has to lose to the system entry and the system entry is added last, so the
     // question cannot be answered until the whole path is known.
     opts.search.remove_duplicates();
+    // A Plan 9 program names files in the name space of the target, such as `-I/sys/src/cmd`
+    // and `#include "/amd64/include/ureg.h"` in libmach. With a sysroot, these are in the tree
+    // that it names.
+    if opts.target.os == rucc_target::Os::Plan9 {
+        if let Some(root) = &sysroot {
+            opts.search.set_root(root.clone(), |dir| dir.is_dir());
+        }
+    }
 
     // The target has to be resolved before the configuration is printed, so this check comes
     // after the loop rather than at the point `--print-config` was seen.

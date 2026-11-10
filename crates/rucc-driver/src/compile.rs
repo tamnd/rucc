@@ -211,6 +211,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             keywords.windows()
         };
     }
+    if opts.kencc {
+        keywords = keywords.kencc();
+    }
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     // What the calls to a function carrying `error` or `warning` that the optimizer left get said
     // about them, kept apart so they come after what the checker said, which is about the source
@@ -261,7 +264,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             cx.lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions, opts.trigraphs)
                 .for_kencc(opts.kencc);
             cx.pedantic = opts.pedantic;
-            cx.kencc = opts.kencc;
+            cx.kencc = opts.kencc && !opts.ansi_preprocessor;
             if pp.predefine(&sess.target, &predef, &mut cx).is_err() {
                 return failure(format!(
                     "{name}: the source map has no room for the built in macros"
