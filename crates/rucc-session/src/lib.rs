@@ -2697,6 +2697,13 @@ pub struct Options {
     /// folded, since an inexact one would be rounded the way the compiler rounds rather than the
     /// way the program asked.
     pub rounding_math: bool,
+    /// Whether a floating constant has the range and precision of `long double` where a `float`
+    /// or `double` expression is evaluated in `long double`, from `-fexcess-precision=`.
+    ///
+    /// `standard` and `16` turn it on and `fast` turns it off. `None` means that the flag was not
+    /// given, and then it is on for an ISO dialect and off for a GNU dialect, which is gcc's
+    /// default. It changes nothing on a target that evaluates each operation in its own type.
+    pub excess_constants: Option<bool>,
     /// Which of the four string operations `-finline-stringops` asks to be written inline every
     /// time, so the object never calls the library for one. See [`Stringops`].
     pub inline_stringops: Stringops,
@@ -3218,6 +3225,7 @@ impl Options {
             fp_contract: Contract::Off,
             trapping_math: true,
             rounding_math: false,
+            excess_constants: None,
             inline_stringops: Stringops::default(),
             math: Math::default(),
             exceptions: false,

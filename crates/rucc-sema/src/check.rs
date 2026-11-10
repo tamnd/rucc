@@ -168,6 +168,12 @@ pub struct Context<'a> {
     /// Whether a function with a fixed number of arguments takes them off the stack itself, which
     /// is `-mrtd` on 32 bit x86. Read by `Checker::own_convention`.
     pub rtd: bool,
+    /// Whether a `float` or `double` constant keeps the range and precision of `long double`
+    /// where the target evaluates those types in `long double`, which is
+    /// `-fexcess-precision=standard` and the default of an ISO dialect. Off, a constant has the
+    /// precision of its own type and only the operations are evaluated wider, which is gcc's
+    /// `-fexcess-precision=fast`.
+    pub excess_constants: bool,
 }
 
 impl<'a> Context<'a> {
@@ -195,6 +201,7 @@ impl<'a> Context<'a> {
             gnuc: 16,
             landing_pads: false,
             rtd: false,
+            excess_constants: false,
         }
     }
 
@@ -712,8 +719,15 @@ impl<'a> Checker<'a> {
         // context, so taking it does not borrow the checker the two mutable ones are taken from.
         let target = self.cx.target;
         let names = self.cx.names;
-        let trapping_math = self.cx.trapping_math;
-        Conv { tast: &mut self.tast, types: &mut self.types, target, names, trapping_math }
+        let (trapping_math, excess_constants) = (self.cx.trapping_math, self.cx.excess_constants);
+        Conv {
+            tast: &mut self.tast,
+            types: &mut self.types,
+            target,
+            names,
+            trapping_math,
+            excess_constants,
+        }
     }
 
     /// The constant folding, over this tree and these types.

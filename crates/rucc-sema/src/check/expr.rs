@@ -431,6 +431,16 @@ impl Checker<'_> {
             return self.constant(Const::Complex { real, imag: value }, ty, span);
         }
         let ty = self.types.float(kind);
+        // Where a `float` or `double` is evaluated in `long double`, a constant is too unless
+        // `-fexcess-precision=fast` asked otherwise. So `0.1f == 0.1` holds, and `x == 0.1` for a
+        // `double` x that was assigned `0.1` does not, as in gcc. The lexer read the digits a
+        // second time in the format of `long double` for this.
+        if let Some(wide) = constant.wide.filter(|_| self.cx.excess_constants)
+            && let Some(long) = self.conv().excess_type(ty)
+        {
+            let node = self.constant(Const::Float(wide), long, span);
+            return self.conv().excess(node, ty);
+        }
         self.constant(Const::Float(value), ty, span)
     }
 
@@ -2855,6 +2865,7 @@ mod tests {
                 ty: FloatConstantType::Double,
                 imaginary: false,
                 remarks: Remarks::default(),
+                wide: None,
             };
             let id = self.ast.add_float(constant);
             self.expr(ast::Expr::Float(id))
@@ -3989,6 +4000,7 @@ mod tests {
             ty: FloatConstantType::Double,
             imaginary: true,
             remarks: Remarks::default(),
+            wide: None,
         };
         let id = f.ast.add_float(constant);
         let imaginary = f.expr(ast::Expr::Float(id));
@@ -4012,6 +4024,7 @@ mod tests {
             ty: FloatConstantType::Float,
             imaginary: true,
             remarks: Remarks::default(),
+            wide: None,
         };
         let id = f.ast.add_float(constant);
         let imaginary = f.expr(ast::Expr::Float(id));
@@ -4123,7 +4136,8 @@ mod tests {
     fn suffixed(triple: &str, ty: FloatConstantType) -> String {
         let mut f = Fixture::for_target(triple);
         let (value, _) = Float::parse("1.0", Format::Double).expect("a float");
-        let constant = FloatConstant { value, ty, imaginary: false, remarks: Remarks::default() };
+        let constant =
+            FloatConstant { value, ty, imaginary: false, remarks: Remarks::default(), wide: None };
         let id = f.ast.add_float(constant);
         let written = f.expr(ast::Expr::Float(id));
 

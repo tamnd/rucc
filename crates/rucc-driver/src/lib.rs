@@ -2258,11 +2258,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ if arg.starts_with("-fexcess-precision=") => {
                 let how = &arg["-fexcess-precision=".len()..];
-                if !matches!(how, "16" | "fast" | "standard") {
-                    return Err(err(format!(
-                        "`{how}` is not an excess precision, which is 16, fast or standard"
-                    )));
-                }
+                opts.excess_constants = match how {
+                    "16" | "standard" => Some(true),
+                    "fast" => Some(false),
+                    _ => {
+                        return Err(err(format!(
+                            "`{how}` is not an excess precision, which is 16, fast or standard"
+                        )));
+                    }
+                };
             }
             // Which front of a path is rewritten before it reaches the output, which is how a
             // build gets the same bytes out of two different directories. The four spellings are
