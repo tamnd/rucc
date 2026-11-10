@@ -1293,6 +1293,11 @@ enum Operand {
 /// address becomes a slot passed as the leading `sret` argument with the load out of it standing for
 /// the call's result.
 ///
+/// The answer asks the rule for an answer and not the one for an operand, as the two differ on
+/// i386: a sixteen byte float goes in as itself and comes back through an address. `__floatditf`
+/// there writes a `long long` as a quad through the address it gets first, which libquadmath's
+/// logbq.c and libgfortran's random.c call.
+///
 /// An answer at this width is the third shape and the one that reads strangely. mingw brings a
 /// sixteen byte integer back in `xmm0` rather than through an address, which is gcc's answer to a
 /// convention that has no integer that size in it, so the call is written as returning one value at
@@ -1314,7 +1319,7 @@ fn runtime(
     let mut answer = Answer::Registers;
     // The answer first, because an address it comes back through is the first argument.
     match *results {
-        [ty] if abi.scalar_is_by_reference(bytes(ty)) => {
+        [ty] if abi.scalar_returns_by_reference(bytes(ty)) => {
             let size = bytes(ty);
             let align = align(size);
             let slot = room(func, inst, size, align);
@@ -3438,6 +3443,29 @@ mod tests {
             let text = printed(&func, &mut names);
             assert!(text.contains(&format!("@{routine}(%0)")), "{routine}: {text}");
             assert!(text.contains("return %1, %2"), "two halves come back: {text}");
+        }
+    }
+
+    /// On i386 a quad goes in as itself and comes back through an address, so the conversion from
+    /// a `long long` hands `__floatditf` a slot first and the answer is the load out of it.
+    #[test]
+    fn on_i386_a_quad_from_a_long_long_comes_back_through_a_slot() {
+        for (opcode, routine) in
+            [(Opcode::SIToFP, "__floatditf"), (Opcode::UIToFP, "__floatunditf")]
+        {
+            let mut names = Interner::new();
+            let quad = Type::float(Float::F128);
+            let (mut func, entry, params) = shell(&mut names, &[long()], &[quad]);
+            let mut build = Builder::new(&mut func, entry);
+            let answer = build.unary(opcode, params[0], quad);
+            build.ret(&[answer]);
+
+            assert!(halves(&mut func, &mut names, &rucc_target::x86::SYSV), "a width to split");
+            let text = printed(&func, &mut names);
+            assert!(text.contains(&format!("call @{routine}")), "{routine}: {text}");
+            assert_eq!(text.matches("alloca").count(), 1, "a slot for the answer: {text}");
+            assert_eq!(text.matches(" = call").count(), 0, "the call answers nothing: {text}");
+            assert_eq!(text.matches(" = load").count(), 1, "the answer is the load: {text}");
         }
     }
 
