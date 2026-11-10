@@ -839,9 +839,13 @@ fn directives_about_names_in_a_function_are_directives_of_the_file() {
     let source = "void base_func(void) {} \
                   void f(void) { int base_func = 42; (void)base_func; \
                   asm volatile (\".weak alias3\\n.set alias3, base_func\"); }\n";
+    // On ELF the directives reach the assembler as they were written, as gcc writes them for GNU
+    // as, which reads `base_func` as the global.
     let text = asm("names-in-function", source);
-    assert!(text.contains(".weak\talias3"), "the weak name is missing:\n{text}");
-    assert!(text.contains("alias3,base_func"), "the equate is missing:\n{text}");
+    assert!(
+        text.contains(".weak alias3\n.set alias3, base_func"),
+        "the equate is missing:\n{text}"
+    );
 }
 
 #[test]
@@ -852,8 +856,7 @@ fn an_equate_at_file_scope_defines_a_name_the_file_only_declared() {
                   asm(\".weak over\\n.set over, base_func\"); \
                   void f(void) { over(); }\n";
     let text = asm("equate-declared", source);
-    assert!(text.contains(".weak\tover"), "the weak name is missing:\n{text}");
-    assert!(text.contains("over,base_func"), "the equate is missing:\n{text}");
+    assert!(text.contains(".weak over\n.set over, base_func"), "the equate is missing:\n{text}");
 }
 
 #[test]

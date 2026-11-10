@@ -5075,21 +5075,30 @@ impl Reader {
     /// type, size, binding and visibility, and the first one stays. `name2@@@VERS` renames the
     /// first one to `name2@@VERS`, so nothing is left under the old name. A name this file only
     /// refers to is renamed whichever spelling was used, since what is asked for then is a
-    /// reference to that version and there is no place to put a copy. A name that turns up
-    /// nowhere at all, which is what is left of a `static` function the compiler threw away, gets
-    /// nothing, as in gas.
+    /// reference to that version and there is no place to put a copy. For such a name `@@@` is a
+    /// reference to `name2@VERS`, and `@@` is an error, because only a definition can be the
+    /// default version. A name that turns up nowhere at all, which is what is left of a `static`
+    /// function the compiler threw away, gets nothing, as in gas.
     ///
     /// The linker reads the `@` itself. LTP's sctp library versions `sctp_connectx` this way, and
     /// a static link takes the `@@` one as the plain name.
     fn versions(&mut self) -> Result<(), Trouble> {
         for (name, versioned, line) in std::mem::take(&mut self.symvers) {
             let Some(&first) = self.known.get(&name) else { continue };
-            let renamed = versioned.replacen("@@@", "@@", 1);
+            let undefined = self.syms[first].at == Held::Undefined;
+            let triple = versioned.contains("@@@");
+            if undefined && !triple && versioned.contains("@@") {
+                let why = format!(
+                    "invalid attempt to declare external version name as default in symbol `{versioned}'"
+                );
+                return Err(Trouble { line, why });
+            }
+            let renamed = versioned.replacen("@@@", if undefined { "@" } else { "@@" }, 1);
             if self.known.contains_key(&renamed) {
                 let why = format!("'{renamed}' is defined twice");
                 return Err(Trouble { line, why });
             }
-            if versioned.contains("@@@") || self.syms[first].at == Held::Undefined {
+            if triple || undefined {
                 // The old name stays in the map, since what was written against it is resolved
                 // after this and has to find the entry that now carries the new name.
                 self.known.insert(renamed.clone(), first);
@@ -6944,6 +6953,26 @@ mod tests {
         assert!(twice.unwrap_err().why.contains("defined twice"));
         let bare = read(".text\na:\n.symver a, x\n", Arch::X86_64);
         assert!(bare.unwrap_err().why.contains("no '@'"));
+    }
+
+    /// `.symver` of a name the file only refers to, as gas 2.42 takes it. `@@@` is a reference to
+    /// the version written with one `@`, and `@@` is turned down, because only a definition can be
+    /// the default version. FreeBSD's `__sym_compat` writes the first.
+    #[test]
+    fn a_symver_of_a_name_from_elsewhere_has_one_at_or_is_refused() {
+        let file = assembled(".text\n.symver ext, ext@@@FBSD_1.0\ncall ext\n");
+        let names: Vec<&str> = file.names.iter().map(|name| name.name.as_str()).collect();
+        assert_eq!(names, ["ext@FBSD_1.0"]);
+        let called: Vec<&str> =
+            file.parts[0].relocs.iter().map(|reloc| reloc.symbol.as_str()).collect();
+        assert_eq!(called, ["ext@FBSD_1.0"]);
+
+        let default = read(".text\n.symver ext, ext@@FBSD_1.0\ncall ext\n", Arch::X86_64);
+        let why = default.unwrap_err().why;
+        assert!(
+            why.contains("external version name as default in symbol `ext@@FBSD_1.0'"),
+            "{why}"
+        );
     }
 
     /// A name in double quotes is the name inside them, in an instruction and in a directive, as

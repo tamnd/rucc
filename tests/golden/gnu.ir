@@ -3,26 +3,26 @@
 target triple = "x86_64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
-global @table : bytes 12 = { i32 11, i32 22, i32 33 }, align 8, linkage(external), constant
-global @table_end : bytes 0 = {}, align 1, linkage(internal), constant
-global @table_count : i32 = 3, align 4, linkage(external), constant
-global @.Lasm.0 : i8 = 41, align 1, linkage(internal)
-global @stuff : bytes 2 = { i8 42, i8 1 }, align 1, linkage(internal)
-global @measured : bytes 2 = { i8 42, i8 43 }, align 1, linkage(internal)
-global @how_far : bytes 4 = { away.4 @measured + 1 }, align 1, linkage(external), section ".data.away"
+module asm ".section .rodata\0a.globl table\0a.balign 8\0atable:\0a.long 11\0a.long 22\0a.long 33\0atable_end:\0a.globl table_count\0a.balign 4\0atable_count:\0a.long (table_end - table) / 4\0a"
+module asm ".weak an_override\0a.set an_override, the_default"
+module asm ".data\0a.byte 41\0astuff:\0a661:\0a.byte 42\0a662:\0a.byte 662b - 661b\0a"
+module asm ".data\0ameasured_bytes:\0a.byte 42\0a663:\0a.byte 43\0a.pushsection .data.away, \"aw\"\0a.globl how_far\0ahow_far:\0a.long 663b - .\0a.popsection\0a"
+
 global @table.0 : bytes 16 = { addr.8 @.Llbl.0, addr.8 @.Llbl.1 }, align 16, linkage(internal), constant, droppable
 global @table.1 : bytes 8 = { i32 0, apart.4 @.Llbl.2 from @.Llbl.3 }, align 8, linkage(internal), constant, droppable
 global @__func__.0 : bytes 12 = { bytes "three_names\00" }, align 8, linkage(internal), constant, droppable
 global @__func__.1 : bytes 12 = { bytes "three_names\00" }, align 8, linkage(internal), constant, droppable
 global @__func__.2 : bytes 12 = { bytes "three_names\00" }, align 8, linkage(internal), constant, droppable
 global @.Lstr.3 : bytes 6 = { bytes "hello\00" }, align 1, linkage(internal), constant, droppable, literal
+global @table : bytes 1, align 4, linkage(external), constant
+global @table_count : bytes 4, align 4, linkage(external), constant
+global @stuff : bytes 1, align 1, linkage(external)
+global @how_far : bytes 4, align 4, linkage(external), constant
 global @ran : bytes 4 = { zero 4 }, align 4, linkage(internal), droppable
 global @__rucc_dtor.closes : bytes 8 = { addr.8 @closes }, align 8, linkage(internal), section ".fini_array.00101"
 global @__rucc_ctor.both_ways : bytes 8 = { addr.8 @both_ways }, align 8, linkage(internal), section ".init_array.00101"
 global @__rucc_ctor.opens : bytes 8 = { addr.8 @opens }, align 8, linkage(internal), section ".init_array"
 global @__rucc_dtor.both_ways : bytes 8 = { addr.8 @both_ways }, align 8, linkage(internal), section ".fini_array"
-
-alias @an_override = @the_default, linkage(weak)
 
 func @use(i32) -> i32, linkage(external);
 
@@ -480,7 +480,7 @@ block0(%0: i32):
     return %9
 }
 
-func @the_default(), linkage(internal) {
+func @the_default(), linkage(internal), attrs(used) {
 block0:
     %0 = iconst.i32 0
     %1 = call @use(%0) : (i32) -> i32
@@ -533,6 +533,30 @@ block0:
     %4 = add.nsw %2, %3
     store %4 -> %0, align 4, tbaa !1
     return
+}
+
+func @measured(i32, ...) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 24, align 16
+    %2 = sext.i64 %0
+    %3 = iconst.i64 1
+    %4 = mul.nsw %2, %3
+    %5 = stacksave.ptr
+    %6 = alloca %4, align 1
+    va_start %1
+    %7 = va_arg %1
+    %8 = sext.i64 %0
+    %9 = iconst.i64 1
+    %10 = mul.nsw %8, %9
+    memcpy %6, %7, %10, align 1
+    va_end %1
+    %11 = iconst.i32 1
+    %12 = sub.nsw %0, %11
+    %13 = sext.i64 %12
+    %14 = ptr_add %6, %13
+    %15 = load.i8 %14, align 1, tbaa !0
+    %16 = sext.i32 %15
+    return %16
 }
 
 func @sends_measured(i32) -> i32, linkage(external) {
