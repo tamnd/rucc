@@ -38,6 +38,8 @@ pub const DIR: &str = "<builtin>";
 const HEADERS: &[(&str, &str)] = &[
     ("arm_acle.h", include_str!("../runtime/include/arm_acle.h")),
     ("arm_neon.h", include_str!("../runtime/include/arm_neon.h")),
+    ("arm_neon_sve_bridge.h", include_str!("../runtime/include/arm_neon_sve_bridge.h")),
+    ("arm_sve.h", include_str!("../runtime/include/arm_sve.h")),
     ("avx2intrin.h", include_str!("../runtime/include/avx2intrin.h")),
     ("avx512bwintrin.h", include_str!("../runtime/include/avx512bwintrin.h")),
     ("avx512fintrin.h", include_str!("../runtime/include/avx512fintrin.h")),

@@ -138,6 +138,7 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__SVFloat16_t", TypeName::Sizeless),
     ("__SVFloat32_t", TypeName::Sizeless),
     ("__SVFloat64_t", TypeName::Sizeless),
+    ("__SVBfloat16_t", TypeName::Sizeless),
     ("__SVBool_t", TypeName::Sizeless),
     ("__Poly8_t", TypeName::Poly(8)),
     ("__Poly16_t", TypeName::Poly(16)),
