@@ -590,10 +590,17 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     for arg in args {
         let (text, said) = masked(arg.trim())?;
         if let Some(said) = said {
-            if mask != Opmask::default() {
+            if said.k != 0 && mask.k != 0 {
                 return Err("an instruction has one mask and this one names two".to_owned());
             }
-            mask = said;
+            if said.broadcast != 0 && mask.broadcast != 0 {
+                return Err("an instruction has one broadcast and this one names two".to_owned());
+            }
+            mask = Opmask {
+                k: mask.k.max(said.k),
+                zero: mask.zero || said.zero,
+                broadcast: mask.broadcast.max(said.broadcast),
+            };
         }
         // gas takes the port of an `in` or an `out` in brackets as well as bare, since it is where
         // the value comes from or goes to, and it is the register all the same.
@@ -1229,6 +1236,9 @@ const PREDICATES: [&str; 8] = ["eq", "lt", "le", "unord", "neq", "nlt", "nle", "
 /// `cmpsd` with no predicate is the string comparison, which is not this, so a name that has none
 /// of the eight in it is left alone.
 fn predicated(word: &str) -> Option<(String, i64)> {
+    if let Some(found) = compared(word) {
+        return Some(found);
+    }
     let rest = word.strip_prefix("cmp")?;
     let (predicate, format) = rest.split_at(rest.len().checked_sub(2)?);
     if !matches!(format, "ss" | "sd" | "ps" | "pd") {
@@ -1236,6 +1246,33 @@ fn predicated(word: &str) -> Option<(String, i64)> {
     }
     let which = PREDICATES.iter().position(|&known| known == predicate)?;
     Some((format!("cmp{format}"), which as i64))
+}
+
+/// The eight comparisons an AVX-512 integer comparison can be asked for, in the order of the
+/// immediate that asks for each.
+const INTEGER_PREDICATES: [&str; 8] = ["eq", "lt", "le", "false", "neq", "nlt", "nle", "true"];
+
+/// An AVX-512 integer comparison written with its condition in the name, as the mnemonic that
+/// takes it as an immediate and the immediate.
+///
+/// gas takes `vpcmpltud %ymm0, %ymm2, %k2` for `vpcmpud $1, %ymm0, %ymm2, %k2`, and
+/// blake3_avx512.S writes the first. `vpcmpeqd` and the other signed equal compares are left
+/// alone, since they are instructions of their own with an opcode of their own.
+fn compared(word: &str) -> Option<(String, i64)> {
+    let rest = word.strip_prefix("vpcmp")?;
+    let (rest, lanes) = rest.split_at(rest.len().checked_sub(1)?);
+    if !matches!(lanes, "b" | "w" | "d" | "q") {
+        return None;
+    }
+    let (predicate, unsigned) = match rest.strip_suffix('u') {
+        Some(predicate) if INTEGER_PREDICATES.contains(&predicate) => (predicate, "u"),
+        _ => (rest, ""),
+    };
+    if unsigned.is_empty() && predicate == "eq" {
+        return None;
+    }
+    let which = INTEGER_PREDICATES.iter().position(|&known| known == predicate)?;
+    Some((format!("vpcmp{unsigned}{lanes}"), which as i64))
 }
 
 /// The mnemonics whose bare name operand is somewhere to go rather than an address.
@@ -1571,6 +1608,9 @@ fn stated(word: &str, operands: &[Operand]) -> Result<Option<Width>, String> {
 /// braces are after whichever operand the instruction writes, which is the destination of a load
 /// and the address of a store. `{%k0}` is refused the way gas refuses it, since zero in the field is
 /// what no mask at all is written as.
+///
+/// `(%rax){1to16}` is the other thing braces say, a broadcast: one element read from that address
+/// and spread over the sixteen of the vector. It comes back in the same [`Opmask`].
 fn masked(text: &str) -> Result<(&str, Option<Opmask>), String> {
     let Some(cut) = text.find('{') else { return Ok((text, None)) };
     let mut mask = Opmask::default();
@@ -1581,6 +1621,10 @@ fn masked(text: &str) -> Result<(&str, Option<Opmask>), String> {
         };
         match inside[..end].trim() {
             "z" => mask.zero = true,
+            name if name.starts_with("1to") => match name[3..].parse::<u8>() {
+                Ok(count @ (2 | 4 | 8 | 16)) => mask.broadcast = count,
+                _ => return Err(format!("'{name}' is not a broadcast an instruction can read")),
+            },
             name => match name.strip_prefix("%k").and_then(|number| number.parse::<u8>().ok()) {
                 Some(number @ 1..=7) => mask.k = number,
                 _ => {
@@ -1592,7 +1636,7 @@ fn masked(text: &str) -> Result<(&str, Option<Opmask>), String> {
         }
         rest = inside[end + 1..].trim_start();
     }
-    if !rest.is_empty() || mask.k == 0 {
+    if !rest.is_empty() || (mask.k == 0 && mask.broadcast == 0) || (mask.zero && mask.k == 0) {
         return Err(format!("'{text}' is not a mask an instruction can be written under"));
     }
     Ok((text[..cut].trim_end(), Some(mask)))
@@ -3420,6 +3464,77 @@ mod tests {
         for &(line, want) in lines {
             assert_eq!(bytes(line), want, "{line}");
         }
+    }
+
+    /// tamnd/rucc#4277. The AVX-512 forms that FreeBSD's support.S, aes-gcm-avx512.S and
+    /// blake3_avx512.S write and that had no row, with a broadcast and the compares written with
+    /// their condition in the name. Each is checked against what GNU as 2.42 writes for the line.
+    #[test]
+    fn the_avx512_forms_of_the_freebsd_kernel_crypto_are_read() {
+        let lines: &[(&str, &str)] = &[
+            ("kmovq (%r10,%r15,8),%k1", "c4 81 f8 90 0c fa"),
+            ("kmovq (%r12),%k1", "c4 c1 f8 90 0c 24"),
+            ("kmovw (%r12,%r10,2),%k1", "c4 81 78 90 0c 54"),
+            ("vinserti64x2 $0x1,%xmm16,%ymm3,%ymm4", "62 b3 e5 28 38 e0 01"),
+            ("vinserti64x2 $0x2,0x150(%rdi),%zmm15,%zmm15", "62 73 85 48 38 7f 15 02"),
+            ("vinserti64x2 $0x2,0x150(%rsi),%zmm20,%zmm20", "62 e3 dd 40 38 66 15 02"),
+            ("vshufi32x4 $0x0,%ymm16,%ymm16,%ymm4", "62 b3 7d 20 43 e0 00"),
+            ("vbroadcastf64x2 (%rdi),%zmm15", "62 72 fd 48 1a 3f"),
+            ("vbroadcastf64x2 (%rdi),%zmm30", "62 62 fd 48 1a 37"),
+            ("vorpd (%rdx),%zmm0,%zmm0", "62 f1 fd 48 56 02"),
+            ("vshufps $0x88,%ymm14,%ymm12,%ymm16", "62 c1 1c 28 c6 c6 88"),
+            ("vpermt2d %zmm17,%zmm27,%zmm16", "62 a2 25 40 7e c1"),
+            ("vinserti32x8 $0x1,%ymm15,%zmm14,%zmm13", "62 53 0d 48 3a ef 01"),
+            ("vpblendmd %zmm12,%zmm13,%zmm13{%k2}", "62 52 15 4a 64 ec"),
+            ("vpcmpltud %ymm0,%ymm2,%k2", "62 f3 6d 28 1e d0 01"),
+            ("vpcmpltud %zmm0,%zmm2,%k2", "62 f3 6d 48 1e d0 01"),
+            ("knotw %k1,%k2", "c5 f8 44 d1"),
+            ("vpaddd 64(%rax){1to16},%zmm0,%zmm2{%k1}", "62 f1 7d 59 fe 50 10"),
+            ("vpaddd (%rax){1to8},%ymm0,%ymm2", "62 f1 7d 38 fe 10"),
+            ("vpaddq 8(%rax){1to8},%zmm1,%zmm2", "62 f1 f5 58 d4 50 01"),
+            ("vpxord 4(%rcx){1to16},%zmm3,%zmm3", "62 f1 65 58 ef 59 01"),
+            ("vpcmpequd %zmm1,%zmm2,%k3", "62 f3 6d 48 1e d9 00"),
+            ("vpcmpnltd 128(%rax),%zmm2,%k1", "62 f3 6d 48 1f 48 02 05"),
+            ("vpcmpleq %zmm1,%zmm2,%k1", "62 f3 ed 48 1f c9 02"),
+            ("knotq %k1,%k2", "c4 e1 f8 44 d1"),
+            ("knotb %k3,%k4", "c5 f9 44 e3"),
+            ("knotd %k5,%k6", "c4 e1 f9 44 f5"),
+            ("kmovw %k1,(%rax)", "c5 f8 91 08"),
+            ("kmovq %k1,%k2", "c4 e1 f8 90 d1"),
+            ("kmovd (%rax),%k1", "c4 e1 f9 90 08"),
+            ("kmovb %k7,8(%rsp)", "c5 f9 91 7c 24 08"),
+            ("vandps %zmm1,%zmm2,%zmm3", "62 f1 6c 48 54 d9"),
+            ("vxorps 64(%rax),%zmm2,%zmm3", "62 f1 6c 48 57 58 01"),
+            ("vandnpd %zmm17,%zmm2,%zmm3", "62 b1 ed 48 55 d9"),
+            ("vshufpd $0x55,%zmm1,%zmm2,%zmm3", "62 f1 ed 48 c6 d9 55"),
+            ("vpermt2q 128(%rax),%zmm2,%zmm3", "62 f2 ed 48 7e 58 02"),
+            ("vpblendmq %zmm1,%zmm2,%zmm3{%k1}", "62 f2 ed 49 64 d9"),
+            ("vbroadcastf32x4 16(%rax),%zmm3", "62 f2 7d 48 1a 58 01"),
+            ("vinserti64x2 $0x3,%xmm1,%zmm2,%zmm3", "62 f3 ed 48 38 d9 03"),
+            ("vinserti32x8 $0x1,32(%rax),%zmm2,%zmm3", "62 f3 6d 48 3a 58 01 01"),
+            ("vorpd %ymm1,%ymm2,%ymm3", "c5 ed 56 d9"),
+            ("vshufps $0x88,%ymm1,%ymm2,%ymm3", "c5 ec c6 d9 88"),
+        ];
+        for &(line, want) in lines {
+            let got: Vec<String> = bytes(line).iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(got.join(" "), want, "{line}");
+        }
+        // A broadcast has to fill the vector with elements of the instruction's width, and only an
+        // address can be spread.
+        for line in [
+            "vpaddd (%rax){1to8}, %zmm0, %zmm2",
+            "vpaddq (%rax){1to16}, %zmm0, %zmm2",
+            "vinserti32x4 $1, (%rax){1to4}, %zmm1, %zmm2",
+            "vpaddd %zmm1{1to16}, %zmm0, %zmm2",
+            "vpaddd (%rax){1to3}, %zmm0, %zmm2",
+        ] {
+            assert!(!refused(line).is_empty(), "{line}");
+        }
+        // The signed equal compares are instructions of their own, not `vpcmpd $0`.
+        assert_eq!(compared("vpcmpeqd"), None);
+        assert_eq!(compared("vpcmpgtq"), None);
+        assert_eq!(compared("vpcmpequd"), Some(("vpcmpud".to_owned(), 0)));
+        assert_eq!(compared("vpcmpnleb"), Some(("vpcmpb".to_owned(), 6)));
     }
 
     /// The AVX-512 instructions the intrinsics in the runtime headers write, each checked against

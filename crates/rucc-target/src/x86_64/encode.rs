@@ -864,6 +864,11 @@ static IRVV: [Kind; 4] = [Kind::Imm, Kind::Reg, Kind::Vec, Kind::Vec];
 /// A general purpose register and a mask register, in the two directions `kmovq` goes.
 static RK: [Kind; 2] = [Kind::Reg, Kind::Mask];
 static KR: [Kind; 2] = [Kind::Mask, Kind::Reg];
+/// A mask loaded from memory, stored to it, and moved or turned over between two mask registers,
+/// as `kmovw` and `knotw` do.
+static MK: [Kind; 2] = [Kind::Mem, Kind::Mask];
+static KM: [Kind; 2] = [Kind::Mask, Kind::Mem];
+static KK: [Kind; 2] = [Kind::Mask, Kind::Mask];
 /// Two masks read and a third written, as `kaddb` does.
 static KKK: [Kind; 3] = [Kind::Mask, Kind::Mask, Kind::Mask];
 /// A compare of two vectors, or of a vector and an address, into a mask.
@@ -3799,6 +3804,16 @@ static ENCODINGS: &[Encoding] = &[
     ),
     evex("vpermi2d", &VVV, Word, &[0x76], pair(0, 2), Evex::new(Map::Escape38, false).third(1)),
     evex("vpermi2d", &MVV, Word, &[0x76], pair(0, 2), Evex::new(Map::Escape38, false).third(1)),
+    // The same permute with the table in the destination's place rather than the indexes, and
+    // the blend of two vectors that a mask picks lanes from. FreeBSD's blake3_avx512.S writes both.
+    evex("vpermt2d", &VVV, Word, &[0x7E], pair(0, 2), Evex::new(Map::Escape38, false).third(1)),
+    evex("vpermt2d", &MVV, Word, &[0x7E], pair(0, 2), Evex::new(Map::Escape38, false).third(1)),
+    evex("vpermt2q", &VVV, Word, &[0x7E], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
+    evex("vpermt2q", &MVV, Word, &[0x7E], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
+    evex("vpblendmd", &VVV, Word, &[0x64], pair(0, 2), Evex::new(Map::Escape38, false).third(1)),
+    evex("vpblendmd", &MVV, Word, &[0x64], pair(0, 2), Evex::new(Map::Escape38, false).third(1)),
+    evex("vpblendmq", &VVV, Word, &[0x64], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
+    evex("vpblendmq", &MVV, Word, &[0x64], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
     evex(
         "vinserti32x4",
         &IVVV,
@@ -3830,6 +3845,41 @@ static ENCODINGS: &[Encoding] = &[
         &[0x3A],
         pair(1, 3),
         Evex::new(Map::Escape3A, true).third(2).fixed(32),
+    ),
+    // The insert of two eight byte lanes and of eight four byte lanes, which differ from the two
+    // above only where a mask picks lanes. OpenSSL's aes-gcm-avx512.S and blake3_avx512.S write
+    // them.
+    evex(
+        "vinserti64x2",
+        &IVVV,
+        Word,
+        &[0x38],
+        pair(1, 3),
+        Evex::new(Map::Escape3A, true).third(2).fixed(16),
+    ),
+    evex(
+        "vinserti64x2",
+        &IMVV,
+        Word,
+        &[0x38],
+        pair(1, 3),
+        Evex::new(Map::Escape3A, true).third(2).fixed(16),
+    ),
+    evex(
+        "vinserti32x8",
+        &IVVV,
+        Word,
+        &[0x3A],
+        pair(1, 3),
+        Evex::new(Map::Escape3A, false).third(2).fixed(32),
+    ),
+    evex(
+        "vinserti32x8",
+        &IMVV,
+        Word,
+        &[0x3A],
+        pair(1, 3),
+        Evex::new(Map::Escape3A, false).third(2).fixed(32),
     ),
     evex(
         "vbroadcasti64x2",
@@ -3839,9 +3889,34 @@ static ENCODINGS: &[Encoding] = &[
         pair(0, 1),
         Evex::new(Map::Escape38, true).fixed(16),
     ),
+    // The same two loads named for floating point lanes, which aes-gcm-avx512.S writes.
+    evex(
+        "vbroadcastf32x4",
+        &MV,
+        Word,
+        &[0x1A],
+        pair(0, 1),
+        Evex::new(Map::Escape38, false).fixed(16),
+    ),
+    evex(
+        "vbroadcastf64x2",
+        &MV,
+        Word,
+        &[0x1A],
+        pair(0, 1),
+        Evex::new(Map::Escape38, true).fixed(16),
+    ),
     // An unsigned compare of eight byte lanes, whose result is a mask rather than a vector.
     evex("vpcmpuq", &IVVK, Word, &[0x1E], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
     evex("vpcmpuq", &IMVK, Word, &[0x1E], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    // The same compare of four byte lanes, and the signed compares of four and eight byte lanes.
+    // blake3_avx512.S writes `vpcmpltud`, which is the unsigned one with the condition one.
+    evex("vpcmpud", &IVVK, Word, &[0x1E], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("vpcmpud", &IMVK, Word, &[0x1E], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("vpcmpd", &IVVK, Word, &[0x1F], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("vpcmpd", &IMVK, Word, &[0x1F], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("vpcmpq", &IVVK, Word, &[0x1F], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    evex("vpcmpq", &IMVK, Word, &[0x1F], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
     // The compares of byte lanes with the condition as a number, signed and unsigned. OpenZFS's
     // AVX512BW RAID-Z writes the signed one.
     evex("vpcmpb", &IVVK, Word, &[0x3F], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
@@ -3911,6 +3986,26 @@ static ENCODINGS: &[Encoding] = &[
     vexed("kmovd", &KR, Double, &[0x93], pair(0, 1)),
     vexed("kmovw", &RK, Long, &[0x92], pair(0, 1)),
     vexed("kmovw", &KR, Long, &[0x93], pair(0, 1)),
+    // A mask loaded from memory, stored to it and moved between two mask registers. The opcodes
+    // are the same for every width, and the width is the wide bit and the mandatory prefix, as for
+    // the moves above. aes-gcm-avx512.S loads `k1` from a table with `kmovq` and `kmovw`.
+    vexed("kmovb", &MK, Word, &[0x90], pair(0, 1)),
+    vexed("kmovb", &KM, Word, &[0x91], pair(1, 0)),
+    vexed("kmovb", &KK, Word, &[0x90], pair(0, 1)),
+    vexed("kmovw", &MK, Long, &[0x90], pair(0, 1)),
+    vexed("kmovw", &KM, Long, &[0x91], pair(1, 0)),
+    vexed("kmovw", &KK, Long, &[0x90], pair(0, 1)),
+    vexed("kmovd", &MK, WordQuad, &[0x90], pair(0, 1)),
+    vexed("kmovd", &KM, WordQuad, &[0x91], pair(1, 0)),
+    vexed("kmovd", &KK, WordQuad, &[0x90], pair(0, 1)),
+    vexed("kmovq", &MK, Quad, &[0x90], pair(0, 1)),
+    vexed("kmovq", &KM, Quad, &[0x91], pair(1, 0)),
+    vexed("kmovq", &KK, Quad, &[0x90], pair(0, 1)),
+    // Every bit of a mask turned over, which blake3_avx512.S writes as `knotw`.
+    vexed("knotb", &KK, Word, &[0x44], pair(0, 1)),
+    vexed("knotw", &KK, Long, &[0x44], pair(0, 1)),
+    vexed("knotd", &KK, WordQuad, &[0x44], pair(0, 1)),
+    vexed("knotq", &KK, Quad, &[0x44], pair(0, 1)),
     // Adding two masks, which is the whole length of the prefix whatever the width of the mask.
     Encoding {
         vex: Some(Vex { map: Map::Escape, vvvv: Some(1), long: true }),
@@ -3953,6 +4048,24 @@ static ENCODINGS: &[Encoding] = &[
     avx("vxorps", &MVV, Long, Map::Escape, &[0x57], Some(1), pair(0, 2)),
     avx("vxorpd", &VVV, Word, Map::Escape, &[0x57], Some(1), pair(0, 2)),
     avx("vxorpd", &MVV, Word, Map::Escape, &[0x57], Some(1), pair(0, 2)),
+    // The EVEX forms of the bitwise operations on packed floats, which AVX-512DQ has. FreeBSD's
+    // support.S clears the buffers of the processor with `vorpd (%rdx), %zmm0, %zmm0`. The VEX
+    // forms above are still the ones taken when nothing needs EVEX.
+    evex("vandps", &VVV, Long, &[0x54], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vandps", &MVV, Long, &[0x54], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vandpd", &VVV, Word, &[0x54], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vandpd", &MVV, Word, &[0x54], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vandnps", &VVV, Long, &[0x55], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vandnps", &MVV, Long, &[0x55], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vandnpd", &VVV, Word, &[0x55], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vandnpd", &MVV, Word, &[0x55], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vorps", &VVV, Long, &[0x56], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vorps", &MVV, Long, &[0x56], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vorpd", &VVV, Word, &[0x56], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vorpd", &MVV, Word, &[0x56], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vxorps", &MVV, Long, &[0x57], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
+    evex("vxorpd", &VVV, Word, &[0x57], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
+    evex("vxorpd", &MVV, Word, &[0x57], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
     avx("vpxor", &VVV, Word, Map::Escape, &[0xEF], Some(1), pair(0, 2)),
     avx("vpxor", &MVV, Word, Map::Escape, &[0xEF], Some(1), pair(0, 2)),
     avx("vpor", &VVV, Word, Map::Escape, &[0xEB], Some(1), pair(0, 2)),
@@ -4709,6 +4822,12 @@ static ENCODINGS: &[Encoding] = &[
     avx("vshufps", &IMVV, Long, Map::Escape, &[0xC6], Some(2), pair(1, 3)),
     avx("vshufpd", &IVVV, Word, Map::Escape, &[0xC6], Some(2), pair(1, 3)),
     avx("vshufpd", &IMVV, Word, Map::Escape, &[0xC6], Some(2), pair(1, 3)),
+    // The EVEX forms of the two shuffles, for a register numbered sixteen or above, a `zmm` or a
+    // mask. blake3_avx512.S writes `vshufps` into `ymm16`.
+    evex("vshufps", &IVVV, Long, &[0xC6], pair(1, 3), Evex::new(Map::Escape, false).third(2)),
+    evex("vshufps", &IMVV, Long, &[0xC6], pair(1, 3), Evex::new(Map::Escape, false).third(2)),
+    evex("vshufpd", &IVVV, Word, &[0xC6], pair(1, 3), Evex::new(Map::Escape, true).third(2)),
+    evex("vshufpd", &IMVV, Word, &[0xC6], pair(1, 3), Evex::new(Map::Escape, true).third(2)),
     avx("vdpps", &IVVV, Word, Map::Escape3A, &[0x40], Some(2), pair(1, 3)),
     avx("vdpps", &IMVV, Word, Map::Escape3A, &[0x40], Some(2), pair(1, 3)),
     Encoding {
@@ -5457,6 +5576,14 @@ pub enum Error {
         /// The mnemonic that was asked for.
         mnemonic: String,
     },
+    /// A broadcast such as `{1to16}` on an instruction that reads no whole vector from memory, or
+    /// whose count is not the number of elements in the vector.
+    Broadcast {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+        /// The count that was asked for.
+        count: u8,
+    },
 }
 
 impl fmt::Display for Error {
@@ -5492,6 +5619,9 @@ impl fmt::Display for Error {
                 "{mnemonic} is only written here with a VEX prefix, which cannot name a zmm \
                  register or one numbered 16 or above"
             ),
+            Error::Broadcast { mnemonic, count } => {
+                write!(f, "{mnemonic} cannot spread one element read from memory over {count}")
+            }
         }
     }
 }
@@ -5560,6 +5690,9 @@ pub struct Opmask {
     /// Whether the elements the mask leaves out are zeroed rather than left as they were, which
     /// is `{z}`.
     pub zero: bool,
+    /// How many elements one element read from memory is spread over, which is `{1to16}` after
+    /// the address, or zero for a whole vector read.
+    pub broadcast: u8,
 }
 
 /// [`encode`] with a mask on the instruction.
@@ -5701,6 +5834,9 @@ fn encoded(
     };
     if let Some(evex) = row.evex {
         writer.choose(evex, mask);
+        if mask.broadcast != 0 && !writer.spread(evex, mask.broadcast) {
+            return Err(Error::Broadcast { mnemonic: mnemonic.to_owned(), count: mask.broadcast });
+        }
     } else if row.vex.is_some() {
         writer.measure()?;
     }
@@ -5749,6 +5885,12 @@ fn flipped(mode: Mode, row: &Encoding, values: &[Value]) -> Option<&'static Enco
         return None;
     }
     rows_in(mode, row.mnemonic, &VM).find(|store| store.vex.is_some())
+}
+
+/// The bytes of one element of an EVEX row, which its wide bit says: eight with it, four without.
+/// A broadcast reads one of these, and a one byte displacement is counted in them.
+const fn element(evex: Evex) -> u8 {
+    if evex.w { 8 } else { 4 }
 }
 
 /// One instruction being written out.
@@ -5811,10 +5953,22 @@ impl Writer<'_> {
         }
         self.evex = Some(evex);
         self.scale = i32::from(match evex.tuple {
+            _ if mask.broadcast != 0 => element(evex),
             Tuple::Full => self.length.bytes(),
             Tuple::Fixed(bytes) => bytes,
             Tuple::Part(divisor) => self.length.bytes() / divisor,
         });
+    }
+
+    /// Whether a broadcast of `count` elements can be written on this row with these operands.
+    ///
+    /// It needs an address the row reads a whole vector from, and the count has to be the number
+    /// of elements in the vector, as gas checks: `{1to16}` is a `zmm` of four byte elements.
+    fn spread(&self, evex: Evex, count: u8) -> bool {
+        let read = self.values.iter().any(|value| matches!(value, Value::Mem(_)));
+        let whole = evex.tuple == Tuple::Full;
+        read && whole
+            && u16::from(count) * u16::from(element(evex)) == u16::from(self.length.bytes())
     }
 
     /// The whole instruction: what the arguments come to, then the bytes in the order they go in.
@@ -5971,6 +6125,7 @@ impl Writer<'_> {
         out.push(
             (u8::from(mask.zero) << 7)
                 | (self.length.bits() << 5)
+                | (u8::from(mask.broadcast != 0) << 4)
                 | (u8::from(vvvv & 0x10 == 0) << 3)
                 | (mask.k & 7),
         );
@@ -7727,14 +7882,30 @@ mod tests {
         };
         let index =
             Value::Mem(Addr { base: Some(R9), index: Some(R10), scale: 1, ..Addr::default() });
-        assert_eq!(masked(Opmask { k: 1, zero: true }, &[at(RBX, 0), z(16)]), "62 e1 7f c9 6f 03");
-        assert_eq!(masked(Opmask { k: 7, zero: true }, &[index, z(30)]), "62 01 7f cf 6f 34 11");
-        assert_eq!(masked(Opmask { k: 1, zero: false }, &[at(RBX, 0), z(16)]), "62 e1 7f 49 6f 03");
+        assert_eq!(
+            masked(Opmask { k: 1, zero: true, ..Opmask::default() }, &[at(RBX, 0), z(16)]),
+            "62 e1 7f c9 6f 03"
+        );
+        assert_eq!(
+            masked(Opmask { k: 7, zero: true, ..Opmask::default() }, &[index, z(30)]),
+            "62 01 7f cf 6f 34 11"
+        );
+        assert_eq!(
+            masked(Opmask { k: 1, ..Opmask::default() }, &[at(RBX, 0), z(16)]),
+            "62 e1 7f 49 6f 03"
+        );
         assert_eq!(masked(Opmask::default(), &[z(16), at(RBX, 0)]), "62 e1 7f 48 7f 03");
-        assert_eq!(masked(Opmask { k: 2, zero: false }, &[z(16), at(RBX, 0)]), "62 e1 7f 4a 7f 03");
+        assert_eq!(
+            masked(Opmask { k: 2, ..Opmask::default() }, &[z(16), at(RBX, 0)]),
+            "62 e1 7f 4a 7f 03"
+        );
         let mut out = Vec::new();
-        let error =
-            encode_masked("addq", &[quad(RAX), quad(RBX)], Opmask { k: 1, zero: false }, &mut out);
+        let error = encode_masked(
+            "addq",
+            &[quad(RAX), quad(RBX)],
+            Opmask { k: 1, ..Opmask::default() },
+            &mut out,
+        );
         assert!(matches!(error, Err(Error::Mask { .. })), "{error:?}");
     }
 
