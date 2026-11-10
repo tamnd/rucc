@@ -270,6 +270,17 @@ fn touches_nothing_it_does_not_understand(
     let data = &func[inst];
     let touched = results(func, inst).any(|value| at(narrow, value).is_some())
         || func[data.args].iter().any(|&value| at(narrow, value).is_some());
+    // A `_BitInt` above sixty four bits is laid out in words of the register width, so on a
+    // machine of thirty two bits a `_BitInt(65)` to a `_BitInt(96)` is twelve bytes, as gcc has it
+    // on i386. The value is held in a hundred and twenty eight bits here, and a load or a store at
+    // that width would reach four bytes past the object.
+    let past = |value: &Value| at(narrow, *value).is_some_and(|bits| (65..=96).contains(&bits));
+    if matches!(data.opcode, Opcode::Load | Opcode::Store)
+        && conv.is_some_and(|conv| conv.word == 4)
+        && (results(func, inst).any(|value| past(&value)) || func[data.args].iter().any(past))
+    {
+        return false;
+    }
     if !touched || understood(data.opcode) {
         return true;
     }
