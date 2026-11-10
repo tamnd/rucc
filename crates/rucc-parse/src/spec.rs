@@ -238,6 +238,27 @@ fn type_keyword(word: Keyword) -> bool {
 }
 
 impl Parser<'_> {
+    /// Puts the storage class `storage`, which is at `span`, on `specs`. A second storage class
+    /// is an error, and the same one twice is a different error.
+    fn put_storage(&mut self, specs: &mut DeclSpecs, storage: StorageClass, span: Span) {
+        if let Some(previous) = specs.storage {
+            if previous == storage {
+                let message = format!("duplicate `{}`", storage.spelling());
+                self.error("E0406", message, span);
+            } else {
+                self.error("E0404", MULTIPLE_STORAGE_CLASSES, span);
+            }
+        }
+        specs.storage = Some(storage);
+    }
+
+    /// Whether `token` is kencc's `typestr`. It is a keyword in kencc and an identifier in C, so
+    /// it is known by its spelling and only under `-fkencc`, as `signof` is.
+    fn is_typestr(&self, token: Token) -> bool {
+        self.cx.kencc
+            && token.ident().is_some_and(|name| Some(name) == self.cx.interner.find("typestr"))
+    }
+
     /// Whether `token` can begin a type name.
     ///
     /// This is the question the cast, the compound literal and `sizeof` all ask, and it is the
@@ -268,7 +289,9 @@ impl Parser<'_> {
                             | Keyword::AutoType
                     )
             }
-            TokenKind::Ident => self.scopes.is_typedef_name(Symbol::from_raw(token.value)),
+            TokenKind::Ident => {
+                self.scopes.is_typedef_name(Symbol::from_raw(token.value)) || self.is_typestr(token)
+            }
             _ => false,
         }
     }
@@ -599,6 +622,8 @@ impl Parser<'_> {
         // An `__extension__` in the list is in effect until the list ends, and only then, so
         // the count it raised is put back here whatever happened in between.
         let outer = self.extension;
+        // Where kencc's `typestr` is, when the list has it.
+        let mut typestr = None;
 
         loop {
             let token = self.cursor.current();
@@ -606,6 +631,14 @@ impl Parser<'_> {
             match token.kind {
                 TokenKind::Punct(Punct::LBracket) if self.at_standard_attribute() => {
                     self.standard_attributes(&mut attrs);
+                }
+                // kencc's `typestr` is the storage class of a typedef whose type is a `struct`
+                // or a `union`, which `funct.c` lets have operator functions. The 9front tree has
+                // no operator function, so rucc reads the class as `typedef` and checks the type.
+                TokenKind::Ident if self.is_typestr(token) => {
+                    self.cursor.bump();
+                    self.put_storage(&mut specs, StorageClass::Typedef, span);
+                    typestr = Some(span);
                 }
                 TokenKind::Ident => {
                     if named || !builtin.is_none() {
@@ -649,6 +682,13 @@ impl Parser<'_> {
         self.extension = outer;
         if !builtin.is_none() {
             specs.ty = TypeSpec::Builtin(builtin);
+        }
+        // `dodecl` in `dcl.c` refuses a `typestr` whose type is not a `struct` or a `union`.
+        // A typedef name is let through here, because the parser does not know its type.
+        if let Some(span) = typestr {
+            if !matches!(specs.ty, TypeSpec::Record { .. } | TypeSpec::Typedef(_)) {
+                self.error("E0404", "typestr must be struct/union", span);
+            }
         }
         self.settle_auto(&mut specs, autos);
         self.settle_constexpr(&specs, start);
@@ -800,15 +840,7 @@ impl Parser<'_> {
                 specs.extern_register = true;
                 return true;
             }
-            if let Some(previous) = specs.storage {
-                if previous == storage {
-                    let message = format!("duplicate `{}`", storage.spelling());
-                    self.error("E0406", message, span);
-                } else {
-                    self.error("E0404", MULTIPLE_STORAGE_CLASSES, span);
-                }
-            }
-            specs.storage = Some(storage);
+            self.put_storage(specs, storage, span);
             return true;
         }
         match word {
