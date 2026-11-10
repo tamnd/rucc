@@ -157,3 +157,16 @@ fn what_is_not_written_is_refused() {
         run("x86", &["--target=x86_64-unknown-linux-gnu", "-mbranch-protection=bti"], SOURCE);
     assert!(!ok && err.contains("unknown option"), "{err}");
 }
+
+#[test]
+fn freebsd_and_netbsd_code_is_protected_with_no_note_as_gcc_writes_it() {
+    // aarch64-freebsd.h ends a file with only `.note.GNU-stack`, and NetBSD's gcc writes nothing
+    // at the end of a file, so neither has the note. The code is signed and marked all the same.
+    for target in ["--target=aarch64-unknown-freebsd15.1", "--target=aarch64-unknown-netbsd"] {
+        let text = listing("bsd", &[target, "-mbranch-protection=standard"], SOURCE);
+        assert_eq!(body(&text, "leaf")[0], "hint #34", "{target}:\n{text}");
+        assert_eq!(body(&text, "caller")[0], "hint #25", "{target}:\n{text}");
+        assert_eq!(feature(&text), None, "{target}:\n{text}");
+        assert!(!text.contains(".note.gnu.property"), "{target}:\n{text}");
+    }
+}

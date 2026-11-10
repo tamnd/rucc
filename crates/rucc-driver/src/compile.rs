@@ -3450,8 +3450,15 @@ fn output(opts: &Options, target: &TargetInfo, indirect: bool) -> rucc_object::O
     }
     let x86 = matches!(target.tuple.arch(), Arch::X86_64 | Arch::X86);
     let needed = if x86 && indirect { rucc_object::Property::INDIRECT_EXTERN_ACCESS } else { 0 };
+    // gcc writes the AArch64 note at the end of a file only for Linux. The FreeBSD header,
+    // aarch64-freebsd.h, ends a file with `file_end_indicate_exec_stack`, which writes only
+    // `.note.GNU-stack`, in gcc 14 and 15 and in the FreeBSD port. NetBSD's own gcc 12.5 has no hook
+    // for the end of a file at all on aarch64. So a FreeBSD or NetBSD object from gcc has no
+    // property note for any `-mbranch-protection=`, and the linker ANDs that object's bits as
+    // zero.
+    let gcc_notes = !matches!(target.tuple.os(), rucc_tuple::Os::FreeBsd | rucc_tuple::Os::NetBsd);
     let mut arm = 0;
-    if target.tuple.arch() == Arch::Aarch64 {
+    if target.tuple.arch() == Arch::Aarch64 && gcc_notes {
         if opts.branch_protection.bti {
             arm |= rucc_object::Property::BTI;
         }
@@ -3682,7 +3689,7 @@ mod tests {
     #[test]
     fn the_guarded_control_stack_is_a_bit_of_the_aarch64_property_note() {
         let mut opts = options();
-        opts.target = "aarch64-unknown-freebsd".parse::<Triple>().unwrap();
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
         let target = TargetInfo::new(opts.target);
         opts.branch_protection = rucc_target::BranchProtection::parse("pac-ret+bti+gcs").unwrap();
         let arm = output(&opts, &target, false).property.arm;
@@ -3690,6 +3697,20 @@ mod tests {
         assert_eq!(arm, all | rucc_object::Property::GCS);
         opts.branch_protection.gcs = false;
         assert_eq!(output(&opts, &target, false).property.arm, all);
+    }
+
+    /// gcc writes no AArch64 property note for FreeBSD or NetBSD, whatever `-mbranch-protection=`
+    /// says.
+    #[test]
+    fn no_aarch64_property_note_is_written_for_freebsd_or_netbsd() {
+        for triple in ["aarch64-unknown-freebsd15.1", "aarch64-unknown-netbsd"] {
+            let mut opts = options();
+            opts.target = triple.parse::<Triple>().unwrap();
+            let target = TargetInfo::new(opts.target);
+            opts.branch_protection =
+                rucc_target::BranchProtection::parse("pac-ret+bti+gcs").unwrap();
+            assert_eq!(output(&opts, &target, false).property.arm, 0, "{triple}");
+        }
     }
 
     /// An object names its source file without the directory, as gcc's `.file` does, both when
