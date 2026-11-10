@@ -1231,6 +1231,16 @@ pub enum Conversion {
     /// comparison against zero or a change of width: the representation of `false` may be any
     /// number at all, and one that is neither of the two traps on its way out.
     Hardbool,
+    /// A `float` or `double` value that was computed in `long double`, standing as the type the
+    /// expression has.
+    ///
+    /// This is how `__FLT_EVAL_METHOD__` 2 is written: the operation underneath is in `long
+    /// double` and this node gives the expression its own type back, so `sizeof`, `_Generic`
+    /// and `typeof` see a `float` where the program wrote one. An operator, a cast, an
+    /// assignment, an argument and a `return` look through it and take the wide value, which is
+    /// what keeps the excess precision until one of them rounds it to the type it wants. Read
+    /// as a value on its own, it is the arithmetic conversion to its type.
+    Excess,
 }
 
 impl Conversion {
@@ -1248,6 +1258,7 @@ impl Conversion {
             Conversion::Void => "void",
             Conversion::Broadcast => "broadcast",
             Conversion::Hardbool => "hardbool",
+            Conversion::Excess => "excess",
         }
     }
 }

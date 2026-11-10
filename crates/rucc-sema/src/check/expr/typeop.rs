@@ -181,6 +181,13 @@ impl Checker<'_> {
         self.cast_warnings(target, operand, span);
         // After the warnings, since a conversion that is folded here is still one the program
         // wrote and the warnings are about what it wrote.
+        // A value computed in `long double` is converted from that, which is the one rounding a
+        // cast to `float` or `double` makes, as `__FLT_EVAL_METHOD__` 2 asks.
+        let operand = if is_arithmetic(&self.types, target) {
+            self.conv().unexcess(operand)
+        } else {
+            operand
+        };
         if let Some(folded) = self.conv().saturated(operand, target) {
             return folded;
         }

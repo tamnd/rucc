@@ -1148,9 +1148,13 @@ impl Checker<'_> {
                     let what = if op == UnaryOp::Plus { "plus" } else { "minus" };
                     return self.wrong_operand(&format!("unary {what}"), span);
                 }
+                // `-(a * b)` keeps the wide product, which a sum around it then uses.
                 let ty = self.tast[operand].ty;
-                self.tast
-                    .expr(Expr::new(ExprKind::Unary { op, operand }, ty, Category::Rvalue), span)
+                let operand = self.conv().unexcess(operand);
+                let wide = self.tast[operand].ty;
+                let node = Expr::new(ExprKind::Unary { op, operand }, wide, Category::Rvalue);
+                let node = self.tast.expr(node, span);
+                self.conv().excess(node, ty)
             }
             UnaryOp::BitNot => {
                 let operand = self.conv().promote(operand);
@@ -1596,11 +1600,13 @@ impl Checker<'_> {
         if !ok(self, lhs) || !ok(self, rhs) {
             return self.invalid_operands(op, lhs, rhs, span);
         }
-        let Some((lhs, rhs)) = self.conv().usual_arithmetic(lhs, rhs) else {
+        let Some((lhs, rhs, ty)) = self.conv().evaluated(lhs, rhs, true) else {
             return self.mixed_decimal(span);
         };
-        let ty = self.tast[lhs].ty;
-        self.tast.expr(Expr::new(ExprKind::Binary { op, lhs, rhs }, ty, Category::Rvalue), span)
+        let wide = self.tast[lhs].ty;
+        let node = Expr::new(ExprKind::Binary { op, lhs, rhs }, wide, Category::Rvalue);
+        let node = self.tast.expr(node, span);
+        self.conv().excess(node, ty)
     }
 
     /// `+` and `-`, which are three operators each wearing one spelling.
@@ -1639,12 +1645,13 @@ impl Checker<'_> {
                 self.ptrdiff()
             }
             _ if is_arithmetic(&self.types, left) && is_arithmetic(&self.types, right) => {
-                let Some((lhs, rhs)) = self.conv().usual_arithmetic(lhs, rhs) else {
+                let Some((lhs, rhs, ty)) = self.conv().evaluated(lhs, rhs, true) else {
                     return self.mixed_decimal(span);
                 };
-                let ty = self.tast[lhs].ty;
+                let wide = self.tast[lhs].ty;
                 let node = ExprKind::Binary { op, lhs, rhs };
-                return self.tast.expr(Expr::new(node, ty, Category::Rvalue), span);
+                let node = self.tast.expr(Expr::new(node, wide, Category::Rvalue), span);
+                return self.conv().excess(node, ty);
             }
             _ => return self.invalid_operands(op, lhs, rhs, span),
         };
@@ -1906,6 +1913,9 @@ impl Checker<'_> {
                     self.mixed_decimal(span);
                     return None;
                 };
+                // Done in `long double` under `__FLT_EVAL_METHOD__` 2, as the operator is, and
+                // rounded once to the type of the left side when it is stored.
+                let computation = self.conv().excess_type(computation).unwrap_or(computation);
                 let rhs = self.conv().to_type(rhs, computation);
                 Some((computation, rhs))
             }
@@ -1956,10 +1966,18 @@ impl Checker<'_> {
         let (ty, then, otherwise) = if is_arithmetic(&self.types, left)
             && is_arithmetic(&self.types, right)
         {
-            let Some((then, otherwise)) = self.conv().usual_arithmetic(then, otherwise) else {
+            let Some((then, otherwise, ty)) = self.conv().evaluated(then, otherwise, false) else {
                 return self.mixed_decimal(span);
             };
-            (self.tast[then].ty, then, otherwise)
+            // An arm computed in `long double` keeps its wide value, and so does the whole
+            // conditional, which is given its own type back below.
+            if self.tast[then].ty != ty {
+                let wide = self.tast[then].ty;
+                let node = ExprKind::Cond { cond, then, otherwise };
+                let node = self.tast.expr(Expr::new(node, wide, Category::Rvalue), span);
+                return self.conv().excess(node, ty);
+            }
+            (ty, then, otherwise)
         } else if is_void(&self.types, left) || is_void(&self.types, right) {
             // C says both arms have to be void or neither is, and gcc says the whole thing is
             // void the moment either arm is, with a warning only under `-Wpedantic`. The

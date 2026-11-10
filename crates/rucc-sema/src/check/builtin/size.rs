@@ -850,7 +850,8 @@ const fn through(kind: Conversion) -> bool {
         | Conversion::Arithmetic
         | Conversion::Bool
         | Conversion::Broadcast
-        | Conversion::Hardbool => false,
+        | Conversion::Hardbool
+        | Conversion::Excess => false,
     }
 }
 
