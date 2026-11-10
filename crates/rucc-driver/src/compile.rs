@@ -566,7 +566,6 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 .toplevel_reorder
                                 .unwrap_or_else(|| opts.opt_level.runs_optimizer())
                                 && sess.target.object_format != rucc_target::ObjectFormat::MachO,
-                            asm_reader: opts.asm_reader,
                             for_size: opts.opt_level.is_size(),
                             isa: opts.isa,
                             vector: opts.vector,
@@ -9075,6 +9074,23 @@ void f(unsigned long n) { use(alloca(n)); }
         result.messages
     }
 
+    /// The options for x86-64 macOS. An `asm` at file scope made of directives is read into
+    /// globals there, because Mach-O has no assembler path to hand it to. On ELF every block goes
+    /// to the assembler, so the reading is tested on Mach-O.
+    fn mach_o() -> Options {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.target = "x86_64-apple-darwin".parse::<Triple>().unwrap();
+        opts
+    }
+
+    /// The IR of `source` for x86-64 macOS, insisting that it compiled cleanly. See [`mach_o`].
+    fn mach_o_ir(source: &str) -> String {
+        let result = run(&mach_o(), source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        result.text().to_owned()
+    }
+
     /// The body of the one function in `source`, which is what most of these are about.
     fn body(source: &str) -> String {
         let text = ir(source);
@@ -15525,7 +15541,7 @@ block2:
     /// them, which is what `spec/11-asm-objects-debug.md` section 11.2 asks for.
     #[test]
     fn an_asm_at_file_scope_that_is_directives_becomes_the_objects_it_defines() {
-        let text = ir(concat!(
+        let text = mach_o_ir(concat!(
             "__asm__(\n",
             "  \".section .rodata\\n\"\n",
             "  \".globl first\\n\"\n",
@@ -15548,7 +15564,7 @@ block2:
     /// made rather than turn it back into something the linker is asked for.
     #[test]
     fn a_name_an_asm_at_file_scope_defined_is_not_undone_by_a_declaration_of_it() {
-        let text = ir(concat!(
+        let text = mach_o_ir(concat!(
             "__asm__(\".data\\n.globl counter\\ncounter:\\n.long 7\\n\");\n",
             "extern int counter;\n",
             "int read(void) { return counter; }\n",
@@ -15562,7 +15578,7 @@ block2:
     /// from one section to another.
     #[test]
     fn bytes_under_no_label_at_file_scope_are_a_global_in_front_of_the_label() {
-        let text = ir(concat!(
+        let text = mach_o_ir(concat!(
             "__asm__(\".data\\n.byte 41\\nstuff:\\n661:\\n.byte 42\\n662:\\n",
             ".pushsection .data.ignore\\n.byte 7\\n.popsection\\n.byte 662b - 661b\\n\");\n",
             "extern unsigned char stuff[];\n",
@@ -15586,7 +15602,7 @@ block2:
     /// linker, so the image holds a hole and a name for it.
     #[test]
     fn a_distance_from_here_at_file_scope_is_a_hole_naming_the_global_it_measures_to() {
-        let text = ir(concat!(
+        let text = mach_o_ir(concat!(
             "__asm__(\".data\\n.byte 41\\nstuff:\\n661:\\n.byte 42\\n",
             ".pushsection .data.ignore\\n.long 661b - .\\n.popsection\\n\");\n",
             "extern unsigned char stuff[];\n",
@@ -15604,7 +15620,7 @@ block2:
     /// which is what gcc's symbol table shows for the block tcc's test file writes.
     #[test]
     fn a_set_at_file_scope_is_a_second_name_for_what_it_names() {
-        let text = ir(concat!(
+        let text = mach_o_ir(concat!(
             "void base(void) {}\n",
             "__asm__(\".weak one\\n.set one, base\");\n",
             "__asm__(\".globl two\\n.set two, base\");\n",
@@ -15623,7 +15639,9 @@ block2:
     /// way.
     #[test]
     fn a_set_of_a_name_this_file_does_not_define_says_so() {
-        let messages = errors("__asm__(\".set here, elsewhere\");\n");
+        let result = run(&mach_o(), "__asm__(\".set here, elsewhere\");\n");
+        assert!(result.failed());
+        let messages = result.messages;
         assert!(
             messages
                 .iter()
@@ -15637,8 +15655,7 @@ block2:
     /// same file system the sources did.
     #[test]
     fn an_incbin_at_file_scope_is_the_bytes_of_the_file_it_names() {
-        let mut opts = options();
-        opts.emit = EmitKind::Ir;
+        let opts = mach_o();
         let mut fs = MemoryFileSystem::new();
         fs.insert(
             "/main.c",

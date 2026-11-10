@@ -3038,11 +3038,6 @@ pub struct Options {
     /// each phase and each optimizer pass took. Appended to, never truncated, so that every
     /// compiler in a parallel build can share one file.
     pub trace: Option<String>,
-    /// Whether an `asm` at file scope made of directives may be read by the compiler into the
-    /// globals it defines, rather than handed to the assembler with the rest of the listing. On
-    /// unless `-frucc-asm-reader=off` turned it off. The switch is for tests, which compile a file
-    /// both ways and compare the objects, and it changes nothing off ELF.
-    pub asm_reader: bool,
     /// What `-fdisable-<pass>[=<range>]` and `-fenable-<pass>[=<range>]` said, in the order the
     /// command line said it, with `true` for the enabling half.
     ///
@@ -3280,7 +3275,6 @@ impl Options {
             pass_fuel: Vec::new(),
             pass_fuel_global: None,
             trace: None,
-            asm_reader: true,
             pass_gates: Vec::new(),
             params: Vec::new(),
             dump_ir: Vec::new(),
