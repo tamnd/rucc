@@ -45,15 +45,15 @@ use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 use Form::{
     Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
     ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi,
-    CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, CmpXchgFlags,
-    Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide,
-    EhReturn, Exchange, FusedVec, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load,
-    LoadImm, LoadVec, Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push,
-    PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl,
-    ShiftDouble, ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
-    StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore,
-    StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR,
-    UnaryX87,
+    CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpSetX87Status,
+    CmpSetX87StatusBoth, CmpXchg, CmpXchgFlags, Convert, ConvertFromVec, ConvertToVec, ConvertVec,
+    CpuId, CtrlX87, DivQuo, DivRem, DivWide, EhReturn, Exchange, FusedVec, Jcc, Jmp, JmpAway,
+    JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulRi,
+    MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec,
+    RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble, ShiftDoubleCl, ShiftRi, ShiftVec,
+    ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
+    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template, Test,
+    TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -979,6 +979,13 @@ pub enum Form {
     /// every predicate but two being one of them. The second byte is a second definition for the
     /// same reason it is there.
     CmpSetX87Both,
+    /// [`Form::CmpSetX87`] for a processor from before the Pentium Pro, which has no `fucomip`.
+    ///
+    /// The comparison pops both values, and `fnstsw` and `sahf` take its result to the flags
+    /// through `ax`. So the byte it sets is in `rax`, and nothing else can be there.
+    CmpSetX87Status,
+    /// [`Form::CmpSetX87Both`] in the same way, with the spare byte in any other register.
+    CmpSetX87StatusBoth,
 }
 
 // The destination of a two-address instruction is the operand after it, which is the first
@@ -1312,6 +1319,10 @@ static HINT: [OperandDesc; 0] = [];
 // somewhere further up the block.
 static ONE_WRITTEN: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 static X87_TO_ONE_BOTH: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::write(GPR)];
+// The same two, when the status word goes through `ax` on its way to the flags.
+static STATUS_WRITTEN: [OperandDesc; 1] = [OperandDesc::write(GPR).with(Constraint::Fixed(RAX))];
+static STATUS_WRITTEN_BOTH: [OperandDesc; 2] =
+    [OperandDesc::write(GPR).with(Constraint::Fixed(RAX)), OperandDesc::write(GPR)];
 
 impl Form {
     /// The operands of an instruction of this form, the ones it writes before the ones it
@@ -1396,6 +1407,8 @@ impl Form {
             PushX87 | PopX87 | CtrlX87 | ArithX87 | UnaryX87 => &X87_MEM,
             CmpSetX87 => &ONE_WRITTEN,
             CmpSetX87Both => &X87_TO_ONE_BOTH,
+            CmpSetX87Status => &STATUS_WRITTEN,
+            CmpSetX87StatusBoth => &STATUS_WRITTEN_BOTH,
         }
     }
 
@@ -2736,6 +2749,16 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fucomip_set_np", CmpSetX87),
     ("fucomip_set_e_and_np", CmpSetX87Both),
     ("fucomip_set_ne_or_p", CmpSetX87Both),
+    ("fucompp_set_a", CmpSetX87Status),
+    ("fucompp_set_ae", CmpSetX87Status),
+    ("fucompp_set_b", CmpSetX87Status),
+    ("fucompp_set_be", CmpSetX87Status),
+    ("fucompp_set_e", CmpSetX87Status),
+    ("fucompp_set_ne", CmpSetX87Status),
+    ("fucompp_set_p", CmpSetX87Status),
+    ("fucompp_set_np", CmpSetX87Status),
+    ("fucompp_set_e_and_np", CmpSetX87StatusBoth),
+    ("fucompp_set_ne_or_p", CmpSetX87StatusBoth),
 ];
 
 /// The form of the opcode of that name, or `None` for a name this target does not have.
@@ -2806,7 +2829,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 832);
+        assert_eq!(described, 842);
     }
 
     #[test]
@@ -3037,7 +3060,10 @@ mod tests {
         // is in the other file because a truth value is a byte and the x87 holds no bytes.
         assert_eq!(form("fucomip_set_e"), Some(CmpSetX87));
         assert_eq!(form("fucomip_set_e_and_np"), Some(CmpSetX87Both));
-        for shape in [CmpSetX87, CmpSetX87Both] {
+        assert_eq!(form("fucompp_set_e"), Some(CmpSetX87Status));
+        assert_eq!(form("fucompp_set_e_and_np"), Some(CmpSetX87StatusBoth));
+        assert_eq!(CmpSetX87Status.operands()[0].constraint, Constraint::Fixed(RAX));
+        for shape in [CmpSetX87, CmpSetX87Both, CmpSetX87Status, CmpSetX87StatusBoth] {
             assert!(shape.operands().iter().all(|operand| operand.role.is_def()));
             assert!(shape.operands().iter().all(|operand| operand.class == GPR));
             assert!(!shape.takes_mem());
@@ -3100,6 +3126,8 @@ mod tests {
         assert_eq!(count(ArithX87), 6, "an add, a multiply and a subtract and a divide each way");
         assert_eq!(count(UnaryX87), 2, "the sign flipped and the sign cleared");
         assert_eq!(count(CmpSetX87) + count(CmpSetX87Both), 10, "the ten a float comparison has");
+        let status = count(CmpSetX87Status) + count(CmpSetX87StatusBoth);
+        assert_eq!(status, 10, "the same ten before the Pentium Pro");
     }
 
     #[test]

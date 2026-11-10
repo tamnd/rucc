@@ -3475,10 +3475,9 @@ static ENCODINGS: &[Encoding] = &[
     bytes("fchs", &NO_ARGS, Long, &[0xD9, 0xE0], NO_MODRM, NO_IMM),
     bytes("fabs", &NO_ARGS, Long, &[0xD9, 0xE1], NO_MODRM, NO_IMM),
     // The comparison, which writes the flags this machine's conditional jumps and byte sets read
-    // rather than the status word the x87 has of its own. That is what the `i` in the middle is,
-    // and it is why the compiler never writes `fnstsw`: the older way of reading an x87 comparison
-    // is to save the status word into `ax` and pick the bits out, and the way this uses has been in
-    // the machine since the Pentium Pro and is in the baseline.
+    // rather than the status word the x87 has of its own. That is what the `i` in the middle is.
+    // It came with the Pentium Pro. For an older processor the compiler writes `fucompp`, saves
+    // the status word in `ax` with `fnstsw` and puts it in the flags with `sahf`.
     //
     // The `u` says a quiet NaN is an answer rather than an exception, which is the same choice
     // `ucomisd` is here for and no choice at all: the ordered comparison is a rule with an extra

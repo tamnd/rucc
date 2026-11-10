@@ -1656,7 +1656,7 @@ pub fn func(
     conv: &'static CallRegs,
     elsewhere: &Elsewhere,
 ) -> Result<Lowered, Unsupported> {
-    func_for(source, names, selector, conv, elsewhere, true, None, Isa::NONE)
+    func_for(source, names, selector, conv, elsewhere, true, None, Isa::NONE, true)
 }
 
 /// [`func`], for a build that says whether it writes debugging information. Without it the walk
@@ -1669,6 +1669,9 @@ pub fn func(
 ///
 /// `isa` is the processor the unit is built for, which a `target` attribute on the function takes
 /// the place of.
+///
+/// `p6` is whether that processor has the instructions of the Pentium Pro. Without them an x87
+/// comparison reads the status word through `ax`, since there is no `fucomip`.
 ///
 /// # Errors
 ///
@@ -1683,8 +1686,9 @@ pub fn func_for(
     debug: bool,
     hold: Option<u32>,
     isa: Isa,
+    p6: bool,
 ) -> Result<Lowered, Unsupported> {
-    Lowering::new(source, names, selector, conv, elsewhere, debug, hold, isa).run()
+    Lowering::new(source, names, selector, conv, elsewhere, debug, hold, isa, p6).run()
 }
 
 /// What the matcher settled on for one block, indexed the way the block's instructions are.
@@ -1789,6 +1793,9 @@ struct Lowering<'a> {
     /// Whether the function is built for a processor with AVX-512, which is what lets a clobber
     /// list name `zmm16` or `k1`. Read the same way as [`Self::avx`].
     avx512: bool,
+    /// Whether the processor has the instructions of the Pentium Pro. Without them an x87
+    /// comparison is `fucompp`, `fnstsw` and `sahf` in place of `fucomip`.
+    p6: bool,
     /// What the function wants its stack to look like, filled in as the walk finds out.
     stack: Stack,
     /// What a `va_start` in this function has to write, or nothing for a function that takes no
@@ -1961,6 +1968,7 @@ impl<'a> Lowering<'a> {
         debug: bool,
         hold: Option<u32>,
         isa: Isa,
+        p6: bool,
     ) -> Self {
         let counts = source.counts();
         let name = source.name;
@@ -2037,6 +2045,7 @@ impl<'a> Lowering<'a> {
                 .is_some_and(|avx| source.target.unwrap_or(isa).has(avx)),
             avx512: rucc_target::Feature::named("avx512f")
                 .is_some_and(|avx512| source.target.unwrap_or(isa).has(avx512)),
+            p6,
             stack: Stack::default(),
             varargs: None,
             slots: vec![None; counts.values],
@@ -4138,6 +4147,9 @@ impl<'a> Lowering<'a> {
             FloatPred::False | FloatPred::True => return Err(self.unsupported(inst)),
         };
         let (top, under) = if reversed { (right, left) } else { (left, right) };
+        // Before the Pentium Pro the same condition is read through the status word. `sahf` puts
+        // its bits in the flags `fucomip` writes, so the table above holds for both.
+        let name = if self.p6 { name.to_owned() } else { name.replacen("fucomip", "fucompp", 1) };
 
         let span = self.source.span(inst);
         let gpr = self.gpr;
@@ -4154,8 +4166,12 @@ impl<'a> Lowering<'a> {
         // Taken before the instruction is started rather than inside it, since both come from the
         // same function being built and only one thing at a time may be adding to it.
         let spare = both.then(|| self.out.new_vreg(gpr));
-        let opcode = self.named(name);
-        let mut build = self.out.build(block, opcode).at(span).def(reg, gpr);
+        let opcode = self.named(&name);
+        // `fnstsw` writes only %ax, so the result is asked for in it. The `setcc` after it then
+        // writes over the status word in the same register.
+        let written = mir::Operand::write(reg, gpr);
+        let written = if self.p6 { written } else { written.with(Constraint::Fixed(x86_64::RAX)) };
+        let mut build = self.out.build(block, opcode).at(span).operand(written);
         if let Some(spare) = spare {
             build = build.def(spare, gpr);
         }
@@ -13397,8 +13413,9 @@ mod tests {
             let produced: Vec<Value> = source[asm].results().collect();
             Builder::new(&mut source, block).ret(&produced);
             let elsewhere = Elsewhere::default();
-            let out = func_for(&source, &mut names, &SELECTOR, &SYSV, &elsewhere, true, None, isa)
-                .expect("the template is kept");
+            let out =
+                func_for(&source, &mut names, &SELECTOR, &SYSV, &elsewhere, true, None, isa, true)
+                    .expect("the template is kept");
             mir::print_func(&out.func, &names, &REGS)
         };
         let avx = Isa::with(rucc_target::Feature::named("avx").expect("gcc names it"));
@@ -13940,6 +13957,39 @@ mod tests {
         // be an instruction the allocator could put a live value in the way of.
         let text = lower(&mut names, &source);
         assert!(text.contains("%8:gpr, %9:gpr = x64.fucomip_set_e_and_np"), "{text}");
+    }
+
+    /// tamnd/rucc#4328. A processor from before the Pentium Pro has no `fucomip`, so the same
+    /// comparison is the opcode that reads the status word.
+    #[test]
+    fn a_processor_before_the_pentium_pro_reads_the_status_word() {
+        let f64 = Type::float(rucc_ir::Float::F64);
+        for (pred, opcode) in [
+            (FloatPred::Ogt, "%8:gpr($rax) = x64.fucompp_set_a"),
+            (FloatPred::Oeq, "%8:gpr($rax), %9:gpr = x64.fucompp_set_e_and_np"),
+        ] {
+            let (mut names, mut source, block, args) = blank(&[f64, f64]);
+            let (left, right) = two_long_doubles(&mut source, block, &args);
+            let mut build = Builder::new(&mut source, block);
+            build.fcmp(pred, left, right, Flags::default());
+            build.ret(&[]);
+            let elsewhere = Elsewhere::default();
+            let lowered = func_for(
+                &source,
+                &mut names,
+                &SELECTOR,
+                &SYSV,
+                &elsewhere,
+                true,
+                None,
+                Isa::NONE,
+                false,
+            );
+            let out = lowered.expect("every instruction is written");
+            let text = mir::print_func(&out.func, &names, &REGS);
+            assert!(text.contains(opcode), "{text}");
+            assert!(!text.contains("fucomip"), "{text}");
+        }
     }
 
     #[test]

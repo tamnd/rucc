@@ -59,3 +59,58 @@ fn every_float_operation_is_on_the_x87_stack_with_no_sse_instruction() {
         }
     }
 }
+
+/// tamnd/rucc#4328. A processor from before the Pentium Pro has no `fucomip`. gcc compares there
+/// with a comparison that pops both values and reads the status word through `ax`, and so does
+/// this. NetBSD builds for the i486 by default, and FreeBSD its boot code for the i386.
+#[test]
+fn a_processor_before_the_pentium_pro_compares_through_the_status_word() {
+    const COMPARE: &str = "\
+int less(double a, double b) { return a < b; }
+int same(long double a, long double b) { return a == b; }
+int other(float a, float b) { return a != b; }
+int fresh(long double a, long double b) { return a > b ? 3 : 7; }
+int pick(long double a, long double b, int x, int y) { return a < b ? x : y; }
+";
+    let compile = |args: &[&str]| {
+        let dir = std::env::temp_dir().join(format!(
+            "rucc-i386-x87-status-{}{}",
+            std::process::id(),
+            args.join("")
+        ));
+        std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+        let path = dir.join("compare.c");
+        std::fs::write(&path, COMPARE).expect("the fixture can be written");
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(args)
+            .args(["-S", "-o", "-"])
+            .arg(&path)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let _ = std::fs::remove_dir_all(&dir);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{args:?}: {stderr}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    for level in ["-O0", "-O2"] {
+        for args in [
+            &["--target=i486--netbsdelf"][..],
+            &["--target=i386-unknown-freebsd14.3", "-march=i386"],
+            &["--target=i686-unknown-linux-gnu", "-mfpmath=387", "-march=pentium"],
+        ] {
+            let text = compile(&[args, &[level]].concat());
+            for wanted in ["fucompp\n", "fnstsw\t%ax", "sahf\n"] {
+                assert!(text.contains(wanted), "{args:?} {level}: no {wanted}\n{text}");
+            }
+            assert!(!text.contains("fucomip"), "{args:?} {level}: a P6 instruction\n{text}");
+            // `fnstsw` writes no register but %ax, even where %eax holds another live value.
+            let written = text.matches("fnstsw\t").count();
+            let ax = text.matches("fnstsw\t%ax").count();
+            assert_eq!(written, ax, "{args:?} {level}: the status word outside %ax\n{text}");
+        }
+        // The Pentium Pro and every processor after it keep the one instruction.
+        let text = compile(&["--target=i386-unknown-freebsd14.3", "-march=i686", level]);
+        assert!(text.contains("fucomip\t"), "{level}: no fucomip\n{text}");
+        assert!(!text.contains("fnstsw"), "{level}: the status word\n{text}");
+    }
+}

@@ -508,7 +508,12 @@ fn x87_depth(func: &mir::Func, all: &[mir::Inst], insts: &MachineInsts, names: &
         match rucc_target::x86_64::form(name) {
             Some(Form::PushX87) => depth += 1,
             Some(Form::PopX87 | Form::ArithX87) => depth = depth.saturating_sub(1),
-            Some(Form::CmpSetX87 | Form::CmpSetX87Both) => depth = depth.saturating_sub(2),
+            Some(
+                Form::CmpSetX87
+                | Form::CmpSetX87Both
+                | Form::CmpSetX87Status
+                | Form::CmpSetX87StatusBoth,
+            ) => depth = depth.saturating_sub(2),
             _ => {}
         }
         deepest = deepest.max(depth);

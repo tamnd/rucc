@@ -3939,9 +3939,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 _ => rucc_target::Isa::NONE,
             };
             // The processors gcc gives no `cmov`, which came with the Pentium Pro. A kernel built
-            // for one of them is one that machine has to be able to run.
+            // for one of them is one that machine has to be able to run. The processor is the
+            // one `-march=` names, or else the one the BSD builds for, which is the i486 on NetBSD.
+            // Without `cmov` there is no `fucomip` either (tamnd/rucc#4328).
             if opts.target.arch == rucc_target::Arch::X86 {
-                opts.cmov = !march.is_some_and(|name| {
+                let named = march.or(opts.processor.map(|it| it.name));
+                opts.cmov = !named.is_some_and(|name| {
                     matches!(
                         name,
                         "i386"
@@ -11584,8 +11587,13 @@ mod tests {
             let opts = unit(&[target, "-m32", "-march=i486", "-mtune=generic"]);
             assert_eq!((opts.processor, opts.tune), (named("i486"), &[][..]), "{target}");
         }
-        assert_eq!(unit(&["--target=i486--netbsdelf"]).processor, named("i486"));
-        assert_eq!(unit(&["--target=i386-unknown-freebsd14.5"]).processor, named("i686"));
+        let opts = unit(&["--target=i486--netbsdelf"]);
+        assert_eq!(opts.processor, named("i486"));
+        // The i486 NetBSD builds for has no `cmov`, as with gcc (tamnd/rucc#4328).
+        assert!(!opts.cmov);
+        let opts = unit(&["--target=i386-unknown-freebsd14.5"]);
+        assert_eq!(opts.processor, named("i686"));
+        assert!(opts.cmov);
         // Elsewhere the unit is the Pentium 4 the backend builds for until `-march=` says more.
         assert_eq!(unit(&["--target=x86_64-linux-gnu", "-m32"]).processor, None);
         assert_eq!(unit(&["--target=i686-linux-gnu", "-march=haswell"]).processor, None);
