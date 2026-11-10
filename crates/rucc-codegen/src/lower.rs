@@ -220,6 +220,11 @@ const APPLY_WORDS_WINDOWS: [u32; 4] = [16, 8, 96, 104];
 /// Where in that block `xmm0` is, with the other three after it sixteen bytes apart.
 const APPLY_VECTORS_WINDOWS: u32 = 32;
 
+/// How many bytes the block `__builtin_apply_args` answers takes on i386, which is a word for where
+/// the arguments in memory are and then `eax`, `edx` and `ecx`, a word each. That is gcc's block
+/// for a target with no vector registers to pass arguments in. See [`Lowering::save_arguments`].
+const APPLY_ARGS_I386: u32 = 16;
+
 /// How many bytes a value passes through on its way between a register and the x87 stack.
 ///
 /// Eight, because the widest thing that crosses is a `double` or a sixty four bit integer, and
@@ -9774,10 +9779,11 @@ impl<'a> Lowering<'a> {
     ///
     /// The one that keeps the two register files apart and saves them the way a SysV list does,
     /// since the block is that layout with one word in front of it, and Windows x64, whose block
-    /// is gcc's for that convention. On any other the call is refused where it stands, which is
+    /// is gcc's for that convention, and i386, whose block is gcc's for a target with no vector
+    /// argument registers. On any other the call is refused where it stands, which is
     /// [`Self::apply_args`] finding nothing saved.
     fn saves_arguments(&self) -> bool {
-        if !self.applies_sysv() && !self.applies_windows() {
+        if !self.applies_sysv() && !self.applies_windows() && !self.applies_i386() {
             return false;
         }
         let source = self.source;
@@ -9820,15 +9826,36 @@ impl<'a> Lowering<'a> {
     /// `double` first was handed it in `xmm0` and not in `rcx`. The walk was given both files to
     /// bind for that reason, see [`varargs::Area::every`], and what is left is moving each slot of
     /// that area to where gcc has the register.
+    ///
+    /// i386 has the block gcc lays out for a target with no vector argument registers:
+    ///
+    /// ```text
+    ///   0        where the arguments are, which is all of them under cdecl
+    ///   4        eax
+    ///   8        edx
+    ///   12       ecx
+    /// ```
+    ///
+    /// The three are the ones `regparm` passes arguments in, in that order, so the save area of a
+    /// `regparm` function is those words one word up. A cdecl function has no argument registers
+    /// and an empty area, and its three words are not written: nothing was passed in them, and a
+    /// `__builtin_apply` made out of the block gives a cdecl callee nothing in them either.
     fn save_arguments(&mut self, out: mir::Block, arrived: &abi::Arrived) {
         let windows = self.applies_windows();
-        let size = if windows { APPLY_ARGS_WINDOWS } else { APPLY_ARGS };
+        let i386 = self.applies_i386();
+        let size = match (windows, i386) {
+            (true, _) => APPLY_ARGS_WINDOWS,
+            (false, true) => APPLY_ARGS_I386,
+            (false, false) => APPLY_ARGS,
+        };
         let area = varargs::Area::every(self.conv);
+        let word = self.conv.word;
         let into = |at: u32| match windows {
             true if at < area.floats_at => {
                 APPLY_WORDS_WINDOWS[usize::try_from(at / 8).unwrap_or(0)]
             }
             true => APPLY_VECTORS_WINDOWS + at - area.floats_at,
+            false if i386 => at + word,
             false => at + APPLY_REGS,
         };
         let applied = self.stack.locals.len();
@@ -9848,8 +9875,11 @@ impl<'a> Lowering<'a> {
         });
         let every: Vec<_> = named.chain(arrived.spare.iter().copied()).collect();
         for (reg, class, at) in every {
-            let ty =
-                if class == self.gpr { Type::int(64) } else { Type::float(rucc_ir::Float::F128) };
+            let ty = if class == self.gpr {
+                Type::int(word * 8)
+            } else {
+                Type::float(rucc_ir::Float::F128)
+            };
             let head = (self.selector.abi.store)(ty).expect("a store of a whole register");
             let store = mir::Opcode::new(self.names.intern(head));
             let up = i32::try_from(into(at)).expect("a block of under two gigabytes");
@@ -9867,6 +9897,12 @@ impl<'a> Lowering<'a> {
     /// convention that counts the two files as one run and has a caller leave shadow space.
     fn applies_windows(&self) -> bool {
         self.conv.shared_positions && self.conv.shadow > 0
+    }
+
+    /// Whether it is i386, whatever the convention: the one target whose word is four bytes and
+    /// whose floating point values come back on the x87 stack.
+    fn applies_i386(&self) -> bool {
+        self.conv.word == 4 && !self.conv.x87_returns.is_empty()
     }
 
     /// One `__builtin_apply_args`, which is the address of the block the prologue wrote.

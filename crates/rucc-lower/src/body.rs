@@ -3959,6 +3959,11 @@ impl<'u> Body<'_, 'u> {
     /// the answer there already and there is nothing to read. A `long double` goes back on the x87
     /// stack, which the block does not hold, and it is read from where `xmm0` is.
     ///
+    /// i386 has gcc's block for a target with no vector registers to return in: `eax` at 0, `edx`
+    /// at 4 and `st0` at 8, written whole as the ten bytes of the x87 format. So the words are read
+    /// four bytes apart, and a floating point answer is read as that format and narrowed to the
+    /// type the function returns, which puts the same value back on the x87 stack.
+    ///
     /// Nothing is after it, so the walk goes on in a block that nothing reaches, which is what is
     /// thrown away with the other unreachable blocks.
     fn apply_return(&mut self, block: Value, span: Span) {
@@ -3970,15 +3975,29 @@ impl<'u> Body<'_, 'u> {
             }
             Pass::Ignore | Pass::Reference | Pass::Memory => Vec::new(),
         };
+        const X87: u64 = 8;
+        let i386 = self.target().tuple.arch() == Arch::X86;
+        let word = if i386 { 4 } else { 8 };
         let (mut words, mut vectors) = (0, 0);
         let mut values = Vec::with_capacity(returns.len());
         for ty in returns {
+            if i386 && ty.is_float() {
+                let x87 = Type::float(rucc_ir::Float::F80);
+                let from = self.offset(block, X87, span);
+                let value = self.build(span).load(x87, from, untyped(4), Flags::NONE);
+                let value = match ty == x87 {
+                    true => value,
+                    false => self.build(span).unary(Opcode::FPTrunc, value, ty),
+                };
+                values.push(value);
+                continue;
+            }
             let at = if ty.is_float() || ty.is_vector() {
                 vectors += 1;
                 VECTORS + 16 * (vectors - 1)
             } else {
                 words += 1;
-                WORDS + 8 * (words - 1)
+                WORDS + word * (words - 1)
             };
             let from = self.offset(block, at, span);
             values.push(self.build(span).load(ty, from, untyped(8), Flags::NONE));
