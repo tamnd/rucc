@@ -511,7 +511,29 @@ impl Checker<'_> {
         node.body = Some(stmt);
         self.tast.set_decl(id, node);
         self.tast.record_definition(id, span);
+        if !nested {
+            self.never_defined();
+        }
         Some(id)
+    }
+
+    /// Reports each nested function declared with `auto` in the function just checked and
+    /// never defined in it, in gcc's words. Nothing else could define it, since it has no
+    /// linkage, and a call to it would be a call to nothing.
+    fn never_defined(&mut self) {
+        for (id, span) in std::mem::take(&mut self.nested_ahead) {
+            if self.tast[id].state != Definition::Declared {
+                continue;
+            }
+            let spelled = self.tast[id].name.map_or_else(String::new, |n| self.text(n).to_owned());
+            self.report(
+                Diagnostic::error(
+                    format!("nested function '{spelled}' declared but never defined"),
+                    span,
+                )
+                .with_code("E0882"),
+            );
+        }
     }
 
     /// What an old-style definition's function type takes.
@@ -1073,7 +1095,11 @@ impl Checker<'_> {
             Some((source, at)) => self.copy_onto(source, at, &mut declared, section),
             None => section,
         };
+        let nested_ahead = kind == DeclKind::Function && linkage == Linkage::None;
         let id = self.merge(declared);
+        if nested_ahead {
+            self.nested_ahead.push((id, span));
+        }
         self.record_section(id, section);
         if may!(carried, "btf_decl_tag") {
             let mut lists = self.btf_starred_decl_tags(node.derived);
@@ -1493,9 +1519,13 @@ impl Checker<'_> {
         if kind == DeclKind::Function {
             // A function is never automatic and never lives in a block, so the only storage
             // class it takes is `static`, and that only where there is a file for it to be
-            // static to.
+            // static to. GNU C adds one: `auto` in a block declares a nested function of that
+            // block ahead of its definition, which is how glibc's `printf_fp.c` and libquadmath's
+            // copy of it declare `hack_digit`. Such a name has no linkage, as the definition has.
+            let nested = storage == Some(StorageClass::Auto) && !file_scope;
             let invalid = match storage {
-                Some(StorageClass::Auto | StorageClass::Register) => true,
+                Some(StorageClass::Auto) => file_scope,
+                Some(StorageClass::Register) => true,
                 Some(StorageClass::Static) => !file_scope,
                 _ => false,
             };
@@ -1509,7 +1539,9 @@ impl Checker<'_> {
                     .with_code("E0596"),
                 );
             }
-            let linkage = if storage == Some(StorageClass::Static) && file_scope {
+            let linkage = if nested {
+                Linkage::None
+            } else if storage == Some(StorageClass::Static) && file_scope {
                 Linkage::Internal
             } else {
                 Linkage::External
@@ -2333,6 +2365,9 @@ impl Checker<'_> {
             (Linkage::None, Linkage::None) if node.init.is_some() && declared.initialized => {
                 return true;
             }
+            // A nested function declared with `auto` and then defined, or declared twice, in the
+            // same block. gcc takes both, and two bodies are the redefinition `merge` reports.
+            (Linkage::None, Linkage::None) if node.kind == DeclKind::Function => return true,
             (Linkage::None, Linkage::None) => {
                 format!("redeclaration of '{spelled}' with no linkage")
             }
@@ -4806,6 +4841,65 @@ mod tests {
         // what the lowering reads to tell it from a declaration of a function defined elsewhere.
         let dumped = dump(&c, outer);
         assert!(dumped.contains("decl #1 g : void(void) function defined"), "{dumped}");
+    }
+
+    /// `void f(void) { auto void g(void); g(); void g(void) {} }`, the GNU way of declaring a
+    /// nested function ahead of its body, which glibc's `printf_fp.c` uses for `hack_digit`.
+    #[test]
+    fn a_nested_function_declared_auto_ahead_of_its_body_is_the_one_defined() {
+        let mut f = Fixture::new();
+        let mut ahead = f.builtin(BuiltinSet::VOID);
+        ahead.storage = Some(StorageClass::Auto);
+        let ahead = f.var(ahead, "g", &[function()], None);
+        let ahead = f.stmt(ast::Stmt::Decl(ahead));
+        let call = f.use_name("g");
+        let call = f.stmt(ast::Stmt::Expr(call));
+        let empty = f.block(&[]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let nested = f.define(specs, "g", &[function()], empty);
+        let nested = f.stmt(ast::Stmt::Decl(nested));
+        let body = f.block(&[ahead, call, nested]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        let list = c.check_decl(decl);
+        let outer = only(&c, list);
+
+        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        let dumped = dump(&c, outer);
+        assert!(dumped.contains("decl #1 g : void(void) function defined"), "{dumped}");
+        assert!(!dumped.contains("decl #2"), "{dumped}");
+    }
+
+    #[test]
+    fn a_nested_function_declared_auto_and_never_defined_is_an_error() {
+        let mut f = Fixture::new();
+        let mut ahead = f.builtin(BuiltinSet::VOID);
+        ahead.storage = Some(StorageClass::Auto);
+        let ahead = f.var(ahead, "g", &[function()], None);
+        let ahead = f.stmt(ast::Stmt::Decl(ahead));
+        let body = f.block(&[ahead]);
+        let specs = f.builtin(BuiltinSet::VOID);
+        let decl = f.define(specs, "f", &[function()], body);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        assert_eq!(message(&c), "nested function 'g' declared but never defined");
+    }
+
+    #[test]
+    fn a_function_declared_auto_at_file_scope_is_an_error() {
+        let mut f = Fixture::new();
+        let mut specs = f.builtin(BuiltinSet::VOID);
+        specs.storage = Some(StorageClass::Auto);
+        let decl = f.var(specs, "g", &[function()], None);
+
+        let mut c = f.checker();
+        c.check_decl(decl);
+
+        assert_eq!(message(&c), "invalid storage class for function 'g'");
     }
 
     /// `void f(a) char a; {}`, which takes its parameter type from the declaration under the
