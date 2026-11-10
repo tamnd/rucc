@@ -412,6 +412,9 @@ pub fn write(
         beyond(text, data)?;
     }
     let mut obj = Writer::new(flavour.binary(), machine, Endianness::Little);
+    if flavour == Flavour::Elf {
+        elf::mark(&mut obj, target, machine);
+    }
     // The names go in as they are, and the one format and machine that decorates them has that
     // done by `spell` rather than by the writer underneath.
     obj.set_mangling(Mangling::None);
@@ -3111,6 +3114,40 @@ mod tests {
             let os_abi = elf.elf_header().e_ident.os_abi;
             assert_eq!(os_abi, elf::ELFOSABI_GNU, "gas marks a file with an ifunc in it as GNU");
         }
+    }
+
+    /// GNU as for FreeBSD on x86-64 and i386 writes `ELFOSABI_FREEBSD`, and the FreeBSD ld reads
+    /// a file without it as generic ELF. A shared object linked only from such files gets no
+    /// dynamic sections, which is how the kernel's `elf-vdso.so.1` came out with no symbols.
+    #[test]
+    fn a_freebsd_object_says_freebsd_in_its_header() {
+        let os_abi = |arch, os, env, aliases: &[Alias]| {
+            let target = TargetInfo::new(Triple::new(arch, os, env));
+            let text = calling("puts");
+            let output = Output::default();
+            let bytes = write(&text, &Data::default(), aliases, &target, output, &Info::default())
+                .expect("an object");
+            match object::File::parse(&bytes[..]).expect("a readable object") {
+                object::File::Elf64(elf) => elf.elf_header().e_ident.os_abi,
+                object::File::Elf32(elf) => elf.elf_header().e_ident.os_abi,
+                _ => panic!("an ELF file"),
+            }
+        };
+        let none = Env::None;
+        assert_eq!(os_abi(Arch::X86_64, Os::FreeBsd(15), none, &[]), elf::ELFOSABI_FREEBSD);
+        assert_eq!(os_abi(Arch::X86, Os::FreeBsd(15), none, &[]), elf::ELFOSABI_FREEBSD);
+        assert_eq!(os_abi(Arch::X86_64, Os::Linux, Env::Gnu, &[]), elf::ELFOSABI_NONE);
+        assert_eq!(os_abi(Arch::X86_64, Os::NetBsd, none, &[]), elf::ELFOSABI_NONE);
+        // An ifunc does not change it. BFD keeps the FreeBSD number for a file with one.
+        let aliases = [Alias {
+            name: "g".to_owned(),
+            target: "f".to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            ifunc: true,
+        }];
+        assert_eq!(os_abi(Arch::X86_64, Os::FreeBsd(15), none, &aliases), elf::ELFOSABI_FREEBSD);
+        assert_eq!(os_abi(Arch::X86_64, Os::Linux, Env::Gnu, &aliases), elf::ELFOSABI_GNU);
     }
 
     /// The other formats have no symbol type for one, and an ordinary name would be a call to the

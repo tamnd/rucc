@@ -613,6 +613,9 @@ pub fn assembled_described(
         };
         obj.flags = object::FileFlags::Elf { os_abi: elf::ELFOSABI_NONE, abi_version: 0, e_flags };
     }
+    if flavour == Flavour::Elf {
+        crate::elf::mark(&mut obj, target, machine);
+    }
     // A name in a file of assembly is already the name in the object, underscore and all, which the
     // writer underneath would otherwise put a second one on for COFF on i386.
     obj.set_mangling(object::write::Mangling::None);
@@ -2502,5 +2505,29 @@ mod tests {
         };
         let input = Assembled { parts: vec![record], names: Vec::new(), subsections: false };
         assert!(assembled(&input, &target()).is_err());
+    }
+
+    /// A file of assembly for FreeBSD on x86-64 or i386 says so in its header, as one from GNU as
+    /// does, and AArch64 there and the other systems keep `ELFOSABI_NONE`.
+    #[test]
+    fn a_freebsd_listing_says_freebsd_in_its_header() {
+        let os_abi = |arch, os, env| {
+            let input = Assembled {
+                parts: vec![part(".text", vec![0x90])],
+                names: Vec::new(),
+                subsections: false,
+            };
+            let target = TargetInfo::new(Triple::new(arch, os, env));
+            let bytes = assembled(&input, &target).expect("an object");
+            match object::File::parse(&bytes[..]).expect("a readable object") {
+                object::File::Elf64(elf) => elf.elf_header().e_ident.os_abi,
+                object::File::Elf32(elf) => elf.elf_header().e_ident.os_abi,
+                _ => panic!("an ELF file"),
+            }
+        };
+        assert_eq!(os_abi(TargetArch::X86_64, Os::FreeBsd(15), Env::None), elf::ELFOSABI_FREEBSD);
+        assert_eq!(os_abi(TargetArch::X86, Os::FreeBsd(15), Env::None), elf::ELFOSABI_FREEBSD);
+        assert_eq!(os_abi(TargetArch::Aarch64, Os::FreeBsd(15), Env::None), elf::ELFOSABI_NONE);
+        assert_eq!(os_abi(TargetArch::X86_64, Os::Linux, Env::Gnu), elf::ELFOSABI_NONE);
     }
 }
