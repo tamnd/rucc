@@ -1311,3 +1311,21 @@ fn pedantic_errors_takes_the_extensions_out_of_has_extension() {
     let strict = preprocessed("has-extension-strict", &["-std=gnu99", "-pedantic-errors"], asked);
     assert_eq!(strict, "0 0 1");
 }
+
+/// In a body at `-O2`, gcc reads a `const` object as its value for `__builtin_constant_p` before
+/// an enumerator, a case label or a static assertion takes the answer. At `-O0` the answer is
+/// zero there. The const-local case of rucc-corpus's const-ice facet is this.
+#[test]
+fn constant_p_of_a_const_object_is_one_in_a_constant_of_a_body_when_optimizing() {
+    let source = "int f(void) {\n\
+                      const unsigned n = 4u;\n\
+                      const unsigned m = n * 2u + 1u;\n\
+                      enum { a = __builtin_constant_p(m) ? 3000 : 1000 };\n\
+                      _Static_assert(__builtin_constant_p(n), \"n folds\");\n\
+                      return a + 4;\n\
+                  }\n";
+    let got = ir("constant-p-const-o2", &["-O2"], source);
+    assert!(got.contains("3004"), "the folded answer is missing from:\n{got}");
+    let out = compile("constant-p-const-o0", &["--emit=ir", "-O0"], source);
+    assert!(!out.status.success(), "-O0 took the static assertion");
+}

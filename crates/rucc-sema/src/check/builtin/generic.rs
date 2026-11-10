@@ -489,8 +489,14 @@ impl Checker<'_> {
     /// A string literal counts and the address of an object does not, which is measured on gcc
     /// 16 rather than reasoned about: `__builtin_constant_p("abc")` is one and
     /// `__builtin_constant_p(&g)` is zero, at every optimization level.
+    ///
+    /// In a body, when gcc optimizes, it reads a `const` object as its value before it asks, the
+    /// same reading a case label gets. So after `const unsigned m = 9u;`,
+    /// `enum { E = __builtin_constant_p (m) ? 3 : 1 };` is 3 at `-O2`. Left for the optimizer, the
+    /// question would be answered after the enumerator had taken it as zero.
     fn folds(&mut self, arg: ExprId) -> bool {
-        let mut eval = self.eval();
+        let optimized = self.cx.optimizing && self.body.is_some();
+        let mut eval = self.eval().optimized(optimized);
         let value = eval.constant(arg);
         let _ = eval.finish();
         match value {
