@@ -33,8 +33,8 @@ use std::str::FromStr;
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
 use rucc_target::{
-    Arch, BranchProtection, CodeModel, Env, Isa, Os, Speculation, TargetInfo, TlsModel, Triple,
-    wasm,
+    Arch, BranchProtection, CodeModel, Env, Isa, Os, Processor, Speculation, TargetInfo, TlsModel,
+    Triple, wasm,
 };
 
 /// An optimisation level.
@@ -2545,6 +2545,14 @@ pub struct Options {
     /// Whether `-march=` or `-mtune=` named a processor, which is what decides whether a gcc
     /// configured with a default tuning still says it. NetBSD's x86 gcc says `__tune_nocona__`.
     pub tuned: bool,
+    /// The 32 bit x86 processor the unit is built for, which is what `-march=` named or what the
+    /// target's gcc builds for with no `-march=`. It decides the macros that name the processor
+    /// and the lock free answers. `None` is the Pentium 4 that the i386 backend builds for, which
+    /// is every x86 target whose gcc has not been measured, and every target that is not x86.
+    pub processor: Option<&'static Processor>,
+    /// The macros that name the processor the unit is tuned for on 32 bit x86, such as
+    /// `__tune_i386__`. They come from `-mtune=`, or from `-march=` when there is no `-mtune=`.
+    pub tune: &'static [&'static str],
     /// What an automatic object with no initializer starts out holding, from
     /// `-ftrivial-auto-var-init=`. `None` is `uninitialized`, which is the default, and otherwise
     /// the byte every byte of it is, zero for `zero` and `0xfe` for `pattern`.
@@ -3177,6 +3185,8 @@ impl Options {
             jump_tables: true,
             cmov: true,
             tuned: false,
+            processor: None,
+            tune: &[],
             auto_var_init: None,
             profile: false,
             hook: Hook::default(),
