@@ -190,6 +190,14 @@ pub struct FloatConstant {
     pub imaginary: bool,
     /// What is worth saying about the constant, for the caller that holds the span.
     pub remarks: Remarks,
+    /// The value correctly rounded into the format of `long double`, where the target evaluates
+    /// a constant of this type in `long double`, which is `__FLT_EVAL_METHOD__` 2 and a `float`
+    /// or `double` constant. [`None`] everywhere else.
+    ///
+    /// The number that was written is rounded once into this format, and not from `value`, so
+    /// `0.1f` is the `long double` nearest to a tenth. gcc does the same under
+    /// `-fexcess-precision=standard`, and the front end reads this only then.
+    pub wide: Option<Float>,
 }
 
 /// The type of a floating constant.
@@ -731,7 +739,21 @@ pub fn floating(text: &str, std: Std, target: &TargetInfo) -> Result<FloatConsta
     if status.has(Status::UNDERFLOW) && value.is_zero() {
         remarks = remarks.with(Remarks::TRUNCATED);
     }
-    Ok(FloatConstant { value, ty: suffix.ty, imaginary: suffix.imaginary, remarks })
+    let excess = matches!(
+        suffix.ty,
+        FloatConstantType::Float
+            | FloatConstantType::Double
+            | FloatConstantType::Float32
+            | FloatConstantType::Float64
+            | FloatConstantType::Float32x
+    );
+    let wide = if excess && target.excess_precision() {
+        let format = FloatConstantType::LongDouble.format(target);
+        Float::parse(&text[..index], format).ok().map(|(wide, _)| wide)
+    } else {
+        None
+    };
+    Ok(FloatConstant { value, ty: suffix.ty, imaginary: suffix.imaginary, remarks, wide })
 }
 
 /// Whether the byte after `index` is a digit in `base`, which is what makes a separator one.

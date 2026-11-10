@@ -1984,6 +1984,7 @@ mod tests {
                 ty: FloatConstantType::Double,
                 imaginary: false,
                 remarks: Remarks::default(),
+                wide: None,
             };
             let id = self.ast.add_float(constant);
             self.expr(ast::Expr::Float(id))
@@ -1997,6 +1998,7 @@ mod tests {
                 ty: FloatConstantType::Double,
                 imaginary: true,
                 remarks: Remarks::default(),
+                wide: None,
             };
             let id = self.ast.add_float(constant);
             self.expr(ast::Expr::Float(id))

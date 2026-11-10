@@ -398,6 +398,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 gnuc: opts.gnuc.major,
                 landing_pads: opts.control.branch(),
                 rtd: opts.rtd,
+                excess_constants: opts.excess_constants.unwrap_or(!opts.gnu_extensions),
             },
         );
         checker.check_unit();

@@ -37,7 +37,7 @@
 //! symptom is a whole expression coming out unsigned on the strength of one member's declared
 //! type.
 
-use rucc_ast::UnaryOp;
+use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Interner;
 use rucc_base::float::Status;
 use rucc_target::TargetInfo;
@@ -70,6 +70,10 @@ pub struct Conv<'a> {
     /// Whether an operation may raise an exception the program then looks at, which is
     /// `-ftrapping-math` and is on by default. The saturating fold below is what reads it.
     pub trapping_math: bool,
+    /// Whether a floating constant has the precision of `long double` where the target evaluates
+    /// `float` and `double` in it, which is `-fexcess-precision=standard`. See
+    /// [`Conv::evaluated`] for what reads it.
+    pub excess_constants: bool,
 }
 
 impl Conv<'_> {
@@ -228,12 +232,35 @@ impl Conv<'_> {
             self.tast[rhs].ty,
             self.target,
         )?;
+        // Under `-fexcess-precision=fast` gcc folds an operation on two constants in their own
+        // type before anything is evaluated wider, so `0.1 * 3` is the `double` product there.
+        let operation =
+            operation && (self.excess_constants || !(self.folded(lhs) && self.folded(rhs)));
         let wide = match self.excess_type(common) {
             Some(wide) if operation || self.is_excess(lhs) || self.is_excess(rhs) => wide,
             _ => common,
         };
         let (lhs, rhs) = (self.unexcess(lhs), self.unexcess(rhs));
         Some((self.arithmetic(lhs, wide), self.arithmetic(rhs, wide), common))
+    }
+
+    /// Whether `expr` is made of constants and the arithmetic on them only, which is what gcc
+    /// folds in the type it was written in under `-fexcess-precision=fast`.
+    fn folded(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Const(_) => true,
+            ExprKind::Cast(operand)
+            | ExprKind::Unary { op: UnaryOp::Plus | UnaryOp::Minus, operand }
+            | ExprKind::Convert { kind: Conversion::Arithmetic | Conversion::Excess, operand } => {
+                self.folded(operand)
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div,
+                lhs,
+                rhs,
+            } => self.folded(lhs) && self.folded(rhs),
+            _ => false,
+        }
     }
 
     /// The type an operation on a value of `ty` is done in under `__FLT_EVAL_METHOD__` 2,
@@ -561,6 +588,7 @@ mod tests {
                 target: &self.target,
                 names: &self.names,
                 trapping_math: true,
+                excess_constants: false,
             }
         }
 
