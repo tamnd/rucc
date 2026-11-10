@@ -15,7 +15,9 @@
 //! that produces a working program with a weakness in it, so it is written here and a test says so.
 
 use object::write::{Object as Writer, SymbolId};
-use object::{SectionFlags, SectionKind, SymbolFlags, elf};
+use object::{Architecture, SectionFlags, SectionKind, SymbolFlags, elf};
+use rucc_target::TargetInfo;
+use rucc_tuple::Os;
 
 use crate::section::{Array, Binding, Property, Reference, Tls, Visibility};
 
@@ -263,11 +265,40 @@ pub(crate) fn indirect(obj: &mut Writer<'_>, id: SymbolId) {
     if let SymbolFlags::Elf { st_info, .. } = obj.symbol_flags_mut(id) {
         *st_info = st_info.st_bind() | elf::STT_GNU_IFUNC;
     }
+    let (os_abi, abi_version, e_flags) = match obj.flags {
+        object::FileFlags::Elf { os_abi, abi_version, e_flags } => (os_abi, abi_version, e_flags),
+        _ => (elf::ELFOSABI_NONE, 0, elf::FileFlags(0)),
+    };
+    // A FreeBSD file keeps its own number, which BFD accepts for the type as it does GNU's.
+    let os_abi = if os_abi == elf::ELFOSABI_FREEBSD { os_abi } else { elf::ELFOSABI_GNU };
+    obj.flags = object::FileFlags::Elf { os_abi, abi_version, e_flags };
+}
+
+/// The `EI_OSABI` byte a file for this target starts with, which GNU as writes from the BFD target
+/// it was built for.
+///
+/// That is `ELFOSABI_FREEBSD` for x86-64 and i386 on FreeBSD, and `ELFOSABI_NONE` for the rest. It
+/// is not a detail of the header only. The FreeBSD ld picks its FreeBSD target for a file with the
+/// number and reads one without it as a generic ELF file. It then makes no dynamic sections for a
+/// shared object built from such files alone, because it makes them only for an input of the
+/// output's own target. The kernel's `elf-vdso.so.1`, which is linked from one object, came out
+/// with no dynamic symbols, and the three kernel units that include the offsets read from them
+/// did not compile.
+pub(crate) fn os_abi(target: &TargetInfo, machine: Architecture) -> elf::OsAbi {
+    match (target.tuple.os(), machine) {
+        (Os::FreeBsd, Architecture::X86_64 | Architecture::I386) => elf::ELFOSABI_FREEBSD,
+        _ => elf::ELFOSABI_NONE,
+    }
+}
+
+/// Puts the `EI_OSABI` byte of [`os_abi`] in the header, with the flags beside it left as they are.
+pub(crate) fn mark(obj: &mut Writer<'_>, target: &TargetInfo, machine: Architecture) {
     let (abi_version, e_flags) = match obj.flags {
         object::FileFlags::Elf { abi_version, e_flags, .. } => (abi_version, e_flags),
         _ => (0, elf::FileFlags(0)),
     };
-    obj.flags = object::FileFlags::Elf { os_abi: elf::ELFOSABI_GNU, abi_version, e_flags };
+    let os_abi = os_abi(target, machine);
+    obj.flags = object::FileFlags::Elf { os_abi, abi_version, e_flags };
 }
 
 /// The type and flags a section of function addresses the startup code calls has.
