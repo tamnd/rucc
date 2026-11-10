@@ -1956,6 +1956,7 @@ fn generate(
                         < rucc_session::GasVersion { major: 2, minor: 42, patch: 0 },
                     // The listing writes `la` for a slot of the table and `lla` for the rest.
                     nopic: false,
+                    relax: opts.relax,
                 };
                 let read = rucc_asm::read_with(&listing, arch, target.object_format, flags)
                     .map_err(|trouble| {
@@ -2495,6 +2496,8 @@ fn describe(
         } else {
             rucc_debug::Version::Five
         },
+        // Every RISC-V unit is read back from its listing, so this is the reader's own answer.
+        relaxed: opts.relax && target.tuple.arch() == Arch::Riscv64,
     };
     let mut info = rucc_debug::write(&unit).map_err(|why| why.to_string())?;
     info.chunks.extend(frames.clone());
@@ -2732,6 +2735,7 @@ fn describe_wasm(
         } else {
             rucc_debug::Version::Five
         },
+        relaxed: false,
     };
     rucc_debug::write(&unit).map_err(|why| why.to_string())
 }

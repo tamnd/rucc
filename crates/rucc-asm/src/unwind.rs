@@ -189,12 +189,42 @@ pub(crate) fn table(
     named: &[Option<Named>],
     begins: &[Begins],
 ) -> Result<Unwind, Error> {
+    relaxed_table(funcs, rows, conv, format, named, begins, &[])
+}
+
+/// What a relaxed RISC-V object needs to say about one function in its tables, where the linker
+/// may take bytes out of the code. See [`relaxed_table`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Relaxed {
+    /// A label at the end of the function, for its length to be a pair of relocations.
+    pub(crate) end: String,
+    /// The distances between rows that are not a number, by where the two rows are in the
+    /// function, with a label at each.
+    pub(crate) pairs: Vec<((usize, usize), (String, String))>,
+}
+
+/// The same as [`table`], for a relaxed RISC-V object when `relaxed` has an entry for each
+/// function.
+///
+/// Then the length of each function is the distance from its first label to its end, as a pair of
+/// relocations, and so is each distance from one row to the next that gas could not work out,
+/// which is one across a piece of code the linker may shorten. The bytes hold the distance as it
+/// is now, in the form it needs now, which is the form gas picks.
+pub(crate) fn relaxed_table(
+    funcs: &[Extent],
+    rows: &[Rows],
+    conv: &CallRegs,
+    format: ObjectFormat,
+    named: &[Option<Named>],
+    begins: &[Begins],
+    relaxed: &[Relaxed],
+) -> Result<Unwind, Error> {
     debug_assert_eq!(funcs.len(), rows.len(), "a record per function");
     if funcs.is_empty() {
         return Ok(Unwind::default());
     }
     match format {
-        ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv, named, begins, true)),
+        ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv, named, begins, true, relaxed)),
         ObjectFormat::Coff => windows(funcs, rows, conv),
         // The same DWARF records, in `__TEXT,__eh_frame`, which ld64 reads and turns into the
         // compact table the unwinder searches, one entry per function that points back at its
@@ -212,7 +242,7 @@ pub(crate) fn table(
         ObjectFormat::MachO => {
             let bare: Vec<Extent> =
                 funcs.iter().map(|func| Extent { landings: Vec::new(), ..func.clone() }).collect();
-            Ok(dwarf(&bare, rows, conv, &[], begins, false))
+            Ok(dwarf(&bare, rows, conv, &[], begins, false, &[]))
         }
         // Nothing, because a WebAssembly module is not a stack a table would describe. A table
         // under a name its linker does not know is a section nothing ever looks at, which is worse
@@ -239,6 +269,18 @@ pub(crate) fn debug_frame(
     format: ObjectFormat,
     begins: &[Begins],
 ) -> Option<Chunk> {
+    relaxed_debug_frame(funcs, rows, conv, format, begins, &[])
+}
+
+/// The same as [`debug_frame`], with what [`relaxed_table`] takes.
+pub(crate) fn relaxed_debug_frame(
+    funcs: &[Extent],
+    rows: &[Rows],
+    conv: &CallRegs,
+    format: ObjectFormat,
+    begins: &[Begins],
+    relaxed: &[Relaxed],
+) -> Option<Chunk> {
     debug_assert_eq!(funcs.len(), rows.len(), "a record per function");
     if funcs.is_empty() || format != ObjectFormat::Elf {
         return None;
@@ -248,7 +290,7 @@ pub(crate) fn debug_frame(
         let begins = begins.get(at).copied().unwrap_or_default();
         let (first, rest) = leading(conv, begins, rows);
         table.choose(conv, Kind::Plain, None, begins.signal, first);
-        table.record(func, rest);
+        table.record(func, rest, relaxed.get(at));
     }
     Some(Chunk { name: DEBUG_FRAME.to_owned(), bytes: table.out.bytes, relocs: table.out.relocs })
 }
@@ -275,6 +317,7 @@ fn dwarf(
     named: &[Option<Named>],
     begins: &[Begins],
     elf: bool,
+    relaxed: &[Relaxed],
 ) -> Unwind {
     let mut table = Table::new(conv, false);
     // gas pads every header and record in `.eh_frame` to four bytes, and only the last record out
@@ -307,7 +350,7 @@ fn dwarf(
                 table.lsda = None;
             }
         }
-        table.record(func, rest);
+        table.record(func, rest, relaxed.get(at));
     }
     table.out
 }
@@ -586,21 +629,55 @@ impl Table {
     }
 
     /// One function's record.
-    fn record(&mut self, func: &Extent, rows: &[(usize, CfiOp)]) {
+    fn record(&mut self, func: &Extent, rows: &[(usize, CfiOp)], relaxed: Option<&Relaxed>) {
         let start = self.out.bytes.len();
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
-        if self.debug {
-            self.debug_record(func);
-        } else {
-            self.eh_record(func);
+        // Where the length of the function goes, which is the last pointer of the two.
+        let length = if self.debug { self.debug_record(func) } else { self.eh_record(func) };
+        if let Some(relaxed) = relaxed {
+            let (bytes, width) = length;
+            self.out.bytes[bytes..bytes + width].fill(0);
+            let bytes8 = u8::try_from(width).expect("a pointer width");
+            self.pair(bytes, Reference::Sum { bytes: bytes8, minus: false }, &relaxed.end);
+            self.pair(bytes, Reference::Sum { bytes: bytes8, minus: true }, &func.name);
         }
         let mut at = 0;
         for &(offset, op) in rows {
-            self.advance(offset - at);
+            let pair = relaxed.and_then(|relaxed| {
+                relaxed.pairs.iter().find(|(places, _)| *places == (at, offset)).map(|(_, l)| l)
+            });
+            match pair {
+                Some((from, to)) => {
+                    let (from, to) = (from.clone(), to.clone());
+                    self.relaxed_advance(offset - at, &from, &to);
+                }
+                None => self.advance(offset - at),
+            }
             at = offset;
             self.row(op);
         }
         self.pad(start);
+    }
+
+    /// A relocation of a pair against a label, with nothing added.
+    fn pair(&mut self, at: usize, kind: Reference, symbol: &str) {
+        self.out.relocs.push(Reloc { at, symbol: symbol.to_owned(), kind, addend: 0, after: 0 });
+    }
+
+    /// The same as [`Table::advance`], for a distance from the label `from` to the label `to`
+    /// that the linker writes again, at the place the form that holds it now has for it.
+    fn relaxed_advance(&mut self, by: usize, from: &str, to: &str) {
+        use rucc_target::riscv64::Fixup as F;
+        let at = self.out.bytes.len();
+        self.advance(by);
+        let (at, set, sub) = match self.out.bytes.len() - at {
+            1 => (at, F::Set6, F::Sub6),
+            2 => (at + 1, F::Set8, F::Sub8),
+            3 => (at + 1, F::Set16, F::Sub16),
+            _ => (at + 1, F::Set32, F::Sub32),
+        };
+        self.pair(at, Reference::Riscv(set), to);
+        self.pair(at, Reference::Riscv(sub), from);
     }
 
     /// Where the header and the function are, in the debugger's copy.
@@ -610,7 +687,7 @@ impl Table {
     /// of it, so it is a relocation against the section itself. The function is its address and
     /// its length, each the width of a pointer, with no augmentation after them because the
     /// header asked for none.
-    fn debug_record(&mut self, func: &Extent) {
+    fn debug_record(&mut self, func: &Extent) -> (usize, usize) {
         let word = self.align;
         self.out.relocs.push(Reloc {
             at: self.out.bytes.len(),
@@ -628,12 +705,14 @@ impl Table {
             after: 0,
         });
         self.out.bytes.resize(self.out.bytes.len() + word, 0);
+        let length = self.out.bytes.len();
         let len = u64::try_from(func.len).expect("a function this size").to_le_bytes();
         self.out.bytes.extend_from_slice(&len[..word]);
+        (length, word)
     }
 
     /// Where the header and the function are, in the unwind table.
-    fn eh_record(&mut self, func: &Extent) {
+    fn eh_record(&mut self, func: &Extent) -> (usize, usize) {
         // The distance back to the header, counted from this field rather than from the record,
         // which is how a reader that has just read the length knows where to look.
         let back = u32::try_from(self.out.bytes.len() - self.cie).expect("an object this size");
@@ -650,6 +729,7 @@ impl Table {
             after: 0,
         });
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
+        let length = self.out.bytes.len();
         let len = u32::try_from(func.len).expect("a function this size");
         self.out.bytes.extend_from_slice(&len.to_le_bytes());
         // No augmentation of its own. The header said `zR` and `R` is answered there, so what is
@@ -677,6 +757,7 @@ impl Table {
                 self.pointer(encoding, &name, size);
             }
         }
+        (length, 4)
     }
 
     /// One row, as the opcode DWARF spells it.

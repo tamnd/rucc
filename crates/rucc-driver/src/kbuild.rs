@@ -261,10 +261,6 @@ pub(crate) const TABLE: &[Row] = &[
              as __riscv_save_0",
         ),
     ),
-    only(
-        RV,
-        same("-mno-relax", "no instruction here is marked for the linker to relax, R_RISCV_RELAX"),
-    ),
     only(RV, same("-mno-riscv-attribute", "no object here has a .riscv.attributes section")),
 ];
 

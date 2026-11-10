@@ -123,6 +123,15 @@ pub struct Unit {
     pub mach_o: bool,
     /// Which version of DWARF to write.
     pub version: Version,
+    /// Whether the code is RISC-V code the linker may relax, which takes bytes out of a function
+    /// after this is written.
+    ///
+    /// Then no distance inside a function is a number here. Every address is a relocation, which
+    /// the object writer points at a label in the code because the linker moves a label and not an
+    /// addend, every end is an address rather than a length, and every step of the line program is
+    /// a `DW_LNS_fixed_advance_pc` whose two bytes the linker works out from a pair of relocations.
+    /// That is what gcc and gas write for the same code.
+    pub relaxed: bool,
 }
 
 /// A version of DWARF this writes.
@@ -319,6 +328,8 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
         })
         .collect();
     for (index, func) in unit.funcs.iter().enumerate() {
+        // A relaxed unit has its sequences written again by `sequences`, but the writer underneath
+        // only writes a line program it has rows for, unless a DIE names one of its files.
         if func.rows.is_empty() {
             continue;
         }
@@ -408,6 +419,9 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
         root.set(gimli::DW_AT_low_pc, gimli::write::AttributeValue::Address(zero));
     }
     tree::describe(&mut dwarf, unit, &files)?;
+    if unit.relaxed {
+        ended(&mut dwarf.unit);
+    }
     let mut sections = gimli::write::Sections::new(Section::default());
     dwarf.write(&mut sections).map_err(refused)?;
     let mut info = Info::default();
@@ -444,7 +458,226 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
         });
         Ok::<(), Error>(())
     })?;
+    if unit.relaxed {
+        let line = gimli::SectionId::DebugLine.name();
+        if let Some(chunk) = info.chunks.iter_mut().find(|chunk| chunk.name == line) {
+            sequences(unit, chunk);
+        }
+    }
     Ok(info)
+}
+
+/// The sequences of a relaxed line program, in place of the ones the writer underneath wrote
+/// after its header, as gas writes them: the address set at the front of each function, and then at
+/// each row the line moved, a `DW_LNS_fixed_advance_pc` and a `DW_LNS_copy`. The two bytes of the
+/// advance are zero, and an `R_RISCV_ADD16` and an `R_RISCV_SUB16` from the row before have the
+/// linker fill them in. See [`Unit::relaxed`].
+fn sequences(unit: &Unit, chunk: &mut Chunk) {
+    let five = unit.version == Version::Five;
+    // The header is the 32 bit length, the version, in version five the size of an address and of
+    // a segment, and the length of the rest of the header, which counts from after itself.
+    let length = if five { 8 } else { 6 };
+    let Some(header) = chunk.bytes.get(length..length + 4) else { return };
+    let header = u32::from_le_bytes(header.try_into().unwrap_or_default()) as usize;
+    let end = length + 4 + header;
+    chunk.bytes.truncate(end);
+    chunk.relocs.retain(|reloc| reloc.at < end);
+    // The writer numbers files from zero in version five, where slot zero is the unit's own file,
+    // and from one before it, and gives a name it already has the slot it had.
+    let mut slots: Vec<Vec<u8>> = Vec::new();
+    let bare = |name: &str| -> Vec<u8> { name.bytes().filter(|&byte| byte != 0).collect() };
+    if five {
+        slots.push(bare(&unit.name));
+    }
+    let numbers: Vec<u64> = unit
+        .files
+        .iter()
+        .map(|file| {
+            let file = bare(file);
+            let slot = slots.iter().position(|had| *had == file).unwrap_or_else(|| {
+                slots.push(file);
+                slots.len() - 1
+            });
+            slot as u64 + u64::from(!five)
+        })
+        .collect();
+    let out = &mut chunk.bytes;
+    let relocs = &mut chunk.relocs;
+    let pointer = unit.pointer;
+    let set = |out: &mut Vec<u8>, relocs: &mut Vec<Reloc>, symbol: &str, addend: u64| {
+        out.extend_from_slice(&[0, pointer + 1, 2]);
+        relocs.push(Reloc {
+            at: out.len(),
+            symbol: symbol.to_owned(),
+            kind: Reference::Address { bytes: pointer },
+            addend: addend as i64,
+            after: 0,
+        });
+        out.extend(std::iter::repeat_n(0, usize::from(pointer)));
+    };
+    // gas sets the address again rather than trust two bytes once a step comes near what they
+    // hold.
+    let step = |out: &mut Vec<u8>, relocs: &mut Vec<Reloc>, symbol: &str, from: u64, to: u64| {
+        if to - from > 50_000 {
+            set(out, relocs, symbol, to);
+            return;
+        }
+        out.push(gimli::DW_LNS_fixed_advance_pc.0);
+        for (addend, minus) in [(to, false), (from, true)] {
+            relocs.push(Reloc {
+                at: out.len(),
+                symbol: symbol.to_owned(),
+                kind: Reference::Sum { bytes: 2, minus },
+                addend: addend as i64,
+                after: 0,
+            });
+        }
+        out.extend_from_slice(&[0, 0]);
+    };
+    for func in unit.funcs.iter().filter(|func| !func.rows.is_empty()) {
+        let symbol = func.symbol.as_deref().unwrap_or(&func.name);
+        set(out, relocs, symbol, 0);
+        let (mut file, mut line, mut column) = (1, 1i64, 0);
+        let mut last: Option<u64> = None;
+        let mut said: Option<(usize, u32, u32)> = None;
+        for row in &func.rows {
+            let now = (row.file, row.line, row.column);
+            let body = func.prologue_end == Some(row.at);
+            if said == Some(now) && !body {
+                continue;
+            }
+            said = Some(now);
+            let number = numbers.get(row.file).copied().unwrap_or(1);
+            if file != number {
+                file = number;
+                out.push(gimli::DW_LNS_set_file.0);
+                leb(out, file);
+            }
+            if column != u64::from(row.column) {
+                column = u64::from(row.column);
+                out.push(gimli::DW_LNS_set_column.0);
+                leb(out, column);
+            }
+            if body {
+                out.push(gimli::DW_LNS_set_prologue_end.0);
+            }
+            let delta = i64::from(row.line) - line;
+            line = i64::from(row.line);
+            match last {
+                None if row.at == 0 => {
+                    if delta != 0 {
+                        out.push(gimli::DW_LNS_advance_line.0);
+                        signed(out, delta);
+                    }
+                }
+                _ => {
+                    out.push(gimli::DW_LNS_advance_line.0);
+                    signed(out, delta);
+                    step(out, relocs, symbol, last.unwrap_or(0), row.at);
+                }
+            }
+            out.push(gimli::DW_LNS_copy.0);
+            last = Some(row.at);
+        }
+        let last = last.unwrap_or(0);
+        step(out, relocs, symbol, last, func.len.max(last));
+        out.extend_from_slice(&[0, 1, gimli::DW_LNE_end_sequence.0]);
+    }
+    // The header's length counts everything after itself.
+    if let Ok(length) = u32::try_from(out.len() - 4) {
+        out[..4].copy_from_slice(&length.to_le_bytes());
+    }
+}
+
+/// An unsigned LEB128 number.
+fn leb(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// A signed LEB128 number.
+fn signed(out: &mut Vec<u8>, mut value: i64) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0) {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Every length in a relaxed unit turned into an end, which is an address and so a relocation the
+/// linker moves with the code: a high PC after a low one, and each stretch of a range list or a
+/// location list. See [`Unit::relaxed`].
+fn ended(unit: &mut gimli::write::Unit) {
+    use gimli::write::{
+        Address, AttributeValue, Location, LocationList, LocationListTable, Range, RangeList,
+        RangeListTable,
+    };
+    let end = |begin: Address, length: u64| match begin {
+        Address::Symbol { symbol, addend } => {
+            Address::Symbol { symbol, addend: addend.saturating_add_unsigned(length) }
+        }
+        Address::Constant(at) => Address::Constant(at + length),
+    };
+    let (mut ranges, mut locations) = (RangeListTable::default(), LocationListTable::default());
+    let mut entries = vec![unit.root()];
+    let mut at = 0;
+    while let Some(&id) = entries.get(at) {
+        entries.extend(unit.get(id).children().copied());
+        at += 1;
+    }
+    for id in entries {
+        let entry = unit.get(id);
+        let low = entry.get(gimli::DW_AT_low_pc).cloned();
+        let mut changed = Vec::new();
+        for attr in entry.attrs() {
+            let value = match (attr.name(), attr.get(), &low) {
+                (
+                    gimli::DW_AT_high_pc,
+                    &AttributeValue::Udata(length),
+                    Some(AttributeValue::Address(begin)),
+                ) => AttributeValue::Address(end(*begin, length)),
+                (_, &AttributeValue::RangeListRef(list), _) => {
+                    let list = unit.ranges.get(list).0.iter().map(|range| match *range {
+                        Range::StartLength { begin, length } => {
+                            Range::StartEnd { begin, end: end(begin, length) }
+                        }
+                        ref other => other.clone(),
+                    });
+                    AttributeValue::RangeListRef(ranges.add(RangeList(list.collect())))
+                }
+                (_, &AttributeValue::LocationListRef(list), _) => {
+                    let list = unit.locations.get(list).0.iter().map(|place| match place {
+                        Location::StartLength { begin, length, data } => Location::StartEnd {
+                            begin: *begin,
+                            end: end(*begin, *length),
+                            data: data.clone(),
+                        },
+                        other => other.clone(),
+                    });
+                    let list = LocationList(list.collect());
+                    AttributeValue::LocationListRef(locations.add(list))
+                }
+                _ => continue,
+            };
+            changed.push((attr.name(), value));
+        }
+        let entry = unit.get_mut(id);
+        for (name, value) in changed {
+            entry.set(name, value);
+        }
+    }
+    (unit.ranges, unit.locations) = (ranges, locations);
 }
 
 /// A string as the line program writes one, which is a reference into `.debug_line_str`.
@@ -513,6 +746,7 @@ mod tests {
             frames: true,
             mach_o: false,
             version: Version::Five,
+            relaxed: false,
         }
     }
 
@@ -617,6 +851,52 @@ mod tests {
         assert!(unit(&four).bytes.contains(&c99));
         assert!(!unit(&four).bytes.contains(&c11));
         assert!(unit(&five).bytes.contains(&c11));
+    }
+
+    /// A relaxed unit leaves every distance in the function to the linker, as gcc and gas write it.
+    /// Each step of the line program is a `DW_LNS_fixed_advance_pc` with an `R_RISCV_ADD16` and an
+    /// `R_RISCV_SUB16` on its two bytes, and the end of a range is an address and not a length.
+    #[test]
+    fn a_relaxed_unit_leaves_each_distance_in_code_to_the_linker() {
+        let info = write(&Unit { relaxed: true, ..one() }).expect("sections");
+        let line = info.chunks.iter().find(|chunk| chunk.name == ".debug_line").expect("a table");
+        let pairs: Vec<_> = line
+            .relocs
+            .iter()
+            .filter(|reloc| matches!(reloc.kind, Reference::Sum { .. }))
+            .map(|reloc| (reloc.symbol.as_str(), reloc.kind, reloc.addend))
+            .collect();
+        let sum = |minus| Reference::Sum { bytes: 2, minus };
+        assert_eq!(
+            pairs,
+            [("f", sum(false), 8), ("f", sum(true), 0), ("f", sum(false), 16), ("f", sum(true), 8)]
+        );
+        // Each pair is on the two zero bytes after a `DW_LNS_fixed_advance_pc`.
+        for reloc in line.relocs.iter().filter(|reloc| matches!(reloc.kind, Reference::Sum { .. }))
+        {
+            assert_eq!(line.bytes[reloc.at - 1], gimli::DW_LNS_fixed_advance_pc.0);
+            assert_eq!(line.bytes[reloc.at..reloc.at + 2], [0, 0]);
+        }
+        let mut sequence = vec![0, 9, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+        // Slot zero is the unit's own file in version five, which is the file of both rows.
+        sequence.extend_from_slice(&[gimli::DW_LNS_set_file.0, 0]);
+        sequence.extend_from_slice(&[gimli::DW_LNS_set_column.0, 1, gimli::DW_LNS_advance_line.0]);
+        sequence.extend_from_slice(&[2, gimli::DW_LNS_copy.0, gimli::DW_LNS_set_column.0, 5]);
+        sequence.extend_from_slice(&[gimli::DW_LNS_advance_line.0, 1]);
+        sequence.extend_from_slice(&[gimli::DW_LNS_fixed_advance_pc.0, 0, 0, gimli::DW_LNS_copy.0]);
+        sequence.extend_from_slice(&[gimli::DW_LNS_fixed_advance_pc.0, 0, 0, 0, 1, 1]);
+        assert!(line.bytes.ends_with(&sequence), "{:x?}", line.bytes);
+        // The range the unit covers ends at an address, the function's and its length after it.
+        let list =
+            info.chunks.iter().find(|chunk| chunk.name == ".debug_rnglists").expect("a list");
+        let ends: Vec<_> = list
+            .relocs
+            .iter()
+            .map(|reloc| (reloc.symbol.as_str(), reloc.kind, reloc.addend))
+            .collect();
+        let address = Reference::Address { bytes: 8 };
+        assert_eq!(ends, [("f", address, 0), ("f", address, 16)]);
+        assert_eq!(list.bytes[list.bytes.len() - 18], gimli::DW_RLE_start_end.0);
     }
 
     /// A file with no code and no variables writes no sections rather than empty ones.

@@ -417,6 +417,8 @@ pub(crate) struct Header {
     pub(crate) sh_type: u32,
     /// `sh_offset`, which is where the section's contents start in the file.
     pub(crate) offset: usize,
+    /// `sh_size`, which is how many bytes the contents are.
+    pub(crate) size: usize,
 }
 
 impl Headers {
@@ -439,6 +441,7 @@ impl Headers {
         };
         let (each, count, names) = (word(each, 2), word(count, 2), word(names, 2));
         let offset = |header: usize| if wide { word(header + 24, 8) } else { word(header + 16, 4) };
+        let size = |header: usize| if wide { word(header + 32, 8) } else { word(header + 20, 4) };
         let strings = offset(table + names * each);
         let list = (0..count)
             .map(|nth| {
@@ -451,6 +454,7 @@ impl Headers {
                     name: String::from_utf8_lossy(&bytes[from..end]).into_owned(),
                     sh_type: word(at + 4, 4) as u32,
                     offset: offset(at),
+                    size: size(at),
                 }
             })
             .collect();
@@ -465,6 +469,57 @@ impl Headers {
     /// Where `sh_entsize` is in a header, and how wide it is.
     pub(crate) fn entry_size(&self) -> (usize, usize) {
         if self.wide { (56, 8) } else { (36, 4) }
+    }
+}
+
+/// Point every relocation against the nameless absolute local at symbol zero, which is what gas
+/// writes for one that names no symbol, such as `R_RISCV_RELAX` and `R_RISCV_ALIGN`.
+///
+/// The writer underneath has no way to name symbol zero, so such a relocation is written against
+/// a local of its own first, and moved here. That is not only how the table looks: BFD ld finds
+/// the place an `R_RISCV_ALIGN` pads from by the symbol, and takes the place of the relocation for
+/// symbol zero but the section of an absolute symbol, which is not a section.
+///
+/// The local is the one symbol with no name, no type and the absolute section, since every
+/// section symbol has a type and every other symbol here a name. It stays in the table, where
+/// nothing then names it.
+pub(crate) fn unnamed(bytes: &mut [u8]) {
+    let headers = Headers::read(bytes);
+    let wide = headers.wide;
+    let word = |bytes: &[u8], at: usize, width: usize| {
+        bytes[at..at + width].iter().rev().fold(0u64, |sum, &byte| sum << 8 | u64::from(byte))
+    };
+    let Some(table) = headers.list.iter().find(|header| header.sh_type == elf::SHT_SYMTAB.0) else {
+        return;
+    };
+    // `st_name`, `st_info` and `st_shndx` of a symbol, which are in different places in each class.
+    let (each, info, shndx) = if wide { (24, 4, 6) } else { (16, 12, 14) };
+    let Some(zero) = (1..table.size / each).find(|nth| {
+        let at = table.offset + nth * each;
+        word(bytes, at, 4) == 0
+            && bytes[at + info] == 0
+            && word(bytes, at + shndx, 2) == u64::from(elf::SHN_ABS.0)
+    }) else {
+        return;
+    };
+    for header in &headers.list {
+        let each = match (elf::SectionType(header.sh_type), wide) {
+            (elf::SHT_RELA, true) => 24,
+            (elf::SHT_RELA, false) => 12,
+            (elf::SHT_REL, true) => 16,
+            (elf::SHT_REL, false) => 8,
+            _ => continue,
+        };
+        for nth in 0..header.size / each {
+            // `r_info`, after `r_offset`. The symbol is the high half of a wide one and is above
+            // the low byte of a narrow one.
+            let at = header.offset + nth * each + if wide { 8 } else { 4 };
+            if wide && word(bytes, at + 4, 4) == zero as u64 {
+                bytes[at + 4..at + 8].fill(0);
+            } else if !wide && word(bytes, at, 4) >> 8 == zero as u64 {
+                bytes[at + 1..at + 4].fill(0);
+            }
+        }
     }
 }
 

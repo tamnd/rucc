@@ -27,6 +27,7 @@ const SET_COLUMN: u8 = 5;
 const NEGATE_STMT: u8 = 6;
 const SET_BASIC_BLOCK: u8 = 7;
 const CONST_ADD_PC: u8 = 8;
+const FIXED_ADVANCE_PC: u8 = 9;
 const SET_PROLOGUE_END: u8 = 10;
 const SET_EPILOGUE_BEGIN: u8 = 11;
 const SET_ISA: u8 = 12;
@@ -135,6 +136,10 @@ pub(crate) enum To {
     /// How far into `.debug_line_str` one of the strings the table adds there starts, counted from
     /// the first of them.
     Text(usize),
+    /// The distance from one place in a section to a later one, which a relaxed RISC-V object
+    /// leaves to the linker as a pair of relocations, since relaxing the code between the two can
+    /// change it.
+    Distance { part: usize, from: u64, to: u64 },
 }
 
 /// The table, ready to be put in `.debug_line`, and the strings that go on the end of
@@ -172,6 +177,10 @@ pub(crate) struct Lines {
     order: Vec<usize>,
     rows: Map<usize, Vec<Row>>,
     pieces: Map<usize, Pieces>,
+    /// Whether the code may still change size at link time, which is a RISC-V object assembled
+    /// with relaxation on. Then every move of the address after the first row of a sequence is a
+    /// `DW_LNS_fixed_advance_pc` the linker fills in, as gas writes it.
+    pub(crate) relaxed: bool,
 }
 
 impl Lines {
@@ -475,6 +484,14 @@ impl Lines {
         self.pieces.get(&part).and_then(|pieces| pieces.starts.get(piece)).copied().unwrap_or(0)
     }
 
+    /// Whether nothing of variable size is between two places in a section, `from` no further on
+    /// than `to`. A place where a piece starts is in that piece and not the one before.
+    pub(crate) fn same_piece(&self, part: usize, from: u64, to: u64) -> bool {
+        self.pieces.get(&part).is_none_or(|pieces| {
+            !pieces.starts.iter().skip(1).any(|&start| from < start && start <= to)
+        })
+    }
+
     /// How many times a section has been cut so far, which numbers the piece the next byte goes in.
     pub(crate) fn cuts(&self, part: usize) -> usize {
         self.pieces.get(&part).map_or(0, |piece| piece.ends.len())
@@ -682,6 +699,12 @@ impl Lines {
             }
             let delta = loc.line as i64 - line;
             match before {
+                Some(last) if self.relaxed && !(loc.reset && self.set_again(last, row)) => {
+                    out.push(ADVANCE_LINE);
+                    sleb(out, delta);
+                    fixed_advance(table, row.part, last.at, row.at, address);
+                    table.bytes.push(COPY);
+                }
                 Some(last) if !(loc.reset && self.set_again(last, row)) => {
                     advance(out, Some(delta), (row.at - last.at) / unit);
                 }
@@ -696,8 +719,13 @@ impl Lines {
             line = loc.line as i64;
             before = Some(row);
         }
-        if let Some(last) = before {
-            advance(&mut table.bytes, None, size.saturating_sub(last.at) / unit);
+        match before {
+            Some(last) if self.relaxed => {
+                fixed_advance(table, last.part, last.at, size.max(last.at), address);
+                table.bytes.extend_from_slice(&[0, 1, END_SEQUENCE]);
+            }
+            Some(last) => advance(&mut table.bytes, None, size.saturating_sub(last.at) / unit),
+            None => {}
         }
     }
 
@@ -767,6 +795,21 @@ fn advance(out: &mut Vec<u8>, line: Option<i64>, address: u64) {
     out.push(ADVANCE_PC);
     uleb(out, address);
     out.push(if copy { COPY } else { base as u8 });
+}
+
+/// The address moved from `from` to `to` in a relaxed object: a `DW_LNS_fixed_advance_pc` whose
+/// two bytes the linker works out, or the address set again when the distance comes near the most
+/// two bytes hold, since relaxing can only make it shorter but gas does not count on that.
+fn fixed_advance(table: &mut Table, part: usize, from: u64, to: u64, address: u8) {
+    if to - from > 50_000 {
+        table.bytes.push(0);
+        uleb(&mut table.bytes, u64::from(address) + 1);
+        table.bytes.push(SET_ADDRESS);
+        hole(table, To::Code { part, at: to }, address);
+    } else {
+        table.bytes.push(FIXED_ADVANCE_PC);
+        hole(table, To::Distance { part, from, to }, 2);
+    }
 }
 
 /// A string added to `.debug_line_str` and a hole in the table that points at it, which comes
