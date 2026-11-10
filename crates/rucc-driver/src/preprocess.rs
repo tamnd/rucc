@@ -323,7 +323,7 @@ pub fn preprocess(opts: &Options, name: &str, assembly: bool, fs: &dyn FileSyste
     let predef = Predef { assembler: assembly, ..Predef::for_options(opts) };
     let mut cx = Context::new(&mut sess.interner, &mut sess.sources, fs, &opts.search);
     let lex = rucc_lex::Options::for_dialect(opts.std, opts.gnu_extensions, opts.trigraphs);
-    cx.lex = if assembly { lex.for_assembly() } else { lex };
+    cx.lex = if assembly { lex.for_assembly() } else { lex.for_kencc(opts.kencc) };
     cx.pedantic = opts.pedantic;
     cx.generated_headers = opts.deps.generated;
     cx.kencc = opts.kencc && !assembly;

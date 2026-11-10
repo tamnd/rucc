@@ -42,13 +42,23 @@ pub struct Options {
     /// the line, because assembly has apostrophes in its comments and in `.ascii` text that are
     /// not character constants, and nothing here knows where an assembler's comments are.
     pub assembly: bool,
+    /// Whether the file is read as kencc reads it. kencc has no hexadecimal floating constant,
+    /// so in `0xCAB00D1E+1` the sign after the `E` ends the number and the text is a sum. Plan
+    /// 9's libc/port/pool.c writes exactly that.
+    pub kencc: bool,
 }
 
 impl Options {
     /// The defaults, which are what `-std=gnu23` implies.
     #[must_use]
     pub fn new() -> Options {
-        Options { trigraphs: false, line_comments: true, digit_separators: true, assembly: false }
+        Options {
+            trigraphs: false,
+            line_comments: true,
+            digit_separators: true,
+            assembly: false,
+            kencc: false,
+        }
     }
 
     /// What a dialect implies, which is the form the driver wants.
@@ -64,7 +74,14 @@ impl Options {
             line_comments: std >= Std::C99 || gnu,
             digit_separators: std >= Std::C23,
             assembly: false,
+            kencc: false,
         }
+    }
+
+    /// The same knobs for a file that kencc would read, when `on` is set.
+    #[must_use]
+    pub fn for_kencc(self, on: bool) -> Options {
+        Options { kencc: on, ..self }
     }
 
     /// The same knobs for a file of assembly that is preprocessed first.
@@ -629,6 +646,9 @@ impl<'a> Lexer<'a> {
         // The pp-number grammar is deliberately looser than the constant grammar, so `1.2.3`
         // and `0x1p+3` are both one token here. Rejecting the first belongs to phase 7, and
         // doing it here would break `##` pasting that builds a number out of pieces.
+        let hex = self.options.kencc
+            && self.cursor.first() == b'0'
+            && matches!(self.cursor.nth(1), b'x' | b'X');
         self.eat();
         while !self.cursor.at_end() {
             if !self.unclean {
@@ -639,7 +659,7 @@ impl<'a> Lexer<'a> {
             }
             let b = self.cursor.first();
             let n1 = self.cursor.nth(1);
-            if matches!(b, b'e' | b'E' | b'p' | b'P') && matches!(n1, b'+' | b'-') {
+            if matches!(b, b'e' | b'E' | b'p' | b'P') && matches!(n1, b'+' | b'-') && !hex {
                 self.eat();
                 self.eat();
             } else if self.continues(b) || b == b'.' {

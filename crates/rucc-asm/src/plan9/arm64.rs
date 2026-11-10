@@ -201,6 +201,9 @@ fn register(name: &str) -> Option<Op> {
         "wzr" => return Some(Op::W(31)),
         _ => {}
     }
+    if name.is_empty() || !name.is_char_boundary(1) {
+        return None;
+    }
     let (head, rest) = name.split_at(1);
     let rest = match rest.split_once('.') {
         Some((n, _)) if head == "v" => n,
@@ -317,7 +320,10 @@ fn operand(text: &str, line: usize) -> Result<Op, Trouble> {
     if let Some(ext) = extension(text) {
         return Ok(Op::Ext(ext, 0));
     }
-    if text.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$')) {
+    if text
+        .chars()
+        .all(|c| !c.is_ascii() || c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$'))
+    {
         return Ok(Op::Name(text.to_owned()));
     }
     Err(bad())
@@ -432,7 +438,9 @@ impl Out<'_> {
         // The prologue is the frame record, the frame pointer and the area below it.
         let mut frame = Frame::default();
         let mut skip = 0;
-        if let Some((_, "stp", ops, number)) = insns.first() {
+        // A leaf can push other pairs first, and those are not a frame record.
+        if let Some((_, "stp", ops, number)) = insns.first().filter(|i| i.2.first() == Some(&"x29"))
+        {
             if ops[..] != ["x29", "x30", "[sp, #-16]!"] {
                 return Err(trouble(*number, "a frame record that is not at the top of the frame"));
             }
@@ -635,8 +643,13 @@ impl Out<'_> {
                     return Ok(());
                 }
                 let [d, n, rest @ ..] = ops else { return Err(bad()) };
-                if matches!(d, Op::Sp) {
+                // A leaf with no frame record has no frame in 7l, so `RETURN` is a bare `RET` and
+                // its own changes of sp are copied as they are.
+                if matches!(d, Op::Sp) && frame.size.is_some() {
                     return Err(trouble(line, "a change of sp in the body of a function"));
+                }
+                if matches!(d, Op::Sp) && !matches!((m, n), ("add" | "sub", Op::Sp)) {
+                    return Err(bad());
                 }
                 let rn = match n {
                     Op::Sp if matches!(rest.first(), Some(Op::Imm(_))) => RSP,
@@ -644,7 +657,8 @@ impl Out<'_> {
                     _ => r(n)?,
                 };
                 let from = self.second(rest, line)?;
-                self.emit3(sized(base, d)?, from, rn, reg(r(d)?));
+                let rd = if matches!(d, Op::Sp) { RSP } else { r(d)? };
+                self.emit3(sized(base, d)?, from, rn, reg(rd));
             }
             "mul" | "sdiv" | "udiv" | "smulh" | "umulh" | "lslv" | "lsrv" | "asrv" | "rorv"
             | "mneg" | "smull" | "umull" => {
@@ -1261,6 +1275,30 @@ mod tests {
         assert_eq!((p[1].from.offset, p[1].reg, p[1].to.reg), (7, 0, UNALIGNED));
         assert_eq!((p[2].from.reg, p[2].from.offset), (UNALIGNED, 0));
         assert_eq!((p[3].from.reg, p[3].from.offset), (0, 7));
+    }
+
+    #[test]
+    fn a_leaf_with_no_frame_record_keeps_its_own_changes_of_sp() {
+        let listing = "\t.text\n\t.globl f\nf:\n\tstp x19, x20, [sp, #-16]!\n\tsub sp, sp, #64\n\
+                       \tstr w0, [sp, #4]\n\tadd sp, sp, #64\n\tldp x19, x20, [sp], #16\n\tret\n";
+        let p = progs(listing);
+        assert_eq!(
+            ops(listing),
+            ["ATEXT", "AMOVP", "ASUB", "AMOVW", "AADD", "AMOVP", "ARETURN", "AEND"]
+        );
+        assert_eq!(p[0].to.offset, 0);
+        assert_eq!((p[2].from.offset, p[2].reg, p[2].to.reg), (64, RSP, RSP));
+        assert_eq!((p[4].from.offset, p[4].reg, p[4].to.reg), (64, RSP, RSP));
+        // A function with a frame record still refuses one.
+        let framed = "f:\n\tstp x29, x30, [sp, #-16]!\n\tmov x29, sp\n\tbl g\n\tsub sp, sp, #16\n\
+                      \tldp x29, x30, [sp], #16\n\tret\n";
+        assert!(arm64(framed, "x.c", None).is_err());
+    }
+
+    #[test]
+    fn a_label_with_letters_that_are_not_ascii_is_a_label() {
+        let listing = "f:\n\tcbz w0, .L\u{3c4}conv_4\n\tmov w0, #1\n.L\u{3c4}conv_4:\n\tret\n";
+        assert_eq!(ops(listing), ["ATEXT", "ACBZW", "AMOVW", "ARETURN", "AEND"]);
     }
 
     #[test]

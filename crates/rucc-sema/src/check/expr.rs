@@ -187,6 +187,12 @@ impl Checker<'_> {
                     self.use_type(Used::Type(enumeration));
                 }
                 self.heed_deprecated_enumerator(name, value, ty, span);
+                // A kencc enumerator with a floating value holds the bits of the number.
+                if let TypeKind::Float(kind) = self.types.kind(self.types.canonical(ty)) {
+                    let format = rucc_types::float_format(kind, self.cx.target);
+                    let number = Float::from_bits(format, value as u128);
+                    return self.constant(Const::Float(number), ty, span);
+                }
                 self.constant(Const::Int(value), ty, span)
             }
             Some(Binding::Typedef(_)) => {

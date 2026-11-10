@@ -49,14 +49,15 @@ use std::num::NonZeroU32;
 
 use rucc_ast::{self as ast, Member, TypeSpec};
 use rucc_base::Symbol;
+use rucc_base::float::{Float, Format};
 use rucc_base::hash::Set;
 use rucc_diag::{Diagnostic, Span};
 use rucc_session::Std;
 use rucc_types::{
     ArrayLen, EnumId, Enumerator, FieldDecl, IntKind, IntegerInfo, Layout, LayoutError,
     RecordError, RecordId, RecordKind, RecordLayout, RecordOptions, Spelled, TypeId, TypeKind,
-    compatible, int_width, integer_info, is_complete, is_function, is_integer, is_void, layout,
-    layout_record,
+    compatible, float_format, int_width, integer_info, is_complete, is_function, is_integer,
+    is_real_floating, is_void, layout, layout_record,
 };
 
 use super::{MEMBER, Subject};
@@ -72,6 +73,7 @@ pub(super) struct Stored {
 }
 use crate::decl::StorageDuration;
 use crate::scope::{Binding, Tag, TagKind};
+use crate::tast::Const;
 
 /// What the tag of a definition turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -923,11 +925,48 @@ impl Checker<'_> {
         let mut previous = int;
         let mut values = Vec::with_capacity(ast[list].len());
         let mut next = Some(0i128);
+        // The floating value the next enumerator with no `=` gets under kencc, after one that
+        // had a floating value, and which of the enumerators are floating.
+        let mut floating: Option<(Float, TypeId)> = None;
+        let mut floats = Vec::with_capacity(ast[list].len());
+        // kencc gives an enumerator the type of its value, and one with no value the type of
+        // the one before it (`s->tenum = en.cenum` in `doenum`). So in libc's date.c, where
+        // `Daysec = (vlong)24*3600`, `2440588 * Daysec` is a product of two vlongs.
+        let mut kencc_ty = int;
+        let mut kencc_types = Vec::with_capacity(ast[list].len());
         for enumerator in &ast[list] {
             let mut written = None;
+            // Under kencc the value is read first, to see whether it is floating.
+            let read = match enumerator.value {
+                Some(expr) if self.cx.kencc => Some(self.enumerator_value(enumerator.name, expr)),
+                _ => None,
+            };
+            if self.cx.kencc {
+                let number = match read {
+                    Some(Some((bits, ty))) => self
+                        .float_format(ty)
+                        .map(|format| (Float::from_bits(format, bits as u128), ty)),
+                    Some(None) => None,
+                    None => floating,
+                };
+                floating = None;
+                if let Some((number, ty)) = number {
+                    let one = Float::from_signed(1, number.format()).0;
+                    floating = Some((number.sum(one).0, ty));
+                    let bits = number.to_bits() as i128;
+                    self.declare_enumerator(enumerator.name, bits, ty, again, enumerator.span);
+                    floats.push(true);
+                    continue;
+                }
+            }
+            floats.push(false);
             let value = match enumerator.value {
                 Some(expr) => {
-                    let value = match self.enumerator_value(enumerator.name, expr) {
+                    let read = match read {
+                        Some(read) => read,
+                        None => self.enumerator_value(enumerator.name, expr),
+                    };
+                    let value = match read {
                         Some((value, ty)) => {
                             written = Some(ty);
                             value
@@ -952,8 +991,22 @@ impl Checker<'_> {
                     }
                 },
             };
+            if let Some(ty) = written.filter(|_| self.cx.kencc && fixed.is_none()) {
+                kencc_ty = ty;
+                // Narrower than an `int` is an `int`, as the value is promoted where it is used.
+                let width = |c: &Self, ty| integer_info(&c.types, ty, c.cx.target).map(|i| i.width);
+                if width(self, ty) < width(self, int) {
+                    kencc_ty = int;
+                }
+            }
+            let kencc = (self.cx.kencc && fixed.is_none()).then_some(kencc_ty).filter(|&ty| {
+                let (low, high) = self.enum_bounds(Some(ty));
+                is_integer(&self.types, ty) && value >= low && value <= high
+            });
+            kencc_types.push(kencc);
             let provisional = match fixed {
                 Some(ty) => ty,
+                None if kencc.is_some() => kencc_ty,
                 None if value >= int_low && value <= int_high => int,
                 None => self.enumerator_placeholder(value, written.unwrap_or(previous)),
             };
@@ -983,9 +1036,13 @@ impl Checker<'_> {
         // Nothing has been folded with the placeholder in between, since an enumerator is the
         // only thing that can refer to an earlier enumerator of the same enumeration and every
         // one of them holds a value rather than a type.
-        for (enumerator, &(name, value, span)) in ast[list].iter().zip(&values) {
+        let integers = ast[list].iter().zip(&floats).filter(|&(_, &float)| !float);
+        for (((enumerator, _), &(name, value, span)), kencc) in
+            integers.zip(&values).zip(kencc_types)
+        {
             let ty = match fixed {
                 Some(ty) => ty,
+                None if kencc.is_some() => kencc.expect("a type"),
                 None if value >= int_low && value <= int_high => int,
                 None => underlying,
             };
@@ -1045,6 +1102,14 @@ impl Checker<'_> {
         self.types.int(IntKind::ULong)
     }
 
+    /// The format of a real floating type, and nothing for any other type.
+    fn float_format(&self, ty: TypeId) -> Option<Format> {
+        match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Float(kind) => Some(float_format(kind, self.cx.target)),
+            _ => None,
+        }
+    }
+
     /// The value an `= expression` gives an enumerator, and the type of that expression.
     fn enumerator_value(&mut self, name: Symbol, expr: ast::ExprId) -> Option<(i128, TypeId)> {
         // As a value and not as an lvalue, which is what `= side` needs when `side` is a named
@@ -1058,6 +1123,14 @@ impl Checker<'_> {
             return None;
         }
         let ty = self.tast[value].ty;
+        // kencc takes a floating constant as the value of an enumerator, and the enumerator is
+        // then a constant of that type (`doenum` in `cc/dcl.c`). libdraw's mkwarp.c has
+        // `enum { ε = 1e-6 }`. The value goes in the binding as the bits of the number.
+        if self.cx.kencc && is_real_floating(&self.types, ty) {
+            if let Ok(Const::Float(number)) = self.eval_constant(value) {
+                return Some((number.to_bits() as i128, ty));
+            }
+        }
         // gcc folds the value first in a body when it optimizes, as it does for a case label, so
         // `enum { A = n };` after `const unsigned n = 4u;` in a function is taken at `-O2`. Not at
         // file scope. tamnd/rucc#3055.
