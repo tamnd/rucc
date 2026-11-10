@@ -155,7 +155,7 @@ impl Missing {
 /// purpose value like every other address, so it answers with the other file rather than with the
 /// one its type would suggest.
 fn class_of(ty: Type, conv: &CallRegs) -> RegClass {
-    if ty.is_float() && !on_the_stack(ty) { conv.sse_class } else { conv.int_class }
+    if ty.is_float() && !on_the_stack(ty, conv) { conv.sse_class } else { conv.int_class }
 }
 
 /// The type a value crosses a call as, which is its own type but for one case.
@@ -243,37 +243,68 @@ pub(crate) fn int_bytes(ty: Type, conv: &CallRegs) -> u32 {
 /// Sixteen bytes aligned to sixteen, which is what the psABI says the type takes and is the same
 /// number [`crate::lower`] gives one in the frame, so a value being passed and a value being worked
 /// on are the same shape of object in two places.
+///
+/// Under `-mfpmath=387` a `float` and a `double` are on the x87 stack too, see
+/// [`CallRegs::x87_floats`]. On i386 they travel in the argument area anyway, so passing one as
+/// bytes there puts it where the psABI puts it, at its own size and aligned to a word.
 #[must_use]
-pub fn on_the_stack(ty: Type) -> bool {
+pub fn on_the_stack(ty: Type, conv: &CallRegs) -> bool {
+    eighty(ty) || x87_float(ty, conv)
+}
+
+/// Whether a type is the eighty bit float, which is on the x87 stack on every x86 convention.
+fn eighty(ty: Type) -> bool {
     ty.is_float() && ty.is_scalar() && ty.bits() == 80
+}
+
+/// Whether a type is a `float` or a `double` that the convention keeps on the x87 stack, which is
+/// i386 under `-mfpmath=387`. See [`CallRegs::x87_floats`].
+#[must_use]
+pub fn x87_float(ty: Type, conv: &CallRegs) -> bool {
+    conv.x87_floats
+        && ty.is_scalar()
+        && matches!(ty.format(), Some(rucc_ir::Float::F32 | rucc_ir::Float::F64))
 }
 
 /// Whether what a function gives back is left on the x87 stack, which is one `long double` in
 /// `st(0)` or a `_Complex long double` with its real half there and its imaginary half in `st(1)`.
 ///
 /// Those two are the whole of what SysV returns on that stack, and a structure holding a `long
-/// double` is not one of them, since the lowering sends that back through memory.
+/// double` is not one of them, since the lowering sends that back through memory. Under
+/// `-mfpmath=387` a single `float` or `double` is a third, since it is on that stack already.
 #[must_use]
-pub fn back_on_x87(returns: &[Type]) -> bool {
-    matches!(returns.len(), 1 | 2) && returns.iter().all(|&ty| on_the_stack(ty))
+pub fn back_on_x87(returns: &[Type], conv: &CallRegs) -> bool {
+    let all = matches!(returns.len(), 1 | 2) && returns.iter().all(|&ty| eighty(ty));
+    all || matches!(returns, [ty] if x87_float(*ty, conv))
 }
 
 /// Whether a `float` or a `double` a function gives back is left on the x87 stack, which is what a
 /// convention with no vector register to return one in says. That is i386, where the psABI puts it
 /// in `st(0)` the way it does a `long double`.
+///
+/// This is the crossing from a vector register, so it is false under `-mfpmath=387`, where the
+/// value is never in one and [`back_on_x87`] covers it.
 #[must_use]
 pub fn float_on_x87(returns: &[Type], conv: &CallRegs) -> bool {
     conv.sse_returns.is_empty()
         && !conv.x87_returns.is_empty()
+        && !conv.x87_floats
         && matches!(returns, [ty] if ty.is_float() && ty.is_scalar() && matches!(ty.bits(), 32 | 64))
 }
 
 /// How much room one takes in the argument area, as a size and an alignment.
 ///
 /// Sixteen aligned to sixteen on x86-64 and twelve aligned to a word on i386, which is the size
-/// and the alignment the type has there, under mingw as well as under System V.
-pub(crate) fn x87_area(conv: &CallRegs) -> (u32, u32) {
-    if conv.word == 4 { (12, 4) } else { (16, 16) }
+/// and the alignment the type has there, under mingw as well as under System V. A `float` or a
+/// `double` on the x87 stack takes its own size, aligned to a word.
+pub(crate) fn x87_area(ty: Type, conv: &CallRegs) -> (u32, u32) {
+    if x87_float(ty, conv) {
+        (ty.bits() / 8, conv.word)
+    } else if conv.word == 4 {
+        (12, 4)
+    } else {
+        (16, 16)
+    }
 }
 
 /// Why a value of that type cannot travel at all, or nothing if it can.
@@ -294,7 +325,7 @@ pub fn refuses(ty: Type, insts: &Insts) -> Option<Missing> {
     // A `long double` is the one type here that is in neither of the two files. Saying so is worth
     // more than calling it a width, because eighty bits is a width this machine computes in and
     // the file it computes in is what actually stands in the way.
-    if on_the_stack(ty) {
+    if eighty(ty) {
         return Some(Missing::OnX87);
     }
     Some(Missing::Width)
@@ -402,8 +433,8 @@ pub fn entry(
         // as a value of its own type, and it is this that knows the type is one that travels as
         // bytes. What arrives is the address of those bytes, which is what an object in the
         // argument area always hands over.
-        if on_the_stack(ty) {
-            let (size, align) = x87_area(conv);
+        if on_the_stack(ty, conv) {
+            let (size, align) = x87_area(ty, conv);
             where_from.push((
                 ty,
                 places.on_stack(size, align),
@@ -864,8 +895,8 @@ pub fn call(
         // joins the objects below rather than being a case of its own, and the copy it becomes is
         // the copy any other sixteen byte object gets.
         let abi = match abi {
-            _ if on_the_stack(ty) => {
-                let (size, align) = x87_area(conv);
+            _ if on_the_stack(ty, conv) => {
+                let (size, align) = x87_area(ty, conv);
                 Abi::ByVal { size: size.into(), align, drains: Drains::Nothing }
             }
             abi => abi,
@@ -969,7 +1000,7 @@ pub fn call(
     // the x87 stack is written in. A complex one is the same with its imaginary half in `st(1)`,
     // and a second `fstp` takes that one off. A `float` or a `double` on i386 comes back the same
     // way, per [`float_on_x87`].
-    let comes_back = if back_on_x87(returns) || float_on_x87(returns, conv) {
+    let comes_back = if back_on_x87(returns, conv) || float_on_x87(returns, conv) {
         Vec::new()
     } else {
         places_back(returns, conv, insts)?

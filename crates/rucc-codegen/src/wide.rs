@@ -647,7 +647,7 @@ fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot
     });
     let mut order: Vec<(Slot, Param, Option<Where>)> = Vec::new();
     for float in [false, true] {
-        let kind = |param: &Param| scalar(*param) && param.ty.is_float() == float;
+        let kind = |param: &Param| scalar(*param, conv) && param.ty.is_float() == float;
         order.extend(
             meant
                 .iter()
@@ -717,8 +717,8 @@ fn place(places: &mut Places<'_>, param: Param, conv: &CallRegs) -> Where {
         let at = places.object(u32::try_from(size).unwrap_or(u32::MAX), align);
         crate::abi::drain(places, drains);
         at
-    } else if crate::abi::on_the_stack(param.ty) {
-        let (size, align) = crate::abi::x87_area(conv);
+    } else if crate::abi::on_the_stack(param.ty, conv) {
+        let (size, align) = crate::abi::x87_area(param.ty, conv);
         places.on_stack(size, align)
     } else if param.ty.is_float() {
         places.float(crate::abi::float_bytes(param.ty))
@@ -728,8 +728,8 @@ fn place(places: &mut Places<'_>, param: Param, conv: &CallRegs) -> Where {
 }
 
 /// Whether a parameter is a value that takes a register of its kind while there is one left.
-fn scalar(param: Param) -> bool {
-    !matches!(param.abi, Abi::ByVal { .. }) && !crate::abi::on_the_stack(param.ty)
+fn scalar(param: Param, conv: &CallRegs) -> bool {
+    !matches!(param.abi, Abi::ByVal { .. }) && !crate::abi::on_the_stack(param.ty, conv)
 }
 
 /// A signature laid out the way [`plan`] said, with every wide return value as two halves.

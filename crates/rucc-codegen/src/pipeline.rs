@@ -919,8 +919,10 @@ pub fn compile_recording(
         })
         .collect();
     // The same for a fused multiply add, which is in a vector register on every machine that has
-    // one, so a function without the vector registers calls the library instead.
+    // one, so a function without the vector registers calls the library instead. So does one whose
+    // floats are on the x87 stack, which has no fused multiply add.
     let fused = flags.vector
+        && !machine.conv.x87_floats
         && machine.selector.fused.is_some_and(|name| {
             name.is_empty()
                 || rucc_target::Feature::named(name).is_some_and(|feature| isa.has(feature))
@@ -1883,7 +1885,7 @@ pub fn compile_recording(
         vector: vectors,
         extension: flags.zero_extension,
         x87: flags.x87 && !saves_all,
-        x87_returned: if abi::back_on_x87(&types) { types.len() } else { 0 },
+        x87_returned: if abi::back_on_x87(&types, machine.conv) { types.len() } else { 0 },
     };
     zero::apply(&mut func, zeroing, files, machine.shapes, &machine.file, names);
 
@@ -2912,6 +2914,78 @@ mod tests {
                 .expect("a growing frame with a double in it on four bytes");
         let text = mir::print_func(&out, &names, &x86::REGS);
         assert!(text.contains("fld"), "the double goes back on the x87 stack: {text}");
+    }
+
+    /// `double f(float a, double b) { double s = -(a + b) * 0.5; return s < b ? s : b; }` on i386
+    /// under `-mfpmath=387`. Every float is in a frame slot and on the x87 stack while it is
+    /// worked on, so nothing in the function names a vector register, the constant and the
+    /// negation are the bits put in the slot, the select is a branch, and the answer goes back in
+    /// `st(0)`.
+    #[test]
+    fn an_i386_function_under_mfpmath_387_names_no_vector_register() {
+        let triple = "i686-unknown-linux-gnu".parse::<rucc_target::Triple>().expect("a triple");
+        let info = TargetInfo::new(triple);
+        let conv = info.call_regs.expect("i386 has a convention").on_x87();
+        let machine = Machine::x86(conv);
+        let f32 = Type::float(rucc_ir::Float::F32);
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f32, f64]);
+        let mut build = Builder::new(&mut source, block);
+        let wide = build.unary(Opcode::FPExt, args[0], f64);
+        let sum = build.binary(Opcode::FAdd, wide, args[1], IrFlags::default());
+        let less = build.unary(Opcode::FNeg, sum, f64);
+        let half = build.fconst(f64, 0x3fe0_0000_0000_0000);
+        let product = build.binary(Opcode::FMul, less, half, IrFlags::default());
+        let below = build.fcmp(rucc_ir::FloatPred::Olt, product, args[1], IrFlags::default());
+        let chosen = build.select(below, product, args[1]);
+        build.ret(&[chosen]);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every float instruction is a group on the x87 stack");
+        let text = mir::print_func(&out, &names, &x86::REGS);
+        assert!(!text.contains("xmm"), "no vector register: {text}");
+        assert!(!text.contains("movs"), "no scalar vector move: {text}");
+        for wanted in ["x64.fld_s", "x64.fstp_l", "x64.fadd_p", "x64.fmul_p", "x64.fucomip"] {
+            assert!(text.contains(wanted), "{wanted}: {text}");
+        }
+        assert!(
+            !text.contains("fld_t") && !text.contains("fstp_t"),
+            "nothing at eighty bits: {text}"
+        );
+        // The answer is left on the stack by the last load before the epilogue.
+        let last = text.lines().rev().find(|line| line.contains("x64.f")).map(str::trim);
+        assert!(last.is_some_and(|line| line.starts_with("x64.fld_l")), "{text}");
+    }
+
+    /// A call under `-mfpmath=387` on i386 passes a `double` as eight bytes in the argument area
+    /// and takes a `float` it gets back off the x87 stack into a slot.
+    #[test]
+    fn an_i386_call_under_mfpmath_387_passes_bytes_and_takes_the_answer_off_the_stack() {
+        let triple = "i686-unknown-linux-gnu".parse::<rucc_target::Triple>().expect("a triple");
+        let info = TargetInfo::new(triple);
+        let conv = info.call_regs.expect("i386 has a convention").on_x87();
+        let machine = Machine::x86(conv);
+        let f32 = Type::float(rucc_ir::Float::F32);
+        let f64 = Type::float(rucc_ir::Float::F64);
+        let (mut names, mut source, block, args) = blank(&[f64]);
+        let sig = source.add_signature(Signature::new().with_params(&[f64]).with_returns(&[f32]));
+        let callee = names.intern("g");
+        let call = Builder::new(&mut source, block).call(callee, sig, &[args[0]]);
+        let got = source[call].first_result.expect("a float comes back");
+        let mut build = Builder::new(&mut source, block);
+        let wide = build.unary(Opcode::FPExt, got, f64);
+        build.ret(&[wide]);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("a call with floats on the x87 stack");
+        let text = mir::print_func(&out, &names, &x86::REGS);
+        // The call still names the vector registers it clobbers, and nothing else does.
+        let used = text.lines().filter(|line| !line.contains("x64.call"));
+        assert!(used.clone().all(|line| !line.contains("xmm")), "no vector register: {text}");
+        let stored = used.filter(|line| line.contains("x64.mov_mr_32")).count();
+        assert_eq!(stored, 2, "the double goes out as two words: {text}");
+        assert!(text.contains("x64.fstp_s"), "the float comes off the stack: {text}");
+        assert!(text.contains("x64.fld_s"), "and is widened from its slot: {text}");
     }
 
     /// A zero count on a plain x86-64 is the search instruction and a conditional move for the

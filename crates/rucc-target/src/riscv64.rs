@@ -295,6 +295,7 @@ pub static LP64D: CallRegs = CallRegs {
     int_returns: &INT_RETURNS,
     sse_returns: &FP_RETURNS,
     x87_returns: &NO_X87,
+    x87_floats: false,
     int_saved: &INT_SAVED,
     sse_saved: &FP_SAVED,
     // The whole of each register is kept, since the whole of it is eight bytes.

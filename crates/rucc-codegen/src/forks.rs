@@ -29,6 +29,7 @@
 //! `long long` writes selects of its own and every one of those needs the same treatment.
 
 use rucc_ir::{Block, Builder, Func, Inst, Opcode, Value};
+use rucc_target::CallRegs;
 
 /// Every select in the function, as a branch.
 pub fn branches(func: &mut Func) {
@@ -36,6 +37,26 @@ pub fn branches(func: &mut Func) {
         .blocks()
         .flat_map(|block| func.insts(block))
         .filter(|&inst| func[inst].opcode == Opcode::Select)
+        .collect();
+    for inst in found {
+        fork(func, inst);
+    }
+}
+
+/// Every select of a value on the x87 stack, as a branch, on a machine that has a conditional move.
+///
+/// A conditional move picks between two registers, and a value on the x87 stack is in a frame slot
+/// rather than in a register, so there is nothing for it to pick between. gcc writes `fcmov` for
+/// these on a machine that has it. This writes the branch it writes on a machine that does not,
+/// which is the same answer one jump slower.
+pub fn stacked(func: &mut Func, conv: &CallRegs) {
+    let found: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Select)
+        .filter(|&inst| {
+            func[inst].first_result.is_some_and(|it| crate::abi::on_the_stack(func[it].ty, conv))
+        })
         .collect();
     for inst in found {
         fork(func, inst);

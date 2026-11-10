@@ -887,6 +887,7 @@ const fn aapcs64(
         int_returns: &INT_RETURNS,
         sse_returns: &FP_RETURNS,
         x87_returns: &NO_X87,
+        x87_floats: false,
         int_saved: &INT_SAVED,
         sse_saved: &FP_SAVED,
         sse_kept: Some(8),

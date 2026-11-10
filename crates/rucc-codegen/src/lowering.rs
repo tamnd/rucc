@@ -402,7 +402,7 @@ impl Step {
             Self::Rounds => expand::rounds(func, conv.stack_align, conv.word),
             Self::Varargs => varargs::lists(func, conv),
             Self::Forks if !cmov => forks::branches(func),
-            Self::Forks => {}
+            Self::Forks => forks::stacked(func, conv),
         }
         true
     }

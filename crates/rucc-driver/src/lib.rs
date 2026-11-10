@@ -1151,6 +1151,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut riscv_ilp32 = false;
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
+    let mut x87_floats = false;
     // Where the stack protector's canary is, which is put together after the loop because the
     // four flags that say it may come in any order and gcc lets the later one win for each.
     let mut guard_global: Option<bool> = None;
@@ -2860,16 +2861,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-m80387" | "-mhard-float" if x86 => x87 = true,
             "-mno-fp-ret-in-387" if x86 => fp_ret_in_387 = false,
             "-mfp-ret-in-387" if x86 => fp_ret_in_387 = true,
-            // Where `float` and `double` arithmetic is done. Both x86 targets do it in the SSE
-            // registers here, which is gcc's default on x86-64 and what gcc does on i386 only with
-            // `-mfpmath=sse`, so that value is taken and changes nothing. The backend does no
-            // arithmetic on the x87 stack, so the values that ask for it are refused.
+            // Where `float` and `double` arithmetic is done. `sse` is the SSE registers, which is
+            // gcc's default on x86-64 and what this compiler does on i386 when nothing else is
+            // said. `387` is the x87 stack, which the backend does on i386 only, and whether the
+            // unit is i386 is known after the loop. Both at once is refused.
             _ if x86 && arg.starts_with("-mfpmath=") => match &arg["-mfpmath=".len()..] {
-                "sse" => {}
-                "387" | "sse+387" | "387+sse" | "both" => {
+                "sse" => x87_floats = false,
+                "387" => x87_floats = true,
+                "sse+387" | "387+sse" | "both" => {
                     return Err(err(format!(
-                        "{arg}: this compiler does `float` and `double` arithmetic in the SSE \
-                         registers only"
+                        "{arg}: this compiler does `float` and `double` arithmetic in one place, \
+                         the SSE registers or the x87 stack"
                     )));
                 }
                 value => {
@@ -4002,6 +4004,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     }
     opts.x87 = x87;
     opts.x87_return = fp_ret_in_387;
+    // After the loop, since `-m32` may come after `-mfpmath=387`.
+    opts.x87_floats = x87_floats;
+    if opts.x87_floats && opts.target.arch != rucc_target::Arch::X86 {
+        return Err(err(
+            "-mfpmath=387: this compiler does `float` and `double` arithmetic on the x87 stack \
+             on i386 only"
+                .to_owned(),
+        ));
+    }
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
     // After the loop, since whether `--64` or `-march=` is true of the target is a question about
     // the last `--target=`.
@@ -11574,11 +11585,22 @@ mod tests {
         // An extension this compiler has no intrinsics for is refused as on x86-64.
         let said = refused(&["--target=i686-linux-gnu", "-mavx512f", "-c", "a.c"]);
         assert!(said.contains("no intrinsics for avx512f"), "{said}");
-        // `-mfpmath=sse` is what the backend does anyway, and the x87 stack is refused.
+        // `-mfpmath=sse` is what the backend does when nothing is said, and `-mfpmath=387` puts
+        // `float` and `double` on the x87 stack, on i386 only.
         let (opts, _) = compile(&["--target=i686-linux-gnu", "-mfpmath=sse", "-mfma", "-c", "a.c"]);
-        assert!(opts.isa.has(named("fma")));
-        let said = refused(&["--target=i686-linux-gnu", "-mfpmath=387", "-c", "a.c"]);
-        assert!(said.contains("in the SSE registers only"), "{said}");
+        assert!(opts.isa.has(named("fma")) && !opts.x87_floats);
+        let (opts, _) = compile(&["--target=i686-linux-gnu", "-mfpmath=387", "-c", "a.c"]);
+        assert!(opts.x87_floats);
+        let (opts, _) =
+            compile(&["--target=x86_64-linux-gnu", "-mfpmath=387", "-m32", "-c", "a.c"]);
+        assert!(opts.x87_floats);
+        let (opts, _) =
+            compile(&["--target=i686-linux-gnu", "-mfpmath=387", "-mfpmath=sse", "a.c"]);
+        assert!(!opts.x87_floats);
+        let said = refused(&["--target=x86_64-linux-gnu", "-mfpmath=387", "-c", "a.c"]);
+        assert!(said.contains("on i386 only"), "{said}");
+        let said = refused(&["--target=i686-linux-gnu", "-mfpmath=both", "-c", "a.c"]);
+        assert!(said.contains("in one place"), "{said}");
         let said = refused(&["--target=i686-linux-gnu", "-mfpmath=bogus", "-c", "a.c"]);
         assert!(said.contains("bad value 'bogus' for '-mfpmath=' switch"), "{said}");
         let said = refused(&["--target=aarch64-linux-gnu", "-mfpmath=sse", "-c", "a.c"]);
