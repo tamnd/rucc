@@ -1044,7 +1044,9 @@ impl<'a> Eval<'a> {
     /// initializer of a `constexpr` object to be a constant expression, so whatever is at the
     /// offset is a value and not an expression to evaluate a second time.
     fn named_constant(&mut self, expr: ExprId) -> Option<Const> {
-        let (decl, offset) = self.designation(expr)?;
+        let Some((decl, offset)) = self.designation(expr) else {
+            return self.const_object(expr);
+        };
         let node = &self.tast[decl];
         if !node.flags.contains(DeclFlags::CONSTANT) {
             return self.const_object(expr);
@@ -1059,20 +1061,24 @@ impl<'a> Eval<'a> {
     /// The value of a `const` object of integer type, where [`Self::objects`] asked for gcc's
     /// reading of one, and [`None`] everywhere else.
     ///
-    /// Only the object named on its own counts. A member of a `const` structure is not one gcc
-    /// folds, and neither is anything with more than one entry in its initializer.
+    /// Only the object named on its own counts in an array size and a case label. In an
+    /// initializer a part of a `const` object counts too, which [`Self::const_part`] reads.
     fn const_object(&mut self, expr: ExprId) -> Option<Const> {
         if !self.objects || self.depth >= OBJECT_DEPTH {
             return None;
         }
-        let ExprKind::Decl(decl) = self.tast[expr].kind else { return None };
+        let ExprKind::Decl(decl) = self.tast[expr].kind else {
+            return self.const_part(expr);
+        };
         let node = &self.tast[decl];
         let ty = self.types.canonical(node.ty);
         let quals = self.types.quals(ty);
+        if self.int_shape(ty).is_none() {
+            return self.const_part(expr);
+        }
         if node.kind != DeclKind::Object
             || !quals.has(Qualifiers::CONST)
             || quals.has(Qualifiers::VOLATILE)
-            || self.int_shape(ty).is_none()
         {
             return None;
         }
@@ -1094,6 +1100,90 @@ impl<'a> Eval<'a> {
             Ok(Const::Int(value)) => {
                 self.read_object = true;
                 Some(Const::Int(value))
+            }
+            _ => None,
+        }
+    }
+
+    /// The value a member or an element of a `const` object holds, where [`Self::initializer`]
+    /// and [`Self::objects`] both asked, and [`None`] everywhere else.
+    ///
+    /// gcc reads `d.n`, `a[1]` and `d.m[1][0]` of a `const` object as the value its initializer put
+    /// there, in an initializer for an object with static storage, at every level of optimization.
+    /// libgomp fills `gomp_global_icv` that way from `gomp_default_icv_values`. It reads a scalar
+    /// of any type, so a `double` and a pointer to a string count as well as an integer. Three
+    /// things stop it, and they stop it here too. The initializer has to name the part, so a member
+    /// it left at zero is not read. The part has to be read as the type it was written as, so the
+    /// other member of a union is not. And the object itself has to be `const`: a `const` member of
+    /// an object that is not is refused. The case label and the array size that
+    /// [`Self::const_object`] answers for a whole object do not read a part at all, at `-O2`
+    /// either.
+    fn const_part(&mut self, expr: ExprId) -> Option<Const> {
+        if !self.literals {
+            return None;
+        }
+        let ty = self.tast[expr].ty;
+        let quals = self.types.object_quals(self.types.canonical(ty));
+        if !is_scalar(self.types, self.types.canonical(ty)) || quals.has(Qualifiers::VOLATILE) {
+            return None;
+        }
+        let (decl, offset, bit, bits) = self.part(expr)?;
+        let node = &self.tast[decl];
+        let object = self.types.object_quals(self.types.canonical(node.ty));
+        if node.kind != DeclKind::Object
+            || !object.has(Qualifiers::CONST)
+            || object.has(Qualifiers::VOLATILE)
+        {
+            return None;
+        }
+        let automatic = node.duration == StorageDuration::Automatic;
+        let entries = self.tast[node.init?].to_vec();
+        let entry = entries.iter().find(|entry| {
+            entry.offset == offset && entry.bit_offset == bit && entry.bit_width == bits
+        })?;
+        if bare(self.types, self.tast[entry.value].ty) != bare(self.types, ty) {
+            return None;
+        }
+        // An automatic object's initializer counts where it is a constant without this reading,
+        // as for a whole object, which is how gcc takes `static int k = l.n;` after
+        // `const struct I l = { 4 };` in the same block.
+        self.objects = !automatic || self.optimized;
+        self.depth += 1;
+        let value = self.eval(entry.value);
+        self.depth -= 1;
+        self.objects = true;
+        let value = value.ok()?;
+        self.read_object = true;
+        Some(value)
+    }
+
+    /// The object a part of one is in, with the byte, the bit and the bit-field width the part is
+    /// at, through members and through elements at a constant index.
+    fn part(&mut self, expr: ExprId) -> Option<(DeclId, u64, u32, u32)> {
+        match self.tast[expr].kind {
+            ExprKind::Decl(decl) => Some((decl, 0, 0, 0)),
+            ExprKind::Member { base, field } => {
+                let (decl, offset, _, _) = self.part(base)?;
+                let TypeKind::Record(record) = bare(self.types, self.tast[base].ty) else {
+                    return None;
+                };
+                let field = self.types.record_info(record).fields.get(field as usize).copied()?;
+                Some((decl, offset.checked_add(field.offset)?, field.bit, field.bits.unwrap_or(0)))
+            }
+            ExprKind::Subscript { base, index } => {
+                let ExprKind::Convert { kind: Conversion::ArrayDecay, operand } =
+                    self.tast[base].kind
+                else {
+                    return None;
+                };
+                let (decl, offset, _, _) = self.part(operand)?;
+                let Ok(Const::Int(index)) = self.eval(index) else { return None };
+                let size = self.size_of(self.tast[expr].ty);
+                if size == 0 {
+                    return None;
+                }
+                let step = u64::try_from(index).ok()?.checked_mul(size)?;
+                Some((decl, offset.checked_add(step)?, 0, 0))
             }
             _ => None,
         }
