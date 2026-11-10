@@ -24,6 +24,7 @@
 //! - Quoted includes look first in the directory of the source file, or in the current directory
 //!   with `-.`, and then in the `-I` directories. Angle includes look in the `-I` directories.
 //!   Then both look in `$INCLUDE`, or else in `/$objtype/include` and `/sys/include`.
+//! - When no directory has the file, both open the name from the current directory.
 //! - `$INCLUDE` and the value of `-I` can hold many directories, with a space between each.
 //! - Warnings are printed only with `-w`.
 //! - `-p` runs the ANSI C preprocessor on the file, where `#` and `##` are operators. Without
@@ -318,6 +319,10 @@ pub fn plan(
             }
         }
     }
+    // When no directory has the file, `macinc` opens the name as it is, from the current
+    // directory. libndb has `#include <ndbhf.h>` for a header that is only in its own directory.
+    common.push("-idirafter".to_owned());
+    common.push(".".to_owned());
     let extra: Vec<String> =
         env(OPTIONS_VARIABLE).unwrap_or_default().split_whitespace().map(str::to_owned).collect();
     if !extra.iter().any(|a| a.starts_with("-O")) {
@@ -435,7 +440,17 @@ mod tests {
     fn a_plain_compile_is_quiet_and_optimized() {
         assert_eq!(
             one("6c", &["-FTVw", "acme.c"]),
-            ["--target=x86_64-plan9", "-c", "-fkencc", "-O2", "-o", "acme.6", "acme.c"]
+            [
+                "--target=x86_64-plan9",
+                "-c",
+                "-fkencc",
+                "-idirafter",
+                ".",
+                "-O2",
+                "-o",
+                "acme.6",
+                "acme.c"
+            ]
         );
         assert_eq!(
             one("7c", &["../port/proc.c"]),
@@ -444,6 +459,8 @@ mod tests {
                 "-c",
                 "-fkencc",
                 "-w",
+                "-idirafter",
+                ".",
                 "-O2",
                 "-o",
                 "proc.7",
@@ -466,6 +483,8 @@ mod tests {
                 "-I../common",
                 "-Ia",
                 "-Ib",
+                "-idirafter",
+                ".",
                 "-O2",
                 "-o",
                 "out.6",
@@ -498,7 +517,20 @@ mod tests {
         assert_eq!(plan_with("6c", &["-w"], &[]).unwrap_err().0, "usage: 6c [-options] files");
         assert_eq!(
             one("6c", &["-o", "p.6"]),
-            ["--target=x86_64-plan9", "-c", "-fkencc", "-w", "-O2", "-x", "c", "-o", "p.6", "-"]
+            [
+                "--target=x86_64-plan9",
+                "-c",
+                "-fkencc",
+                "-w",
+                "-idirafter",
+                ".",
+                "-O2",
+                "-x",
+                "c",
+                "-o",
+                "p.6",
+                "-"
+            ]
         );
     }
 
@@ -517,19 +549,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            p.jobs[0].args[3..7],
-            ["-I/sys/include", "-nostdinc", "-I/amd64/include", "-O2"]
+            p.jobs[0].args[3..9],
+            ["-I/sys/include", "-nostdinc", "-I/amd64/include", "-idirafter", ".", "-O2"]
         );
     }
 
     #[test]
     fn r9_opt_sets_the_options_and_n_turns_off_the_optimizer() {
         let a = plan_with("6c", &["-w", "x.c"], &[("R9_OPT", "-O1 -g")]).unwrap();
-        assert_eq!(a.jobs[0].args[3..5], ["-O1", "-g"]);
+        assert_eq!(a.jobs[0].args[5..7], ["-O1", "-g"]);
         let a = plan_with("6c", &["-wN", "x.c"], &[("R9_OPT", "-O3")]).unwrap();
-        assert_eq!(a.jobs[0].args[3..5], ["-O3", "-O0"]);
+        assert_eq!(a.jobs[0].args[5..7], ["-O3", "-O0"]);
         let a = one("6c", &["-N", "x.c"]);
-        assert_eq!(a[4..6], ["-O2", "-O0"]);
+        assert_eq!(a[6..8], ["-O2", "-O0"]);
     }
 
     #[test]
@@ -546,7 +578,7 @@ mod tests {
         assert_eq!(p.jobs[0].args.last().unwrap(), "x.c");
         assert_eq!(
             p.jobs[1].args,
-            ["--target=x86_64-plan9", "-fkencc", "-O2", "-S", "-o", "-", "x.c"]
+            ["--target=x86_64-plan9", "-fkencc", "-idirafter", ".", "-O2", "-S", "-o", "-", "x.c"]
         );
         assert!(!p.announce);
     }
@@ -565,6 +597,8 @@ mod tests {
                 "-c",
                 "-fkencc",
                 "-I../common",
+                "-idirafter",
+                ".",
                 "-O2",
                 "-o",
                 "acme.7",
