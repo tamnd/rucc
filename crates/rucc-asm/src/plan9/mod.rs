@@ -248,9 +248,12 @@ fn split_operands(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut quoted = false;
+    let mut escaped = false;
     let mut start = 0;
     for (at, c) in text.char_indices() {
         match c {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
             '"' => quoted = !quoted,
             '(' if !quoted => depth += 1,
             ')' if !quoted => depth -= 1,
@@ -424,9 +427,7 @@ fn expr(text: &str, line: usize) -> Result<Expr, Trouble> {
     let bytes = text.as_bytes();
     let mut terms = Vec::new();
     for at in 1..bytes.len() {
-        if (bytes[at] == b'+' || bytes[at] == b'-')
-            && !matches!(bytes[at - 1], b'+' | b'-' | b'x' | b'X')
-        {
+        if (bytes[at] == b'+' || bytes[at] == b'-') && !matches!(bytes[at - 1], b'+' | b'-') {
             terms.push(&text[start..at]);
             start = at;
         }
@@ -444,7 +445,9 @@ fn expr(text: &str, line: usize) -> Result<Expr, Trouble> {
             out.offset = out.offset.wrapping_add(value * sign);
         } else if sign == 1
             && out.sym.is_none()
-            && body.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$' | '@'))
+            && body.chars().all(|c| {
+                !c.is_ascii() || c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$' | '@')
+            })
             && body != "."
         {
             out.sym = Some(body.to_owned());
@@ -1124,6 +1127,31 @@ impl Out<'_> {
                 _ => None,
             })
         };
+        // A double shift is SHL or SHR in 6l. The source register is the index of the count.
+        if let Some(rest) = m.strip_prefix("shld").or_else(|| m.strip_prefix("shrd")) {
+            let width = match rest.chars().next() {
+                Some(c) => size_letter(c).filter(|_| rest.len() == 1),
+                None => width_of(&ops),
+            };
+            let (count, src, dst) = match &ops[..] {
+                [count, src, dst] => (self.addr(count, line)?, src, dst),
+                [src, dst] => (Addr6::of(a6::D_CL), src, dst),
+                _ => return Err(trouble(line, format!("{m} with the wrong number of operands"))),
+            };
+            let Some(width) = width.filter(|w| matches!(w, Width::W | Width::L | Width::Q)) else {
+                return Err(trouble(line, format!("6l has no instruction {m}")));
+            };
+            let Operand::Reg(src, _) = src else {
+                return Err(trouble(line, format!("the source of {m} is not a register")));
+            };
+            let op = self.op(&format!("SH{}{}", m[2..3].to_uppercase(), suffix(width)), line)?;
+            let mut from = count;
+            from.index = *src;
+            from.scale = 0;
+            let to = self.addr(dst, line)?;
+            self.push(op, from, to);
+            return Ok(());
+        }
         let name: String = if let Some(rest) = m.strip_prefix("cmov") {
             let (cc, width) = match rest.char_indices().last() {
                 Some((at, c)) if size_letter(c).is_some() && condition(&rest[..at]).is_some() => {
@@ -1568,6 +1596,32 @@ mod tests {
             (p[5].from.sym.as_deref(), p[5].from.ty, p[5].to.offset),
             (Some("count"), a6::D_STATIC, 4)
         );
+    }
+
+    #[test]
+    fn a_double_shift_has_the_source_as_the_index_of_the_count() {
+        let p = progs("f:\n\tshrdl\t$1, %esi, %ecx\n\tshldq\t%cl, %rdx, %rax\n\tret\n");
+        assert_eq!(names(&p), ["ATEXT", "ASHRL", "ASHLQ", "ARET", "AEND"]);
+        assert_eq!((p[1].from.ty, p[1].from.offset, p[1].from.index), (a6::D_CONST, 1, a6::D_SI));
+        assert_eq!((p[1].from.scale, p[1].to.ty), (0, a6::D_CX));
+        assert_eq!((p[2].from.ty, p[2].from.index, p[2].to.ty), (a6::D_CL, a6::D_DX, a6::D_AX));
+    }
+
+    #[test]
+    fn a_symbol_can_end_in_x_or_have_letters_that_are_not_ascii() {
+        let p = progs(
+            "f:\n\tleaq\tonex+512(%rip), %rax\n\tjmp\t.L\u{3c4}conv_4\n.L\u{3c4}conv_4:\n\tret\n",
+        );
+        assert_eq!(names(&p), ["ATEXT", "ALEAQ", "AJMP", "ARET", "AEND"]);
+        assert_eq!((p[1].from.sym.as_deref(), p[1].from.offset), (Some("onex"), 512));
+        assert_eq!(p[2].to.ty, a6::D_BRANCH);
+    }
+
+    #[test]
+    fn a_quote_after_a_backslash_does_not_end_the_string() {
+        assert_eq!(split_operands(r#""a\"b,c", 1"#), [r#""a\"b,c""#, "1"]);
+        let p = progs("\t.data\ns:\n\t.ascii\t\"\\\"x,y\\\"\"\n");
+        assert_eq!(&p[0].to.string[..5], b"\"x,y\"");
     }
 
     #[test]
