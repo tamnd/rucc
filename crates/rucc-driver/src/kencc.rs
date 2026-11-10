@@ -26,6 +26,8 @@
 //!   Then both look in `$INCLUDE`, or else in `/$objtype/include` and `/sys/include`.
 //! - `$INCLUDE` and the value of `-I` can hold many directories, with a space between each.
 //! - Warnings are printed only with `-w`.
+//! - `-p` runs the ANSI C preprocessor on the file, where `#` and `##` are operators. Without
+//!   it the preprocessor of kencc reads the file.
 //! - With more than one file, kencc prints the name of each file and a colon on standard error
 //!   before it compiles the file.
 //!
@@ -291,6 +293,10 @@ pub fn plan(
     common.extend(o.rucc.iter().cloned());
     common.push("-c".to_owned());
     common.push("-fkencc".to_owned());
+    // `-p` runs the ANSI C preprocessor, `/bin/cpp`, on the file first.
+    if o.has(b'p') {
+        common.push("-fno-kencc-preprocessor".to_owned());
+    }
     if !o.has(b'w') {
         common.push("-w".to_owned());
     }
@@ -517,6 +523,13 @@ mod tests {
         assert_eq!(a.jobs[0].args[3..5], ["-O3", "-O0"]);
         let a = one("6c", &["-N", "x.c"]);
         assert_eq!(a[4..6], ["-O2", "-O0"]);
+    }
+
+    #[test]
+    fn p_runs_the_ansi_preprocessor() {
+        let a = one("6c", &["-FVpw", "x.c"]);
+        assert_eq!(a[2..4], ["-fkencc", "-fno-kencc-preprocessor"]);
+        assert!(!one("6c", &["-w", "x.c"]).iter().any(|a| a == "-fno-kencc-preprocessor"));
     }
 
     #[test]

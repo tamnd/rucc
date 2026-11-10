@@ -297,7 +297,12 @@ impl Checker<'_> {
             match decl.name {
                 Some(name) => reached.push(name),
                 None if decl.bits.is_none() => {
-                    self.reached_through(decl.ty, &mut reached);
+                    // kencc finds a member breadth first and takes the first match, so a name
+                    // inside an unnamed member can be the same as another one. libc's `QLock` and
+                    // `Rendez` both have a `head`, and 9p.h puts the two in `Reqqueue`.
+                    if !self.cx.kencc {
+                        self.reached_through(decl.ty, &mut reached);
+                    }
                     // Under `-fplan9-extensions` the typedef name of the member names it too.
                     if let Some((name, _)) = spelled.filter(|_| self.plan9_named(decl.ty)) {
                         self.anonymous_spellings.insert((id, decl.ty), name);

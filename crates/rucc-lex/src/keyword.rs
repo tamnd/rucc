@@ -368,6 +368,24 @@ impl Keywords {
         if gnu { all.with(X86) } else { all }
     }
 
+    /// The same table with only the words that kencc has, for `-fkencc`.
+    ///
+    /// kencc has the words of C89, and `inline` and `restrict` from C99 (`cc/lex.c`). The words
+    /// of C23 and the GNU words `asm` and `typeof` are names, so `typedef int bool;` in
+    /// libscribble compiles. A word with a leading underscore stays a keyword, because a program
+    /// cannot use it as a name.
+    #[must_use]
+    pub fn kencc(mut self) -> Keywords {
+        for (slot, entry) in self.active.iter_mut().zip(KEYWORDS) {
+            let kept = entry.spelling.starts_with('_')
+                || matches!(entry.dialects, ALWAYS | SINCE_C99 | SINCE_C99_OR_GNU);
+            if !kept {
+                *slot = None;
+            }
+        }
+        self
+    }
+
     /// Turns on every entry with one of `bits` in its mask, whatever the dialect says.
     fn with(mut self, bits: u16) -> Keywords {
         for (slot, entry) in self.active.iter_mut().zip(KEYWORDS) {
@@ -702,6 +720,21 @@ mod tests {
                 assert_eq!(lookup(std, gnu, "sizeof"), Some(Keyword::Sizeof));
                 assert_eq!(lookup(std, gnu, "_Complex"), Some(Keyword::Complex));
             }
+        }
+    }
+
+    #[test]
+    fn kencc_has_the_words_of_c89_and_inline_and_restrict() {
+        let mut interner = Interner::new();
+        let keywords = Keywords::new(&mut interner, Std::C23, true).kencc();
+        let mut get = |text: &str| keywords.get(interner.intern(text));
+        assert_eq!(get("int"), Some(Keyword::Int));
+        assert_eq!(get("inline"), Some(Keyword::Inline));
+        assert_eq!(get("restrict"), Some(Keyword::Restrict));
+        assert_eq!(get("_Noreturn"), Some(Keyword::Noreturn));
+        assert_eq!(get("__typeof__"), Some(Keyword::Typeof));
+        for name in ["bool", "true", "false", "nullptr", "typeof", "asm", "alignof"] {
+            assert_eq!(get(name), None, "{name} is a name under kencc");
         }
     }
 

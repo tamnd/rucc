@@ -101,3 +101,24 @@ fn a_plan_9_target_refuses_the_conversion_without_the_rule() {
     );
     assert!(err.contains("warning: passing argument 1 of 'lock' from incompatible pointer type"));
 }
+
+/// kencc finds a member breadth first and takes the first match, so two unnamed members can
+/// have a member with the same name. 9p.h puts `QLock` and `Rendez` in `Reqqueue`, and the two
+/// have a `head`. A member of the record itself is found before the ones in its unnamed members.
+#[test]
+fn kencc_takes_the_same_name_in_two_unnamed_members() {
+    let source = "typedef struct QLock { int locked; long head; } QLock;\n\
+                  typedef struct Rendez { QLock *l; long head; } Rendez;\n\
+                  typedef struct Queue { QLock; Rendez; char *locked; } Queue;\n\
+                  long first(Queue *q) { return q->head; }\n\
+                  char *own(Queue *q) { return q->locked; }\n";
+    let (ok, out, err) =
+        run("twice", &["--target=x86_64-unknown-linux-gnu", "-O1", "-fkencc"], source);
+    assert!(ok, "{err}");
+    assert!(body(&out, "first").contains("movq\t8(%rdi), %rax"), "{out}");
+    assert!(body(&out, "own").contains("movq\t32(%rdi), %rax"), "{out}");
+    let (ok, _, err) =
+        run("twice-gcc", &["--target=x86_64-unknown-linux-gnu", "-fplan9-extensions"], source);
+    assert!(!ok);
+    assert!(err.contains("duplicate member 'head'"), "{err}");
+}

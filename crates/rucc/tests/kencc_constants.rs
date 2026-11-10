@@ -8,6 +8,8 @@
 //!   not overflow.
 //! - kencc has no hexadecimal floating constant, so a sign after an `e` or a `p` in a
 //!   hexadecimal number ends the number. libc/port/pool.c has `0xCAB00D1E+1`.
+//! - `'''` is the character constant of a quote, as `escchar` in `cc/lex.c` reads it.
+//!   The file dossubs.c of dossrv has `isdos['''] = 1`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,18 +23,21 @@ const SOURCE: &str = "enum { eps = 1e-6, half = 2.5, next, seven = 7, eight };\n
                       long long e = 2440588 * Daysec;\n\
                       int f = sizeof(Next) + sizeof(Small);\n";
 
-fn fixture(what: &str) -> PathBuf {
+/// The quote, which is in its own line because C stops at it before the checks of the rest.
+const QUOTE: &str = "int g = ''';\n";
+
+fn fixture(what: &str, source: &str) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("rucc-kencc-constants-{}-{what}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
-    std::fs::write(&path, SOURCE).expect("the fixture can be written");
+    std::fs::write(&path, source).expect("the fixture can be written");
     path
 }
 
 /// Whether the compiler took the source, the assembly, and what it said.
-fn compile(what: &str, flags: &[&str]) -> (bool, String, String) {
-    let path = fixture(what);
+fn compile(what: &str, source: &str, flags: &[&str]) -> (bool, String, String) {
+    let path = fixture(what, source);
     let out = path.with_extension("s");
     let run = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .args(["--target=x86_64-unknown-linux-gnu", "-S", "-o"])
@@ -56,7 +61,7 @@ fn value<'a>(asm: &'a str, name: &str) -> &'a str {
 
 #[test]
 fn kencc_reads_the_constants() {
-    let (ok, asm, err) = compile("kencc", &["-fkencc", "-w"]);
+    let (ok, asm, err) = compile("kencc", &format!("{SOURCE}{QUOTE}"), &["-fkencc", "-w"]);
     assert!(ok, "the compiler refused the source:\n{err}");
     // 1e-6 and 3.5, as the bits of a double.
     assert_eq!(value(&asm, "a"), ".quad\t4517329193108106637");
@@ -65,12 +70,16 @@ fn kencc_reads_the_constants() {
     assert_eq!(value(&asm, "d"), ".long\t3400535327");
     assert_eq!(value(&asm, "e"), ".quad\t210866803200");
     assert_eq!(value(&asm, "f"), ".long\t12");
+    assert_eq!(value(&asm, "g"), ".long\t39");
 }
 
 #[test]
 fn c_refuses_them() {
-    let (ok, _, err) = compile("c", &[]);
+    let (ok, _, err) = compile("c", SOURCE, &[]);
     assert!(!ok);
     assert!(err.contains("enumerator value for 'eps' is not an integer constant"), "{err}");
     assert!(err.contains("invalid suffix"), "{err}");
+    let (ok, _, err) = compile("quote", QUOTE, &[]);
+    assert!(!ok);
+    assert!(err.contains("empty character constant"), "{err}");
 }

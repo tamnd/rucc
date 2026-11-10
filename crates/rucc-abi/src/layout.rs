@@ -276,6 +276,9 @@ fn wchar_is_signed(target: TargetTuple) -> bool {
     match target.os() {
         // A `wchar_t` on Windows is an `unsigned short`, which is also why it is two bytes.
         Os::Windows => false,
+        // A wide literal of kencc is an array of `Rune`, which 9front makes a `uint` (`TRUNE`
+        // in `cc/cc.h`).
+        Os::Plan9 => false,
         // Apple kept the Intel answer on AArch64, the same way it kept plain `char` signed, and
         // NetBSD makes it an `int` everywhere on purpose.
         Os::MacOs | Os::IOs | Os::NetBsd => true,

@@ -2002,6 +2002,12 @@ impl Checker<'_> {
             // kencc sets the qualifiers aside when it compares two declarations, and the type
             // of the first one stays the type of the name.
             if !(self.cx.kencc && compatible_unqualified(&self.types, node.ty, declared.ty)) {
+                // kencc's `adecl` binds an `extern` in a block to the type it is written with
+                // and does not compare it with the declaration outside. games/nes/ppu.c has
+                // `extern int nmi;` where dat.h has `extern u8int irq, nmi;`.
+                if self.cx.kencc && !self.scopes.at_file_scope() {
+                    return self.declare(declared);
+                }
                 self.conflicting_types(declared.name, declared.ty, Some(previous), declared.span);
                 return previous;
             }

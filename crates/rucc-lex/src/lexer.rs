@@ -683,6 +683,18 @@ impl<'a> Lexer<'a> {
 
     fn literal(&mut self, quote: u8, start: u32, kind: PpTokenKind) -> PpTokenKind {
         self.eat();
+        // kencc reads `'''` as the quote character, because an apostrophe right after the
+        // opening one is the character and not the end (`escchar` in `cc/lex.c`). libdraw and
+        // vnc write `L'''`.
+        if self.options.kencc
+            && quote == b'\''
+            && self.cursor.nth(0) == b'\''
+            && self.cursor.nth(1) == b'\''
+        {
+            self.eat();
+            self.eat();
+            return kind;
+        }
         loop {
             if self.cursor.at_end() || self.cursor.first() == b'\n' {
                 // A literal does not cross a line, so the quote and the rest of its line are

@@ -357,7 +357,8 @@ impl Checker<'_> {
                 self.record_spec(kind, tag, fields, attrs, pragmas, span)
             }
             TypeSpec::Enum { tag, enumerators, underlying, attrs } => {
-                self.enum_spec(tag, enumerators, underlying, attrs, span)
+                let ty = self.enum_spec(tag, enumerators, underlying, attrs, span);
+                if self.cx.kencc { self.kencc_enum(ty) } else { ty }
             }
             TypeSpec::Typedef(name) => match self.scopes.lookup(name) {
                 Some(Binding::Typedef(ty)) => {
@@ -404,6 +405,12 @@ impl Checker<'_> {
 
     /// One of the types a keyword or a run of keywords names.
     fn basic_type(&mut self, scalar: Scalar, complexity: Complexity, span: Span) -> TypeId {
+        // kencc's `simplet` gives `signed char` the type of `char`, so games/v8e can write
+        // `typedef char s8int;` after u.h has `typedef signed char s8int;`.
+        let scalar = match scalar {
+            Scalar::SignedChar if self.cx.kencc => Scalar::Char,
+            scalar => scalar,
+        };
         let kind = int_kind(scalar);
         let float = float_kind(scalar, self.cx.target);
 
@@ -792,6 +799,17 @@ impl Checker<'_> {
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,
+        }
+    }
+
+    /// The type that an `enum` specifier gives under kencc, which is the integer type of its
+    /// values and not a type of its own (`cc/cc.y`). An enumeration with no body yet is `int`.
+    /// So two enumerations are the same type, and nfs3.h declares `nfs3Errstr(Nfs3Status)`
+    /// where nfs3.c defines `nfs3Errstr(SunStatus status)`.
+    fn kencc_enum(&mut self, ty: TypeId) -> TypeId {
+        match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Enum(id) => self.types.enum_info(id).underlying.unwrap_or_else(|| self.int()),
+            _ => ty,
         }
     }
 
