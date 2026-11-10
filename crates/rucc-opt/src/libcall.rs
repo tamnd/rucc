@@ -404,6 +404,18 @@ enum Argument {
     At(Value, u64),
 }
 
+/// Which C library the program links against, which says which names a fold may leave behind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Library {
+    /// The library of the C standard, which has every name in [`REPLACEMENTS`].
+    #[default]
+    Standard,
+    /// The C library of Plan 9, which has less. A fold may name only a function that the headers
+    /// declare, so there is no `floorf`. And it may never name `putchar`: `<stdio.h>` declares it,
+    /// but it is a macro alone, and the library has no function of that name.
+    Plan9,
+}
+
 /// What this module already says about each name a fold may leave behind.
 ///
 /// The verifier holds that a call to a name the module declares carries that name's own signature,
@@ -421,10 +433,15 @@ struct Shapes {
 
 impl Shapes {
     /// Reads the module's answer for each of the names a fold may leave behind.
-    fn of(module: &Module, names: &mut Interner) -> Self {
+    ///
+    /// For [`Library::Plan9`], a name the module does not declare is one no call may name.
+    fn of(module: &Module, names: &mut Interner, library: Library) -> Self {
+        let declared_only = library == Library::Plan9;
         let mut held: Map<&'static str, Option<(Symbol, Signature)>> = REPLACEMENTS
             .iter()
-            .map(|&name| (name, Some((names.intern(name), canonical(module, name)))))
+            .map(|&name| {
+                (name, (!declared_only).then(|| (names.intern(name), canonical(module, name))))
+            })
             .collect();
         let mut named: Map<&'static str, Option<(Symbol, Option<Signature>)>> =
             UNCHECKED.iter().map(|&name| (name, Some((names.intern(name), None)))).collect();
@@ -438,11 +455,13 @@ impl Shapes {
             }
             let Some(slot) = held.get_mut(names.resolve(spelled)) else { continue };
             let declared = func.signature();
-            let agrees = slot.as_ref().is_some_and(|(_, want)| {
-                !declared.variadic
-                    && declared.param_types().eq(want.param_types())
-                    && declared.return_types().eq(want.return_types())
-            });
+            let want = canonical(module, names.resolve(spelled));
+            let absent = library == Library::Plan9 && names.resolve(spelled) == "putchar";
+            let agrees = (declared_only || slot.is_some())
+                && !absent
+                && !declared.variadic
+                && declared.param_types().eq(want.param_types())
+                && declared.return_types().eq(want.return_types());
             *slot = agrees.then(|| (func.name, declared.clone()));
         }
         // A variable or a second name for something else is not a function to call, whatever it is
@@ -539,14 +558,17 @@ fn size(module: &Module) -> Type {
 ///
 /// Gives back the functions that changed and what changed in them, which is what the pipeline turns
 /// into `-fopt-info` remarks.
+///
+/// `library` says which names the C library has, and so which calls a fold may leave behind.
 pub fn fold(
     module: &mut Module,
     names: &mut Interner,
     no_builtin: &[String],
     pic: Pic,
+    library: Library,
     fuel: &mut Fuel,
 ) -> Vec<(FuncId, Stats)> {
-    visit(module, names, no_builtin, pic, fuel, false, false)
+    visit(module, names, no_builtin, pic, library, fuel, false, false)
 }
 
 /// Writes out every `memcpy`, `memset` and `memmove` of a small known length as the IR's own copy,
@@ -568,20 +590,22 @@ pub fn write_out(
     kasan: bool,
     fuel: &mut Fuel,
 ) -> Vec<(FuncId, Stats)> {
-    visit(module, names, no_builtin, pic, fuel, true, kasan)
+    visit(module, names, no_builtin, pic, Library::Standard, fuel, true, kasan)
 }
 
 /// [`fold`] or [`write_out`], as `small` says.
+#[allow(clippy::too_many_arguments)]
 fn visit(
     module: &mut Module,
     names: &mut Interner,
     no_builtin: &[String],
     pic: Pic,
+    library: Library,
     fuel: &mut Fuel,
     small: bool,
     kasan: bool,
 ) -> Vec<(FuncId, Stats)> {
-    let shapes = Shapes::of(module, names);
+    let shapes = Shapes::of(module, names, library);
     // What each symbol was called in the source, for the declarations where the two differ. A call
     // names a symbol, and a symbol an assembler name replaced says nothing about which library
     // function it is, so this is what the two names are put back together through.
@@ -2741,10 +2765,15 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
 
     /// The same, under whatever `-fno-builtin-<name>` and fuel the test wants.
     fn run(body: &str, no_builtin: &[String], fuel: &mut Fuel) -> String {
+        run_for(body, no_builtin, Library::Standard, fuel)
+    }
+
+    /// The same, for the C library `library`.
+    fn run_for(body: &str, no_builtin: &[String], library: Library, fuel: &mut Fuel) -> String {
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        fold(&mut module, &mut names, no_builtin, Pic::Executable, fuel);
+        fold(&mut module, &mut names, no_builtin, Pic::Executable, library, fuel);
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the fold left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
@@ -2800,6 +2829,40 @@ block0:
         assert!(out.contains("iconst.i32 120"), "the character is the argument, {out}");
         assert!(out.contains("call @putchar("), "{out}");
         assert_eq!(out.matches("call @").count(), 1, "the empty one is gone, {out}");
+    }
+
+    /// On Plan 9 a fold names only a function that the module declares, and never `putchar`,
+    /// which is a macro alone there. join.c has `printf("\n")`, and 7l found no `putchar` for it.
+    #[test]
+    fn plan9_has_no_putchar_and_only_what_its_headers_declare() {
+        let body = r#"
+global @.Lstr.0 : bytes 2 = { bytes "\0a\00" }, align 1, linkage(internal), constant
+global @.Lstr.1 : bytes 4 = { bytes "hi\0a\00" }, align 1, linkage(internal), constant
+
+func @printf(ptr, ...) -> i32, linkage(external);
+func @putchar(i32) -> i32, linkage(external);
+DECLARE
+
+func @g(), linkage(external) {
+block0:
+    %0 = global_addr @.Lstr.0
+    %1 = call @printf(%0) : (ptr, ...) -> i32
+    %2 = global_addr @.Lstr.1
+    %3 = call @printf(%2) : (ptr, ...) -> i32
+    return
+}
+"#;
+        let plan9 = |declare: &str| {
+            run_for(&body.replace("DECLARE", declare), &[], Library::Plan9, &mut Fuel::unlimited())
+        };
+        let out = plan9("");
+        assert!(!out.contains("call @putchar("), "{out}");
+        assert!(!out.contains("call @puts("), "puts is not declared, {out}");
+        assert_eq!(out.matches("call @printf(").count(), 2, "{out}");
+        let out = plan9("func @puts(ptr) -> i32, linkage(external);");
+        assert!(!out.contains("call @putchar("), "{out}");
+        assert!(out.contains("call @puts("), "{out}");
+        assert_eq!(out.matches("call @printf(").count(), 1, "{out}");
     }
 
     /// `printf("%s\n", p)` is `puts(p)` and `printf("%c", c)` is `putchar(c)`, whatever the
