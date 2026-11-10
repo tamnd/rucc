@@ -7515,6 +7515,19 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// A conversion between `long double` and `__float128` calls libgcc's routine for it, as gcc
+    /// does. libgfortran's `_gfortran_sind_r16` widens a `long double` to a `__float128`.
+    #[test]
+    fn a_long_double_converts_to_and_from_the_quad_through_libgcc() {
+        for (source, routine) in [
+            ("__float128 f(long double a) { return a; }\n", "__extendxftf2"),
+            ("long double f(__float128 a) { return a; }\n", "__trunctfxf2"),
+        ] {
+            let text = mir(source);
+            assert!(text.contains(routine), "{routine} for {source}{text}");
+        }
+    }
+
     /// The note names the issue tracker, which is where a reader finds out whether it is known.
     /// The program is the one above, on AArch64 for the same reason.
     #[test]
