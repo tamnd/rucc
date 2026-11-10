@@ -733,6 +733,32 @@ fn isa_name(arg: &str) -> Option<(&str, rucc_target::Feature, bool)> {
     known.map(|feature| (name, feature, on))
 }
 
+/// The 32 bit x86 processor a unit is built for, or `None` for the Pentium 4 that the backend
+/// builds for.
+///
+/// A `-march=` this compiler knows the processor of decides on every target, since gcc says the
+/// same macros for it everywhere. With none, the processor is the one the target's gcc was built
+/// to default to, where that has been measured. The amd64 gcc of FreeBSD and of NetBSD builds
+/// `-m32` code for the K8, which is `-march=x86-64`. NetBSD's own i386 gcc is configured for the
+/// i486. FreeBSD's i386 system compiler builds for the i686. Every other target keeps the
+/// Pentium 4, which is what its macros said before any of this was measured.
+fn x86_processor(
+    march: Option<&str>,
+    os: rucc_target::Os,
+    narrowed: bool,
+) -> Option<&'static rucc_target::Processor> {
+    if let Some(name) = march {
+        return rucc_target::Processor::named(name);
+    }
+    let name = match os {
+        rucc_target::Os::NetBsd | rucc_target::Os::FreeBsd(_) if narrowed => "x86-64",
+        rucc_target::Os::NetBsd => "i486",
+        rucc_target::Os::FreeBsd(_) => "i686",
+        _ => return None,
+    };
+    rucc_target::Processor::named(name)
+}
+
 /// The extensions the machine running the compiler has, which is what `-march=native` means.
 ///
 /// Asked of the processor with `cpuid`, through the standard library, and only when the compiler
@@ -1067,7 +1093,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut isa = rucc_target::Choices::new();
     let mut isa_flag: Option<&str> = None;
     let mut march: Option<&str> = None;
-    let mut tuned = false;
+    let mut mtune: Option<&str> = None;
     // What `-fexceptions` and `-fno-exceptions` last said, if either was written. It is kept apart
     // from the field because `-fnon-call-exceptions` turns exceptions on only when neither was,
     // which is gcc's rule and is why `-fno-exceptions -fnon-call-exceptions` defines no
@@ -3299,7 +3325,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // target's processors. `-mtune=` says what to schedule for and changes nothing a
             // program can see.
             _ if arg.starts_with("-march=") => march = Some(&arg["-march=".len()..]),
-            _ if arg.starts_with("-mtune=") => tuned = true,
+            _ if arg.starts_with("-mtune=") => mtune = Some(&arg["-mtune=".len()..]),
             _ if arg.starts_with("-mcpu=") => {}
             // The calling convention, which is not safe to ignore. Taken when it names the one
             // the target already uses and refused otherwise. The 32 bit ones are taken for the
@@ -3530,6 +3556,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // operating system and runtime. `-m16` is the 32 bit machine assembled as `.code16gcc`, which
     // is how the kernel builds its real mode code. Anywhere else the other size is a target this
     // compiler does not have, which it is told rather than being given the wrong one.
+    //
+    // Whether the unit is the 32 bit half of an x86-64 target, which is what a BSD builds its
+    // lib32 libraries and its boot code as, is kept for the processor below.
+    let narrowed =
+        matches!(word, Some("-m32" | "-m16")) && opts.target.arch == rucc_target::Arch::X86_64;
     if let Some(word) = word {
         use rucc_target::Arch;
         let arch = match (word, opts.target.arch) {
@@ -3835,7 +3866,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // machine is the target's. Anywhere else gcc is a cross compiler, which has no way to ask the
     // processor and refuses the value, and the kernel's `CONFIG_CC_HAS_MARCH_NATIVE` is that
     // answer.
-    opts.tuned = tuned || march.is_some();
+    opts.tuned = mtune.is_some() || march.is_some();
     let host = if cfg!(target_arch = "x86_64") {
         Some(rucc_target::Arch::X86_64)
     } else if cfg!(target_arch = "aarch64") {
@@ -3875,9 +3906,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     Some(modifiers) => native_aarch64().aarch64_modifiers(modifiers),
                     None => rucc_target::Isa::aarch64_march(name),
                 },
-                (rucc_target::Arch::X86, _) => isa
-                    .over(rucc_target::Isa::baseline().union(rucc_target::Isa::of(&["sahf"])))
-                    .minus(rucc_target::Isa::of(&["cx16"])),
+                (rucc_target::Arch::X86, _) => {
+                    let processor = x86_processor(march, opts.target.os, narrowed);
+                    // gcc 11 and later give every 32 bit unit `sahf`, whatever the processor,
+                    // and gcc 10 gives it to none of the processors here. The Pentium 4 the
+                    // backend builds for has always had it.
+                    let sahf = processor.is_none() || opts.gnuc.major >= 11;
+                    let sahf =
+                        if sahf { rucc_target::Isa::of(&["sahf"]) } else { rucc_target::Isa::NONE };
+                    let base = processor.map_or_else(rucc_target::Isa::baseline, |it| it.isa());
+                    opts.processor = processor;
+                    opts.tune = mtune
+                        .or(march)
+                        .and_then(rucc_target::Processor::named)
+                        .filter(|_| processor.is_some())
+                        .map_or(&[], |it| it.tune);
+                    isa.over(base.union(sahf)).minus(rucc_target::Isa::of(&["cx16"]))
+                }
                 _ => rucc_target::Isa::NONE,
             };
             // The processors gcc gives no `cmov`, which came with the Pentium Pro. A kernel built
@@ -11467,6 +11512,43 @@ mod tests {
         assert_eq!(files(&fpu), (true, true));
         let (opts, _) = compile(&[&fpu[..], &["-c", "a.c"]].concat());
         assert_eq!(opts.isa, rucc_target::Isa::of(&["sse", "sse2", "fxsr", "sahf"]));
+    }
+
+    /// tamnd/rucc#4251. A 32 bit unit on a BSD is built for the processor that BSD's gcc builds
+    /// for, and a `-march=` that names a processor this compiler knows is that processor
+    /// everywhere. The extensions are the processor's, with `sahf` from gcc 11 on.
+    #[test]
+    fn a_32_bit_unit_is_built_for_the_processor_its_gcc_builds_for() {
+        let unit = |more: &[&str]| compile(&[&["-c", "a.c"], more].concat()).0;
+        let named = |name| rucc_target::Processor::named(name);
+        let sahf = rucc_target::Isa::of(&["sahf"]);
+        let k8 = rucc_target::Isa::baseline().union(sahf);
+        for target in ["--target=x86_64-unknown-freebsd15.1", "--target=x86_64-unknown-netbsd"] {
+            let opts = unit(&[target, "-m32"]);
+            assert_eq!(opts.processor, named("x86-64"), "{target}");
+            assert_eq!((opts.isa, opts.tune), (k8, &[][..]), "{target}");
+            // gcc 10 has no `sahf` for the K8.
+            let opts = unit(&[target, "-m32", "-fgnuc-version=10.5.0"]);
+            assert_eq!(opts.isa, rucc_target::Isa::baseline(), "{target}");
+            // The boot code's processor has none of the extensions, and is the one tuned for.
+            let opts = unit(&[target, "-m32", "-march=i386", "-Os", "-ffreestanding"]);
+            assert_eq!(opts.processor, named("i386"), "{target}");
+            assert_eq!((opts.isa, opts.tune), (sahf, &["__tune_i386__"][..]), "{target}");
+            assert!(!opts.cmov, "{target}");
+            // A flag still turns an extension on over the processor.
+            let opts = unit(&[target, "-m32", "-march=i386", "-msse2"]);
+            assert!(opts.isa.has(rucc_target::Feature::named("sse2").unwrap()), "{target}");
+            let opts = unit(&[target, "-m32", "-march=i486", "-mtune=generic"]);
+            assert_eq!((opts.processor, opts.tune), (named("i486"), &[][..]), "{target}");
+        }
+        assert_eq!(unit(&["--target=i486--netbsdelf"]).processor, named("i486"));
+        assert_eq!(unit(&["--target=i386-unknown-freebsd14.5"]).processor, named("i686"));
+        // Elsewhere the unit is the Pentium 4 the backend builds for until `-march=` says more.
+        assert_eq!(unit(&["--target=x86_64-linux-gnu", "-m32"]).processor, None);
+        assert_eq!(unit(&["--target=i686-linux-gnu", "-march=haswell"]).processor, None);
+        let opts = unit(&["--target=i686-linux-gnu", "-march=pentium-mmx"]);
+        assert_eq!(opts.processor, named("pentium-mmx"));
+        assert_eq!(opts.isa, rucc_target::Isa::of(&["mmx", "sahf"]));
     }
 
     /// tamnd/rucc#3694. An i386 unit is built for the Pentium 4 and the flags go over it, as gcc

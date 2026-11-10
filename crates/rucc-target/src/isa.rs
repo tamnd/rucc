@@ -508,6 +508,186 @@ impl Isa {
     }
 }
 
+/// A 32 bit x86 processor that `-march=` can name, and what gcc says and builds for it.
+///
+/// gcc writes the processor into the predefined macros twice, once as the machine the code is
+/// for and once as the machine it is tuned for, and the two lists here are the ones gcc 13
+/// defines under `-m32 -march=<name>` with no `-mtune=`. The extensions are the ones that change
+/// a macro this compiler has. The compare and swap width is what decides the lock free answers:
+/// the i386 has no `cmpxchg`, the i486 has it up to four bytes, and the Pentium added
+/// `cmpxchg8b`.
+///
+/// A name that is not in [`PROCESSORS`] is a processor this table does not know. The caller
+/// keeps the Pentium 4 that the i386 backend builds for there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Processor {
+    /// The name `-march=` takes.
+    pub name: &'static str,
+    /// The macros that name the machine the code is for, such as `__i486__`.
+    pub arch: &'static [&'static str],
+    /// The macros that name the machine the code is tuned for, such as `__tune_i486__`. gcc tunes
+    /// for the generic machine under `-march=x86-64`, and that one has no macro.
+    pub tune: &'static [&'static str],
+    /// The extensions the processor has, as [`Isa::of`] takes them.
+    pub extensions: &'static [&'static str],
+    /// The widest `cmpxchg` in bytes, or zero for none.
+    pub compare_and_swap: u32,
+}
+
+impl Processor {
+    /// The processor with that name, or `None` for a name not in [`PROCESSORS`].
+    #[must_use]
+    pub fn named(name: &str) -> Option<&'static Processor> {
+        PROCESSORS.iter().find(|processor| processor.name == name)
+    }
+
+    /// The extensions as a set.
+    #[must_use]
+    pub fn isa(&self) -> Isa {
+        Isa::of(self.extensions)
+    }
+}
+
+/// The macros of the i386.
+const I386: &[&str] = &[];
+/// The macros of the i486.
+const I486: &[&str] = &["__i486", "__i486__"];
+/// The macros of the Pentium.
+const I586: &[&str] = &["__i586", "__i586__", "__pentium", "__pentium__"];
+/// The macros of the Pentium MMX.
+const PENTIUM_MMX: &[&str] = &["__i586", "__i586__", "__pentium", "__pentium__", "__pentium_mmx__"];
+/// The macros of the Pentium Pro and of every processor gcc builds the same code for.
+const I686: &[&str] = &["__i686", "__i686__", "__pentiumpro", "__pentiumpro__"];
+/// The tuning macros of the Pentium Pro.
+const TUNE_I686: &[&str] = &["__tune_i686__", "__tune_pentiumpro__"];
+/// The macros of the Pentium 4.
+const PENTIUM4: &[&str] = &["__pentium4", "__pentium4__"];
+/// The macros of the Prescott and the Nocona, which gcc builds the same code for.
+const NOCONA: &[&str] = &["__nocona", "__nocona__"];
+/// The macros of the K8, which `-march=x86-64` builds for too.
+const K8: &[&str] = &["__k8", "__k8__"];
+/// MMX, SSE and SSE2 and the instructions that save their state.
+const SSE2: &[&str] = &["mmx", "sse", "sse2", "fxsr"];
+
+/// The 32 bit processors this compiler knows, measured against gcc 13.3 with
+/// `-m32 -march=<name> -dM -E`. See [`Processor`].
+pub static PROCESSORS: [Processor; 18] = [
+    Processor {
+        name: "i386",
+        arch: I386,
+        tune: &["__tune_i386__"],
+        extensions: &[],
+        compare_and_swap: 0,
+    },
+    Processor {
+        name: "i486",
+        arch: I486,
+        tune: &["__tune_i486__"],
+        extensions: &[],
+        compare_and_swap: 4,
+    },
+    Processor {
+        name: "i586",
+        arch: I586,
+        tune: &["__tune_i586__", "__tune_pentium__"],
+        extensions: &[],
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "pentium",
+        arch: I586,
+        tune: &["__tune_i586__", "__tune_pentium__"],
+        extensions: &[],
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "pentium-mmx",
+        arch: PENTIUM_MMX,
+        tune: &["__tune_i586__", "__tune_pentium__", "__tune_pentium_mmx__"],
+        extensions: &["mmx"],
+        compare_and_swap: 8,
+    },
+    Processor { name: "i686", arch: I686, tune: TUNE_I686, extensions: &[], compare_and_swap: 8 },
+    Processor {
+        name: "pentiumpro",
+        arch: I686,
+        tune: TUNE_I686,
+        extensions: &[],
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "pentium2",
+        arch: I686,
+        tune: &["__tune_i686__", "__tune_pentiumpro__", "__tune_pentium2__"],
+        extensions: &["mmx", "fxsr"],
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "pentium3",
+        arch: I686,
+        tune: &["__tune_i686__", "__tune_pentiumpro__", "__tune_pentium2__", "__tune_pentium3__"],
+        extensions: &["mmx", "fxsr", "sse"],
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "pentium3m",
+        arch: I686,
+        tune: TUNE_I686,
+        extensions: &["mmx", "fxsr", "sse"],
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "pentium-m",
+        arch: I686,
+        tune: TUNE_I686,
+        extensions: SSE2,
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "pentium4",
+        arch: PENTIUM4,
+        tune: &["__tune_pentium4__"],
+        extensions: SSE2,
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "pentium4m",
+        arch: PENTIUM4,
+        tune: &["__tune_pentium4__"],
+        extensions: SSE2,
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "prescott",
+        arch: NOCONA,
+        tune: &["__tune_nocona__"],
+        extensions: &["mmx", "sse", "sse2", "fxsr", "sse3"],
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "nocona",
+        arch: NOCONA,
+        tune: &["__tune_nocona__"],
+        extensions: &["mmx", "sse", "sse2", "fxsr", "sse3"],
+        compare_and_swap: 8,
+    },
+    Processor { name: "x86-64", arch: K8, tune: &[], extensions: SSE2, compare_and_swap: 8 },
+    Processor {
+        name: "k8",
+        arch: K8,
+        tune: &["__tune_k8__"],
+        extensions: SSE2,
+        compare_and_swap: 8,
+    },
+    Processor {
+        name: "core2",
+        arch: &["__core2", "__core2__"],
+        tune: &["__tune_core2__"],
+        extensions: &["mmx", "sse", "sse2", "fxsr", "sse3", "ssse3"],
+        compare_and_swap: 8,
+    },
+];
+
 impl fmt::Display for Isa {
     /// The names, comma separated, which is how an attribute string would say the same set.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1224,5 +1404,18 @@ mod tests {
         assert!(has_crc(plain.aarch64_target("cpu=cortex-a72+crc")));
         assert!(has_crc(crc_unit.aarch64_target("tune=cortex-a72,branch-protection=standard")));
         assert!(!has_crc(plain.aarch64_target("strict-align,+crc,+nocrc")));
+    }
+
+    /// tamnd/rucc#4251. Every processor has a name of its own and extensions that are rows of
+    /// the table, and the ones before the Pentium Pro have none of the vector ones.
+    #[test]
+    fn the_32_bit_processors_are_named_once_and_have_known_extensions() {
+        for (at, processor) in PROCESSORS.iter().enumerate() {
+            assert_eq!(Processor::named(processor.name), Some(&PROCESSORS[at]));
+            let _ = processor.isa();
+        }
+        assert_eq!(Processor::named("i386").map(Processor::isa), Some(Isa::NONE));
+        assert_eq!(Processor::named("x86-64").map(Processor::isa), Some(Isa::baseline()));
+        assert_eq!(Processor::named("haswell"), None);
     }
 }

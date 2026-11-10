@@ -78,7 +78,7 @@ pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Sign, Zeroing};
 pub use crate::frame::{
     Canary, ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, SpillMove, Targets, Through, Thunks,
 };
-pub use crate::isa::{Choices, Feature, Isa, Target, TargetRefusal};
+pub use crate::isa::{Choices, Feature, Isa, Processor, Target, TargetRefusal};
 pub use crate::machine::{Address, MachineInsts};
 pub use crate::operand::{Constraint, OperandDesc, Role};
 pub use crate::regs::{

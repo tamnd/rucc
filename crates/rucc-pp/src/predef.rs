@@ -24,8 +24,8 @@ use rucc_session::{
     Control, GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Protector, Std,
 };
 use rucc_target::{
-    Arch, BranchProtection, CodeModel, Env, Feature, Isa, ObjectFormat, Os, Preview, SignReturn,
-    TargetInfo, Triple, wasm,
+    Arch, BranchProtection, CodeModel, Env, Feature, Isa, ObjectFormat, Os, Preview, Processor,
+    SignReturn, TargetInfo, Triple, wasm,
 };
 use rucc_tuple::{self as tuple};
 
@@ -182,6 +182,12 @@ pub struct Predef {
     /// Whether `-march=` or `-mtune=` named a processor to tune for, which takes away the default
     /// tuning a BSD gcc was configured with.
     pub tuned: bool,
+    /// The 32 bit x86 processor the unit is built for, see
+    /// [`Options::processor`](rucc_session::Options::processor). `None` is the Pentium 4.
+    pub processor: Option<&'static Processor>,
+    /// The macros that name the processor the unit is tuned for on 32 bit x86, see
+    /// [`Options::tune`](rucc_session::Options::tune).
+    pub tune: &'static [&'static str],
     /// What `-mbranch-protection=` asked for, which decides `__ARM_FEATURE_BTI_DEFAULT` and
     /// `__ARM_FEATURE_PAC_DEFAULT` on AArch64. The kernel's assembly reads both to write the same
     /// note the compiler writes for C.
@@ -242,6 +248,8 @@ impl Predef {
             x87: true,
             strict_align: false,
             tuned: false,
+            processor: None,
+            tune: &[],
             branch_protection: BranchProtection::default(),
             protector: Protector::None,
             address: false,
@@ -290,6 +298,8 @@ impl Predef {
             x87: opts.x87,
             strict_align: opts.strict_align,
             tuned: opts.tuned,
+            processor: opts.processor,
+            tune: opts.tune,
             branch_protection: opts.branch_protection,
             protector: opts.protector,
             address: opts.kasan.on,
@@ -460,13 +470,14 @@ fn identity(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // is one. Every table here is written with those directives, so the answer follows whether
     // there is a table. It is no on 32-bit Arm, which has its own unwind tables, and off ELF,
     // where gcc says nothing: mingw-w64 has SEH, and clang for Apple does not say it. FreeBSD's
-    // gcc for riscv64 says no as well, and the answer here is the same. A no only means that a
-    // program leaves its own directives out.
+    // gcc for riscv64 says no as well, and so does its amd64 gcc under `-m32`, which builds no
+    // unwind tables for i386, and the answer here is the same. A no only means that a program
+    // leaves its own directives out.
     let elf = target.tuple.object_format() == tuple::ObjectFormat::Elf;
-    let freebsd_riscv =
-        target.tuple.os() == tuple::Os::FreeBsd && target.tuple.arch() == tuple::Arch::Riscv64;
+    let freebsd_quiet = target.tuple.os() == tuple::Os::FreeBsd
+        && matches!(target.tuple.arch(), tuple::Arch::Riscv64 | tuple::Arch::X86);
     let arm = target.tuple.arch() == tuple::Arch::Arm;
-    let cfi = gcc && opts.unwinds && elf && !arm && !freebsd_riscv;
+    let cfi = gcc && opts.unwinds && elf && !arm && !freebsd_quiet;
     d.flag_if(cfi, "__GCC_HAVE_DWARF2_CFI_ASM");
     // gcc says this on the machines it has a speculation barrier for, where
     // `__builtin_speculation_safe_value` is the value and then the barrier. rucc-sema's list of
@@ -621,16 +632,25 @@ fn atomics(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // the half word are only sometimes lock free and have no `__sync` compare and swap.
     let riscv = matches!(target.tuple.arch(), tuple::Arch::Riscv64 | tuple::Arch::Riscv32);
     let narrow = if riscv && opts.gnuc.major < 13 { "1" } else { "2" };
+    // A 32 bit x86 processor from before the Pentium has a narrower `cmpxchg` or none. The i386
+    // has none, so nothing is always lock free and there is no `__sync` compare and swap, and
+    // the i486 has it up to the word. That is what `-march=i386` says to the boot code.
+    let swap = match opts.processor {
+        Some(processor) if target.tuple.arch() == tuple::Arch::X86 => processor.compare_and_swap,
+        _ => 8,
+    };
+    let (narrow, word) = if swap == 0 { ("1", "1") } else { (narrow, "2") };
+    let llong = if swap < 8 { "1" } else { llong };
     for name in ["BOOL", "CHAR", "CHAR16_T", "SHORT"] {
         d.set(&format!("__GCC_ATOMIC_{name}_LOCK_FREE"), narrow);
     }
     for name in ["CHAR32_T", "WCHAR_T", "INT", "LONG", "POINTER"] {
-        d.set(&format!("__GCC_ATOMIC_{name}_LOCK_FREE"), "2");
+        d.set(&format!("__GCC_ATOMIC_{name}_LOCK_FREE"), word);
     }
     // `char8_t` is a type of C23 alone, as `__CHAR8_TYPE__` is, and gcc 15 is the first release
     // that answers for it in C.
     let char8 = opts.std >= Std::C23 && opts.gnuc.major >= 15;
-    d.set_if(char8, "__GCC_ATOMIC_CHAR8_T_LOCK_FREE", "2");
+    d.set_if(char8, "__GCC_ATOMIC_CHAR8_T_LOCK_FREE", narrow);
     // The one that is not always two: a target whose word is thirty two bits wide can only
     // promise `long long` is lock free if it has a double word instruction, and the honest
     // answer there is sometimes rather than always.
@@ -638,10 +658,11 @@ fn atomics(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.set("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL", "1");
     // What `__sync_bool_compare_and_swap` works on, one macro per width in bytes. Every target
     // here has it at all four, apart from the narrow widths that RISC-V gcc 12 leaves to
-    // libatomic. glibc reads these rather than the `__atomic_*` set because they are the older
-    // question and the answer is the same one.
+    // libatomic and the widths an old x86 processor has no `cmpxchg` for. glibc reads these
+    // rather than the `__atomic_*` set because they are the older question and the answer is
+    // the same one.
     let widths: &[u32] = if narrow == "1" { &[4, 8] } else { &[1, 2, 4, 8] };
-    for width in widths {
+    for width in widths.iter().filter(|&&width| width <= swap) {
         d.flag(&format!("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_{width}"));
     }
     // AArch64 has it at sixteen bytes as well, as the exclusive pair loop or `caspal`, and gcc
@@ -858,28 +879,44 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
         Arch::X86 => {
             d.flag("__i386__");
             d.flag("__i386");
-            // The processor the unit is built for, which gcc spells both as the family and as
-            // the product. The backend writes SSE2 for floating point, so the product is the
-            // Pentium 4 rather than the i686 that a plain `i686-linux-gnu-gcc` says, and a
-            // header choosing an intrinsic by processor takes the branch for what the code runs
-            // on.
-            d.flag("__i686__");
-            d.flag("__i686");
-            d.flag("__pentium4__");
-            d.flag("__pentium4");
-            // The same four extensions as the x86-64 baseline, because they are what the
-            // Pentium 4 has and what the backend emits. `__SSE2_MATH__` is the promise that
-            // `double` arithmetic happens in an SSE register, which is also why
-            // `__FLT_EVAL_METHOD__` is zero here rather than the two that x87 math gives.
-            for name in Isa::baseline().macros() {
-                d.flag(&name);
-            }
-            // What the unit has over the x86-64 baseline, which is `__LAHF_SAHF__` for the Pentium
-            // 4 and `__SSE4_2__` and its relatives for the flags, as on x86-64. The four above stay
-            // defined when the kernel turns them off, which is what they did before any flag was
-            // honoured here.
-            for name in opts.isa.minus(Isa::baseline()).macros() {
-                d.flag(&name);
+            match opts.processor {
+                // The processor the target's gcc builds for, or the one `-march=` named, and the
+                // extensions it has. The amd64 gcc of a BSD builds `-m32` code for the K8, with
+                // its SSE2, and `-march=i386` takes all of them away, which is how the boot code
+                // and the lib32 libraries find out what they may use.
+                Some(processor) => {
+                    for name in processor.arch.iter().chain(opts.tune) {
+                        d.flag(name);
+                    }
+                    for name in opts.isa.macros() {
+                        d.flag(&name);
+                    }
+                }
+                // The processor the unit is built for, which gcc spells both as the family and as
+                // the product. The backend writes SSE2 for floating point, so the product is the
+                // Pentium 4 rather than the i686 that a plain `i686-linux-gnu-gcc` says, and a
+                // header choosing an intrinsic by processor takes the branch for what the code
+                // runs on.
+                None => {
+                    d.flag("__i686__");
+                    d.flag("__i686");
+                    d.flag("__pentium4__");
+                    d.flag("__pentium4");
+                    // The same four extensions as the x86-64 baseline, because they are what the
+                    // Pentium 4 has and what the backend emits. `__SSE2_MATH__` is the promise
+                    // that `double` arithmetic happens in an SSE register, which is also why
+                    // `__FLT_EVAL_METHOD__` is zero here rather than the two that x87 math gives.
+                    for name in Isa::baseline().macros() {
+                        d.flag(&name);
+                    }
+                    // What the unit has over the x86-64 baseline, which is `__LAHF_SAHF__` for
+                    // the Pentium 4 and `__SSE4_2__` and its relatives for the flags, as on
+                    // x86-64. The four above stay defined when the kernel turns them off, which
+                    // is what they did before any flag was honoured here.
+                    for name in opts.isa.minus(Isa::baseline()).macros() {
+                        d.flag(&name);
+                    }
+                }
             }
             d.flag("__SSE_MATH__");
             d.flag("__SSE2_MATH__");
@@ -4535,6 +4572,59 @@ mod tests {
             let set = set_for(triple);
             assert!(!set.contains("__SEG_FS") && !set.contains("__SIZEOF_FLOAT80__"), "{triple}");
             assert!(!set.contains("__tune_"), "{triple}");
+        }
+    }
+
+    /// tamnd/rucc#4251. A 32 bit unit says the processor it is built for and what that processor
+    /// has, as gcc does. The amd64 gcc of a BSD builds `-m32` code for the K8, and the boot code's
+    /// `-march=i386` has no extensions and no `cmpxchg`. The values are what the reference gcc of
+    /// FreeBSD 15.1 and NetBSD 11 give, and gcc 13.3 for the i486.
+    #[test]
+    fn a_32_bit_unit_names_its_processor_and_what_it_has() {
+        let built = |triple: &str, name: &str, tune: bool| {
+            let triple: Triple = triple.parse().unwrap();
+            let processor = Processor::named(name).unwrap();
+            let tune = if tune { processor.tune } else { &[] };
+            let isa = processor.isa().union(Isa::of(&["sahf"]));
+            let opts =
+                Predef { processor: Some(processor), tune, isa, tuned: true, ..Predef::new() };
+            built_in(&TargetInfo::new(triple), &opts)
+        };
+        let k8 = built("i386-unknown-freebsd15.1", "x86-64", false);
+        for name in
+            ["__k8", "__k8__", "__MMX__", "__SSE__", "__SSE2__", "__FXSR__", "__LAHF_SAHF__"]
+        {
+            assert!(has(&k8, &format!("#define {name} 1")), "{name}: {k8}");
+        }
+        for name in ["__i686", "__pentium4", "__tune_", "__GCC_HAVE_DWARF2_CFI_ASM"] {
+            assert!(!k8.contains(name), "{name}: {k8}");
+        }
+        assert!(has(&k8, "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8 1"), "{k8}");
+        assert!(has(&k8, "#define __GCC_ATOMIC_LLONG_LOCK_FREE 2"), "{k8}");
+        let boot = built("i486--netbsdelf", "i386", true);
+        assert!(has(&boot, "#define __tune_i386__ 1"), "{boot}");
+        for name in ["__MMX__", "__SSE__", "__SSE2__", "__FXSR__", "__i486", "__i686", "__k8"] {
+            assert!(!boot.contains(name), "{name}: {boot}");
+        }
+        for name in ["BOOL", "CHAR", "SHORT", "INT", "LONG", "LLONG", "POINTER", "WCHAR_T"] {
+            let line = format!("#define __GCC_ATOMIC_{name}_LOCK_FREE 1");
+            assert!(has(&boot, &line), "{line}: {boot}");
+        }
+        assert!(!boot.contains("__GCC_HAVE_SYNC_COMPARE_AND_SWAP"), "{boot}");
+        // NetBSD's own i386 gcc is configured for the i486, which has `cmpxchg` up to the word.
+        let i486 = built("i486--netbsdelf", "i486", false);
+        assert!(has(&i486, "#define __i486__ 1") && has(&i486, "#define __i486 1"), "{i486}");
+        assert!(has(&i486, "#define __GCC_ATOMIC_INT_LOCK_FREE 2"), "{i486}");
+        assert!(has(&i486, "#define __GCC_ATOMIC_LLONG_LOCK_FREE 1"), "{i486}");
+        assert!(has(&i486, "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_4 1"), "{i486}");
+        assert!(!i486.contains("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8"), "{i486}");
+        // NetBSD's gcc keeps the unwind tables under `-m32`, and FreeBSD's does not.
+        let netbsd = built("i486--netbsdelf", "x86-64", false);
+        assert!(has(&netbsd, "#define __GCC_HAVE_DWARF2_CFI_ASM 1"), "{netbsd}");
+        // With no processor the unit is the Pentium 4 the backend builds for, as before.
+        let linux = set_for("i686-unknown-linux-gnu");
+        for name in ["__i686", "__pentium4", "__SSE2__", "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8"] {
+            assert!(linux.contains(name), "{name}: {linux}");
         }
     }
 }
