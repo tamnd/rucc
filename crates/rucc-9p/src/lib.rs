@@ -22,6 +22,8 @@
 //! output to the host, so `create`, `write`, `remove` and `wstat` are not here, and neither is
 //! authentication.
 
+#![doc(html_root_url = "https://docs.rs/rucc-9p/0.30.15")]
+
 pub mod client;
 pub mod serve;
 pub mod wire;
