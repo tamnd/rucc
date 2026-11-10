@@ -5317,11 +5317,12 @@ mod tests {
     /// an assertion about how much `<mmintrin.h>` defines, which is not what is being asked.
     #[test]
     fn every_shipped_header_can_be_included_twice() {
-        // This is x86-64, and `<arm_neon.h>` and `<arm_acle.h>` are for AArch64 only and
+        // This is x86-64, and the four `<arm_*.h>` headers are for AArch64 only and
         // `<wasm_simd128.h>` is for wasm only, so they are held to the same thing by the tests
         // below. `<intrin.h>`, `<setjmp.h>`, `<tgmath.h>` and `<vadefs.h>` wrap the library's,
         // which they go on to find, and there is no library here.
-        let elsewhere = ["arm_acle.h", "arm_neon.h", "wasm_simd128.h"];
+        let elsewhere =
+            ["arm_acle.h", "arm_neon.h", "arm_neon_sve_bridge.h", "arm_sve.h", "wasm_simd128.h"];
         let wrappers = ["intrin.h", "setjmp.h", "tgmath.h", "vadefs.h"];
         let once: String = rucc_session::runtime::names()
             .iter()
@@ -5342,7 +5343,8 @@ mod tests {
             );
             result.text().to_owned()
         };
-        let neon = "#include <arm_neon.h>\n#include <arm_acle.h>\n";
+        let neon =
+            "#include <arm_neon.h>\n#include <arm_acle.h>\n#include <arm_neon_sve_bridge.h>\n";
         assert_eq!(tree(&format!("{neon}int x;\n")), tree(&format!("{neon}{neon}int x;\n")));
 
         let mut opts = freestanding();
@@ -6873,6 +6875,31 @@ decl #0 x : int object external static defined
         assert!(result.failed());
         let result = run(&opts, "int __Float32x4_t = 1;\n");
         assert!(!result.failed(), "{:?}", result.messages);
+    }
+
+    /// tamnd/rucc#4225. gcc 14 and later promise `<arm_neon_sve_bridge.h>` with
+    /// `__ARM_NEON_SVE_BRIDGE` on every AArch64 target. The header has the types of both
+    /// `<arm_neon.h>` and `<arm_sve.h>`, and an SVE vector is still a type with no size.
+    #[test]
+    fn the_neon_sve_bridge_header_has_the_types_it_promises() {
+        let mut opts = freestanding();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-freebsd15.1".parse::<Triple>().unwrap();
+        let source = "#ifndef __ARM_NEON_SVE_BRIDGE\n#error no bridge\n#endif\n\
+                      #include <arm_neon_sve_bridge.h>\n\
+                      svint8_t to_sve(svint8_t, int8x16_t);\n\
+                      int8x16_t from_sve(svint8_t);\n\
+                      svbool_t take(svbfloat16_t, svfloat16x4_t, svuint64x2_t, svbool_t);\n\
+                      int p = SV_VL256 + SV_MUL4 + SV_ALL + SV_PSTL3STRM;\n\
+                      bfloat16_t b;\nfloat16_t h;\nfloat64_t d;\n";
+        let result = run(&opts, source);
+        assert!(!result.failed(), "{:?}", result.messages);
+        assert!(result.text().contains(".long\t86"), "{}", result.text());
+        let result = run(&opts, "#include <arm_sve.h>\nint n = sizeof(svint8_t);\n");
+        assert!(result.failed());
+        opts.target = "x86_64-unknown-freebsd15.1".parse::<Triple>().unwrap();
+        let result = run(&opts, "#include <arm_sve.h>\n");
+        assert!(result.messages.join("\n").contains("arm_sve.h is for AArch64"));
     }
 
     /// A structure too big for registers comes back through the address in x8, which AAPCS64 keeps

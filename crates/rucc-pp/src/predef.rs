@@ -1235,10 +1235,12 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 /// Each one is a scoped attribute in the `arm` namespace, and `__extension__` keeps a C mode
 /// without `[[...]]` from warning about it. The two `__ARM_STATE_` macros say that the compiler
 /// knows the state, so that a header can write `__arm_inout("za")`. The checker reads the
-/// attributes as gcc built without SME does, and refuses what needs SME to build. gcc also defines
-/// `__ARM_NEON_SVE_BRIDGE` here, which is a promise of `<arm_neon_sve_bridge.h>` and the SVE
-/// types, and this compiler has neither yet, so it is left out. tamnd/rucc#4225.
+/// attributes as gcc built without SME does, and refuses what needs SME to build. gcc 14 also
+/// defines `__ARM_NEON_SVE_BRIDGE`, which says that `<arm_neon_sve_bridge.h>` is there. The shipped
+/// header has the types of `<arm_neon.h>` and `<arm_sve.h>` and none of the SVE functions, as gcc
+/// without SVE has none that can be called. tamnd/rucc#4225.
 fn sme(d: &mut Defs) {
+    d.set("__ARM_NEON_SVE_BRIDGE", "1");
     d.set("__ARM_STATE_ZA", "1");
     d.set("__ARM_STATE_ZT0", "1");
     for name in ["streaming", "streaming_compatible", "locally_streaming"] {
@@ -4187,8 +4189,8 @@ mod tests {
         }
     }
 
-    /// tamnd/rucc#4225. gcc 14 defines the SME keyword attributes on every AArch64 target, and
-    /// gcc 13 does not. clang defines none of them as macros.
+    /// tamnd/rucc#4225. gcc 14 defines the SME keyword attributes and `__ARM_NEON_SVE_BRIDGE` on
+    /// every AArch64 target, and gcc 13 does not. clang defines none of them as macros.
     #[test]
     fn the_sme_keyword_attributes_are_macros_from_gcc_14_on() {
         let gcc = |major: u32| Predef {
@@ -4208,9 +4210,10 @@ mod tests {
             ] {
                 assert!(has(&text, line), "{triple}: {line}");
             }
-            assert!(!text.contains("__ARM_NEON_SVE_BRIDGE"), "{triple}");
+            assert!(has(&text, "#define __ARM_NEON_SVE_BRIDGE 1"), "{triple}");
             let old = built_in(&target, &gcc(13));
             assert!(!old.contains("__ARM_STATE_") && !old.contains("__arm_"), "{triple}");
+            assert!(!old.contains("__ARM_NEON_SVE_BRIDGE"), "{triple}");
         }
         let apple = TargetInfo::new("aarch64-apple-darwin".parse().expect("a triple"));
         assert!(!built_in(&apple, &gcc(14)).contains("__arm_streaming"));
