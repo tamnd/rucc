@@ -31,6 +31,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On Plan 9 targets, `__builtin_va_list` is `char *`, as `va_list` is in the Plan 9 `u.h` (#4154)
 - Under `-fkencc` on Plan 9 targets, `extern register` puts a variable in a register for the whole program, as kencc does. The registers are `r15` and `r14` on amd64 and `x27` and `x26` on arm64, in the order of declaration. A read is a move out of the register and a write is a move into it. A new IR instruction, `set_register`, holds the write (#4155)
 - Taking the address of a global register variable is now the error that gcc gives, "address of global register variable requested" (#4155)
+- On Plan 9 targets, a copy that is too large to write out calls `memmove` and not `memcpy`, as 08.6 of the rucc-plan9 plan says. A new field, `CallRegs::copies_by_moving`, holds the rule (#4158)
+- `docs/TARGETS.md` has a Plan 9 section. It says that integer work uses no vector register on these targets, for all code and not only for the kernel (#4158)
 
 ### Fixed
 

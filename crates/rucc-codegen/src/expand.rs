@@ -1535,7 +1535,17 @@ pub fn fills(goal: Goal) -> usize {
 /// which catches the sizes that were only constant once a function was inlined, unless the unit
 /// said those names are not the library's. See `small`. Where it may not, a load or store less
 /// aligned than its width is taken apart instead. See `pieces`.
-pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool, goal: Goal) {
+///
+/// `moving` is whether a copy too large to write out calls `memmove` and not `memcpy`, which is
+/// [`rucc_target::CallRegs::copies_by_moving`].
+pub fn bulk(
+    func: &mut Func,
+    names: &mut Interner,
+    word: u32,
+    unaligned: bool,
+    goal: Goal,
+    moving: bool,
+) {
     let most = (copies(goal), fills(goal));
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     if unaligned && !func.attrs.set.contains(AttrSet::NO_BUILTIN) {
@@ -1547,7 +1557,7 @@ pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool, g
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
-            Opcode::Memcpy => copy(func, names, inst, word, unaligned, most.0),
+            Opcode::Memcpy => copy(func, names, inst, word, unaligned, most.0, moving),
             Opcode::Memset => fill(func, names, inst, word, unaligned, most.1),
             Opcode::Memmove => shift(func, names, inst, word, unaligned),
             _ => {}
@@ -1777,6 +1787,7 @@ fn copy(
     word: u32,
     unaligned: bool,
     most: usize,
+    moving: bool,
 ) {
     let Some(bulk) = func.bulk(inst) else { return };
     let (into, from) = (bulk.to, bulk.with);
@@ -1784,7 +1795,9 @@ fn copy(
     let info = func[mem];
     // A plan is a list of offsets, so there is none for a copy whose length the program works out.
     let Some(plan) = chunks(info, word, unaligned, most).filter(|_| bulk.length.is_none()) else {
-        return library(func, names, inst, Opcode::Memcpy, word);
+        // A `memmove` is right for a copy too, because the two sides of a copy do not overlap.
+        let routine = if moving { Opcode::Memmove } else { Opcode::Memcpy };
+        return library(func, names, inst, routine, word);
     };
     for two in plan.chunks(2) {
         let mut read_two = Vec::with_capacity(2);
@@ -2954,7 +2967,7 @@ mod tests {
     #[test]
     fn a_copy_becomes_a_load_and_a_store_for_each_word_of_it() {
         let (mut names, mut func) = copying(16, 8);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("memcpy"), "the copy is gone: {text}");
@@ -3001,7 +3014,7 @@ mod tests {
     #[test]
     fn a_fill_is_the_byte_spread_across_each_word() {
         let (mut names, mut func) = filling(16, 8, 0);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("memset"), "the fill is gone: {text}");
@@ -3014,7 +3027,7 @@ mod tests {
     #[test]
     fn a_large_fill_passes_its_constant_byte_as_a_constant_int() {
         let (mut names, mut func) = filling(1024, 8, 0);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
 
         let text = printed(&func, &mut names);
         assert!(text.contains("call @memset"), "{text}");
@@ -3038,14 +3051,14 @@ mod tests {
     fn a_copy_too_large_to_unroll_becomes_a_call_to_the_runtime() {
         let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
         let (mut names, mut func) = copying(size, 1);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(text.contains("call @memcpy"), "a call and not a bulk move: {text}");
 
         // And the one word under it is moves, because the threshold counts moves rather than
         // bytes and the whole point of the threshold is that a small copy does not pay for a call.
         let (mut names, mut func) = copying(size - 1, 1);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         assert!(!printed(&func, &mut names).contains("memcpy"), "one word under it is unrolled");
     }
 
@@ -3057,12 +3070,24 @@ mod tests {
         assert!(fills(Goal::Size) < fills(Goal::Speed));
         let size = u64::try_from(copies(Goal::Size) + 1).expect("a small threshold") * 8;
         let (mut names, mut func) = copying(size, 8);
-        bulk(&mut func, &mut names, 8, false, Goal::Size);
+        bulk(&mut func, &mut names, 8, false, Goal::Size, false);
         assert!(printed(&func, &mut names).contains("call @memcpy"), "a call for size");
 
         let (mut names, mut func) = copying(size, 8);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         assert!(!printed(&func, &mut names).contains("memcpy"), "moves for speed");
+    }
+
+    /// On a target whose copies are by moving, a copy too large to write out calls `memmove`.
+    /// That is Plan 9, where a kernel or a library may give only `memmove`.
+    #[test]
+    fn a_large_copy_calls_memmove_where_the_target_copies_by_moving() {
+        let size = u64::try_from(copies(Goal::Speed) + 1).expect("a small threshold") * 8;
+        let (mut names, mut func) = copying(size, 8);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, true);
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @memmove"), "{text}");
+        assert!(!text.contains("memcpy"), "{text}");
     }
 
     /// The call passes what C passes, which is not what the IR holds. The size lives beside the
@@ -3071,7 +3096,7 @@ mod tests {
     fn the_call_passes_the_size_that_the_instruction_carried_beside_it() {
         let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
         let (mut names, mut func) = copying(size, 1);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(text.contains(&format!("{size}")), "the size is an argument now: {text}");
     }
@@ -3081,7 +3106,7 @@ mod tests {
     #[test]
     fn a_small_move_reads_everything_before_it_writes_anything() {
         let (mut names, mut func) = moving(Opcode::Memmove, 24, 8, None);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(!text.contains("memmove"), "a run of moves and not a call: {text}");
         let loads: Vec<usize> = text.match_indices("load.").map(|(at, _)| at).collect();
@@ -3090,7 +3115,7 @@ mod tests {
         assert!(loads.iter().max() < stores.iter().min(), "every read comes first: {text}");
 
         let (mut names, mut func) = moving(Opcode::Memmove, 72, 8, None);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(text.contains("call @memmove"), "nine words is a call: {text}");
     }
@@ -3110,7 +3135,7 @@ mod tests {
             build.inst(data, &[]);
             build.ret(&[]);
         });
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(!text.contains("memset"), "a store and not a call: {text}");
         assert!(text.contains("zext.i64"), "the byte is widened to the word: {text}");
@@ -3159,7 +3184,7 @@ mod tests {
             build.inst(data, &[]);
             build.ret(&[]);
         });
-        bulk(&mut func, &mut names, 8, true, Goal::Speed);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(!text.contains("memcpy"), "{text}");
         let made = |number: &str| text.lines().any(|line| line.trim_end().ends_with(number));
@@ -3194,7 +3219,7 @@ mod tests {
         {
             let byte = (opcode == Opcode::Memset).then_some(0);
             let (mut names, mut func) = computing(opcode, byte);
-            bulk(&mut func, &mut names, 8, false, Goal::Speed);
+            bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
             let text = printed(&func, &mut names);
             assert!(text.contains(&format!("call @{name}")), "a call and not a plan: {text}");
             // The count is the operand it came in with rather than a constant made here, which is
@@ -3208,7 +3233,7 @@ mod tests {
         for opcode in [Opcode::Memcpy, Opcode::Memmove, Opcode::Memset] {
             let byte = (opcode == Opcode::Memset).then_some(0);
             let (mut names, mut func) = computing(opcode, byte);
-            bulk(&mut func, &mut names, 8, false, Goal::Speed);
+            bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
             valid(&func, &mut names);
         }
     }
@@ -3224,7 +3249,7 @@ mod tests {
     #[test]
     fn what_a_copy_becomes_is_ir_that_verifies() {
         let (mut names, mut func) = copying(13, 8);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         let module = Module::new(names.intern("c.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
     }
@@ -3232,7 +3257,7 @@ mod tests {
     #[test]
     fn what_a_fill_becomes_is_ir_that_verifies() {
         let (mut names, mut func) = filling(13, 8, 0xff);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         let module = Module::new(names.intern("f.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
     }
@@ -3241,7 +3266,7 @@ mod tests {
     fn what_a_copy_too_large_to_unroll_becomes_is_ir_that_verifies() {
         let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
         let (mut names, mut func) = copying(size, 1);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         let module = Module::new(names.intern("c.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the call is valid IR");
     }
@@ -3253,7 +3278,7 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         assert_eq!(printed(&func, &mut names), before);
     }
 
@@ -4210,7 +4235,7 @@ mod tests {
     #[test]
     fn a_small_memcpy_call_is_moves_where_a_word_may_be_moved_anywhere() {
         let (mut names, mut func) = calling("memcpy", None, 24, false);
-        bulk(&mut func, &mut names, 8, true, Goal::Speed);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "the call is gone: {text}");
         assert_eq!(text.matches("load.i64").count(), 3, "{text}");
@@ -4219,7 +4244,7 @@ mod tests {
         // Where a word may not be moved to any address the call stays, since nothing is known
         // about how the two pointers are aligned and a move per byte is worse than the call.
         let (mut names, mut func) = calling("memcpy", None, 24, false);
-        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed, false);
         assert!(printed(&func, &mut names).contains("call @memcpy"));
     }
 
@@ -4228,14 +4253,14 @@ mod tests {
     fn a_function_that_said_no_builtin_keeps_its_call() {
         let (mut names, mut func) = calling("memcpy", None, 24, false);
         func.attrs.set |= rucc_ir::AttrSet::NO_BUILTIN;
-        bulk(&mut func, &mut names, 8, true, Goal::Speed);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
         assert!(printed(&func, &mut names).contains("call @memcpy"));
     }
 
     #[test]
     fn a_small_memset_call_is_stores_of_the_byte_and_a_large_one_stays_a_call() {
         let (mut names, mut func) = calling("memset", Some(0xff), 13, false);
-        bulk(&mut func, &mut names, 8, true, Goal::Speed);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "{text}");
         assert!(text.contains("iconst.i64 -1"), "{text}");
@@ -4248,11 +4273,11 @@ mod tests {
             [("memset", Some(0), fills(Goal::Speed)), ("memcpy", None, copies(Goal::Speed))]
         {
             let (mut names, mut func) = calling(name, byte, words(most) + 1, false);
-            bulk(&mut func, &mut names, 8, true, Goal::Speed);
+            bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
             assert!(printed(&func, &mut names).contains(&format!("call @{name}")), "over");
 
             let (mut names, mut func) = calling(name, byte, words(most), false);
-            bulk(&mut func, &mut names, 8, true, Goal::Speed);
+            bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
             let text = printed(&func, &mut names);
             assert!(!text.contains("call"), "{name} of {} words: {text}", most);
             assert_eq!(text.matches("store").count(), most, "{text}");
@@ -4260,14 +4285,14 @@ mod tests {
 
         // And a call to some other function of the same shape is left alone.
         let (mut names, mut func) = calling("memcpy_toio", None, 8, false);
-        bulk(&mut func, &mut names, 8, true, Goal::Speed);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
         assert!(printed(&func, &mut names).contains("call @memcpy_toio"));
     }
 
     #[test]
     fn what_a_small_memcpy_gives_back_is_its_destination() {
         let (mut names, mut func) = calling("memcpy", None, 8, true);
-        bulk(&mut func, &mut names, 8, true, Goal::Speed);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed, false);
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "{text}");
         assert!(text.contains("return %0"), "{text}");

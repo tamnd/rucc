@@ -466,6 +466,12 @@ pub struct CallRegs {
     /// call would overwrite the frame pointer. So a function there addresses its frame from the
     /// stack pointer, and one that cannot is refused.
     pub frameless: bool,
+    /// Whether a block copy too large to write out is a call to `memmove` and not to `memcpy`.
+    ///
+    /// True on the Plan 9 convention of kencc, per 08.6 of the rucc-plan9 plan. The C library there
+    /// has a `memcpy`, but it is `memmove` under a second name, and a kernel or a library that
+    /// gives only `memmove` must link. So the compiler calls the name that is always there.
+    pub copies_by_moving: bool,
     /// The general purpose registers an integer return value comes back in.
     pub int_returns: &'static [PhysReg],
     /// The vector registers a floating point return value comes back in.
@@ -1312,6 +1318,7 @@ mod tests {
             shared_positions: shared,
             slotted: false,
             frameless: false,
+            copies_by_moving: false,
             int_returns: &INT,
             sse_returns: &SSE,
             x87_returns: &NONE,
