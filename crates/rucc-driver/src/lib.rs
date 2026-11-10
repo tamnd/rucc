@@ -1151,7 +1151,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut riscv_ilp32 = false;
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
-    let mut x87_floats = false;
+    let mut x87_floats: Option<bool> = None;
     // Where the stack protector's canary is, which is put together after the loop because the
     // four flags that say it may come in any order and gcc lets the later one win for each.
     let mut guard_global: Option<bool> = None;
@@ -2866,8 +2866,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // said. `387` is the x87 stack, which the backend does on i386 only, and whether the
             // unit is i386 is known after the loop. Both at once is refused.
             _ if x86 && arg.starts_with("-mfpmath=") => match &arg["-mfpmath=".len()..] {
-                "sse" => x87_floats = false,
-                "387" => x87_floats = true,
+                "sse" => x87_floats = Some(false),
+                "387" => x87_floats = Some(true),
                 "sse+387" | "387+sse" | "both" => {
                     return Err(err(format!(
                         "{arg}: this compiler does `float` and `double` arithmetic in one place, \
@@ -4004,8 +4004,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     }
     opts.x87 = x87;
     opts.x87_return = fp_ret_in_387;
-    // After the loop, since `-m32` may come after `-mfpmath=387`.
-    opts.x87_floats = x87_floats;
+    // After the loop, since `-m32` may come after `-mfpmath=387`. With no `-mfpmath=`, the BSD
+    // gcc does `float` and `double` arithmetic on the x87 stack for every 32 bit unit, both on
+    // i386 and under `-m32` on amd64, whatever `-march=` says. Under `-mno-80387` there is no
+    // stack, and a float is refused as before.
+    let bsd = matches!(opts.target.os, rucc_target::Os::NetBsd | rucc_target::Os::FreeBsd(_));
+    let default = bsd && opts.target.arch == rucc_target::Arch::X86 && x87;
+    opts.x87_floats = x87_floats.unwrap_or(default);
     if opts.x87_floats && opts.target.arch != rucc_target::Arch::X86 {
         return Err(err(
             "-mfpmath=387: this compiler does `float` and `double` arithmetic on the x87 stack \
@@ -11560,6 +11565,35 @@ mod tests {
         let opts = unit(&["--target=i686-linux-gnu", "-march=pentium-mmx"]);
         assert_eq!(opts.processor, named("pentium-mmx"));
         assert_eq!(opts.isa, rucc_target::Isa::of(&["mmx", "sahf"]));
+    }
+
+    /// The BSD gcc does `float` and `double` arithmetic on the x87 stack in every 32 bit unit,
+    /// which is what NetBSD's compat libraries and FreeBSD's lib32 and boot code are built with.
+    #[test]
+    fn a_bsd_32_bit_unit_does_its_float_arithmetic_on_the_x87_stack() {
+        let unit = |more: &[&str]| compile(&[&["-c", "a.c"], more].concat()).0;
+        for target in [
+            &["--target=x86_64-unknown-freebsd15.1", "-m32"][..],
+            &["--target=x86_64-unknown-netbsd", "-m32"],
+            &["--target=x86_64-unknown-netbsd", "-m32", "-march=k8", "-msse2"],
+            &["--target=i486--netbsdelf"],
+            &["--target=i386-unknown-freebsd14.5"],
+        ] {
+            assert!(unit(target).x87_floats, "{target:?}");
+            // `-mfpmath=sse` still asks for the SSE registers.
+            assert!(!unit(&[target, &["-mfpmath=sse"]].concat()).x87_floats, "{target:?}");
+        }
+        // Under `-mno-80387` there is no stack to do it on.
+        assert!(!unit(&["--target=i386-unknown-freebsd14.5", "-mno-80387"]).x87_floats);
+        // Elsewhere the SSE registers are the default as before, and x86-64 has no choice.
+        for target in [
+            &["--target=x86_64-linux-gnu", "-m32"][..],
+            &["--target=i686-linux-gnu"],
+            &["--target=x86_64-unknown-freebsd15.1"],
+            &["--target=x86_64-unknown-netbsd"],
+        ] {
+            assert!(!unit(target).x87_floats, "{target:?}");
+        }
     }
 
     /// tamnd/rucc#3694. An i386 unit is built for the Pentium 4 and the flags go over it, as gcc
