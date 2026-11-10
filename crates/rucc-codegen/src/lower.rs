@@ -90,7 +90,7 @@ use rucc_ir::{
 use rucc_mir as mir;
 use rucc_target::template::{template_name, template_reg};
 use rucc_target::{
-    Address, CallRegs, Cleanup, Constraint, Convention, OperandDesc, PhysReg, RegClass, Role,
+    Address, CallRegs, Cleanup, Constraint, Convention, Isa, OperandDesc, PhysReg, RegClass, Role,
     VaList, Variadic,
 };
 use rucc_target::{aarch64, riscv64, x86_64};
@@ -1638,7 +1638,7 @@ pub fn func(
     conv: &'static CallRegs,
     elsewhere: &Elsewhere,
 ) -> Result<Lowered, Unsupported> {
-    func_for(source, names, selector, conv, elsewhere, true, None)
+    func_for(source, names, selector, conv, elsewhere, true, None, Isa::NONE)
 }
 
 /// [`func`], for a build that says whether it writes debugging information. Without it the walk
@@ -1649,9 +1649,13 @@ pub fn func(
 /// read with an index in a loop is to be taken once in front of the loop rather than on every trip,
 /// and nothing when it is not. See [`crate::hoist`].
 ///
+/// `isa` is the processor the unit is built for, which a `target` attribute on the function takes
+/// the place of.
+///
 /// # Errors
 ///
 /// The same as [`func`].
+#[allow(clippy::too_many_arguments)]
 pub fn func_for(
     source: &Func,
     names: &mut Interner,
@@ -1660,8 +1664,9 @@ pub fn func_for(
     elsewhere: &Elsewhere,
     debug: bool,
     hold: Option<u32>,
+    isa: Isa,
 ) -> Result<Lowered, Unsupported> {
-    Lowering::new(source, names, selector, conv, elsewhere, debug, hold).run()
+    Lowering::new(source, names, selector, conv, elsewhere, debug, hold, isa).run()
 }
 
 /// What the matcher settled on for one block, indexed the way the block's instructions are.
@@ -1759,6 +1764,10 @@ struct Lowering<'a> {
     /// Whether the build writes debugging information, which is the one thing that reads which
     /// value a declaration holds on the way into each block.
     debug: bool,
+    /// Whether the function is built for a processor with AVX, which is what a `%v` in front of an
+    /// instruction in an `asm` template asks about. A `target` attribute on the function says what
+    /// it is built for in place of the command line.
+    avx: bool,
     /// What the function wants its stack to look like, filled in as the walk finds out.
     stack: Stack,
     /// What a `va_start` in this function has to write, or nothing for a function that takes no
@@ -1921,6 +1930,7 @@ const fn visibility(visibility: Visibility) -> mir::Visibility {
 }
 
 impl<'a> Lowering<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         source: &'a Func,
         names: &'a mut Interner,
@@ -1929,6 +1939,7 @@ impl<'a> Lowering<'a> {
         elsewhere: &'a Elsewhere,
         debug: bool,
         hold: Option<u32>,
+        isa: Isa,
     ) -> Self {
         let counts = source.counts();
         let name = source.name;
@@ -2001,6 +2012,8 @@ impl<'a> Lowering<'a> {
             conv,
             elsewhere,
             debug,
+            avx: rucc_target::Feature::named("avx")
+                .is_some_and(|avx| source.target.unwrap_or(isa).has(avx)),
             stack: Stack::default(),
             varargs: None,
             slots: vec![None; counts.values],
@@ -7526,6 +7539,16 @@ impl<'a> Lowering<'a> {
                     digits.push(c);
                     chars.next();
                 }
+                // `%v` in front of an instruction is a `v` when the function has AVX and nothing
+                // when it does not, so that one template is the VEX form or the SSE form of the
+                // instruction. libgcc's `sfp-exceptions.c` reads the control word with
+                // `%vstmxcsr`.
+                if modifier == Some('v') && digits.is_empty() && !text_only {
+                    if self.avx {
+                        text.push('v');
+                    }
+                    continue;
+                }
                 let index: usize = digits.parse().map_err(|_| refused())?;
                 // A label, numbered after every operand. Arm 0 is the fall through, so the first
                 // label is arm 1.
@@ -7638,9 +7661,18 @@ impl<'a> Lowering<'a> {
                         }
                     } else if files[index] != self.gpr {
                         // A vector register is named as `xmm`, which is what gcc writes with no
-                        // modifier and with `%x`.
+                        // modifier and with `%x`. `%d` is the register twice under AVX, as the
+                        // source and the destination both, which is the extra operand the VEX
+                        // form of a scalar instruction takes: `%vdivss %0, %d0`.
                         match modifier {
                             None | Some('x') => 'x',
+                            Some('d') => {
+                                if self.avx {
+                                    text.push_str(&template_reg(at, 'x'));
+                                    text.push_str(", ");
+                                }
+                                'x'
+                            }
                             Some(_) => return Err(refused()),
                         }
                     } else {
@@ -13148,6 +13180,44 @@ mod tests {
         // of an `int`.
         assert!(line.contains("x64.template %0, @hcf \u{1}r0k\u{2}"), "{printed}");
         assert!(!line.contains("early $"), "{printed}");
+    }
+
+    /// `%v` in front of an instruction is a `v` with AVX and nothing without it, and `%d` names a
+    /// vector register twice with AVX and once without it. The template is libgcc's in
+    /// `sfp-exceptions.c`, which divides to raise an exception and reads the control word.
+    #[test]
+    fn a_template_with_the_avx_prefix_is_the_vex_form_only_with_avx() {
+        let f32 = Type::float(rucc_ir::Float::F32);
+        let template = "%vdivss\t{%1, %d0|%d0, %1}\n\t%vsqrtss\t%1, %d0";
+        let build = |isa: Isa| {
+            let (mut names, mut source, block, args) = blank(&[f32, f32]);
+            let asm = assembly(
+                &mut source,
+                block,
+                &mut names,
+                template,
+                "=x,x,0",
+                &[args[1], args[0]],
+                &[f32],
+            );
+            let produced: Vec<Value> = source[asm].results().collect();
+            Builder::new(&mut source, block).ret(&produced);
+            let elsewhere = Elsewhere::default();
+            let out = func_for(&source, &mut names, &SELECTOR, &SYSV, &elsewhere, true, None, isa)
+                .expect("the template is kept");
+            mir::print_func(&out.func, &names, &REGS)
+        };
+        let avx = Isa::with(rucc_target::Feature::named("avx").expect("gcc names it"));
+
+        let plain = build(Isa::NONE);
+        let hole = |reg: &str| format!("\u{1}{reg}\u{2}");
+        let (r0, r1) = (hole("r0x"), hole("r1x"));
+        let want = format!("@divss\t{r1}, {r0}\n\tsqrtss\t{r1}, {r0}\n");
+        assert!(plain.contains(&want), "{plain}");
+
+        let vex = build(avx);
+        let want = format!("@vdivss\t{r1}, {r0}, {r0}\n\tvsqrtss\t{r1}, {r0}, {r0}\n");
+        assert!(vex.contains(&want), "{vex}");
     }
 
     /// A template kept as text with more outputs than the convention keeps registers across a call

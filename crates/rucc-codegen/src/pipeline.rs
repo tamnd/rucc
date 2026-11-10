@@ -1040,6 +1040,7 @@ pub fn compile_recording(
         elsewhere,
         flags.debug,
         hold,
+        flags.isa,
     )?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
