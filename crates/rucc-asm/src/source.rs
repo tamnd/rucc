@@ -5286,8 +5286,16 @@ impl Reader {
     ///
     /// The linker reads the `@` itself. LTP's sctp library versions `sctp_connectx` this way, and
     /// a static link takes the `@@` one as the plain name.
+    ///
+    /// A `.symver` the same as one before it, with the same name and the same versioned name, does
+    /// nothing, as in gas. FreeBSD's `stdlib.h` and its `qsort_r_compat.c` both write
+    /// `__sym_compat(qsort_r, __qsort_r_compat, FBSD_1.0)`, so that file has the line twice.
     fn versions(&mut self) -> Result<(), Trouble> {
+        let mut seen: Set<(String, String)> = Set::default();
         for (name, versioned, line) in std::mem::take(&mut self.symvers) {
+            if !seen.insert((name.clone(), versioned.clone())) {
+                continue;
+            }
             let Some(&first) = self.known.get(&name) else { continue };
             let undefined = self.syms[first].at == Held::Undefined;
             let triple = versioned.contains("@@@");
@@ -7389,6 +7397,24 @@ mod tests {
         assert!(twice.unwrap_err().why.contains("defined twice"));
         let bare = read(".text\na:\n.symver a, x\n", Arch::X86_64);
         assert!(bare.unwrap_err().why.contains("no '@'"));
+    }
+
+    /// A `.symver` written twice with the same two names is taken once, as gas 2.42 takes it,
+    /// whether the name is defined here, renamed with `@@@` or only referred to. FreeBSD's
+    /// `qsort_r_compat.c` has the line from `stdlib.h` and its own.
+    #[test]
+    fn a_symver_written_twice_is_taken_once() {
+        let names = |text: &str| -> Vec<String> {
+            assembled(text).names.iter().map(|name| name.name.clone()).collect()
+        };
+        let copy = names(".text\na: ret\n.symver a, x@V\n.symver a, x@V\n");
+        assert_eq!(copy, ["a", "x@V"]);
+        let renamed = names(".text\n.globl r\nr: ret\n.symver r, r@@@V\n.symver r, r@@@V\n");
+        assert_eq!(renamed, ["r@@V"]);
+        let referred = names(".text\n.symver ext, ext@V\n.symver ext, ext@V\ncall ext\n");
+        assert_eq!(referred, ["ext@V"]);
+        let two = names(".text\na: ret\n.symver a, x@V\n.symver a, x@W\n");
+        assert_eq!(two, ["a", "x@V", "x@W"]);
     }
 
     /// `.symver` of a name the file only refers to, as gas 2.42 takes it. `@@@` is a reference to

@@ -297,3 +297,25 @@ fn a_symver_of_a_name_from_elsewhere_is_a_versioned_reference() {
         "invalid attempt to declare external version name as default in symbol `qsort_r@@FBSD_1.0'";
     assert!(err.contains(why), "{err}");
 }
+
+/// FreeBSD's `stdlib.h` and its `qsort_r_compat.c` both write the `.symver` of `__sym_compat`
+/// for `qsort_r`, so the file has the same line twice. gas takes it once, and so does the
+/// assembler here: the object has the versioned name one time.
+#[test]
+fn a_symver_written_twice_gives_one_versioned_name() {
+    let dir = dir("twice");
+    let source = "__asm__(\".symver __qsort_r_compat, qsort_r@FBSD_1.0\");\n\
+        int __qsort_r_compat(void) { return 0; }\n\
+        __asm__(\".symver __qsort_r_compat, qsort_r@FBSD_1.0\");\n";
+    std::fs::write(dir.join("a.c"), source).expect("the fixture can be written");
+    let (ok, _, err) = run(
+        &dir,
+        &["--target=x86_64-unknown-freebsd15.0", "-O2", "-fpic", "-c", "a.c", "-o", "a.o"],
+    );
+    assert!(ok, "{err}");
+    let bytes = std::fs::read(dir.join("a.o")).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    let spelled = b"\0qsort_r@FBSD_1.0\0";
+    let count = bytes.windows(spelled.len()).filter(|window| *window == spelled).count();
+    assert_eq!(count, 1);
+}
