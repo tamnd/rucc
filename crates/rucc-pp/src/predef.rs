@@ -107,6 +107,9 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 pub struct Predef {
     /// The dialect, which decides `__STDC_VERSION__`.
     pub std: Std,
+    /// Whether the unit is in the kencc dialect, which is `-fkencc`. kencc defines no macro, so
+    /// the set is empty and only the command line defines macros.
+    pub kencc: bool,
     /// Whether the GNU extensions are on, which is `-std=gnu23` rather than `-std=c23`. It
     /// decides `__STRICT_ANSI__` and the unarmoured `linux` and `unix` macros.
     pub gnu_extensions: bool,
@@ -224,6 +227,7 @@ impl Predef {
     pub fn new() -> Predef {
         Predef {
             std: Std::default(),
+            kencc: false,
             gnu_extensions: true,
             gnu89_inline: false,
             gnuc: GnucVersion::default(),
@@ -275,6 +279,7 @@ impl Predef {
     pub fn for_options(opts: &Options) -> Predef {
         Predef {
             std: opts.std,
+            kencc: opts.kencc,
             gnu_extensions: opts.gnu_extensions,
             gnu89_inline: opts.gnu89_inline,
             gnuc: opts.gnuc,
