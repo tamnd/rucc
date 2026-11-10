@@ -134,6 +134,10 @@ pub enum Expr {
     SizeofExpr(ExprId),
     /// `sizeof (ty)`.
     SizeofType(TypeNameId),
+    /// kencc's `signof operand`, which is the type signature of the operand as a constant.
+    SignofExpr(ExprId),
+    /// kencc's `signof (ty)`.
+    SignofType(TypeNameId),
     /// `alignof operand`, which is GNU's `__alignof__` since ISO C only has the type form.
     AlignofExpr(ExprId),
     /// `alignof (ty)`.

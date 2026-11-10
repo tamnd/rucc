@@ -251,8 +251,36 @@ impl Parser<'_> {
                 _ => {}
             }
         }
+        if self.at_signof() {
+            return self.signof_expr();
+        }
         let base = self.primary();
         self.postfix_ops(base)
+    }
+
+    /// Whether the cursor is at kencc's `signof`. It is a keyword in kencc and an identifier in
+    /// C, so it is known by its spelling and only under `-fkencc`, as `USED` and `SET` are.
+    fn at_signof(&self) -> bool {
+        self.cx.kencc
+            && self
+                .cursor
+                .current()
+                .ident()
+                .is_some_and(|name| Some(name) == self.cx.interner.find("signof"))
+    }
+
+    /// kencc's `signof expr` or `signof (type)`, which `cc.y` reads as `sizeof` is read. There
+    /// is no compound literal in kencc, so a type in parentheses is the whole operand.
+    fn signof_expr(&mut self) -> ExprId {
+        let start = self.cursor.span();
+        self.cursor.bump();
+        if let Some(ty) = self.parenthesised_type_operand() {
+            let span = self.span_from(start);
+            return self.add_expr(Expr::SignofType(ty), span);
+        }
+        let operand = self.unary();
+        let span = start.to(self.ast.expr_span(operand));
+        self.add_expr(Expr::SignofExpr(operand), span)
     }
 
     /// `sizeof expr` or `sizeof (type)`.

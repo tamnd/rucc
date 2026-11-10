@@ -1117,7 +1117,10 @@ impl<'a> Printer<'a> {
                     UNARY
                 }
             }
-            Expr::SizeofExpr(_) | Expr::AlignofExpr(_) | Expr::Extension(_) => UNARY,
+            Expr::SizeofExpr(_)
+            | Expr::SignofExpr(_)
+            | Expr::AlignofExpr(_)
+            | Expr::Extension(_) => UNARY,
             Expr::Index { .. }
             | Expr::Call { .. }
             | Expr::Member { .. }
@@ -1248,6 +1251,17 @@ impl<'a> Printer<'a> {
             }
             Expr::SizeofType(ty) => {
                 self.token("sizeof");
+                self.token("(");
+                self.type_name(ty);
+                self.token(")");
+            }
+            Expr::SignofExpr(operand) => {
+                self.token("signof");
+                self.space();
+                self.expr_at(operand, PRIMARY);
+            }
+            Expr::SignofType(ty) => {
+                self.token("signof");
                 self.token("(");
                 self.type_name(ty);
                 self.token(")");
