@@ -222,8 +222,9 @@ impl Checker<'_> {
         self.assume_misplaced(&[node.attrs], true, node.span);
         self.musttail_misplaced(&[node.attrs]);
         let mut declared = Vec::with_capacity(items.len());
-        let register =
-            self.ast[specs].storage == Some(StorageClass::Register) && !self.scopes.at_file_scope();
+        // At file scope too, where it is a global register variable, kencc's `extern register` or
+        // gcc's with `asm`, and its address is refused the same way.
+        let register = self.ast[specs].storage == Some(StorageClass::Register);
         for item in items {
             if let Some(id) = self.init_declarator(specs, item) {
                 if register {
@@ -836,7 +837,7 @@ impl Checker<'_> {
             return self.typedef(name, ty, &specs, item, span, spelled);
         }
         let kind = if is_function(&self.types, ty) { DeclKind::Function } else { DeclKind::Object };
-        let named = item.asm_label.is_some();
+        let named = item.asm_label.is_some() || specs.extern_register;
         let (linkage, duration) = self.placement(&specs, kind, name, named, span);
         if duration == StorageDuration::Automatic {
             self.check_space(ty, Some(name), span, "auto variable");
@@ -2155,6 +2156,49 @@ impl Checker<'_> {
         self.tast.record_defined_spelling(id, spelled);
     }
 
+    /// The register of a kencc `extern register` variable, which is the next one the target has
+    /// for them, or the one an earlier declaration of the same name took.
+    ///
+    /// kencc gives them in the order of declaration in the unit, from `R15` down on amd64 and from
+    /// `R27` down on arm64. The variable must be at file scope, because the register is the
+    /// program's and not the function's.
+    fn extern_register(&mut self, name: Symbol, span: Span) -> Option<StrId> {
+        let spelled = self.text(name).to_owned();
+        if !self.scopes.at_file_scope() {
+            self.report(
+                Diagnostic::error(
+                    format!("'{spelled}' is declared 'extern register' inside a function"),
+                    span,
+                )
+                .with_code("E0714"),
+            );
+            return None;
+        }
+        if let Some(&(_, register)) = self.extern_registers.iter().find(|(had, _)| *had == name) {
+            return Some(register);
+        }
+        let free = self.cx.target.extern_registers();
+        let Some(register) = free.get(self.extern_registers.len()) else {
+            let message = match free.len() {
+                0 => format!("this target has no register for the 'extern register' '{spelled}'"),
+                n => format!(
+                    "this target has {n} registers for 'extern register', and '{spelled}' is one more"
+                ),
+            };
+            self.report(Diagnostic::error(message, span).with_code("E0714"));
+            return None;
+        };
+        let elements = register.chars().map(u32::from).collect();
+        let literal = rucc_lex::StringLiteral {
+            elements,
+            encoding: rucc_lex::Encoding::Plain,
+            remarks: rucc_lex::Remarks::default(),
+        };
+        let id = self.tast.add_string(literal);
+        self.extern_registers.push((name, id));
+        Some(id)
+    }
+
     /// The two readings of the string one declarator wrote after `asm`, which are the assembler
     /// name of a symbol and the name of the machine register an object is kept in.
     ///
@@ -2172,6 +2216,9 @@ impl Checker<'_> {
         name: Symbol,
         span: Span,
     ) -> (Option<StrId>, Option<StrId>) {
+        if specs.extern_register {
+            return (None, self.extern_register(name, span));
+        }
         let Some(id) = item.asm_label else {
             return (None, None);
         };

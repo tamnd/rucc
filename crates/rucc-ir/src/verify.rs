@@ -1128,6 +1128,21 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
+            // A write of a named machine register, which takes the value and answers nothing.
+            Opcode::SetRegister => {
+                if self.takes(opcode, arity, 1) {
+                    let ty = arg(0);
+                    if !(ty.is_ptr() || (ty.is_scalar() && (ty.is_int() || ty.is_float()))) {
+                        self.error(format!(
+                            "set_register takes an integer, an address or a float and this one \
+                             takes {ty}"
+                        ));
+                    }
+                }
+                if results != 0 {
+                    self.error("set_register produces nothing".to_owned());
+                }
+            }
             // The two that walk the frames, which answer a pointer like the three above and take
             // nothing, since how far up to walk is the depth beside the instruction rather than
             // anything computed.

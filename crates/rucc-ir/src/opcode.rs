@@ -713,6 +713,13 @@ pub enum Opcode {
     /// answers, since anything in between may have written the register, so neither may be moved
     /// to where the other is and neither may be dropped for the other.
     RegisterValue,
+    /// A write of its one operand to a machine register, for kencc's `extern register`.
+    ///
+    /// The name of the register is the payload, as for [`Self::RegisterValue`], and there is no
+    /// result. The target keeps the register for the whole program, so the value stays there
+    /// until the next one of these, and a [`Self::RegisterValue`] after it reads it. It is not
+    /// pure, and it is ordered with every call and every read of a register.
+    SetRegister,
     /// The start of a variable argument list.
     VaStart,
     /// One argument off a variable argument list, which moves the list on as it reads it. Two
@@ -933,6 +940,7 @@ impl Opcode {
             Self::VaArgPack => "va_arg_pack",
             Self::VaArgPackLen => "va_arg_pack_len",
             Self::RegisterValue => "register_value",
+            Self::SetRegister => "set_register",
             Self::VaStart => "va_start",
             Self::VaArg => "va_arg",
             Self::VaObject => "va_object",
@@ -1293,6 +1301,7 @@ impl Opcode {
             | Self::VaEnd
             | Self::VaCopy
             | Self::StackRestore
+            | Self::SetRegister
             | Self::LifetimeEnd
             | Self::UnreachableHint
             | Self::Trap
@@ -1411,7 +1420,10 @@ impl Opcode {
     pub const fn extra_kind(self) -> ExtraKind {
         match self {
             Self::IConst | Self::FConst | Self::Splat => ExtraKind::Imm,
-            Self::GlobalAddr | Self::TargetIntrinsic | Self::RegisterValue => ExtraKind::Symbol,
+            Self::GlobalAddr
+            | Self::TargetIntrinsic
+            | Self::RegisterValue
+            | Self::SetRegister => ExtraKind::Symbol,
             Self::ICmp => ExtraKind::IntPred,
             Self::FCmp => ExtraKind::FloatPred,
             Self::Alloca
@@ -1701,6 +1713,7 @@ static ALL: &[Opcode] = &[
     Opcode::VaArgPack,
     Opcode::VaArgPackLen,
     Opcode::RegisterValue,
+    Opcode::SetRegister,
     Opcode::VaStart,
     Opcode::VaArg,
     Opcode::VaObject,

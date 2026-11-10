@@ -29,6 +29,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On the x86_64-plan9 target, calls use the convention of kencc. Each argument has an 8-byte slot, an integer or a pointer first also goes in `rbp`, a structure result goes through a hidden pointer, and no register is kept across a call. A parameter whose address is taken lives in its slot, so the `va_start` of the Plan 9 `u.h` and `getcallerpc(&arg)` work. No function keeps a frame pointer, and a function that needs one is refused (#4154)
 - On the aarch64-plan9 target, calls use the convention of kencc on arm64. It is the same as on amd64 with `x0` for the register, and the first slot is at `8(SP)` at the call. A function on this target may keep a frame pointer (#4154)
 - On Plan 9 targets, `__builtin_va_list` is `char *`, as `va_list` is in the Plan 9 `u.h` (#4154)
+- Under `-fkencc` on Plan 9 targets, `extern register` puts a variable in a register for the whole program, as kencc does. The registers are `r15` and `r14` on amd64 and `x27` and `x26` on arm64, in the order of declaration. A read is a move out of the register and a write is a move into it. A new IR instruction, `set_register`, holds the write (#4155)
+- Taking the address of a global register variable is now the error that gcc gives, "address of global register variable requested" (#4155)
 
 ### Fixed
 
