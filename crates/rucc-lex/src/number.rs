@@ -1356,16 +1356,17 @@ mod tests {
         let msvc =
             TargetInfo::for_tuple("x86_64-windows-msvc".parse().expect("a row in the table"));
         assert_eq!(floating("1.0w", Std::C23, &msvc), Err(FloatError::UnsupportedType));
-        // i386 FreeBSD rounds its x87 format to fifty three bits, and all three names of it do.
+        // i386 FreeBSD rounds its x87 format to fifty three bits, and both names of it do.
         let freebsd =
             TargetInfo::for_tuple("i386-unknown-freebsd15.1".parse().expect("a row in the table"));
         assert!(floating("1.0w", Std::C23, &freebsd).is_ok());
-        for ty in
-            [FloatConstantType::LongDouble, FloatConstantType::Float64x, FloatConstantType::Float80]
-        {
+        for ty in [FloatConstantType::LongDouble, FloatConstantType::Float80] {
             assert_eq!(ty.format(&freebsd), Format::X87Round53, "{ty:?}");
             assert_eq!(ty.format(&i686), Format::X87Extended, "{ty:?}");
         }
+        // That leaves `_Float64x` no more precision than `double` there, so gcc makes it binary128
+        // (tamnd/rucc#4325).
+        assert_eq!(FloatConstantType::Float64x.format(&freebsd), Format::Quad);
         // The interchange types every machine has keep working on the machine that has least.
         for text in ["1.0f32", "1.0f64", "1.0f32x"] {
             assert!(floating(text, Std::C23, &arm).is_ok(), "{text} on armv7");

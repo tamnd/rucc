@@ -1821,6 +1821,12 @@ fn float64x_format(target: TargetTuple) -> Option<Format> {
         // The x87 unit is on the machine whatever the operating system says a `long double` is,
         // so `x86_64-apple-darwin` and `x86_64-windows-msvc` both have an eighty bit `_Float64x`
         // and an eight byte `long double`.
+        //
+        // Where the x87 format rounds to fifty three bits, gcc gives `_Float64x` the quad format,
+        // which is binary128 in software. `_Float64x` must have more precision than `_Float64`,
+        // and the x87 format there has the same precision. This is i386 FreeBSD and DragonFly
+        // (tamnd/rucc#4325).
+        tuple::Arch::X86 if rounds_to_53(target) => Some(Format::Quad),
         tuple::Arch::X86_64 | tuple::Arch::X86 => Some(Format::X87Extended),
         tuple::Arch::Aarch64
         | tuple::Arch::Riscv64
@@ -2220,7 +2226,10 @@ mod tests {
             // The storage is the x87 format whichever it is, and the rounding is in the format.
             let format = if rounds { Format::X87Round53 } else { Format::X87Extended };
             assert_eq!(target.long_double_format, format, "{spelling}");
-            assert_eq!(target.float64x_format, Some(format), "{spelling}");
+            // `_Float64x` needs more precision than a `double`, so where the x87 format has no
+            // more, gcc makes it the quad format (tamnd/rucc#4325).
+            let wide = if rounds { Format::Quad } else { Format::X87Extended };
+            assert_eq!(target.float64x_format, Some(wide), "{spelling}");
             assert_eq!(target.long_double_format.width(), 80, "{spelling}");
         }
     }

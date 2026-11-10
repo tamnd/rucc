@@ -2978,33 +2978,47 @@ mod tests {
 
     /// tamnd/rucc#4088. i386 FreeBSD's `long double` is GCC's
     /// `ieee_extended_intel_96_round_53_format`, so its `float.h` values are a `double`'s
-    /// precision in the x87 exponent range. `_Float64x` is the same mode and takes them too.
+    /// precision in the x87 exponent range.
     #[test]
     fn i386_freebsd_describes_a_long_double_of_53_bits() {
         let freebsd = set_for("i386-unknown-freebsd14");
-        for prefix in ["LDBL", "FLT64X"] {
-            let suffix = if prefix == "LDBL" { "L" } else { "F64x" };
-            for (name, value) in [
-                ("MANT_DIG", "53".to_owned()),
-                ("DIG", "15".to_owned()),
-                ("MIN_EXP", "(-16381)".to_owned()),
-                ("MIN_10_EXP", "(-4931)".to_owned()),
-                ("MAX_EXP", "16384".to_owned()),
-                ("MAX_10_EXP", "4932".to_owned()),
-                ("DECIMAL_DIG", "17".to_owned()),
-                ("MAX", format!("1.18973149535723163299902939989638351e+4932{suffix}")),
-                ("NORM_MAX", format!("1.18973149535723163299902939989638351e+4932{suffix}")),
-                ("MIN", format!("3.36210314311209350626267781732175260e-4932{suffix}")),
-                ("EPSILON", format!("2.22044604925031308084726333618164062e-16{suffix}")),
-                ("DENORM_MIN", format!("7.46536864129530798597817535205257178e-4948{suffix}")),
-                ("IS_IEC_60559", "1".to_owned()),
-            ] {
-                let line = format!("#define __{prefix}_{name}__ {value}");
-                assert!(has(&freebsd, &line), "{line}");
-            }
+        for (name, value) in [
+            ("MANT_DIG", "53"),
+            ("DIG", "15"),
+            ("MIN_EXP", "(-16381)"),
+            ("MIN_10_EXP", "(-4931)"),
+            ("MAX_EXP", "16384"),
+            ("MAX_10_EXP", "4932"),
+            ("DECIMAL_DIG", "17"),
+            ("MAX", "1.18973149535723163299902939989638351e+4932L"),
+            ("NORM_MAX", "1.18973149535723163299902939989638351e+4932L"),
+            ("MIN", "3.36210314311209350626267781732175260e-4932L"),
+            ("EPSILON", "2.22044604925031308084726333618164062e-16L"),
+            ("DENORM_MIN", "7.46536864129530798597817535205257178e-4948L"),
+            ("IS_IEC_60559", "1"),
+        ] {
+            let line = format!("#define __LDBL_{name}__ {value}");
+            assert!(has(&freebsd, &line), "{line}");
         }
         assert!(has(&freebsd, "#define __DECIMAL_DIG__ 17"));
         assert!(has(&freebsd, "#define __SIZEOF_LONG_DOUBLE__ 12"));
+        // tamnd/rucc#4325. `_Float64x` needs more precision than a `double`, so gcc makes it
+        // binary128 there. These are the values of gcc 14 and 15 for FreeBSD with `-m32`.
+        for line in [
+            "__FLT64X_MANT_DIG__ 113",
+            "__FLT64X_DIG__ 33",
+            "__FLT64X_MIN_EXP__ (-16381)",
+            "__FLT64X_MAX_EXP__ 16384",
+            "__FLT64X_DECIMAL_DIG__ 36",
+            "__FLT64X_MAX__ 1.18973149535723176508575932662800702e+4932F64x",
+            "__FLT64X_NORM_MAX__ 1.18973149535723176508575932662800702e+4932F64x",
+            "__FLT64X_MIN__ 3.36210314311209350626267781732175260e-4932F64x",
+            "__FLT64X_EPSILON__ 1.92592994438723585305597794258492732e-34F64x",
+            "__FLT64X_DENORM_MIN__ 6.47517511943802511092443895822764655e-4966F64x",
+            "__FLT64X_IS_IEC_60559__ 1",
+        ] {
+            assert!(has(&freebsd, &format!("#define {line}")), "{line}");
+        }
         // The other i386 BSDs and x86-64 FreeBSD keep the sixty four bits of the x87 format.
         for triple in ["x86_64-unknown-freebsd", "i386-unknown-openbsd", "i486--netbsdelf"] {
             let set = set_for(triple);
