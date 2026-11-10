@@ -1174,23 +1174,6 @@ pub enum Unsupported {
         /// What the frame could not do about it.
         growing: Growing,
     },
-    /// More parameters of a type that travels on the x87 stack than the stack is deep.
-    ///
-    /// Not an instruction either, for the reason a function's parameter is not one: it is a fact
-    /// about the block and there is nothing in the block to point at. What crosses an edge for one
-    /// of these is the address of where the value is, and the block copies the bytes into a slot
-    /// of its own, all of them through the stack at once so that a block carrying two of them
-    /// swapped is copied in an order that is right. Eight is as many as the stack holds, and a
-    /// ninth would have to be copied before or after the rest, which is the order that could be
-    /// wrong.
-    Phi {
-        /// Which block it arrives at.
-        block: Block,
-        /// How many of them arrive there, which is the whole of what is wrong.
-        count: usize,
-        /// What they are.
-        ty: Type,
-    },
     /// An `asm` statement this cannot build.
     ///
     /// Not an instruction no rule fires on, for the reason a call is not one: what it stands for is
@@ -1380,9 +1363,7 @@ impl Unsupported {
             | Unsupported::Register { inst, .. }
             | Unsupported::MustTail { inst, .. } => Some(inst),
             Unsupported::Unported { inst, .. } | Unsupported::Registers { inst, .. } => inst,
-            Unsupported::Argument { .. } | Unsupported::Phi { .. } | Unsupported::Naked { .. } => {
-                None
-            }
+            Unsupported::Argument { .. } | Unsupported::Naked { .. } => None,
         }
     }
 }
@@ -1411,13 +1392,6 @@ impl fmt::Display for Unsupported {
             }
             Unsupported::Dynamic { growing, .. } => {
                 write!(f, "this local {}", growing.why())
-            }
-            Unsupported::Phi { block, count, ty } => {
-                let block = block.index();
-                write!(
-                    f,
-                    "block{block} takes {count} parameters of type `{ty}` and only {X87_DEPTH} can cross an edge at once"
-                )
             }
             Unsupported::Assembly { refused, .. } => write!(f, "this `asm` {}", refused.why()),
             Unsupported::Unported { what, .. } => f.write_str(what.why()),
@@ -3532,19 +3506,44 @@ impl<'a> Lowering<'a> {
     /// Every load runs before every store and the stores run backwards, so all of the values are
     /// on the x87 stack at once and nothing reads a slot another one has already written. That
     /// costs nothing in the ordinary case of one parameter and is what makes the back edge of a
-    /// loop that swaps two of these work. It is also the reason for the limit: the stack is eight
-    /// deep, and a block with more of these than that is refused rather than copied in an order
-    /// that could be wrong.
+    /// loop that swaps two of these work.
+    ///
+    /// The stack is eight deep, so a block with more of these than that copies each value to a
+    /// fresh slot first, one at a time, and from there to the slot of its parameter. Nothing else
+    /// reads or writes the fresh slots, so every value is read before any parameter is written, as
+    /// above. libgfortran's `matmul_r10` unrolls its inner loop over sixteen `long double` sums.
     fn settle(&mut self, block: Block, arriving: &[(Value, mir::Reg)]) -> Result<(), Unsupported> {
-        let Some(&(first, _)) = arriving.first() else { return Ok(()) };
-        if arriving.len() > X87_DEPTH {
-            let ty = self.source[first].ty;
-            return Err(Unsupported::Phi { block, count: arriving.len(), ty });
+        if arriving.is_empty() {
+            return Ok(());
         }
         // A block parameter comes from no instruction, so what this points at is the first thing
         // in the block, which is where a reader looking for the copy would look.
         let first_inst = self.source.insts(block).next();
         let span = first_inst.map_or(Span::DUMMY, |it| self.source.span(it));
+        if arriving.len() > X87_DEPTH {
+            let at = self.at.expect("a block is being filled");
+            let mut staged = Vec::with_capacity(arriving.len());
+            for &(_, reg) in arriving {
+                let index = self.stack.locals.len();
+                let align = self.scratch_align(X87_BYTES);
+                self.stack.locals.push(Local { size: X87_BYTES, align });
+                let from = self.through(reg);
+                self.x87_at("fld_t", span, from);
+                let into = self.frame_address(at, index);
+                let into = self.through(into);
+                self.x87_at("fstp_t", span, into);
+                staged.push(index);
+            }
+            for (&(param, _), index) in arriving.iter().zip(staged) {
+                let from = self.frame_address(at, index);
+                let from = self.through(from);
+                self.x87_at("fld_t", span, from);
+                let into = self.x87_slot(param);
+                let into = self.through(into);
+                self.x87_at("fstp_t", span, into);
+            }
+            return Ok(());
+        }
         for &(_, reg) in arriving {
             let from = self.through(reg);
             self.x87_at("fld_t", span, from);
@@ -13865,8 +13864,12 @@ mod tests {
         );
     }
 
+    /// Nine of them is more than the x87 stack holds at once, so each is copied to a fresh slot
+    /// and then to its parameter's slot. Every read of an address the edge handed over comes
+    /// before every write of a parameter's slot, which is what makes a block that swaps them
+    /// right, as it is for eight.
     #[test]
-    fn more_long_doubles_at_a_block_than_the_stack_is_deep_are_reported() {
+    fn more_long_doubles_at_a_block_than_the_stack_is_deep_are_copied_through_fresh_slots() {
         let f64 = Type::float(rucc_ir::Float::F64);
         let (mut names, mut source, block, args) = blank(&[f64]);
         let wide = cast(&mut source, block, Opcode::FPExt, args[0], long_double());
@@ -13877,16 +13880,21 @@ mod tests {
         Builder::new(&mut source, block).jump(next, &carried);
         Builder::new(&mut source, next).ret(&[params[0]]);
 
-        // The copies go through the x87 stack so that every one of them is read before any of them
-        // is written, which is what makes a block that swaps two of these right. Nine of them do
-        // not fit on the stack, and copying the ninth before or after the rest is the order that
-        // could be wrong, so it is refused instead.
-        let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
-            .expect_err("nine do not fit on the stack");
-        assert_eq!(
-            failed.to_string(),
-            "block1 takes 9 parameters of type `f80` and only 8 can cross an edge at once"
+        let text = lower(&mut names, &source);
+        let copies: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !line.starts_with("block1"))
+            .map(str::trim)
+            .filter(|line| line.starts_with("x64.fld_t") || line.starts_with("x64.fstp_t"))
+            .collect();
+        // Two copies of each of the nine, each a load and a store, and then the load of the one
+        // the block gives back.
+        assert_eq!(copies.len(), 4 * (X87_DEPTH + 1) + 1, "{text}");
+        assert!(
+            copies.chunks(2).take(4 * (X87_DEPTH + 1) / 2).all(|pair| {
+                pair[0].starts_with("x64.fld_t") && pair[1].starts_with("x64.fstp_t")
+            }),
+            "{text}"
         );
-        assert_eq!(failed.inst(), None);
     }
 }
