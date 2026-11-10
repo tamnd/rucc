@@ -4246,7 +4246,16 @@ impl<'u> Body<'_, 'u> {
     }
 
     /// A zero of one IR type, for a place that has to produce a value and has none to produce.
+    ///
+    /// A pointer is a null pointer, because an integer immediate cannot have a pointer type. The
+    /// `compile` of the regexp code that yacc puts in APE's expr does `return;` in a function
+    /// that gives a `char *`.
     fn blank(&mut self, ty: Type, span: Span) -> Value {
+        if ty.is_ptr() {
+            let address = self.address;
+            let zero = self.build(span).iconst(address, 0);
+            return self.build(span).unary(Opcode::IntToPtr, zero, Type::PTR);
+        }
         if ty.is_float() { self.build(span).fconst(ty, 0) } else { self.build(span).iconst(ty, 0) }
     }
 
