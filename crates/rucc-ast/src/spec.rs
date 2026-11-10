@@ -452,10 +452,12 @@ impl BuiltinSet {
     pub const DECIMAL128: BuiltinSet = BuiltinSet(1 << 23);
     /// `_BitInt`, whose width is kept next to the set rather than in it.
     pub const BIT_INT: BuiltinSet = BuiltinSet(1 << 24);
+    /// `_Decimal64x`.
+    pub const DECIMAL64X: BuiltinSet = BuiltinSet(1 << 25);
 
     /// Everything that names a decimal floating type.
     const DECIMALS: BuiltinSet =
-        BuiltinSet(Self::DECIMAL32.0 | Self::DECIMAL64.0 | Self::DECIMAL128.0);
+        BuiltinSet(Self::DECIMAL32.0 | Self::DECIMAL64.0 | Self::DECIMAL128.0 | Self::DECIMAL64X.0);
     /// Everything that names one of the `_FloatN` and `_FloatNx` types.
     const EXTENDED: BuiltinSet = BuiltinSet(
         Self::FLOAT16.0
@@ -653,6 +655,7 @@ impl Builtin {
                 s if s == BuiltinSet::DECIMAL32 => basic(Scalar::Decimal32),
                 s if s == BuiltinSet::DECIMAL64 => basic(Scalar::Decimal64),
                 s if s == BuiltinSet::DECIMAL128 => basic(Scalar::Decimal128),
+                s if s == BuiltinSet::DECIMAL64X => basic(Scalar::Decimal64x),
                 _ => None,
             };
         }
@@ -746,6 +749,7 @@ impl Builtin {
             (BuiltinSet::DECIMAL32, "_Decimal32"),
             (BuiltinSet::DECIMAL64, "_Decimal64"),
             (BuiltinSet::DECIMAL128, "_Decimal128"),
+            (BuiltinSet::DECIMAL64X, "_Decimal64x"),
             (BuiltinSet::FLOAT16, "_Float16"),
             (BuiltinSet::FLOAT32, "_Float32"),
             (BuiltinSet::FLOAT64, "_Float64"),
@@ -883,6 +887,8 @@ pub enum Scalar {
     Decimal64,
     /// `_Decimal128`.
     Decimal128,
+    /// `_Decimal64x`.
+    Decimal64x,
 }
 
 #[cfg(test)]

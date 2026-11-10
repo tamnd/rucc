@@ -2195,7 +2195,7 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // of their macros there.
     let aarch64 = target.tuple.arch() == tuple::Arch::Aarch64;
     if target.has_decimal_float && !(aarch64 && gnuc < 14) {
-        decimals(d);
+        decimals(d, gnuc);
     }
 }
 
@@ -2297,16 +2297,16 @@ fn libgcc(d: &mut Defs, target: &TargetInfo) {
     }
 }
 
-/// The limits of the three decimal types, on the one target that has them.
+/// The limits of the decimal types, on the targets that have them.
 ///
 /// Written out rather than worked out, because each is a fact of the interchange format and the
-/// three rows are all there will ever be. The spellings are gcc's, down to the parentheses around a
-/// negative exponent and the suffix on every constant. `__DEC64X_*` is not here: `_Decimal64x` has
-/// a suffix of its own the lexer does not read yet, so the macros would be constants nothing can
-/// use. `__DEC_EVAL_METHOD__` is not here, because gcc says it on every target.
+/// rows are all there will ever be. The spellings are gcc's, down to the parentheses around a
+/// negative exponent and the suffix on every constant. `_Decimal64x` is from gcc 15, and it is
+/// the decimal128 format with a suffix of its own, so its row is the `_Decimal128` row with
+/// `D64x`. `__DEC_EVAL_METHOD__` is not here, because gcc says it on every target.
 /// `__DECIMAL_BID_FORMAT__` says the encoding is the binary integer one, which it is on every
 /// row that has the types.
-fn decimals(d: &mut Defs) {
+fn decimals(d: &mut Defs, gnuc: u32) {
     d.set("__DECIMAL_BID_FORMAT__", "1");
     let rows = [
         ("32", "DF", "7", "(-94)", "97", "1E-95", "9.999999E96", "1E-6", "0.000001E-95"),
@@ -2333,7 +2333,15 @@ fn decimals(d: &mut Defs) {
             "0.000000000000000000000000000000001E-6143",
         ),
     ];
-    for (bits, suffix, mant_dig, min_exp, max_exp, min, max, epsilon, subnormal_min) in rows {
+    let extended = (gnuc >= 15).then(|| {
+        let mut row = rows[2];
+        row.0 = "64X";
+        row.1 = "D64x";
+        row
+    });
+    for (bits, suffix, mant_dig, min_exp, max_exp, min, max, epsilon, subnormal_min) in
+        rows.into_iter().chain(extended)
+    {
         d.set(&format!("__DEC{bits}_MANT_DIG__"), mant_dig);
         d.set(&format!("__DEC{bits}_MIN_EXP__"), min_exp);
         d.set(&format!("__DEC{bits}_MAX_EXP__"), max_exp);

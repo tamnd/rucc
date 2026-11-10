@@ -391,12 +391,15 @@ impl Checker<'_> {
             "long double" => return Some(self.types.float(FloatKind::LongDouble)),
             // Only where the target has them, so a decimal builtin elsewhere is a name nothing
             // declared, which is how gcc treats it on the same target.
-            "_Decimal32" | "_Decimal64" | "_Decimal128" if !self.cx.target.has_decimal_float => {
+            "_Decimal32" | "_Decimal64" | "_Decimal128" | "_Decimal64x"
+                if !self.cx.target.has_decimal_float =>
+            {
                 return None;
             }
             "_Decimal32" => return Some(self.types.float(FloatKind::Decimal32)),
             "_Decimal64" => return Some(self.types.float(FloatKind::Decimal64)),
             "_Decimal128" => return Some(self.types.float(FloatKind::Decimal128)),
+            "_Decimal64x" => return Some(self.types.float(FloatKind::Decimal64x)),
             // The interchange types, also only where the target has them. `_Float32`,
             // `_Float64` and `_Float32x` are on every target, and the other three are not.
             "_Float16" => return self.interchange(FloatKind::Float16),
@@ -474,9 +477,10 @@ impl Checker<'_> {
             FloatKind::Fp16 => target.type_names().iter().any(|&(name, _)| name == "__fp16"),
             FloatKind::Float128 => target.has_float128,
             FloatKind::Float64x => target.float64x_format.is_some(),
-            FloatKind::Decimal32 | FloatKind::Decimal64 | FloatKind::Decimal128 => {
-                target.has_decimal_float
-            }
+            FloatKind::Decimal32
+            | FloatKind::Decimal64
+            | FloatKind::Decimal128
+            | FloatKind::Decimal64x => target.has_decimal_float,
             FloatKind::Float
             | FloatKind::Float32
             | FloatKind::Double

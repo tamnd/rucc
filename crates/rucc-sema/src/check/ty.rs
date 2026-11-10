@@ -473,7 +473,8 @@ impl Checker<'_> {
                     | Scalar::BitInt { .. }
                     | Scalar::Decimal32
                     | Scalar::Decimal64
-                    | Scalar::Decimal128,
+                    | Scalar::Decimal128
+                    | Scalar::Decimal64x,
                     _,
                     _,
                 ) => {
@@ -1796,6 +1797,7 @@ fn float_kind(scalar: Scalar, target: &TargetInfo) -> Option<FloatKind> {
         Scalar::Decimal32 if target.has_decimal_float => Some(FloatKind::Decimal32),
         Scalar::Decimal64 if target.has_decimal_float => Some(FloatKind::Decimal64),
         Scalar::Decimal128 if target.has_decimal_float => Some(FloatKind::Decimal128),
+        Scalar::Decimal64x if target.has_decimal_float => Some(FloatKind::Decimal64x),
         _ => None,
     }
 }
@@ -1836,6 +1838,7 @@ fn spell_scalar(scalar: Scalar) -> &'static str {
         Scalar::Decimal32 => "_Decimal32",
         Scalar::Decimal64 => "_Decimal64",
         Scalar::Decimal128 => "_Decimal128",
+        Scalar::Decimal64x => "_Decimal64x",
     }
 }
 

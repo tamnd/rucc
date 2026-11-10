@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `_Decimal64x`, which gcc has from gcc 15 on every target with the decimal types. It is the decimal128 format and a type of its own, so `_Generic` tells it from `_Decimal128` and `_Decimal128` wins in an operation on both. A constant of the type has the suffix `d64x` or `D64x`, and with `__GNUC__` 15 or more the seven `__DEC64X_*` macros are defined, as gcc defines them.
 - AArch64 FreeBSD now has `_Decimal32`, `_Decimal64` and `_Decimal128`, as the gcc 14 and gcc 15 packages of FreeBSD have, with the `__DEC*` macros when `__GNUC__` is 14 or more. gcc there uses the binary integer encoding and the `__bid_*` routines of libgcc, as on x86-64, and AAPCS64 passes a decimal in a vector register. Every row with the types now also defines `__DECIMAL_BID_FORMAT__`, as gcc does.
 - Blocks that hold the same instructions and go to the same place are now merged before the layout, the cross jumping gcc does, so the hundred or so `jmp __x64_sys_ni_syscall` cases in the kernel's system call switch are written once and the bench objects are 6215 bytes smaller (#3963)
 - The peephole tests a bit read after a shift where it is, so `((x >> s) & c) != 0` is `(x & (c << s)) != 0` and a bitfield flag test is one `test` with an immediate as with gcc, and the trailing zero loop is still found when its test is the `x & 2` this leaves (#3972)

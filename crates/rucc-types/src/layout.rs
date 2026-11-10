@@ -358,7 +358,8 @@ fn float_layout(kind: FloatKind, target: &TargetInfo) -> Layout {
         | FloatKind::Float32
         | FloatKind::Decimal32
         | FloatKind::Decimal64
-        | FloatKind::Decimal128 => size,
+        | FloatKind::Decimal128
+        | FloatKind::Decimal64x => size,
     };
     Layout::new(size, align)
 }
@@ -387,7 +388,7 @@ pub fn float_width(kind: FloatKind, target: &TargetInfo) -> u32 {
         FloatKind::Float16 | FloatKind::Fp16 => 16,
         FloatKind::Float | FloatKind::Float32 | FloatKind::Decimal32 => 32,
         FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 | FloatKind::Decimal64 => 64,
-        FloatKind::Decimal128 => 128,
+        FloatKind::Decimal128 | FloatKind::Decimal64x => 128,
         FloatKind::LongDouble => target.long_double_width,
         FloatKind::Float64x if float64x_is_long_double(target) => target.long_double_width,
         // The same sixteen bytes whichever of the two formats it is, for the same reason
@@ -416,7 +417,8 @@ pub fn float_format(kind: FloatKind, target: &TargetInfo) -> Format {
         FloatKind::Float128 => Format::Quad,
         FloatKind::Decimal32 => Format::Decimal32,
         FloatKind::Decimal64 => Format::Decimal64,
-        FloatKind::Decimal128 => Format::Decimal128,
+        // The format wider than decimal64, which is decimal128 on every target gcc has it for.
+        FloatKind::Decimal128 | FloatKind::Decimal64x => Format::Decimal128,
     }
 }
 

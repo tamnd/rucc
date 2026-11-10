@@ -78,6 +78,7 @@ fn builtin_keyword(word: Keyword) -> Option<BuiltinSet> {
         Keyword::Decimal32 => BuiltinSet::DECIMAL32,
         Keyword::Decimal64 => BuiltinSet::DECIMAL64,
         Keyword::Decimal128 => BuiltinSet::DECIMAL128,
+        Keyword::Decimal64x => BuiltinSet::DECIMAL64X,
         _ => return None,
     };
     Some(set)
