@@ -6,10 +6,9 @@
  * which are 3DNow!, FMA4 and XOP, plus the general purpose header that holds the names that are
  * not vector instructions at all.
  *
- * None of those extra families is a family this compiler has, and none of them is a family any
- * current machine has either: AMD dropped 3DNow! with Bulldozer's successor, and FMA4 and XOP
- * went with Zen. So on every target this compiler supports, the widest umbrella and Intel's reach
- * the same set of names, and this header is `immintrin.h` with a reason attached.
+ * No current machine has those families: AMD dropped 3DNow! with Bulldozer's successor, and FMA4
+ * and XOP went with Zen. Of them, this compiler has only the XOP rotates and byte permute in
+ * <xopintrin.h>, which FreeBSD's BLAKE2 for XOP calls. So this header is `immintrin.h` and that.
  *
  * It is here because it is what a header asks for rather than what a program asks for. mingw-w64's
  * `<winnt.h>` includes it on line 1658, so every Windows program that includes `<windows.h>` needs
@@ -20,12 +19,15 @@
  *
  * A name this compiler does not have stays missing rather than being made to appear, which is the
  * rule `immintrin.h` states at more length. A program that includes this and then calls an XOP
- * intrinsic gets a diagnostic at the call, which is where it belongs.
+ * intrinsic that is not in <xopintrin.h> gets a diagnostic at the call, which is where it belongs.
  */
 
 #ifndef __RUCC_X86INTRIN_H
 #define __RUCC_X86INTRIN_H
 
 #include <immintrin.h>
+
+/* Unguarded for the reason <immintrin.h> gives: each function is built for `xop`. */
+#include <xopintrin.h>
 
 #endif /* __RUCC_X86INTRIN_H */

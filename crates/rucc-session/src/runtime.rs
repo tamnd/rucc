@@ -84,6 +84,7 @@ const HEADERS: &[(&str, &str)] = &[
     ("x86gprintrin.h", include_str!("../runtime/include/x86gprintrin.h")),
     ("x86intrin.h", include_str!("../runtime/include/x86intrin.h")),
     ("xmmintrin.h", include_str!("../runtime/include/xmmintrin.h")),
+    ("xopintrin.h", include_str!("../runtime/include/xopintrin.h")),
     ("xsaveintrin.h", include_str!("../runtime/include/xsaveintrin.h")),
 ];
 

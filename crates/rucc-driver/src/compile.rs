@@ -4406,6 +4406,53 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// tamnd/rucc#4206. FreeBSD's BLAKE2 for XOP includes `<x86intrin.h>` and calls the rotates and
+    /// the byte permute from a unit built with `-mxop`. Each is the instruction, inlined at every
+    /// level, and a function not built for `xop` is refused the call the way gcc refuses it.
+    #[test]
+    fn the_shipped_xopintrin_has_the_rotates_and_the_permute_under_xop() {
+        let source = concat!(
+            "#include <x86intrin.h>\n",
+            "__attribute__((__target__(\"xop\")))\n",
+            "__m128i f(__m128i a, __m128i b, __m128i c) {\n",
+            "  a = _mm_roti_epi64(a, -24);\n",
+            "  a = _mm_roti_epi32(a, 7);\n",
+            "  a = _mm_roti_epi16(a, 3);\n",
+            "  a = _mm_roti_epi8(a, 1);\n",
+            "  return _mm_perm_epi8(a, b, c);\n",
+            "}\n",
+        );
+        for level in [rucc_session::OptLevel::O0, rucc_session::OptLevel::O2] {
+            let mut opts = freestanding();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "at {level:?}");
+            let text = result.text();
+            for step in [
+                "vprotq $-24, %xmm0, %xmm0",
+                "vprotd $7, %xmm0, %xmm0",
+                "vprotw $3, %xmm0, %xmm0",
+                "vprotb $1, %xmm0, %xmm0",
+                "vpperm %xmm2, %xmm1, %xmm0, %xmm0",
+            ] {
+                assert!(text.contains(step), "no {step} at {level:?} in:\n{text}");
+            }
+            assert!(!text.contains("call"), "a step was not inlined at {level:?}:\n{text}");
+            opts.emit = EmitKind::Object;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "the object at {level:?}");
+        }
+        let result = run(
+            &freestanding(),
+            "#include <x86intrin.h>\n__m128i f(__m128i x) { return _mm_roti_epi64(x, 3); }\n",
+        );
+        let said = result.messages.join("\n");
+        let refusal = "inlining failed in call to 'always_inline' '_mm_roti_epi64': target \
+                       specific option mismatch";
+        assert!(said.contains(refusal), "{said}");
+    }
+
     /// libiberty's sha1.c includes `<x86intrin.h>` and calls the SHA-1 steps from a function built
     /// for `sse4.1,sha`. Each of the seven is the instruction, inlined at every level, and a
     /// function not built for `sha` is refused the call the way gcc refuses it.

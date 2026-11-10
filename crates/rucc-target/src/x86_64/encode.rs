@@ -397,6 +397,9 @@ pub enum Map {
     /// What `0F 3A` means, which is where the ones carrying an immediate that selects something
     /// are.
     Escape3A,
+    /// AMD's XOP table eight, which has no legacy escape. Its prefix is the VEX three byte form
+    /// with `8F` in place of `C4`, and the map number keeps it apart from `pop`.
+    Xop8,
 }
 
 impl Map {
@@ -406,6 +409,7 @@ impl Map {
             Map::Escape => 1,
             Map::Escape38 => 2,
             Map::Escape3A => 3,
+            Map::Xop8 => 8,
         }
     }
 }
@@ -4590,6 +4594,26 @@ static ENCODINGS: &[Encoding] = &[
         pair(1, 3),
         Evex::new(Map::Escape3A, false).third(2).or_vex(false),
     ),
+    // AMD's XOP rotates of each lane by a constant, a left rotate for a positive count and a
+    // right one for a negative count, and its byte permute of two registers by a third. The
+    // selector of the permute is named in the top half of the immediate byte, as for `vpblendvb`.
+    // FreeBSD's BLAKE2 for XOP is written with them through <xopintrin.h>.
+    avx("vprotb", &IVV, Long, Map::Xop8, &[0xC0], None, pair(1, 2)),
+    avx("vprotb", &IMV, Long, Map::Xop8, &[0xC0], None, pair(1, 2)),
+    avx("vprotw", &IVV, Long, Map::Xop8, &[0xC1], None, pair(1, 2)),
+    avx("vprotw", &IMV, Long, Map::Xop8, &[0xC1], None, pair(1, 2)),
+    avx("vprotd", &IVV, Long, Map::Xop8, &[0xC2], None, pair(1, 2)),
+    avx("vprotd", &IMV, Long, Map::Xop8, &[0xC2], None, pair(1, 2)),
+    avx("vprotq", &IVV, Long, Map::Xop8, &[0xC3], None, pair(1, 2)),
+    avx("vprotq", &IMV, Long, Map::Xop8, &[0xC3], None, pair(1, 2)),
+    Encoding {
+        imm: ImmSize::Is4,
+        ..avx("vpperm", &VVVV, Long, Map::Xop8, &[0xA3], Some(2), pair(1, 3))
+    },
+    Encoding {
+        imm: ImmSize::Is4,
+        ..avx("vpperm", &VMVV, Long, Map::Xop8, &[0xA3], Some(2), pair(1, 3))
+    },
     // A blend whose selector is a fourth register, named in the top half of the immediate byte.
     Encoding {
         imm: ImmSize::Is4,
@@ -5903,7 +5927,7 @@ impl Writer<'_> {
             out.push((u8::from(self.rex & REX_R == 0) << 7) | tail);
             return;
         }
-        out.push(0xC4);
+        out.push(if vex.map == Map::Xop8 { 0x8F } else { 0xC4 });
         out.push(
             (u8::from(self.rex & REX_R == 0) << 7)
                 | (u8::from(self.rex & REX_X == 0) << 6)
