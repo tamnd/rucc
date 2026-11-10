@@ -1166,14 +1166,16 @@ pub struct TargetInfo {
     pub has_float128: bool,
     /// Whether the target has `_Decimal32`, `_Decimal64` and `_Decimal128`.
     ///
-    /// Only x86-64 Linux and x86-64 mingw-w64 today. gcc has the three types on more rows than
-    /// that, but a decimal is a call into libgcc for everything but a move, and the only encoding
-    /// the back end names routines for is the binary integer one x86 uses. mingw-w64 gcc uses the
-    /// same encoding and the same routines, and passes the two narrow types in general purpose
-    /// registers. Microsoft's compiler has no decimal types, so the msvc row does not either. PowerPC and s390x use the densely packed
-    /// encoding and are a different set of routines, and the other rows are untested, so a
-    /// program that writes one there is told the type is not available rather than handed code
-    /// nobody has run.
+    /// Only x86-64 Linux, x86-64 mingw-w64 and AArch64 FreeBSD today. gcc has the three types on
+    /// more rows than that, but a decimal is a call into libgcc for everything but a move, and the
+    /// only encoding the back end names routines for is the binary integer one x86 uses. mingw-w64
+    /// gcc uses the same encoding and the same routines, and passes the two narrow types in
+    /// general purpose registers. Microsoft's compiler has no decimal types, so the msvc row does
+    /// not either. gcc 14 and later on AArch64 use the binary integer encoding and the same
+    /// routines too, and the FreeBSD packages of gcc are built with them, so FreeBSD AArch64 has
+    /// the types. PowerPC and s390x use the densely packed encoding and are a different set of
+    /// routines, and the other rows are untested, so a program that writes one there is told the
+    /// type is not available rather than handed code nobody has run.
     pub has_decimal_float: bool,
     /// Width of `wchar_t` in bits, which decides what a wide literal is encoded in.
     ///
@@ -1631,6 +1633,7 @@ impl TargetInfo {
                 (target.arch(), target.os(), target.env()),
                 (tuple::Arch::X86_64, tuple::Os::Linux, _)
                     | (tuple::Arch::X86_64, tuple::Os::Windows, tuple::Env::Gnu)
+                    | (tuple::Arch::Aarch64, tuple::Os::FreeBsd, _)
             ),
             wchar_width: bits(layout.wchar_size),
             wchar_is_signed: layout.wchar_is_signed,
@@ -2485,7 +2488,17 @@ mod tests {
         let of = |tuple: &str| TargetInfo::for_tuple(tuple.parse().expect("a row in the table"));
         assert!(of("x86_64-linux-gnu").has_decimal_float);
         assert!(of("x86_64-pc-windows-gnu").has_decimal_float);
-        for tuple in ["aarch64-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"] {
+        // The gcc packages of FreeBSD have the types on AArch64 and not on x86-64 or RISC-V, and
+        // NetBSD's gcc has them on no machine.
+        assert!(of("aarch64-unknown-freebsd").has_decimal_float);
+        for tuple in [
+            "aarch64-linux-gnu",
+            "x86_64-pc-windows-msvc",
+            "aarch64-apple-darwin",
+            "x86_64-unknown-freebsd",
+            "riscv64-unknown-freebsd",
+            "aarch64-unknown-netbsd",
+        ] {
             assert!(!of(tuple).has_decimal_float, "{tuple}");
         }
     }
