@@ -536,13 +536,19 @@ pub struct Evex {
     /// needs EVEX, which is a register numbered sixteen or above, a whole `zmm` or a mask. The
     /// bytes have to match, and the VEX form is also the one a processor without AVX-512 can run.
     pub vex: Option<bool>,
+    /// Whether gas writes that VEX form only when the line asks for it with `{vex}`.
+    ///
+    /// AVX512-IFMA came before AVX-IFMA, so gas writes `vpmadd52luq %ymm1, %ymm2, %ymm3` EVEX
+    /// encoded, and OpenSSL's rsaz-2k-avxifma.S writes `{vex}` in front of the ones it wants for
+    /// a processor without AVX-512.
+    pub asked: bool,
 }
 
 impl Evex {
     /// A row in that table with that wide bit, reaching a whole vector, with no third register and
     /// no VEX form.
     const fn new(map: Map, w: bool) -> Evex {
-        Evex { map, w, vvvv: None, tuple: Tuple::Full, vex: None }
+        Evex { map, w, vvvv: None, tuple: Tuple::Full, vex: None, asked: false }
     }
 
     /// The same with the argument at that index in `vvvv`.
@@ -563,6 +569,11 @@ impl Evex {
     /// The same with a VEX form written with that wide bit.
     const fn or_vex(self, w: bool) -> Evex {
         Evex { vex: Some(w), ..self }
+    }
+
+    /// The same with a VEX form written with that wide bit, but only for a line that asks for it.
+    const fn or_asked_vex(self, w: bool) -> Evex {
+        Evex { vex: Some(w), asked: true, ..self }
     }
 }
 
@@ -3600,11 +3611,39 @@ static ENCODINGS: &[Encoding] = &[
     evex("vpandd", &VVV, Word, &[0xDB], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
     evex("vpandd", &MVV, Word, &[0xDB], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
     // The multiply and add of 52 bit halves that the kernel's IFMA Poly1305 is written with. gas
-    // writes these with EVEX unless `{vex}` asks for the AVX-IFMA form, so there is no VEX form.
-    evex("vpmadd52luq", &VVV, Word, &[0xB4], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
-    evex("vpmadd52luq", &MVV, Word, &[0xB4], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
-    evex("vpmadd52huq", &VVV, Word, &[0xB5], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
-    evex("vpmadd52huq", &MVV, Word, &[0xB5], pair(0, 2), Evex::new(Map::Escape38, true).third(1)),
+    // writes these with EVEX unless `{vex}` asks for the AVX-IFMA form, which is VEX encoded.
+    evex(
+        "vpmadd52luq",
+        &VVV,
+        Word,
+        &[0xB4],
+        pair(0, 2),
+        Evex::new(Map::Escape38, true).third(1).or_asked_vex(true),
+    ),
+    evex(
+        "vpmadd52luq",
+        &MVV,
+        Word,
+        &[0xB4],
+        pair(0, 2),
+        Evex::new(Map::Escape38, true).third(1).or_asked_vex(true),
+    ),
+    evex(
+        "vpmadd52huq",
+        &VVV,
+        Word,
+        &[0xB5],
+        pair(0, 2),
+        Evex::new(Map::Escape38, true).third(1).or_asked_vex(true),
+    ),
+    evex(
+        "vpmadd52huq",
+        &MVV,
+        Word,
+        &[0xB5],
+        pair(0, 2),
+        Evex::new(Map::Escape38, true).third(1).or_asked_vex(true),
+    ),
     evex("vpxorq", &MVV, Word, &[0xEF], pair(0, 2), Evex::new(Map::Escape, true).third(1)),
     evex("vpternlogq", &IVVV, Word, &[0x25], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
     evex("vpternlogq", &IMVV, Word, &[0x25], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
@@ -5609,6 +5648,12 @@ pub enum Error {
         /// The count that was asked for.
         count: u8,
     },
+    /// `{vex}` on an instruction with no VEX form, or with a mask, a `zmm` register or one
+    /// numbered sixteen or above, which only an EVEX prefix can name.
+    Asked {
+        /// The mnemonic that was asked for.
+        mnemonic: String,
+    },
 }
 
 impl fmt::Display for Error {
@@ -5647,6 +5692,10 @@ impl fmt::Display for Error {
             Error::Broadcast { mnemonic, count } => {
                 write!(f, "{mnemonic} cannot spread one element read from memory over {count}")
             }
+            Error::Asked { mnemonic } => write!(
+                f,
+                "{{vex}} asks for a VEX prefix, and {mnemonic} with these operands has no VEX form"
+            ),
         }
     }
 }
@@ -5747,7 +5796,28 @@ pub fn encode_masked_in(
     mask: Opmask,
     out: &mut Vec<u8>,
 ) -> Result<Holes, Error> {
-    encoded(mode, mnemonic, values, mask, false, out)
+    encoded(mode, mnemonic, values, mask, false, false, out)
+}
+
+/// [`encode_masked_in`] for a line with gas's `{vex}` pseudo prefix in front of it, which asks for
+/// the VEX form of an instruction.
+///
+/// A row that has only a VEX form is written as it always is. A row that has an EVEX form and a
+/// VEX form is written in its VEX form, also where gas writes the EVEX form for the plain line.
+/// The prefix itself writes no byte.
+///
+/// # Errors
+///
+/// What [`encode_masked_in`] returns, and [`Error::Asked`] for an instruction with no VEX form, or
+/// with operands that only an EVEX prefix can name.
+pub fn encode_vex_in(
+    mode: Mode,
+    mnemonic: &str,
+    values: &[Value],
+    mask: Opmask,
+    out: &mut Vec<u8>,
+) -> Result<Holes, Error> {
+    encoded(mode, mnemonic, values, mask, false, true, out)
 }
 
 /// [`encode_masked_in`] for a line an assembly source wrote, where a number too wide for every row
@@ -5768,7 +5838,7 @@ pub fn encode_cut_in(
     mask: Opmask,
     out: &mut Vec<u8>,
 ) -> Result<Holes, Error> {
-    encoded(mode, mnemonic, values, mask, true, out)
+    encoded(mode, mnemonic, values, mask, true, false, out)
 }
 
 /// The row [`encoding_in`] finds, or, when no row holds the number, the first row that counts a
@@ -5784,13 +5854,15 @@ pub fn cut_in(mode: Mode, mnemonic: &str, args: &[Kind], imm: i64) -> Option<&'s
     })
 }
 
-/// [`encode_masked_in`], with the row [`cut_in`] finds when `cut` says so.
+/// [`encode_masked_in`], with the row [`cut_in`] finds when `cut` says so, and in the VEX form
+/// when `asked` says so, as [`encode_vex_in`] describes.
 fn encoded(
     mode: Mode,
     mnemonic: &str,
     values: &[Value],
     mask: Opmask,
     cut: bool,
+    asked: bool,
     out: &mut Vec<u8>,
 ) -> Result<Holes, Error> {
     if mode == Mode::Bits32 && ONLY64.contains(&mnemonic) {
@@ -5858,12 +5930,19 @@ fn encoded(
         length: Length::Xmm,
     };
     if let Some(evex) = row.evex {
-        writer.choose(evex, mask);
+        writer.choose(evex, mask, asked);
         if mask.broadcast != 0 && !writer.spread(evex, mask.broadcast) {
             return Err(Error::Broadcast { mnemonic: mnemonic.to_owned(), count: mask.broadcast });
         }
     } else if row.vex.is_some() {
         writer.measure()?;
+    }
+    let vex = match row.evex {
+        Some(evex) => evex.vex.is_some() && writer.evex.is_none(),
+        None => row.vex.is_some(),
+    };
+    if asked && !vex {
+        return Err(Error::Asked { mnemonic: mnemonic.to_owned() });
     }
     writer.write(out, imm, mask)
 }
@@ -5963,8 +6042,9 @@ impl Writer<'_> {
     /// Whether a row that is EVEX encoded is written that way or in its VEX form.
     ///
     /// The VEX form is what gas writes whenever the row has one and nothing needs EVEX, which is a
-    /// mask, a whole `zmm`, or a register numbered sixteen or above.
-    fn choose(&mut self, evex: Evex, mask: Opmask) {
+    /// mask, a whole `zmm`, or a register numbered sixteen or above. A row whose VEX form is
+    /// [`Evex::asked`] takes it only when `asked` says the line has `{vex}`.
+    fn choose(&mut self, evex: Evex, mask: Opmask, asked: bool) {
         let mut high = false;
         for value in self.values {
             if let Value::Vector(number, length) = *value {
@@ -5973,7 +6053,7 @@ impl Writer<'_> {
             }
         }
         let plain = mask == Opmask::default() && !high && self.length != Length::Zmm;
-        if evex.vex.is_some() && plain {
+        if evex.vex.is_some() && plain && (asked || !evex.asked) {
             return;
         }
         self.evex = Some(evex);
@@ -7808,6 +7888,46 @@ mod tests {
 
     // Every expected string in the tests below is what GNU as writes for the instruction in
     // the message beside it.
+
+    /// The VEX form that `{vex}` asks for, as [`encode_vex_in`] writes it.
+    fn asked(mnemonic: &str, values: &[Value], mask: Opmask) -> Result<String, Error> {
+        let mut out = Vec::new();
+        encode_vex_in(Mode::Bits64, mnemonic, values, mask, &mut out)?;
+        Ok(out.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" "))
+    }
+
+    #[test]
+    fn vex_asks_for_the_avx_ifma_form_that_gas_writes_only_when_asked() {
+        let plain = Opmask::default();
+        // `{vex} vpmadd52luq 32(%rsi),%ymm1,%ymm5` of OpenSSL's rsaz-2k-avxifma.S.
+        let read = [at(RSI, 32), y(1), y(5)];
+        assert_eq!(asked("vpmadd52luq", &read, plain), Ok("c4 e2 f5 b4 6e 20".to_owned()));
+        assert_eq!(hex("vpmadd52luq", &read), "62 f2 f5 28 b4 6e 01");
+        assert_eq!(
+            asked("vpmadd52huq", &[y(2), y(1), y(5)], plain),
+            Ok("c4 e2 f5 b5 ea".to_owned())
+        );
+        assert_eq!(
+            asked("vpmadd52luq", &[x(2), x(1), x(5)], plain),
+            Ok("c4 e2 f1 b4 ea".to_owned())
+        );
+        // A row that gas writes VEX encoded anyway is the same with `{vex}`.
+        assert_eq!(asked("vpaddd", &[x(1), x(2), x(3)], plain), Ok("c5 e9 fe d9".to_owned()));
+        assert_eq!(asked("vpaddq", &[y(1), y(2), y(3)], plain), Ok("c5 ed d4 d9".to_owned()));
+        // gas refuses each of these: a `zmm`, a register above fifteen, a mask, an instruction
+        // with only an EVEX form and one with neither.
+        let masked = Opmask { k: 1, ..Opmask::default() };
+        for (mnemonic, values, mask) in [
+            ("vpmadd52luq", vec![z(1), z(2), z(3)], plain),
+            ("vpmadd52luq", vec![y(17), y(2), y(3)], plain),
+            ("vpmadd52luq", vec![y(1), y(2), y(3)], masked),
+            ("vpandq", vec![y(1), y(2), y(3)], plain),
+            ("addl", vec![Value::Reg(RAX, Width::Long), Value::Reg(RBX, Width::Long)], plain),
+        ] {
+            let why = asked(mnemonic, &values, mask).expect_err(mnemonic);
+            assert_eq!(why, Error::Asked { mnemonic: mnemonic.to_owned() }, "{mnemonic}");
+        }
+    }
 
     #[test]
     fn an_avx512_instruction_is_the_four_byte_prefix_and_then_what_a_vex_one_would_be() {

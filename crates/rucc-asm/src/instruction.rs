@@ -30,7 +30,8 @@
 use rucc_object::Tls;
 use rucc_target::x86_64::{
     Addr, Encoding, ImmSize, Kind, Length, Mode, Opmask, RAX, RBX, RCX, RDX, Value, Width, cut_in,
-    encode_cut_in, encode_masked, encode_masked_in, encoding_in, gpr_name, gpr_named, xmm,
+    encode_cut_in, encode_masked, encode_masked_in, encode_vex_in, encoding_in, gpr_name,
+    gpr_named, xmm,
 };
 use rucc_target::{PhysReg, Segment};
 
@@ -575,6 +576,12 @@ fn segment_prefix(byte: u8) -> bool {
 
 /// [`one_in`], for an address of whole registers.
 fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
+    // gas's `{vex}` pseudo prefix, which the reader of the line joins to the mnemonic behind it.
+    // It writes no byte and asks for the VEX form. See [`encode_vex_in`].
+    let (word, asked) = match word.strip_prefix("{vex} ") {
+        Some(word) => (word, true),
+        None => (word, false),
+    };
     if let Some(far) = far(word, args, mode) {
         return far;
     }
@@ -673,7 +680,13 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     special(word, &mnemonic, &operands, mode)?;
 
     let mut bytes = Vec::with_capacity(16);
-    let encode = if cut { encode_cut_in } else { encode_masked_in };
+    let encode = if asked {
+        encode_vex_in
+    } else if cut {
+        encode_cut_in
+    } else {
+        encode_masked_in
+    };
     let mut holes =
         encode(mode, &mnemonic, &values, mask, &mut bytes).map_err(|why| why.to_string())?;
     if mode == Mode::Bits32 && moffs(&mut bytes, &operands) {

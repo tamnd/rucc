@@ -7227,6 +7227,16 @@ fn repeated<'a>(word: &str, rest: &'a str) -> Option<(String, &'a str)> {
         Some(cut) => (&rest[..cut], rest[cut..].trim()),
         None => (rest, ""),
     };
+    // gas's `{vex}` pseudo prefix, which asks for the VEX form of the instruction behind it.
+    // OpenSSL's rsaz-2k-avxifma.S writes `{vex} vpmadd52luq`. gas also reads it with no space
+    // before the mnemonic.
+    if let Some(glued) = word.strip_prefix("{vex}") {
+        return match glued {
+            "" if next.is_empty() => None,
+            "" => Some((format!("{{vex}} {}", next.to_ascii_lowercase()), after)),
+            glued => Some((format!("{{vex}} {glued}"), rest)),
+        };
+    }
     if word == "notrack" {
         return match next {
             "jmp" | "jmpq" => Some(("notrack jmp".to_owned(), after)),
@@ -8581,6 +8591,23 @@ _tls$tlv$init:
             bytes(&assembled, ".text"),
             [0xF3, 0xA5, 0xF2, 0xAE, 0xF3, 0xA6, 0xF3, 0x48, 0xAB]
         );
+    }
+
+    #[test]
+    fn vex_is_read_as_the_vex_form_of_the_instruction_behind_it() {
+        let assembled = assembled(
+            "\t.text\n\t{vex}\tvpmadd52luq\t32(%rsi),%ymm1,%ymm5\n\t{vex} vpmadd52huq %ymm2,%ymm1,%ymm5\n\
+             \t{vex}vpaddq %ymm1,%ymm2,%ymm3\n\tvpmadd52luq 32(%rsi),%ymm1,%ymm5\n",
+        );
+        assert_eq!(
+            bytes(&assembled, ".text"),
+            [
+                0xC4, 0xE2, 0xF5, 0xB4, 0x6E, 0x20, 0xC4, 0xE2, 0xF5, 0xB5, 0xEA, 0xC5, 0xED, 0xD4,
+                0xD9, 0x62, 0xF2, 0xF5, 0x28, 0xB4, 0x6E, 0x01
+            ]
+        );
+        let why = refused("\t.text\n\t{vex} vpmadd52luq %zmm1,%zmm2,%zmm3\n").to_string();
+        assert!(why.contains("{vex} asks for a VEX prefix"), "{why}");
     }
 
     #[test]
