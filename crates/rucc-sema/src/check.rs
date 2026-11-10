@@ -138,6 +138,13 @@ pub struct Context<'a> {
     /// Whether Microsoft's reading of an anonymous member is taken, which is `-fms-extensions`
     /// and is on by default for a Windows target because mingw's gcc has it on there.
     pub ms_extensions: bool,
+    /// Whether the Plan 9 reading of an anonymous member is taken, which is `-fplan9-extensions`
+    /// or `-fkencc`. A `struct` named by a tag or a typedef is an anonymous member, the typedef
+    /// name names it, and a pointer to the record converts to a pointer to it.
+    pub plan9_extensions: bool,
+    /// Whether the unit is in the kencc dialect, which is `-fkencc`. The tag names an anonymous
+    /// member too, and a member name is found breadth first.
+    pub kencc: bool,
     /// Whether an operation may raise an exception the program then looks at, which is
     /// `-ftrapping-math` and is on by default.
     ///
@@ -195,6 +202,8 @@ impl<'a> Context<'a> {
             no_builtin: &[],
             short_enums: false,
             ms_extensions: false,
+            plan9_extensions: false,
+            kencc: false,
             trapping_math: true,
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
             x87: true,
