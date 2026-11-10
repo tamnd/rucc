@@ -41,7 +41,7 @@ use rucc_target::{TargetInfo, VaList};
 use rucc_types::{
     ArrayLen, FieldDecl, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, RecordOptions,
     TypeId, TypeKind, Written, adjust_parameter, is_complete, is_function, is_integer, is_pointer,
-    is_void, layout,
+    is_record, is_void, layout,
 };
 
 use crate::check::{Checker, Promoted};
@@ -1070,7 +1070,10 @@ impl Checker<'_> {
             self.report(Diagnostic::error(format!("{who} {what}"), subject.span).with_code(code));
             return elem;
         }
-        if !is_complete(&self.types, canonical) {
+        // kencc gives an array of a `struct` it has not seen the body of yet, and grap's lex
+        // output declares `extern struct symtab symtab[];` for a `struct` it never defines.
+        let later = self.cx.kencc && is_record(&self.types, canonical);
+        if !later && !is_complete(&self.types, canonical) {
             let spelled = self.spell(elem);
             self.report(
                 Diagnostic::error(

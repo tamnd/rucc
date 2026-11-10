@@ -7,6 +7,8 @@
 //! - A declaration at file scope after an `extern` in a block with another type is a new
 //!   declaration. pc.y has `extern void yyparse(void);` in main, and yaccpar defines
 //!   `int yyparse(void)`.
+//! - An array can have a `struct` or a `union` element that is not complete yet. The lex output
+//!   of grap declares `extern struct symtab symtab[];` and never defines `struct symtab`.
 
 use std::process::Command;
 
@@ -22,6 +24,12 @@ const OBJECTS: &str = "struct S { int x; };\n\
 
 const BLOCK: &str = "void use(void) { extern void yyparse(void); yyparse(); }\n\
                      int yyparse(void) { return 3; }\n";
+
+const LATER: &str = "extern struct symtab symtab[];\n\
+                     extern struct row rows[4];\n\
+                     struct row { int a, b; };\n\
+                     struct row rows[4];\n\
+                     int sum(void) { return rows[3].b + (int)sizeof rows; }\n";
 
 /// Whether the compiler took `source` with `flags`, and what it said.
 fn compile(what: &str, source: &str, flags: &[&str]) -> (bool, String) {
@@ -65,4 +73,13 @@ fn an_extern_in_a_block_does_not_bind_a_later_definition() {
     let (ok, err) = compile("block-c", BLOCK, &[]);
     assert!(!ok);
     assert!(err.contains("conflicting types for 'yyparse'"), "{err}");
+}
+
+#[test]
+fn an_array_of_a_struct_that_is_not_complete_yet_is_allowed() {
+    let (ok, err) = compile("later", LATER, &["-fkencc"]);
+    assert!(ok, "{err}");
+    let (ok, err) = compile("later-c", LATER, &[]);
+    assert!(!ok);
+    assert!(err.contains("incomplete element type"), "{err}");
 }
