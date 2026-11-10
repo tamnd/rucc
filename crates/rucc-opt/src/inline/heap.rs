@@ -114,12 +114,10 @@ pub(super) struct Later {
     pub(super) examined: Set<(FuncId, Inst)>,
     /// The ones it found too large and left for this pass to weigh again.
     pub(super) deferred: Set<(FuncId, Inst)>,
-    /// The functions this pass never weighs a call to, which the first pass does not leave it.
-    pub(super) cyclic: Set<Symbol>,
 }
 
 /// The functions that reach themselves through calls.
-pub(super) fn cyclic(graph: &CallGraph) -> Set<Symbol> {
+fn cyclic(graph: &CallGraph) -> Set<Symbol> {
     let mut cyclic = Set::default();
     for component in graph.components() {
         for &node in component {
@@ -247,8 +245,13 @@ struct Heap<'a> {
     /// How large the whole unit is now, and how large it may become.
     unit: usize,
     most: usize,
-    /// The functions that reach themselves through calls, which are never weighed.
+    /// The functions that reach themselves through calls.
     cyclic: Set<Symbol>,
+    /// For each call to one of them that a copy brought, the functions copied on the way to it.
+    /// A call to one of those is refused, which is gcc's rule for a function inlined into a copy
+    /// of itself. Without it a copy of one function of a cycle brings a call to the next, and a
+    /// copy of that a call back to the first, until the bounds on growth stop it.
+    chains: Map<(FuncId, Inst), Vec<Symbol>>,
     /// The profile of each callee as it was when a call to it was last weighed.
     profiles: Map<FuncId, (u32, Profile)>,
     /// How often each call runs for each time its caller does and how many loops deep it is, how
@@ -315,6 +318,7 @@ pub(super) fn run(
         unit,
         most,
         cyclic,
+        chains: Map::default(),
         profiles: Map::default(),
         at: Map::default(),
         spent: Map::default(),
@@ -381,10 +385,11 @@ impl Heap<'_> {
 
     /// The callee of a call this pass weighs, and why it would be inlined.
     ///
-    /// A function that reaches itself is left to the first pass, which refuses it, since a copy
-    /// of one brings the call back with it. So is a caller that asked not to be optimized. A call
-    /// to a function no larger than a call is one the first pass took wherever it saw one, and here
-    /// it is one a copy brought or one a copy made direct.
+    /// A call from a function to itself is left to the first pass, which refuses it, since a copy
+    /// brings the call back with it. So is a call to a function already copied on the way to it,
+    /// and a caller that asked not to be optimized. A call to a function no larger than a call is
+    /// one the first pass took wherever it saw one, and here it is one a copy brought or one a copy
+    /// made direct.
     fn callee(&self, module: &Module, caller: FuncId, call: Inst) -> Option<(FuncId, Kind)> {
         let func = &module[caller];
         func.block_of(call)?;
@@ -396,7 +401,7 @@ impl Heap<'_> {
         let &(callee, kind) = self.how.wanted.get(&name)?;
         let weighed = matches!(kind, Kind::Hinted | Kind::Auto | Kind::Small)
             && callee != caller
-            && !self.cyclic.contains(&name)
+            && !self.chains.get(&(caller, call)).is_some_and(|chain| chain.contains(&name))
             && !module[callee].is_declaration();
         weighed.then_some((callee, kind))
     }
@@ -1045,7 +1050,12 @@ impl Heap<'_> {
                         self.unit = self.unit.saturating_sub(gone + OUT_OF_LINE);
                     }
                 }
+                let mut chain = self.chains.remove(&(caller, call)).unwrap_or_default();
+                chain.push(module[weighed.callee].name);
                 for &(inst, name) in &calls {
+                    if self.cyclic.contains(&name) {
+                        self.chains.insert((caller, inst), chain.clone());
+                    }
                     let (often, deep) = brought.get(&name).copied().unwrap_or((1.0, 0));
                     self.at.insert((caller, inst), (frequency * often, depth + deep));
                     *self.calls.entry(name).or_default() += 1;

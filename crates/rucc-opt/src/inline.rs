@@ -564,11 +564,7 @@ pub fn run(
     // what the early one found too large again, so this round writes those down rather than
     // refusing them.
     let second_pass = second_pass.filter(|_| limit.is_some());
-    let cyclic = match second_pass {
-        Some(_) => heap::cyclic(&crate::callgraph::CallGraph::of(module, pic)),
-        None => Set::default(),
-    };
-    let later = RefCell::new(heap::Later { cyclic, ..heap::Later::default() });
+    let later = RefCell::new(heap::Later::default());
     round(module, &wanted, &mut done, second_pass.and(Some(&later)));
     if let Some(second) = second_pass {
         // gcc removes what its early inliner left unreachable before the second inliner measures
@@ -1365,9 +1361,12 @@ fn settle(
         // to the limit, a body went into its callers before the second pass weighed it whole:
         // `post_alloc_hook` in mm/page_alloc.c went into `prep_new_page` first, and that was then
         // too large for `get_page_from_freelist`, where gcc has all three in one body.
-        // Not a call to a function that reaches itself, which the second pass never weighs.
-        let second = how.later.is_some_and(|it| !it.borrow().cyclic.contains(&module[callee].name))
-            && matches!(kind, Kind::Hinted | Kind::Auto);
+        // A function that reaches itself through other functions is left too. Taken here up to
+        // the limit, `ahd_dump_card_state` in sys/dev/aic7xxx/aic79xx.c, which FreeBSD builds
+        // with `-finline-limit=8000`, went into 24 callers with its 48 calls, and the second pass
+        // then filled the unit with copies of `ahd_print_register` in them. gcc refuses it there
+        // on the growth of the unit and keeps 20 calls.
+        let second = how.later.is_some() && matches!(kind, Kind::Hinted | Kind::Auto);
         // The call it replaces is counted without its result here. With it, mm/memory.c kept 22
         // calls more than gcc does, and 9 more without it.
         let cost = 1 + module[id][module[id][call].args].len();
@@ -5692,6 +5691,105 @@ block0(%0: i32, %1: i1):
         );
         let out = rucc_ir::print(&module, &names);
         assert_eq!(out.matches("call @pick").count(), 2, "{out}");
+    }
+
+    /// Runs both passes on `body` under `limits`, as `-O2` does.
+    fn inlined_twice(body: &str, limits: Limits) -> String {
+        let mut names = Interner::new();
+        let text = format!("{HEAD}{body}");
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        run(
+            &mut module,
+            &names,
+            Some(limits),
+            true,
+            Isa::baseline(),
+            Growth::DEFAULT,
+            false,
+            Pic::Executable,
+            true,
+            Some(Second::o2()),
+        );
+        rucc_ir::print(&module, &names)
+    }
+
+    /// A body of `count` multiplications of its argument that then calls `next` with the result.
+    fn multiplies(name: &str, count: usize, next: &str) -> String {
+        let chain: String =
+            (0..count).map(|at| format!("    %{} = mul.i32 %{at}, %0\n", at + 1)).collect();
+        format!(
+            "
+func @{name}(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+{chain}    %{} = call @{next}(%{count}) : (i32) -> i32
+    return %{}
+}}
+",
+            count + 1,
+            count + 1,
+        )
+    }
+
+    /// The body of each function in `out`, by name.
+    fn bodies(out: &str) -> Map<&str, &str> {
+        out.split("\nfunc @")
+            .skip(1)
+            .filter_map(|func| Some((func.split('(').next()?, func)))
+            .collect()
+    }
+
+    /// `a` calls `b` and `b` calls `a`. `a` is under the limit, which is high, as it is where
+    /// FreeBSD builds sys/dev/aic7xxx with `-finline-limit=8000`, and `b` is over it. A copy of `a`
+    /// into each of its ten callers would make the unit almost four times as large, and gcc stops
+    /// when the unit has grown by `inline-unit-growth`. Taken by the first pass, which does not
+    /// count the unit, `a` went into every caller.
+    #[test]
+    fn a_function_in_a_cycle_is_held_to_the_growth_of_the_unit() {
+        let mut body = multiplies("a", 2000, "b");
+        body.push_str(&multiplies("b", 5000, "a"));
+        for caller in 0..10 {
+            body.push_str(&format!(
+                "
+func @c{caller}(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+    %1 = call @a(%0) : (i32) -> i32
+    return %1
+}}
+"
+            ));
+        }
+        let limits = Limits { single: 4000, auto: 4000, ..Limits::o2() };
+        let out = inlined_twice(&body, limits);
+        let bodies = bodies(&out);
+        let kept =
+            (0..10).filter(|caller| bodies[&*format!("c{caller}")].contains("call @a(")).count();
+        assert!(kept > 0, "{kept} calls kept");
+        let size = out.matches(" = mul ").count();
+        assert!(size < 20000, "{size} multiplications");
+    }
+
+    /// `a` and `b` call each other. Each is over the early limit and under the auto limit, which is
+    /// as high as FreeBSD sets it for aic79xx.c. A copy of `a` into `c` brings a call to `b`, and a
+    /// copy of `b` brings a call to `a` again, which gcc refuses there since `a` is already copied
+    /// on the way to it. Weighed like any other, the calls went on until `c` had 2680
+    /// multiplications.
+    #[test]
+    fn a_function_in_a_cycle_is_not_copied_into_a_copy_of_itself() {
+        let mut body = multiplies("a", 10, "b");
+        body.push_str(&multiplies("b", 10, "a"));
+        body.push_str(
+            "
+func @c(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @a(%0) : (i32) -> i32
+    return %1
+}
+",
+        );
+        let limits = Limits { single: 4000, auto: 4000, ..Limits::o2() };
+        let out = inlined_twice(&body, limits);
+        let c = bodies(&out)["c"];
+        assert!(c.matches(" = mul ").count() <= 20, "{out}");
     }
 
     /// A body that only passes its argument on with five more is eight to gcc, a call and six
