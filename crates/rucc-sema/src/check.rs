@@ -345,6 +345,9 @@ pub struct Checker<'a> {
     /// What a call in the body may inline depends on the extensions the function is built for,
     /// which a `target` attribute on it decides, and that is kept against the declaration.
     pub(in crate::check) defining: Option<DeclId>,
+    /// The nested functions declared with `auto` ahead of their definitions, with where, which
+    /// the end of the function around them reports if one is still without a body there.
+    pub(in crate::check) nested_ahead: Vec<(DeclId, Span)>,
     /// Whether the calls in the function being checked go without the SME refusals, because the
     /// definition itself was refused for its SME mode or state, or is not built at all. gcc says
     /// nothing about the calls in such a function. See [`Checker::sme_refused_call`].
@@ -444,6 +447,7 @@ impl<'a> Checker<'a> {
             refused_sizes: 0,
             calling: None,
             defining: None,
+            nested_ahead: Vec::new(),
             sme_quiet: false,
             pending_uses: Vec::new(),
             incomplete_tentative: Vec::new(),

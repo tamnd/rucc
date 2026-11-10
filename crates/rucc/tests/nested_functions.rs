@@ -131,3 +131,49 @@ fn a_function_with_no_nested_function_is_untouched() {
     assert!(ok, "the compiler refused the fixture:\n{err}");
     assert!(!text.contains("__gcc_nested_func_ptr"), "{text}");
 }
+
+/// A nested function declared with `auto` ahead of its body, the way glibc's `printf_fp.c` and
+/// libquadmath's copy of it declare `hack_digit`, and two that call each other through such a
+/// declaration.
+const AHEAD: &str = "\
+int digits(int n) {
+  int left = n, made = 0;
+  auto inline int hack_digit(void);
+  auto int odd(int);
+  int even(int k) { return k == 0 ? 1 : odd(k - 1); }
+  int odd(int k) { return k == 0 ? 0 : even(k - 1); }
+  int hack_digit(void) { int d = left % 10; left /= 10; made++; return d; }
+  int sum = 0;
+  while (left)
+    sum += hack_digit();
+  return sum * 100 + made * 10 + even(n % 7);
+}
+";
+
+/// Each is the one defined below it, so the unit builds and names each function once.
+#[test]
+fn a_nested_function_declared_auto_ahead_of_its_body_is_the_one_defined() {
+    for level in ["-O0", "-O2"] {
+        let (ok, text, err) =
+            run(&format!("ahead{level}"), "x86_64-unknown-linux-gnu", &[level], AHEAD);
+        assert!(ok, "{level}: the compiler refused the fixture:\n{err}");
+        assert!(err.is_empty(), "{level}: {err}");
+        if level == "-O0" {
+            for name in ["hack_digit", "odd", "even"] {
+                let defined =
+                    text.lines().filter(|line| line.starts_with(name) && line.ends_with(':'));
+                assert_eq!(defined.count(), 1, "{name}:\n{text}");
+            }
+        }
+    }
+}
+
+/// One declared that way and never defined is refused in gcc's words, since nothing else could
+/// define a name with no linkage.
+#[test]
+fn a_nested_function_declared_auto_and_never_defined_is_refused() {
+    let source = "int f(void) { auto int g(void); return 1; }\n";
+    let (ok, _, err) = run("never", "x86_64-unknown-linux-gnu", &[], source);
+    assert!(!ok, "{err}");
+    assert!(err.contains("nested function 'g' declared but never defined"), "{err}");
+}

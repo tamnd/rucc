@@ -13080,8 +13080,15 @@ fn nest_tree(unit: &mut Unit<'_>, root: DeclId) {
         for decl in declared {
             scan_sizes(&mut scan, unit.types, tast[decl].ty);
         }
-        let children: Vec<DeclId> =
-            scan.statics.iter().copied().filter(|&d| nested_definition(tast, d)).collect();
+        // Once each, though a nested function declared with `auto` ahead of its body is met
+        // twice, at the declaration and at the definition, which are the same one.
+        let mut met: Set<DeclId> = Set::default();
+        let children: Vec<DeclId> = scan
+            .statics
+            .iter()
+            .copied()
+            .filter(|&d| nested_definition(tast, d) && met.insert(d))
+            .collect();
         let mut owned: Set<DeclId> = tast[tast[func].params].iter().copied().collect();
         owned.extend(scan.locals.iter().copied());
         owned.extend(children.iter().copied());
