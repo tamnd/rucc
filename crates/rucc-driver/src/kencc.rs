@@ -27,6 +27,8 @@
 //! - When no directory has the file, both open the name from the current directory.
 //! - `$INCLUDE` and the value of `-I` can hold many directories, with a space between each.
 //! - Warnings are printed only with `-w`.
+//! - Without `-V`, a pointer to `void` is the same type as any other pointer when two
+//!   declarations of one name are compared.
 //! - `-p` runs the ANSI C preprocessor on the file, where `#` and `##` are operators. Without
 //!   it the preprocessor of kencc reads the file.
 //! - With more than one file, kencc prints the name of each file and a colon on standard error
@@ -301,6 +303,10 @@ pub fn plan(
     if !o.has(b'w') {
         common.push("-w".to_owned());
     }
+    // `-V` compares `void *` with other pointers as ANSI C does.
+    if o.has(b'V') {
+        common.push("-fkencc-strict-void".to_owned());
+    }
     for d in &o.defines {
         common.push(format!("-D{d}"));
     }
@@ -444,6 +450,7 @@ mod tests {
                 "--target=x86_64-plan9",
                 "-c",
                 "-fkencc",
+                "-fkencc-strict-void",
                 "-idirafter",
                 ".",
                 "-O2",
@@ -596,6 +603,7 @@ mod tests {
                 "--sysroot=/n/guest",
                 "-c",
                 "-fkencc",
+                "-fkencc-strict-void",
                 "-I../common",
                 "-idirafter",
                 ".",
