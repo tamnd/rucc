@@ -3537,6 +3537,33 @@ mod tests {
         assert_eq!(compared("vpcmpnleb"), Some(("vpcmpb".to_owned(), 6)));
     }
 
+    /// tamnd/rucc#4257. `valignq` of OpenSSL's rsaz AVX-512 code, `vpsraq` of its AES-XTS code and
+    /// the `{1to4}` broadcast of libmd's md5block.S, each checked against what GNU as 2.42 writes
+    /// for the line.
+    #[test]
+    fn the_avx512_forms_of_the_freebsd_world_crypto_are_read() {
+        let lines: &[(&str, &str)] = &[
+            ("valignq $1,%ymm16,%ymm17,%ymm16", "62 a3 f5 20 03 c0 01"),
+            ("valignq $1,%ymm3,%ymm16,%ymm3", "62 f3 fd 20 03 db 01"),
+            ("valignq $3,%zmm1,%zmm2,%zmm3", "62 f3 ed 48 03 d9 03"),
+            ("valignq $1,32(%rax),%ymm1,%ymm2", "62 f3 f5 28 03 50 01 01"),
+            ("valignd $5,%xmm1,%xmm2,%xmm3{%k1}", "62 f3 6d 09 03 d9 05"),
+            ("vpsraq $0x3f,%xmm13,%xmm14", "62 d1 8d 08 72 e5 3f"),
+            ("vpsraq $3,%ymm1,%ymm2", "62 f1 ed 28 72 e1 03"),
+            ("vpsraq $3,%zmm17,%zmm2{%k2}{z}", "62 b1 ed ca 72 e1 03"),
+            ("vpsraq %xmm1,%xmm2,%xmm3", "62 f1 ed 08 e2 d9"),
+            ("vpsraq %xmm1,%zmm2,%zmm3", "62 f1 ed 48 e2 d9"),
+            ("vpsraq 16(%rax),%ymm2,%ymm3", "62 f1 ed 28 e2 58 01"),
+            ("vpsraq $3,(%rax),%ymm3", "62 f1 e5 28 72 20 03"),
+            ("vpsraq $3,(%rax){1to4},%ymm3", "62 f1 e5 38 72 20 03"),
+            ("vpaddd 4*(0)(%rax){1to4}, %xmm1, %xmm5", "62 f1 75 18 fe 28"),
+        ];
+        for &(line, want) in lines {
+            let got: Vec<String> = bytes(line).iter().map(|byte| format!("{byte:02x}")).collect();
+            assert_eq!(got.join(" "), want, "{line}");
+        }
+    }
+
     /// The AVX-512 instructions the intrinsics in the runtime headers write, each checked against
     /// what GNU as writes for the same line.
     #[test]

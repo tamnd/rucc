@@ -3677,6 +3677,12 @@ static ENCODINGS: &[Encoding] = &[
     // OpenSSL's aes-gcm-avx512.S writes it.
     evex("vshufi32x4", &IVVV, Word, &[0x43], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
     evex("vshufi32x4", &IMVV, Word, &[0x43], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    // The two vectors joined and moved right by that many elements, with the low half kept.
+    // OpenSSL's rsaz-2k-avx512.S, rsaz-3k-avx512.S and rsaz-4k-avx512.S write `valignq`.
+    evex("valignq", &IVVV, Word, &[0x03], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    evex("valignq", &IMVV, Word, &[0x03], pair(1, 3), Evex::new(Map::Escape3A, true).third(2)),
+    evex("valignd", &IVVV, Word, &[0x03], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
+    evex("valignd", &IMVV, Word, &[0x03], pair(1, 3), Evex::new(Map::Escape3A, false).third(2)),
     evex("vpshufd", &IVV, Word, &[0x70], pair(1, 2), Evex::new(Map::Escape, false).or_vex(false)),
     evex("vpshufd", &IMV, Word, &[0x70], pair(1, 2), Evex::new(Map::Escape, false).or_vex(false)),
     evex(
@@ -4269,6 +4275,24 @@ static ENCODINGS: &[Encoding] = &[
         &[0xE2],
         pair(0, 2),
         Evex::new(Map::Escape, false).third(1).fixed(16).or_vex(false),
+    ),
+    // The arithmetic shift of eight byte lanes, which came with AVX-512 and has no VEX form.
+    // OpenSSL's aesni-xts-avx512.S writes it.
+    evex(
+        "vpsraq",
+        &VVV,
+        Word,
+        &[0xE2],
+        pair(0, 2),
+        Evex::new(Map::Escape, true).third(1).fixed(16),
+    ),
+    evex(
+        "vpsraq",
+        &MVV,
+        Word,
+        &[0xE2],
+        pair(0, 2),
+        Evex::new(Map::Escape, true).third(1).fixed(16),
     ),
     evex(
         "vpsllq",
@@ -5066,6 +5090,8 @@ static ENCODINGS: &[Encoding] = &[
         ext(1, 4),
         Evex::new(Map::Escape, false).third(2).or_vex(false),
     ),
+    evex("vpsraq", &IVV, Word, &[0x72], ext(1, 4), Evex::new(Map::Escape, true).third(2)),
+    evex("vpsraq", &IMV, Word, &[0x72], ext(1, 4), Evex::new(Map::Escape, true).third(2)),
     evex(
         "vpsraw",
         &IVV,
