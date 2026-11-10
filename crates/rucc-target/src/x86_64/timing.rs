@@ -218,6 +218,9 @@ fn plain(form: Form) -> Timing {
         UnaryX87 => (1, Unit::Float),
         CmpSetX87 => (4, Unit::Float),
         CmpSetX87Both => (5, Unit::Float),
+        // `fnstsw` and `sahf` between the comparison and the byte set.
+        CmpSetX87Status => (6, Unit::Float),
+        CmpSetX87StatusBoth => (7, Unit::Float),
         // The instructions that encode to nothing. They are in the function to tell the allocator
         // where a value already is, and a schedule built around them taking a cycle would be a
         // schedule built around instructions that are not in the output.

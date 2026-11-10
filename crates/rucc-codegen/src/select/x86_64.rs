@@ -903,6 +903,16 @@ mod tests {
         "fucomip_set_np",
         "fucomip_set_e_and_np",
         "fucomip_set_ne_or_p",
+        "fucompp_set_a",
+        "fucompp_set_ae",
+        "fucompp_set_b",
+        "fucompp_set_be",
+        "fucompp_set_e",
+        "fucompp_set_ne",
+        "fucompp_set_p",
+        "fucompp_set_np",
+        "fucompp_set_e_and_np",
+        "fucompp_set_ne_or_p",
     ];
 
     /// The instructions no rule selects yet, because the rules that selected them were taken out.
@@ -1480,6 +1490,8 @@ mod tests {
         // count is here as well as in the target description because this list is what says none
         // of them is reachable, and a name that arrived here without its partner would be a format
         // this target can convert in one direction and not the other.
-        assert_eq!(X87.len(), 30, "twelve that move a value and eighteen that work on one");
+        // The ten comparisons are there twice, once with `fucomip` and once for a processor
+        // before the Pentium Pro.
+        assert_eq!(X87.len(), 40, "twelve that move a value and twenty eight that work on one");
     }
 }

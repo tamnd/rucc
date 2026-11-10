@@ -324,6 +324,9 @@ static UCOMI_BOTH: [Arg; 2] = [Xmm(3), Xmm(2)];
 // bytes together into the one at index zero.
 static SET_SPARE: [Arg; 1] = [Reg(1, Byte)];
 static COMBINE: [Arg; 2] = [Reg(1, Byte), Reg(0, Byte)];
+// Where `fnstsw` saves the x87 status word, which is `ax` and nothing else. The result of the
+// comparison is the operand, and it is put in `rax` for this reason.
+static STATUS: [Arg; 1] = [Reg(0, Word)];
 
 // The two values an x87 instruction works on, which it names by depth rather than by register.
 // The top and the one below it, written the way the assembler writes them, which is the source
@@ -1659,6 +1662,84 @@ static TEXT: &[(&str, &[Written])] = &[
         &[
             spell("fucomip", &STACK_AGAINST),
             spell("fstp", &STACK_TOP),
+            spell("setne", &SET),
+            spell("setp", &SET_SPARE),
+            spell("orb", &COMBINE),
+        ],
+    ),
+    // The same ten for a processor from before the Pentium Pro, which has no `fucomip`. The
+    // comparison pops both values, `fnstsw` saves the status word in `ax`, and `sahf` puts its
+    // high byte in the flags. `sahf` puts C0 in the carry, C2 in the parity and C3 in the zero
+    // flag, which are the three flags `fucomip` writes, so the byte sets are the same.
+    (
+        "fucompp_set_a",
+        &[spell("fucompp", &[]), spell("fnstsw", &STATUS), spell("sahf", &[]), spell("seta", &SET)],
+    ),
+    (
+        "fucompp_set_ae",
+        &[
+            spell("fucompp", &[]),
+            spell("fnstsw", &STATUS),
+            spell("sahf", &[]),
+            spell("setae", &SET),
+        ],
+    ),
+    (
+        "fucompp_set_b",
+        &[spell("fucompp", &[]), spell("fnstsw", &STATUS), spell("sahf", &[]), spell("setb", &SET)],
+    ),
+    (
+        "fucompp_set_be",
+        &[
+            spell("fucompp", &[]),
+            spell("fnstsw", &STATUS),
+            spell("sahf", &[]),
+            spell("setbe", &SET),
+        ],
+    ),
+    (
+        "fucompp_set_e",
+        &[spell("fucompp", &[]), spell("fnstsw", &STATUS), spell("sahf", &[]), spell("sete", &SET)],
+    ),
+    (
+        "fucompp_set_ne",
+        &[
+            spell("fucompp", &[]),
+            spell("fnstsw", &STATUS),
+            spell("sahf", &[]),
+            spell("setne", &SET),
+        ],
+    ),
+    (
+        "fucompp_set_p",
+        &[spell("fucompp", &[]), spell("fnstsw", &STATUS), spell("sahf", &[]), spell("setp", &SET)],
+    ),
+    (
+        "fucompp_set_np",
+        &[
+            spell("fucompp", &[]),
+            spell("fnstsw", &STATUS),
+            spell("sahf", &[]),
+            spell("setnp", &SET),
+        ],
+    ),
+    (
+        "fucompp_set_e_and_np",
+        &[
+            spell("fucompp", &[]),
+            spell("fnstsw", &STATUS),
+            spell("sahf", &[]),
+            spell("sete", &SET),
+            spell("setnp", &SET_SPARE),
+            spell("andb", &COMBINE),
+        ],
+    ),
+    (
+        "fucompp_set_ne_or_p",
+        &[
+            spell("fucompp", &[]),
+            spell("fnstsw", &STATUS),
+            spell("sahf", &[]),
             spell("setne", &SET),
             spell("setp", &SET_SPARE),
             spell("orb", &COMBINE),
