@@ -720,11 +720,22 @@ impl Checker<'_> {
     /// The width of a bit-field, folded and measured against the type it was declared in.
     fn bit_width(&mut self, ty: TypeId, width: ast::ExprId, subject: Subject) -> Option<u32> {
         let value = self.expr(width);
+        // Read as a value, so that a `const` object named on its own is one the folding can read.
+        let value = self.value(value);
         let span = self.tast.expr_span(value);
         if self.is_poisoned(value) {
             return None;
         }
-        let Ok(bits) = self.eval_integer(value) else {
+        // gcc folds the width first in a body when it optimizes, as it does for an enumerator, so
+        // `unsigned c : n;` after `const int n = 4;` in a function is taken at `-O2`. Not at file
+        // scope. `__builtin_constant_p` reads a `const` object the same way, and NetBSD's
+        // `BUILD_BUG_ON` makes a width out of what it picks. tamnd/rucc#4347.
+        let folded = if self.scopes.at_file_scope() {
+            self.eval_integer(value).map(|value| (value, false))
+        } else {
+            self.eval_folded_integer(value)
+        };
+        let Ok((bits, read_object)) = folded else {
             let who = self.member_named(subject.name);
             self.report(
                 Diagnostic::error(format!("bit-field {who} width not an integer constant"), span)
@@ -732,6 +743,11 @@ impl Checker<'_> {
             );
             return None;
         };
+        if read_object && self.cx.pedantic {
+            let who = self.member_named(subject.name);
+            let message = format!("bit-field {who} width not an integer constant expression");
+            self.report(Diagnostic::warning(message, span).with_code("E0883"));
+        }
         // The qualifier has nowhere to go here. What makes an access atomic is an instruction
         // that reaches a whole object, and a run of bits inside a byte shared with the members
         // either side of it is not one: an instruction wide enough to reach the field would
