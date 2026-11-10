@@ -1,9 +1,10 @@
-//! The driver writes a Plan 9 object for `-c` on the x86_64-plan9 target.
+//! The driver writes a Plan 9 object for `-c` on the x86_64-plan9 and the aarch64-plan9 targets.
 //!
 //! Design: tamnd/rucc#4156, and 10 of the rucc-plan9 plan.
 //!
-//! The object is the `.6` file that `6l` reads. The records come from the listing of the
-//! assembly, which `rucc_asm::plan9` puts in the instructions of `6l`. These tests check the
+//! The object is the `.6` file that `6l` reads, or the `.7` file that `7l` reads. The records
+//! come from the listing of the assembly, which `rucc_asm::plan9` puts in the instructions of the
+//! linker. These tests check the
 //! file from the outside. The unit tests of `rucc_asm::plan9` check the records.
 
 use std::path::PathBuf;
@@ -57,15 +58,30 @@ fn the_object_has_a_name_record_first_and_the_names_of_the_unit() {
 }
 
 #[test]
-fn an_object_for_arm64_is_refused_until_it_is_written() {
-    let why = compile("aarch64-plan9", "-O2").expect_err("the arm64 object is not written yet");
-    assert!(why.contains("Plan 9 object"), "{why}");
+fn the_object_for_arm64_has_the_records_of_7l() {
+    for level in ["-O0", "-O2", "-Os"] {
+        let bytes = compile("aarch64-plan9", level).unwrap_or_else(|why| panic!("{level}: {why}"));
+        // ANAME is 313 in 7.out.h.
+        assert_eq!(bytes[..2], [57, 1], "{level}");
+        for name in ["add", "tail", "bump", "table", "count", "g"] {
+            let mut z = name.as_bytes().to_vec();
+            z.push(0);
+            assert!(contains(&bytes, &z), "{level}: no name {name}");
+        }
+        assert!(
+            !contains(&bytes, b"lo12"),
+            "{level}: a relocation of the listing is in the object"
+        );
+    }
 }
 
 /// The assembly that the object is made from, for a source given here.
 fn assembly(source: &str, args: &[&str]) -> String {
+    // Each call has its own directory, because the tests run at the same time.
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "rucc-plan9-asm-{}-{}",
+        "rucc-plan9-asm-{}-{call}-{}",
         std::process::id(),
         args.join("")
     ));

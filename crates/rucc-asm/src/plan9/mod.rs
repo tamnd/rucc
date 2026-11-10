@@ -7,6 +7,9 @@
 //! or a small number of them, with the same operands. The linker `6l` then selects the encoding,
 //! lays out the text and resolves every symbol, as it does for the output of `6c`.
 //!
+//! This module has the parts that the two machines share and the translation for amd64. The
+//! module `arm64` has the translation for `7l`.
+//!
 //! These rules of `6l` are different from the rules of the GNU assembler, and the translation
 //! obeys them:
 //!
@@ -25,6 +28,10 @@ use rucc_object::plan9::{Addr6, History, Machine, NSNAME, Object, Prog6, Progs, 
 
 use crate::Trouble;
 
+mod arm64;
+
+pub use arm64::arm64;
+
 /// The records of a `.6` file for an amd64 listing.
 ///
 /// `file` is the name of the source, which goes in the history, and `directory` is the directory
@@ -35,7 +42,7 @@ use crate::Trouble;
 /// A line that has no equivalent in a Plan 9 object, such as a section that Plan 9 does not have
 /// or an instruction that the linker cannot encode.
 pub fn amd64(listing: &str, file: &str, directory: Option<&str>) -> Result<Object, Trouble> {
-    let lines = parse(listing)?;
+    let lines = parse(listing, "#")?;
     let scope = Scope::new(&lines);
     let mut out = Out {
         scope: &scope,
@@ -47,12 +54,47 @@ pub fn amd64(listing: &str, file: &str, directory: Option<&str>) -> Result<Objec
         frame: 0,
         cells: Vec::new(),
     };
+    let (functions, data) = units(&lines)?;
+    for (name, body) in &functions {
+        out.function(name, body)?;
+    }
+    out.resolve()?;
+    for datum in &data {
+        out.datum(datum)?;
+    }
+    for (cell, target) in std::mem::take(&mut out.cells) {
+        let mut from = Addr6::symbol(a6::D_STATIC, &cell, 0);
+        from.scale = 8;
+        let mut to = out.symbol(&target);
+        to.index = to.ty;
+        to.ty = a6::D_ADDR;
+        out.progs.push(Prog6::new(a6::ADATA, 0, from, to));
+        let sym = Addr6::symbol(a6::D_STATIC, &cell, 0);
+        out.progs.push(Prog6::new(a6::AGLOBL, 0, sym, Addr6::constant(8)));
+    }
+    for (name, size) in &scope.commons {
+        let sym = Addr6::symbol(scope.class(name), &scope.object_name(name), 0);
+        out.progs.push(Prog6::new(a6::AGLOBL, 0, sym, Addr6::constant(*size)));
+    }
+    out.progs.push(Prog6::new(a6::AEND, out.line, Addr6::default(), Addr6::default()));
+    let mut object = Object::new(Progs::Amd64(out.progs));
+    object.directory = directory.map(str::to_owned);
+    object.history.push(History::push(file, 1));
+    Ok(object)
+}
+
+/// A function of the text, by name, with the lines of its body.
+type Function<'l, 'a> = (&'a str, Vec<&'l Line<'a>>);
+
+/// The functions and the data of the listing, in order.
+fn units<'l, 'a>(lines: &'l [Line<'a>]) -> Result<(Vec<Function<'l, 'a>>, Vec<Datum>), Trouble> {
+    let mut functions = Vec::new();
     let mut data = Vec::new();
     let mut section = Section::Text;
     let mut stack = Vec::new();
-    let mut func: Option<(&str, Vec<&Line<'_>>)> = None;
+    let mut func: Option<Function<'l, 'a>> = None;
     let mut symbol: Option<Datum> = None;
-    for line in &lines {
+    for line in lines {
         if let Item::Directive(name, args) = line.item {
             let switch = match name {
                 ".text" => Some(Section::Text),
@@ -79,16 +121,13 @@ pub fn amd64(listing: &str, file: &str, directory: Option<&str>) -> Result<Objec
         match section {
             Section::Text => match line.item {
                 Item::Label(label) if !label.starts_with(".L") => {
-                    if let Some((name, body)) = func.take() {
-                        out.function(name, &body)?;
-                    }
+                    functions.extend(func.take());
                     func = Some((label, Vec::new()));
                 }
-                Item::Directive(".loc", args) => {
+                Item::Directive(".loc", _) => {
                     if let Some((_, body)) = &mut func {
                         body.push(line);
                     }
-                    let _ = args;
                 }
                 Item::Directive(name, args) => {
                     directive_anywhere(name, args, line.number)?;
@@ -120,35 +159,9 @@ pub fn amd64(listing: &str, file: &str, directory: Option<&str>) -> Result<Objec
             Section::Other => {}
         }
     }
-    if let Some((name, body)) = func.take() {
-        out.function(name, &body)?;
-    }
-    if let Some(datum) = symbol.take() {
-        data.push(datum);
-    }
-    out.resolve()?;
-    for datum in &data {
-        out.datum(datum)?;
-    }
-    for (cell, target) in std::mem::take(&mut out.cells) {
-        let mut from = Addr6::symbol(a6::D_STATIC, &cell, 0);
-        from.scale = 8;
-        let mut to = out.symbol(&target);
-        to.index = to.ty;
-        to.ty = a6::D_ADDR;
-        out.progs.push(Prog6::new(a6::ADATA, 0, from, to));
-        let sym = Addr6::symbol(a6::D_STATIC, &cell, 0);
-        out.progs.push(Prog6::new(a6::AGLOBL, 0, sym, Addr6::constant(8)));
-    }
-    for (name, size) in &scope.commons {
-        let sym = Addr6::symbol(scope.class(name), &scope.object_name(name), 0);
-        out.progs.push(Prog6::new(a6::AGLOBL, 0, sym, Addr6::constant(*size)));
-    }
-    out.progs.push(Prog6::new(a6::AEND, out.line, Addr6::default(), Addr6::default()));
-    let mut object = Object::new(Progs::Amd64(out.progs));
-    object.directory = directory.map(str::to_owned);
-    object.history.push(History::push(file, 1));
-    Ok(object)
+    functions.extend(func.take());
+    data.extend(symbol.take());
+    Ok((functions, data))
 }
 
 /// One line of the listing that says something.
@@ -174,12 +187,13 @@ fn trouble(line: usize, why: impl Into<String>) -> Trouble {
     Trouble { line, why: why.into() }
 }
 
-/// The lines of the listing, without the comments and the empty lines.
-fn parse(listing: &str) -> Result<Vec<Line<'_>>, Trouble> {
+/// The lines of the listing, without the comments and the empty lines. A comment starts with
+/// `comment`, which is `#` on amd64 and `//` on arm64.
+fn parse<'a>(listing: &'a str, comment: &str) -> Result<Vec<Line<'a>>, Trouble> {
     let mut lines = Vec::new();
     for (index, raw) in listing.lines().enumerate() {
         let number = index + 1;
-        let text = strip_comment(raw).trim();
+        let text = strip_comment(raw, comment).trim();
         if text.is_empty() {
             continue;
         }
@@ -213,8 +227,8 @@ fn parse(listing: &str) -> Result<Vec<Line<'_>>, Trouble> {
     Ok(lines)
 }
 
-/// The line without a `#` comment that is outside a string.
-fn strip_comment(line: &str) -> &str {
+/// The line without a comment that is outside a string.
+fn strip_comment<'a>(line: &'a str, comment: &str) -> &'a str {
     let mut quoted = false;
     let mut escaped = false;
     for (at, c) in line.char_indices() {
@@ -222,7 +236,7 @@ fn strip_comment(line: &str) -> &str {
             _ if escaped => escaped = false,
             '\\' if quoted => escaped = true,
             '"' => quoted = !quoted,
-            '#' if !quoted => return &line[..at],
+            _ if !quoted && line[at..].starts_with(comment) => return &line[..at],
             _ => {}
         }
     }
@@ -353,13 +367,14 @@ impl Scope {
         scope
     }
 
+    /// Whether other objects cannot see the symbol.
+    fn is_static(&self, name: &str) -> bool {
+        !self.global.contains(name) && self.defined.contains(name)
+    }
+
     /// `D_EXTERN` for a symbol that other objects can see, and `D_STATIC` for one they cannot.
     fn class(&self, name: &str) -> u8 {
-        if !self.global.contains(name) && self.defined.contains(name) {
-            a6::D_STATIC
-        } else {
-            a6::D_EXTERN
-        }
+        if self.is_static(name) { a6::D_STATIC } else { a6::D_EXTERN }
     }
 
     /// The name in the object. A local label of the listing starts with `.L`, which becomes a
