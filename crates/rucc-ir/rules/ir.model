@@ -37,9 +37,9 @@
 (semantics (value.f128 v) v)
 
 ;; And the other one, at the far end of the same story. A half is kept in a vector register too
-;; and the machine computes nothing in it either, so its entries are the moves and the two
-;; reinterpretations and nothing else, with every add and every comparison done a format wider
-;; and rounded back by a call.
+;; and the machine computes nothing in it either, so its entries are the moves, the two
+;; reinterpretations and the conversions against the two wider formats, with every add and every
+;; comparison done a format wider and rounded back.
 (semantics (value.f16 v) v)
 
 ;; And the integer vectors, in the same register, as the bitvector of their lanes end to end.
@@ -256,6 +256,10 @@
 ;; value where the others keep the value and no bit.
 (semantics (fpext.f32.f64 v) (float_from_float 32 64 v))
 (semantics (fptrunc.f64.f32 v) (float_from_float 64 32 v))
+(semantics (fpext.f16.f32 v) (float_from_float 16 32 v))
+(semantics (fpext.f16.f64 v) (float_from_float 16 64 v))
+(semantics (fptrunc.f32.f16 v) (float_from_float 32 16 v))
+(semantics (fptrunc.f64.f16 v) (float_from_float 64 16 v))
 (semantics (fptosi.f32.i32 v) (signed_from_float 32 32 v))
 (semantics (fptosi.f32.i64 v) (signed_from_float 32 64 v))
 (semantics (fptosi.f64.i32 v) (signed_from_float 64 32 v))

@@ -64,6 +64,15 @@
 //! form of `pextrw` that writes memory is SSE4.1, so a store is the bits out through a general
 //! purpose register and an ordinary sixteen bit store after them, which is two instructions and so
 //! this pass's work rather than a rule's.
+//!
+//! # AArch64
+//!
+//! Every ARMv8 has `fcvt` between a half and both wider formats, and `ldr h` and `str h`, without
+//! the half precision arithmetic extension. So on that machine the widening and the narrowing are
+//! the conversion instruction rather than a call, and a store stays a store. The arithmetic is the
+//! same `float` operation between the two, for the same reason as above, and that is what gcc
+//! writes there as well. It also matters for linking: libgcc on AArch64 has no `__extendhfsf2` and
+//! no `__truncsfhf2`, because gcc never calls them on that machine.
 
 use rucc_base::Interner;
 use rucc_ir::{
@@ -97,24 +106,37 @@ fn routine(opcode: Opcode, mode: &str) -> &'static str {
 
 /// Rewrites every operation at this format into the work at a wider one.
 ///
+/// `converts` is whether the machine converts a half to and from `float` and `double` in one
+/// instruction and stores one in one, which is AArch64. See the module's last section.
+///
 /// The instructions are collected before any of them is touched, because a rewrite puts
 /// instructions in front of the one it replaces and the walk would otherwise see its own work.
-pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription) {
+pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, converts: bool) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    let pass = Pass { abi, converts };
     for inst in found {
         match func[inst].opcode {
             Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv => {
-                arithmetic(func, names, abi, inst);
+                arithmetic(func, names, pass, inst);
             }
-            Opcode::FCmp => compare(func, names, abi, inst),
-            Opcode::FPExt => widen(func, names, abi, inst),
-            Opcode::FPTrunc => narrow(func, names, abi, inst),
-            Opcode::SIToFP | Opcode::UIToFP => from_integer(func, names, abi, inst),
-            Opcode::FPToSI | Opcode::FPToUI => to_integer(func, names, abi, inst),
-            Opcode::Store => stored(func, inst),
+            Opcode::FCmp => compare(func, names, pass, inst),
+            Opcode::FPExt => widen(func, names, pass, inst),
+            Opcode::FPTrunc => narrow(func, names, pass, inst),
+            Opcode::SIToFP | Opcode::UIToFP => from_integer(func, names, pass, inst),
+            Opcode::FPToSI | Opcode::FPToUI => to_integer(func, names, pass, inst),
+            Opcode::Store if !converts => stored(func, inst),
             _ => {}
         }
     }
+}
+
+/// What every rewrite here needs to know about the machine.
+#[derive(Clone, Copy)]
+struct Pass {
+    /// The convention a call this pass writes follows.
+    abi: &'static AbiDescription,
+    /// Whether a conversion of a half is one instruction, which is the argument to [`calls`].
+    converts: bool,
 }
 
 /// Whether this type is the format.
@@ -134,7 +156,7 @@ fn produced(func: &Func, inst: Inst) -> Option<Type> {
 /// a not a number it promised there would not be is still promised of the same operands. The two
 /// calls carry none, which is the same thing [`crate::quad`] does and for the same reason, since a
 /// call is a call whatever the program said about rounding.
-fn arithmetic(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
+fn arithmetic(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     if !half(ty) {
         return;
@@ -143,12 +165,12 @@ fn arithmetic(func: &mut Func, names: &mut Interner, abi: &'static AbiDescriptio
     let [a, b] = args[..] else { return };
     let opcode = func[inst].opcode;
     let flags = func[inst].flags;
-    let a = extended(func, names, abi, inst, a);
-    let b = extended(func, names, abi, inst, b);
+    let a = extended(func, names, pass, inst, a);
+    let b = extended(func, names, pass, inst, b);
     let args = func.push_values(&[a, b]);
     let data = InstData { args, flags, ..InstData::new(opcode) };
     let answer = written(func, inst, data, Type::float(WIDE));
-    into_call(func, names, abi, inst, routine(Opcode::FPTrunc, "f32.f16"), &[answer]);
+    narrowed(func, names, pass, inst, "f32.f16", answer);
 }
 
 /// A comparison, as the same comparison of the two `float`s the operands widen to.
@@ -157,14 +179,14 @@ fn arithmetic(func: &mut Func, names: &mut Interner, abi: &'static AbiDescriptio
 /// makes this different from the quad's: there the answer comes back from a routine as an integer
 /// and has to be tested against zero, and here the machine has the comparison already and only the
 /// operands had to get to a format it has one at.
-fn compare(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
+fn compare(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
     if !half(func[a].ty) || !half(func[b].ty) {
         return;
     }
-    let a = extended(func, names, abi, inst, a);
-    let b = extended(func, names, abi, inst, b);
+    let a = extended(func, names, pass, inst, a);
+    let b = extended(func, names, pass, inst, b);
     func[inst].args = func.push_values(&[a, b]);
 }
 
@@ -174,28 +196,38 @@ fn compare(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, 
 /// the one to `float` and the rest of the way is a widening the machine does itself. Nothing is
 /// lost by going in two steps here, unlike in the narrowing direction: both halves of the journey
 /// are exact, so there is no second rounding to get wrong.
-fn widen(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
+///
+/// A machine that converts a half keeps the widening to `float` and to `double` as it is, since
+/// each is one instruction there, and only the quad goes in two steps.
+fn widen(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     if !half(func[arg].ty) {
         return;
     }
-    let routine = routine(Opcode::FPExt, "f16.f32");
-    if ty.format() == Some(WIDE) {
-        into_call(func, names, abi, inst, routine, &[arg]);
+    if pass.converts && matches!(ty.format(), Some(Float::F32 | Float::F64)) {
         return;
     }
-    let wide = call(func, names, abi, inst, routine, &[arg], Type::float(WIDE));
+    if ty.format() == Some(WIDE) {
+        into_call(func, names, pass.abi, inst, routine(Opcode::FPExt, "f16.f32"), &[arg]);
+        return;
+    }
+    let wide = extended(func, names, pass, inst, arg);
     becomes(func, inst, Opcode::FPExt, Extra::None, &[wide]);
 }
 
 /// A wider float becoming a half, which is a routine per source width because each of them rounds.
 ///
-/// The eighty bit format is not one of them, for the reason the module's last section gives.
-fn narrow(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
+/// The eighty bit format is not one of them, for the reason the module's last section gives. A
+/// machine that converts a half keeps the narrowing from `float` and from `double` as it is, since
+/// each is one instruction that rounds once there.
+fn narrow(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     if !half(ty) {
+        return;
+    }
+    if pass.converts && matches!(func[arg].ty.format(), Some(Float::F32 | Float::F64)) {
         return;
     }
     let mode = match func[arg].ty.format() {
@@ -204,7 +236,7 @@ fn narrow(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, i
         Some(Float::F128) => "f128.f16",
         _ => return,
     };
-    into_call(func, names, abi, inst, routine(Opcode::FPTrunc, mode), &[arg]);
+    into_call(func, names, pass.abi, inst, routine(Opcode::FPTrunc, mode), &[arg]);
 }
 
 /// An integer becoming a half, which is the conversion to a `double` and the narrowing of that.
@@ -213,7 +245,7 @@ fn narrow(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, i
 /// [`crate::expand::floats`] still gets to widen a narrow integer and to take the unsigned word
 /// apart the way it does for every other conversion. This pass only says which format it lands in
 /// on the way.
-fn from_integer(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
+fn from_integer(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     let from = func[arg].ty;
@@ -224,7 +256,7 @@ fn from_integer(func: &mut Func, names: &mut Interner, abi: &'static AbiDescript
     let args = func.push_values(&[arg]);
     let data = InstData { args, ..InstData::new(opcode) };
     let wide = written(func, inst, data, Type::float(THROUGH));
-    into_call(func, names, abi, inst, routine(Opcode::FPTrunc, "f64.f16"), &[wide]);
+    narrowed(func, names, pass, inst, "f64.f16", wide);
 }
 
 /// A half becoming an integer, which is the widening and the conversion the machine has.
@@ -232,14 +264,14 @@ fn from_integer(func: &mut Func, names: &mut Interner, abi: &'static AbiDescript
 /// `float` rather than `double` on this side, because the widening is exact and the conversion from
 /// there is the same rounding toward zero at either width. The opcode is left alone for the reason
 /// [`from_integer`] leaves it alone.
-fn to_integer(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
+fn to_integer(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
     if !half(func[arg].ty) || !ty.is_int() || !ty.is_scalar() {
         return;
     }
     let opcode = func[inst].opcode;
-    let wide = extended(func, names, abi, inst, arg);
+    let wide = extended(func, names, pass, inst, arg);
     becomes(func, inst, opcode, Extra::None, &[wide]);
 }
 
@@ -259,16 +291,31 @@ fn stored(func: &mut Func, inst: Inst) {
     func[inst].args = func.push_values(&[bits, address]);
 }
 
-/// One half widened to a `float` in front of an instruction, as the call that does it.
-fn extended(
+/// One half widened to a `float` in front of an instruction, as the call that does it or as the
+/// conversion on a machine that has one.
+fn extended(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst, value: Value) -> Value {
+    if pass.converts {
+        return ahead(func, inst, Opcode::FPExt, &[value], Type::float(WIDE));
+    }
+    let routine = routine(Opcode::FPExt, "f16.f32");
+    call(func, names, pass.abi, inst, routine, &[value], Type::float(WIDE))
+}
+
+/// An instruction turned into the narrowing of `value` to a half, in place: the call for `mode`,
+/// or the conversion on a machine that has one.
+fn narrowed(
     func: &mut Func,
     names: &mut Interner,
-    abi: &'static AbiDescription,
+    pass: Pass,
     inst: Inst,
+    mode: &str,
     value: Value,
-) -> Value {
-    let routine = routine(Opcode::FPExt, "f16.f32");
-    call(func, names, abi, inst, routine, &[value], Type::float(WIDE))
+) {
+    if pass.converts {
+        becomes(func, inst, Opcode::FPTrunc, Extra::None, &[value]);
+        return;
+    }
+    into_call(func, names, pass.abi, inst, routine(Opcode::FPTrunc, mode), &[value]);
 }
 
 /// Turns an instruction into the call that performs it, in place.

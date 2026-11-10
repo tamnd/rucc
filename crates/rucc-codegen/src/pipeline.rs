@@ -947,7 +947,9 @@ pub fn compile_recording(
     } else {
         locked::Exclusive::Loop
     });
-    let built = lowering::Built { fused, pairs };
+    // AArch64 converts a half with `fcvt` and stores one with `str h`. See [`crate::half`].
+    let converts = std::ptr::eq(machine.shapes, &aarch64::MACHINE);
+    let built = lowering::Built { fused, pairs, converts };
     let ran = lowering::group(source, names, conv, switching, &counts, built, counting);
     // AArch64 has the conditional compare, which is what gcc keeps the and for. See [`jumps`].
     if flags.jumps && !std::ptr::eq(machine.shapes, &aarch64::MACHINE) {

@@ -1752,6 +1752,10 @@
       (a64.fmadd_f64 x y z)
       (spec (= (fp.fma x y z) (result))))
 
+(rule (lower (ret.f16 (value.f16 v)))
+      (a64.ret_val_f16 v)
+      (spec (= v (result))))
+
 (rule (lower (ret.f32 (value.f32 v)))
       (a64.ret_val_f32 v)
       (spec (= v (result))))
@@ -1884,6 +1888,15 @@
 
 ;; Reading a float out of memory and writing one back, with the same two addressing modes.
 
+(rule (lower (load.f16 (value.i64 a)))
+      (a64.ldr_f16 (amode_base a))
+      (spec (= (float_from_bits 16 (concat (select (mem) (bvadd a 1)) (select (mem) a))) (result))))
+
+(rule (lower (load.f16 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 8192) (= (extract 0 0 k) 0))))
+      (a64.ldr_f16 (amode_base_offset a k))
+      (spec (= (float_from_bits 16 (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))) (result))))
+
 (rule (lower (load.f32 (value.i64 a)))
       (a64.ldr_f32 (amode_base a))
       (spec (= (float_from_bits 32 (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
@@ -1909,6 +1922,19 @@
                        (select (mem) (bvadd (bvadd a k) 5)) (select (mem) (bvadd (bvadd a k) 4))
                        (select (mem) (bvadd (bvadd a k) 3)) (select (mem) (bvadd (bvadd a k) 2))
                        (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))) (result))))
+
+(rule (lower (store.f16 (value.f16 v) (value.i64 a)))
+      (a64.str_f16 (amode_base a) v)
+      (spec (= (store (store (mem)
+                       a (extract 7 0 (bits_from_float 16 v)))
+                       (bvadd a 1) (extract 15 8 (bits_from_float 16 v))) (result))))
+
+(rule (lower (store.f16 (value.f16 v) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (or (and (>= k -256) (< k 256)) (and (>= k 0) (< k 8192) (= (extract 0 0 k) 0))))
+      (a64.str_f16 (amode_base_offset a k) v)
+      (spec (= (store (store (mem)
+                       (bvadd a k) (extract 7 0 (bits_from_float 16 v)))
+                       (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 16 v))) (result))))
 
 (rule (lower (store.f32 (value.f32 v) (value.i64 a)))
       (a64.str_f32 (amode_base a) v)
@@ -2404,6 +2430,26 @@
       (a64.fcvt_f64_f32 x)
       (spec (= (float_from_float 64 32 x) (result))))
 
+;; A half and the two wider formats, one `fcvt` each way, which is in every ARMv8 and needs nothing
+;; of the half precision arithmetic extension. Widening is exact, and each narrowing rounds once
+;; from the format the program had, which is why there is one from each.
+
+(rule (lower (fpext.f16.f32 (value.f16 x)))
+      (a64.fcvt_f16_f32 x)
+      (spec (= (float_from_float 16 32 x) (result))))
+
+(rule (lower (fpext.f16.f64 (value.f16 x)))
+      (a64.fcvt_f16_f64 x)
+      (spec (= (float_from_float 16 64 x) (result))))
+
+(rule (lower (fptrunc.f32.f16 (value.f32 x)))
+      (a64.fcvt_f32_f16 x)
+      (spec (= (float_from_float 32 16 x) (result))))
+
+(rule (lower (fptrunc.f64.f16 (value.f64 x)))
+      (a64.fcvt_f64_f16 x)
+      (spec (= (float_from_float 64 16 x) (result))))
+
 (rule (lower (fptosi.f32.i32 (value.f32 x)))
       (a64.fcvtzs_f32_32 x)
       (spec (= (signed_from_float 32 32 x) (result))))
@@ -2446,6 +2492,14 @@
 (rule (lower (bitcast.i32.f32 (value.i32 x)))
       (a64.fmov_to_f32 x)
       (spec (= (float_from_bits 32 x) (result))))
+
+(rule (lower (bitcast.f16.i16 (value.f16 x)))
+      (a64.fmov_from_f16 x)
+      (spec (= (bits_from_float 16 x) (result))))
+
+(rule (lower (bitcast.i16.f16 (value.i16 x)))
+      (a64.fmov_to_f16 x)
+      (spec (= (float_from_bits 16 x) (result))))
 
 (rule (lower (bitcast.f64.i64 (value.f64 x)))
       (a64.fmov_from_f64 x)

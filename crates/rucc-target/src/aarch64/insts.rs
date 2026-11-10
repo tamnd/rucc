@@ -747,9 +747,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("stp_32", StorePair),
     ("stp_64", StorePair),
     // Loads and stores of the other register file.
+    ("ldr_f16", LoadFp),
     ("ldr_f32", LoadFp),
     ("ldr_f64", LoadFp),
     ("ldr_f128", LoadFp),
+    ("str_f16", StoreFp),
     ("str_f32", StoreFp),
     ("str_f64", StoreFp),
     ("str_f128", StoreFp),
@@ -880,6 +882,12 @@ pub static INSTS: &[(&str, Form)] = &[
     // Between the two floating point widths.
     ("fcvt_f64_f32", FConvert),
     ("fcvt_f32_f64", FConvert),
+    // And between a half and each of them, which every ARMv8 has without the half precision
+    // arithmetic extension. The name is the source and then the destination, as above.
+    ("fcvt_f16_f32", FConvert),
+    ("fcvt_f32_f16", FConvert),
+    ("fcvt_f16_f64", FConvert),
+    ("fcvt_f64_f16", FConvert),
     // From an integer to a float, and back, rounding toward zero the way C does. The name is the
     // source and then the destination.
     ("scvtf_32_f32", IntToFp),
@@ -904,6 +912,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fmov_to_f64", IntToFp),
     ("fmov_from_f32", FpToInt),
     ("fmov_from_f64", FpToInt),
+    // A half's sixteen bits moved the same way, through the thirty two bit forms, since the
+    // sixteen bit `fmov` needs the half precision arithmetic extension. The bits above the half
+    // are nothing anyone reads.
+    ("fmov_to_f16", IntToFp),
+    ("fmov_from_f16", FpToInt),
     // Floating point comparisons. The conditions are chosen so that every ordered one is false when
     // either side is not a number and `ne` is true, which is what C asks of each of them.
     ("fcmp_f32", FCmp),
@@ -943,22 +956,27 @@ pub static INSTS: &[(&str, Form)] = &[
     // and each is here so the allocator knows which register the value has to be in.
     ("ret_val_32", RetVal),
     ("ret_val_64", RetVal),
+    ("ret_val_f16", RetValFp),
     ("ret_val_f32", RetValFp),
     ("ret_val_f64", RetValFp),
     ("ret_val_f128", RetValFp),
     ("ret_val2_32", RetVal2),
     ("ret_val2_64", RetVal2),
+    ("ret_val2_f16", RetVal2Fp),
     ("ret_val2_f32", RetVal2Fp),
     ("ret_val2_f64", RetVal2Fp),
     ("ret_val2_f128", RetVal2Fp),
+    ("ret_val3_f16", RetVal3Fp),
     ("ret_val3_f32", RetVal3Fp),
     ("ret_val3_f64", RetVal3Fp),
     ("ret_val3_f128", RetVal3Fp),
+    ("ret_val4_f16", RetVal4Fp),
     ("ret_val4_f32", RetVal4Fp),
     ("ret_val4_f64", RetVal4Fp),
     ("ret_val4_f128", RetVal4Fp),
     ("arg_val_32", ArgVal),
     ("arg_val_64", ArgVal),
+    ("arg_val_f16", ArgValFp),
     ("arg_val_f32", ArgValFp),
     ("arg_val_f64", ArgValFp),
     ("arg_val_f128", ArgValFp),

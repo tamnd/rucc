@@ -3,9 +3,8 @@
 //! The same four questions [`super::head_of`] and its neighbours answer for x86-64, answered with
 //! the names `rucc_target::aarch64` describes. Two things make the answers shorter here. A value
 //! narrower than 32 bits lives in a 32 bit register, so a byte and a short arrive and go back as
-//! the 32 bit pseudo, the same as an `int`. And there is no second name for a half: `_Float16`
-//! has no rule on this machine yet, so it has no name here either, and a function that passes one
-//! is refused at the argument rather than halfway through.
+//! the 32 bit pseudo, the same as an `int`. And a half travels in the low sixteen bits of a vector
+//! register, `h0` to `h7` as AAPCS64 says, and is read and written in memory at its own width.
 
 use rucc_ir::{Abi, Type};
 
@@ -48,7 +47,7 @@ fn head_of(ty: Type) -> Option<&'static str> {
         return Some("a64.arg_val_f128");
     }
     if crate::term::is_half(ty) {
-        return None;
+        return Some("a64.arg_val_f16");
     }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["a64.arg_val_f32", "a64.arg_val_f64"][at]);
@@ -66,7 +65,7 @@ fn load_of(ty: Type) -> Option<&'static str> {
         return Some("a64.ldr_f128");
     }
     if crate::term::is_half(ty) {
-        return None;
+        return Some("a64.ldr_f16");
     }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["a64.ldr_f32", "a64.ldr_f64"][at]);
@@ -81,7 +80,7 @@ fn store_of(ty: Type) -> Option<&'static str> {
         return Some("a64.str_f128");
     }
     if crate::term::is_half(ty) {
-        return None;
+        return Some("a64.str_f16");
     }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["a64.str_f32", "a64.str_f64"][at]);
@@ -103,7 +102,8 @@ fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
         return Some(*names.get(at)?);
     }
     if crate::term::is_half(ty) {
-        return None;
+        let names = ["a64.ret_val_f16", "a64.ret_val2_f16", "a64.ret_val3_f16", "a64.ret_val4_f16"];
+        return Some(*names.get(at)?);
     }
     if let Some(width) = crate::term::float_slot(ty) {
         // Four, since a homogeneous aggregate of up to four floating point members comes back
@@ -191,9 +191,15 @@ mod tests {
     }
 
     #[test]
-    fn a_long_double_is_a_quad_and_a_half_is_not_passed_yet() {
+    fn a_long_double_is_a_quad_and_a_half_is_a_half() {
+        let half = Type::float(Float::F16);
         assert_eq!(head_of(Type::float(Float::F128)), Some("a64.arg_val_f128"));
-        assert_eq!(head_of(Type::float(Float::F16)), None);
+        assert_eq!(head_of(half), Some("a64.arg_val_f16"));
+        assert_eq!(load_of(half), Some("a64.ldr_f16"));
+        assert_eq!(store_of(half), Some("a64.str_f16"));
+        assert_eq!(ret_of(half, 0), Some("a64.ret_val_f16"));
+        assert_eq!(ret_of(half, 3), Some("a64.ret_val4_f16"));
+        assert_eq!(ret_of(half, 4), None);
         assert_eq!(head_of(Type::int(128)), None);
     }
 }
