@@ -1065,6 +1065,13 @@ impl Checker<'_> {
             );
             return self.poison(span);
         };
+        if self.cx.kencc && self.plan9_ambiguous(record, name) {
+            let name = self.text(name).to_owned();
+            self.report(
+                Diagnostic::error(format!("ambiguous structure element: {name}"), span)
+                    .with_code("E0502"),
+            );
+        }
         // An anonymous member is reached through the member that holds it, so `u.x` where `x`
         // is inside an anonymous union is two nodes and not one. Writing the chain out here is
         // what lets everything downstream treat a member access as one step.
@@ -1146,7 +1153,8 @@ impl Checker<'_> {
     /// found by the name of its type: the typedef name it was written with, and under `-fkencc`
     /// its tag too. In the 9front tree that is how `r->Lock` reaches the `Lock` in `struct Ref
     /// { Lock; long ref; }`. Last, the name is looked for in each anonymous member, at any depth.
-    /// kencc calls a name found in two places ambiguous, and the first is taken here.
+    /// kencc calls a name found in two places ambiguous. Under `-fkencc` the access reports
+    /// that, and in all cases the first is taken here.
     fn find_field_plan9(&self, record: RecordId, name: Symbol) -> Option<Vec<u32>> {
         let fields = &self.types.record_info(record).fields;
         let at = fields.iter().position(|field| field.name == Some(name)).or_else(|| {
@@ -1168,6 +1176,37 @@ impl Checker<'_> {
             }
         }
         None
+    }
+
+    /// Whether `name` is found in two places in `record` at the level where it is found first,
+    /// which kencc's `dotsearch` reports as an ambiguous structure element.
+    ///
+    /// A member of the record and an anonymous member that the name names are one level. When
+    /// neither is found, each anonymous member that holds the name is one more place. Where one
+    /// anonymous member holds it, the search goes on into that member.
+    fn plan9_ambiguous(&self, record: RecordId, name: Symbol) -> bool {
+        let fields = &self.types.record_info(record).fields;
+        let top = fields
+            .iter()
+            .filter(|field| field.name == Some(name) || self.anonymous_member_is_named(field, name))
+            .count();
+        if top > 0 {
+            return top > 1;
+        }
+        let mut holders = fields.iter().filter_map(|field| {
+            if field.name.is_some() {
+                return None;
+            }
+            let TypeKind::Record(inner) = self.types.kind(self.types.canonical(field.ty)) else {
+                return None;
+            };
+            self.find_field_plan9(inner, name).map(|_| inner)
+        });
+        match (holders.next(), holders.next()) {
+            (Some(_), Some(_)) => true,
+            (Some(inner), None) => self.plan9_ambiguous(inner, name),
+            _ => false,
+        }
     }
 
     /// Whether `field` is an anonymous member that `name` names under `-fplan9-extensions`.
