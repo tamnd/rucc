@@ -2381,6 +2381,10 @@ pub struct Options {
     /// off while leaving the stack itself on. A function returning one is then refused, which is
     /// what gcc does.
     pub x87_return: bool,
+    /// Whether `float` and `double` arithmetic is done on the x87 stack and the values are kept in
+    /// memory, which `-mfpmath=387` asks for on 32 bit x86. Off, the arithmetic is done in the SSE
+    /// registers, as `-mfpmath=sse` does. See [`rucc_target::CallRegs::x87_floats`].
+    pub x87_floats: bool,
     /// Where the stack protector's canary is copied from when the command line moved it, from the
     /// `-mstack-protector-guard` flags. `None` is the target's own place, which is `%fs:40` on
     /// x86-64 Linux. A kernel moves it to its per CPU block behind `%gs`.
@@ -3154,6 +3158,7 @@ impl Options {
             riscv_arch: None,
             x87: true,
             x87_return: true,
+            x87_floats: false,
             guard: None,
             zero_regs: None,
             isa: match target.arch {
@@ -3404,6 +3409,7 @@ impl Session {
         if let Some(regs) = target.call_regs {
             let regs = opts.stack_boundary.map_or(regs, |bytes| regs.aligned_to(bytes));
             let regs = if opts.vector { regs } else { regs.without_vectors() };
+            let regs = if opts.x87_floats { regs.on_x87() } else { regs };
             let regs = if opts.strict_align { regs.strictly_aligned() } else { regs };
             let regs = regs.without_vector_regs(opts.fixed_vectors);
             target.call_regs = Some(opts.guard.map_or(regs, |guard| regs.guarded_by(guard)));

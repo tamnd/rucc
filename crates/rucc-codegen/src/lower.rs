@@ -257,6 +257,20 @@ fn on_x87(ty: Type) -> bool {
     ty.is_scalar() && ty.is_float() && ty.bits() == 80
 }
 
+/// How a float on the x87 stack is loaded at its own format and stored back, and how many bytes of
+/// the frame its slot takes.
+///
+/// An eighty bit float takes [`X87_BYTES`]. A `float` and a `double` under `-mfpmath=387` take
+/// their own size, which is what a store at their format writes, so the slot holds the value the way
+/// memory holds it and a `bitcast` of one is a move of the bits in the slot.
+fn x87_format(ty: Type) -> (&'static str, &'static str, u32) {
+    match ty.bits() {
+        32 => ("fld_s", "fstp_s", 4),
+        64 => ("fld_l", "fstp_l", 8),
+        _ => ("fld_t", "fstp_t", X87_BYTES),
+    }
+}
+
 /// A register file the command line can take away from the compiler. See [`off_registers`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Off {
@@ -2327,7 +2341,7 @@ impl<'a> Lowering<'a> {
                 let reg = self.out.append_param(out, self.class_of(ty));
                 self.sized(reg, ty);
                 self.regs[param.index()] = Some(reg);
-                if on_x87(ty) {
+                if self.x87_held(ty) {
                     arriving.push((param, reg));
                 }
             }
@@ -2895,7 +2909,7 @@ impl<'a> Lowering<'a> {
             // where they are rather than a register they are in, and there is no register they
             // could be in. Everything else about it is a sixteen byte object passed by value and
             // is built by the same code.
-            let reg = if abi::on_the_stack(ty) {
+            let reg = if abi::on_the_stack(ty, self.conv) {
                 self.x87_slot(value)
             } else {
                 let before = self.out.terminator(here);
@@ -2995,12 +3009,13 @@ impl<'a> Lowering<'a> {
         // taking them off in order leaves each in its own slot and the stack empty.
         let results: Vec<Value> = self.source[inst].results().collect();
         let types: Vec<Type> = results.iter().map(|&result| self.source[result].ty).collect();
-        if abi::back_on_x87(&types) {
+        if abi::back_on_x87(&types, conv) {
             let span = self.source.span(inst);
             for result in results {
+                let (_, fstp, _) = x87_format(self.source[result].ty);
                 let into = self.x87_slot(result);
                 let into = self.through(into);
-                self.x87_at("fstp_t", span, into);
+                self.x87_at(fstp, span, into);
             }
             return Ok(made);
         }
@@ -3169,7 +3184,7 @@ impl<'a> Lowering<'a> {
     /// Whether those values go back on the x87 stack, per [`abi::back_on_x87`].
     fn x87_values(&self, values: &[Value]) -> bool {
         let types: Vec<Type> = values.iter().map(|&value| self.source[value].ty).collect();
-        abi::back_on_x87(&types) || abi::float_on_x87(&types, self.conv)
+        abi::back_on_x87(&types, self.conv) || abi::float_on_x87(&types, self.conv)
     }
 
     fn returned(&mut self, inst: Inst, values: Vec<Value>) -> Result<(), Unsupported> {
@@ -3183,12 +3198,13 @@ impl<'a> Lowering<'a> {
         // the unit. A complex one loads its imaginary half first so that the real half ends up on
         // top of it, in `st(0)`, with the imaginary half under it in `st(1)`.
         let types: Vec<Type> = values.iter().map(|&value| self.source[value].ty).collect();
-        if abi::back_on_x87(&types) && self.sret().is_none() {
+        if abi::back_on_x87(&types, self.conv) && self.sret().is_none() {
             let span = self.source.span(inst);
             for &value in values.iter().rev() {
+                let (fld, _, _) = x87_format(self.source[value].ty);
                 let from = self.x87_slot(value);
                 let from = self.through(from);
-                self.x87_at("fld_t", span, from);
+                self.x87_at(fld, span, from);
             }
             return Ok(());
         }
@@ -3453,8 +3469,15 @@ impl<'a> Lowering<'a> {
     /// of the time, and neither of those is somewhere the operand of a rule could point.
     fn touches_x87(&self, inst: Inst) -> bool {
         let data = &self.source[inst];
-        data.results().any(|value| on_x87(self.source[value].ty))
-            || self.source[data.args].iter().any(|&arg| on_x87(self.source[arg].ty))
+        data.results().any(|value| self.x87_held(self.source[value].ty))
+            || self.source[data.args].iter().any(|&arg| self.x87_held(self.source[arg].ty))
+    }
+
+    /// Whether a value of that type is on the x87 stack while it is worked on and in a frame slot
+    /// the rest of the time. That is the eighty bit float everywhere, and a `float` or a `double`
+    /// too under `-mfpmath=387`. See [`abi::on_the_stack`].
+    fn x87_held(&self, ty: Type) -> bool {
+        abi::on_the_stack(ty, self.conv)
     }
 
     /// Everything that happens to an eighty bit float, as the group of instructions it is.
@@ -3489,6 +3512,7 @@ impl<'a> Lowering<'a> {
             Opcode::FNeg => self.x87_flip(inst),
             Opcode::FCmp => self.x87_compare(inst),
             Opcode::FConst => self.x87_const(inst),
+            Opcode::Bitcast => self.x87_bitcast(inst),
             _ => Err(self.unsupported(inst)),
         }
     }
@@ -3523,35 +3547,39 @@ impl<'a> Lowering<'a> {
         if arriving.len() > X87_DEPTH {
             let at = self.at.expect("a block is being filled");
             let mut staged = Vec::with_capacity(arriving.len());
-            for &(_, reg) in arriving {
+            for &(param, reg) in arriving {
+                let (fld, fstp, bytes) = x87_format(self.source[param].ty);
                 let index = self.stack.locals.len();
-                let align = self.scratch_align(X87_BYTES);
-                self.stack.locals.push(Local { size: X87_BYTES, align });
+                let align = self.scratch_align(bytes);
+                self.stack.locals.push(Local { size: bytes, align });
                 let from = self.through(reg);
-                self.x87_at("fld_t", span, from);
+                self.x87_at(fld, span, from);
                 let into = self.frame_address(at, index);
                 let into = self.through(into);
-                self.x87_at("fstp_t", span, into);
+                self.x87_at(fstp, span, into);
                 staged.push(index);
             }
             for (&(param, _), index) in arriving.iter().zip(staged) {
+                let (fld, fstp, _) = x87_format(self.source[param].ty);
                 let from = self.frame_address(at, index);
                 let from = self.through(from);
-                self.x87_at("fld_t", span, from);
+                self.x87_at(fld, span, from);
                 let into = self.x87_slot(param);
                 let into = self.through(into);
-                self.x87_at("fstp_t", span, into);
+                self.x87_at(fstp, span, into);
             }
             return Ok(());
         }
-        for &(_, reg) in arriving {
+        for &(param, reg) in arriving {
+            let (fld, _, _) = x87_format(self.source[param].ty);
             let from = self.through(reg);
-            self.x87_at("fld_t", span, from);
+            self.x87_at(fld, span, from);
         }
         for &(param, _) in arriving.iter().rev() {
+            let (_, fstp, _) = x87_format(self.source[param].ty);
             let into = self.x87_slot(param);
             let into = self.through(into);
-            self.x87_at("fstp_t", span, into);
+            self.x87_at(fstp, span, into);
         }
         Ok(())
     }
@@ -3582,9 +3610,10 @@ impl<'a> Lowering<'a> {
         let index = match self.slots[value.index()] {
             Some(index) => index,
             None => {
+                let (_, _, bytes) = x87_format(self.source[value].ty);
                 let index = self.stack.locals.len();
-                let align = self.scratch_align(X87_BYTES);
-                self.stack.locals.push(Local { size: X87_BYTES, align });
+                let align = self.scratch_align(bytes);
+                self.stack.locals.push(Local { size: bytes, align });
                 self.slots[value.index()] = Some(index);
                 index
             }
@@ -3692,12 +3721,13 @@ impl<'a> Lowering<'a> {
         let (args, result) = self.ends(inst)?;
         let &address = args.first().ok_or_else(|| self.unsupported(inst))?;
         let span = self.source.span(inst);
+        let (fld, fstp, _) = x87_format(self.source[result].ty);
         let from = self.reg_of(address)?;
         let from = self.through(from);
         let into = self.x87_slot(result);
         let into = self.through(into);
-        self.x87_touching("fld_t", inst, from);
-        self.x87_at("fstp_t", span, into);
+        self.x87_touching(fld, inst, from);
+        self.x87_at(fstp, span, into);
         Ok(())
     }
 
@@ -3706,12 +3736,13 @@ impl<'a> Lowering<'a> {
         let args = self.source[self.source[inst].args].to_vec();
         let [value, address] = args[..] else { return Err(self.unsupported(inst)) };
         let span = self.source.span(inst);
+        let (fld, fstp, _) = x87_format(self.source[value].ty);
         let from = self.x87_slot(value);
         let from = self.through(from);
         let into = self.reg_of(address)?;
         let into = self.through(into);
-        self.x87_at("fld_t", span, from);
-        self.x87_touching("fstp_t", inst, into);
+        self.x87_at(fld, span, from);
+        self.x87_touching(fstp, inst, into);
         Ok(())
     }
 
@@ -3742,7 +3773,8 @@ impl<'a> Lowering<'a> {
         let store = self.named(put);
         self.out.build(block, store).at(span).uses(value, class).mem(across).finish();
         self.x87_at(get, span, across);
-        self.x87_at("fstp_t", span, into);
+        let (_, fstp, _) = x87_format(self.source[result].ty);
+        self.x87_at(fstp, span, into);
         Ok(())
     }
 
@@ -3762,12 +3794,13 @@ impl<'a> Lowering<'a> {
         let (args, result) = self.ends(inst)?;
         let &source = args.first().ok_or_else(|| self.unsupported(inst))?;
         let span = self.source.span(inst);
+        let (fld, _, _) = x87_format(self.source[source].ty);
         let from = self.x87_slot(source);
         let from = self.through(from);
         let across = self.x87_crossing();
         let across = self.through(across);
 
-        self.x87_at("fld_t", span, from);
+        self.x87_at(fld, span, from);
         self.x87_at(put, span, across);
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
@@ -3779,7 +3812,11 @@ impl<'a> Lowering<'a> {
     /// An `fpext` up to a `long double`, which is the only direction this machine has one in.
     fn x87_widen(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let sse = self.conv.sse_class;
-        match self.source[self.narrow(inst)?].ty.bits() {
+        let narrow = self.narrow(inst)?;
+        if self.x87_held(self.source[narrow].ty) {
+            return self.x87_reformat(inst);
+        }
+        match self.source[narrow].ty.bits() {
             32 => self.x87_across(inst, "movss_mr", sse, "fld_s"),
             64 => self.x87_across(inst, "movsd_mr", sse, "fld_l"),
             _ => Err(self.unsupported(inst)),
@@ -3790,11 +3827,71 @@ impl<'a> Lowering<'a> {
     fn x87_narrow(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let sse = self.conv.sse_class;
         let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
+        if self.x87_held(self.source[result].ty) {
+            return self.x87_reformat(inst);
+        }
         match self.source[result].ty.bits() {
             32 => self.x87_back(inst, "fstp_s", "movss_rm", sse),
             64 => self.x87_back(inst, "fstp_l", "movsd_rm", sse),
             _ => Err(self.unsupported(inst)),
         }
+    }
+
+    /// An `fpext` or an `fptrunc` between two formats that are both on the x87 stack, which is the
+    /// load at the one and the store at the other.
+    ///
+    /// The store is what rounds, so a narrowing rounds once and to nearest, as the control word
+    /// says. Every widening is exact.
+    fn x87_reformat(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let (args, result) = self.ends(inst)?;
+        let &source = args.first().ok_or_else(|| self.unsupported(inst))?;
+        let span = self.source.span(inst);
+        let (fld, _, _) = x87_format(self.source[source].ty);
+        let (_, fstp, _) = x87_format(self.source[result].ty);
+        let from = self.x87_slot(source);
+        let from = self.through(from);
+        let into = self.x87_slot(result);
+        let into = self.through(into);
+        self.x87_at(fld, span, from);
+        self.x87_at(fstp, span, into);
+        Ok(())
+    }
+
+    /// A `bitcast` between an integer and a `float` on the x87 stack, which is a move of the bits
+    /// between a register and the slot.
+    ///
+    /// The slot holds the value at its own format, see [`x87_format`], so the bits in it are the
+    /// bits of the float and no x87 instruction is needed. This is how a `float` constant arrives,
+    /// as the integer that spells it, and how a negation flips its sign.
+    fn x87_bitcast(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let (args, result) = self.ends(inst)?;
+        let &source = args.first().ok_or_else(|| self.unsupported(inst))?;
+        let (from, to) = (self.source[source].ty, self.source[result].ty);
+        let into_slot = self.x87_held(to) && from.is_int() && from.is_scalar();
+        let out_of_slot = self.x87_held(from) && to.is_int() && to.is_scalar();
+        let int = if into_slot { from } else { to };
+        if !(into_slot || out_of_slot)
+            || int.bits() != x87_format(if into_slot { to } else { from }).2 * 8
+            || int.bits() > self.conv.word * 8
+        {
+            return Err(self.unsupported(inst));
+        }
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+        let width = int.bits();
+        let slot = if into_slot { self.x87_slot(result) } else { self.x87_slot(source) };
+        let slot = self.through(slot);
+        let block = self.at.expect("a block is being filled");
+        if into_slot {
+            let value = self.reg_of(source)?;
+            let store = self.named(&format!("mov_mr_{width}"));
+            self.out.build(block, store).at(span).uses(value, gpr).mem(slot).finish();
+        } else {
+            let reg = self.new_reg(result);
+            let load = self.named(&format!("mov_rm_{width}"));
+            self.out.build(block, load).at(span).def(reg, gpr).mem(slot).finish();
+        }
+        Ok(())
     }
 
     /// A `sitofp` up to a `long double`.
@@ -3866,7 +3963,7 @@ impl<'a> Lowering<'a> {
         // The conversion itself, under the changed word, and then the word the unit had put back
         // before anything else runs.
         self.x87_at("fldcw", span, cut);
-        self.x87_at("fld_t", span, from);
+        self.x87_at(x87_format(self.source[source].ty).0, span, from);
         self.x87_at(put, span, across);
         self.x87_at("fldcw", span, saved);
 
@@ -3898,19 +3995,23 @@ impl<'a> Lowering<'a> {
         let bits = self.source[imm].bits();
         let span = self.source.span(inst);
         let gpr = self.gpr;
+        let eighty = self.source[result].ty.bits() == 80;
         let slot = self.x87_slot(result);
         let at = |to: i32| self.through(slot).plus(to);
         let top = (((bits >> 64) & 0xffff) as i64, at(8), "16");
-        // A machine whose registers are four bytes puts the significand down in two of them.
-        let pieces = if self.conv.word == 4 {
-            vec![
+        // A machine whose registers are four bytes puts the significand down in two of them. A
+        // `float` on the x87 stack is one of those and no top.
+        let mut pieces = match self.source[result].ty.bits() {
+            32 => vec![(i64::from(bits as u32 as i32), at(0), "32")],
+            _ if self.conv.word == 4 => vec![
                 (i64::from(bits as u32 as i32), at(0), "32"),
                 (i64::from((bits >> 32) as u32 as i32), at(4), "32"),
-                top,
-            ]
-        } else {
-            vec![(bits as u64 as i64, at(0), "64"), top]
+            ],
+            _ => vec![(bits as u64 as i64, at(0), "64")],
         };
+        if eighty {
+            pieces.push(top);
+        }
 
         let block = self.at.expect("a block is being filled");
         for (bytes, at, into) in pieces {
@@ -3957,10 +4058,11 @@ impl<'a> Lowering<'a> {
         let right = self.through(right);
         let into = self.x87_slot(result);
         let into = self.through(into);
-        self.x87_at("fld_t", span, left);
-        self.x87_at("fld_t", span, right);
+        let (fld, fstp, _) = x87_format(self.source[result].ty);
+        self.x87_at(fld, span, left);
+        self.x87_at(fld, span, right);
         self.x87_only(with, span);
-        self.x87_at("fstp_t", span, into);
+        self.x87_at(fstp, span, into);
         Ok(())
     }
 
@@ -3978,9 +4080,10 @@ impl<'a> Lowering<'a> {
         let from = self.through(from);
         let into = self.x87_slot(result);
         let into = self.through(into);
-        self.x87_at("fld_t", span, from);
+        let (fld, fstp, _) = x87_format(self.source[result].ty);
+        self.x87_at(fld, span, from);
         self.x87_only("fchs", span);
-        self.x87_at("fstp_t", span, into);
+        self.x87_at(fstp, span, into);
         Ok(())
     }
 
@@ -4033,12 +4136,13 @@ impl<'a> Lowering<'a> {
 
         let span = self.source.span(inst);
         let gpr = self.gpr;
+        let (fld, _, _) = x87_format(self.source[left].ty);
         let under = self.x87_slot(under);
         let under = self.through(under);
         let top = self.x87_slot(top);
         let top = self.through(top);
-        self.x87_at("fld_t", span, under);
-        self.x87_at("fld_t", span, top);
+        self.x87_at(fld, span, under);
+        self.x87_at(fld, span, top);
 
         let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
@@ -5381,7 +5485,7 @@ impl<'a> Lowering<'a> {
         // A float in a general purpose register, or a number in a vector one, is a register the
         // machine has holding a type that is not kept there, and would need a move between the
         // files that nothing here makes yet.
-        if on_x87(ty) || self.class_of(ty) != file {
+        if self.x87_held(ty) || self.class_of(ty) != file {
             return Err(self.unsupported(inst));
         }
         let block = self.at.expect("a block is being filled");
@@ -6907,7 +7011,7 @@ impl<'a> Lowering<'a> {
                 continue;
             };
             let ty = self.source[result].ty;
-            if on_x87(ty) {
+            if self.x87_held(ty) {
                 return Err(refused());
             }
             let tied = operands.tied_to(index);
@@ -7194,7 +7298,7 @@ impl<'a> Lowering<'a> {
             for (index, operand) in list.iter().enumerate() {
                 let Some(result) = operand.result else { continue };
                 let (ty, file) = (self.source[result].ty, files[index]);
-                if on_x87(ty) || self.class_of(ty) != file {
+                if self.x87_held(ty) || self.class_of(ty) != file {
                     return Err(refused());
                 }
                 let reg = self.new_reg(result);
@@ -7278,7 +7382,7 @@ impl<'a> Lowering<'a> {
                     continue;
                 }
                 let (ty, file) = (self.source[value].ty, files[index]);
-                if on_x87(ty) || self.class_of(ty) != file {
+                if self.x87_held(ty) || self.class_of(ty) != file {
                     return Err(refused());
                 }
                 let read = mir::Operand::read(self.reg_of(value)?, file);
@@ -8150,7 +8254,7 @@ impl<'a> Lowering<'a> {
             }
             let value = operand.result.or(operand.value).ok_or_else(refused)?;
             let ty = self.source[value].ty;
-            if on_x87(ty) {
+            if self.x87_held(ty) {
                 return Err(refused());
             }
             carried.push((index, self.class_of(ty)));
@@ -8600,7 +8704,8 @@ impl<'a> Lowering<'a> {
             return false;
         }
         let ty = operand.result.or(operand.value).map(|value| self.source[value].ty);
-        !general || ty.is_some_and(|ty| !on_x87(ty) && self.class_of(ty) == self.conv.sse_class)
+        !general
+            || ty.is_some_and(|ty| !self.x87_held(ty) && self.class_of(ty) == self.conv.sse_class)
     }
 
     /// An `asm` statement whose operands are `long double` values on the x87 stack.
@@ -8646,7 +8751,7 @@ impl<'a> Lowering<'a> {
         let mut depths: Vec<Option<usize>> = Vec::with_capacity(list.len());
         for (operand, letter) in list.iter().zip(&letters) {
             let value = operand.result.or(operand.value).ok_or_else(refused)?;
-            let stacked = !operand.memory && on_x87(self.source[value].ty);
+            let stacked = !operand.memory && self.x87_held(self.source[value].ty);
             let depth = match operand.tied {
                 Some(output) => *depths.get(output).ok_or_else(refused)?,
                 None => match letter.trim_start_matches(['=', '+', '&']) {
@@ -8765,9 +8870,10 @@ impl<'a> Lowering<'a> {
 
         let span = self.source.span(inst);
         for value in inputs.iter().rev().flatten() {
+            let (fld, _, _) = x87_format(self.source[*value].ty);
             let from = self.x87_slot(*value);
             let from = self.through(from);
-            self.x87_at("fld_t", span, from);
+            self.x87_at(fld, span, from);
         }
         if mixed {
             let mut rest = Vec::with_capacity(count);
@@ -8803,9 +8909,10 @@ impl<'a> Lowering<'a> {
             self.out.build(block, opcode).at(span).symbol(symbol).finish();
         }
         for value in outputs.iter().flatten() {
+            let (_, fstp, _) = x87_format(self.source[*value].ty);
             let into = self.x87_slot(*value);
             let into = self.through(into);
-            self.x87_at("fstp_t", span, into);
+            self.x87_at(fstp, span, into);
         }
         // musl's `fmodl` leaves the divisor in `st(1)` under the remainder.
         for _ in left.iter().filter(|&&left| left) {
@@ -9349,7 +9456,7 @@ impl<'a> Lowering<'a> {
                 // register holds none of. The block on the other side copies the bytes out of it
                 // into a slot of its own, which is what makes a second edge into the same block
                 // safe.
-                let reg = if on_x87(self.source[value].ty) {
+                let reg = if self.x87_held(self.source[value].ty) {
                     self.x87_slot(value)
                 } else {
                     self.reg_of(value)?
@@ -10131,6 +10238,11 @@ impl<'a> Lowering<'a> {
         refused: &Set<Value>,
         left: &mut Vec<Term>,
     ) -> Option<(Plan, Match<Term>)> {
+        // A value on the x87 stack is in a frame slot, which no operand of a rule can name, and
+        // the group in [`Self::x87`] writes every instruction that touches one.
+        if self.touches_x87(inst) {
+            return None;
+        }
         // The root of the trie is asked about the head once, since a plan only says how the
         // operands are shown and the head is the same under every one.
         let table = self.selector.table;
@@ -10208,6 +10320,12 @@ impl<'a> Lowering<'a> {
     fn foldable(&self, into: Inst, value: Value, refused: &Set<Value>) -> bool {
         let Def::Result { inst, .. } = self.source[value].def else { return false };
         if self.source[inst].opcode == Opcode::IConst || refused.contains(&value) {
+            return false;
+        }
+        // An instruction on the x87 stack is written by [`Self::x87`] where it is, so a rule
+        // that took it would leave nothing to write the slot it reads. A comparison of two of
+        // these in front of a branch is the one that would be taken.
+        if self.touches_x87(inst) {
             return false;
         }
         // An access in a named address space is left as the instruction it is, since the segment
@@ -10707,7 +10825,11 @@ impl<'a> Lowering<'a> {
     /// what the class buys is the moves: a register that holds the whole value is a register a
     /// spill, a reload and a copy are each one instruction for.
     fn class_of(&self, ty: Type) -> RegClass {
-        if crate::term::in_vector_file(ty) { self.conv.sse_class } else { self.gpr }
+        if crate::term::in_vector_file(ty) && !self.x87_held(ty) {
+            self.conv.sse_class
+        } else {
+            self.gpr
+        }
     }
 
     /// A fresh register for a value, which is what the instruction computing it writes.
@@ -10734,7 +10856,7 @@ impl<'a> Lowering<'a> {
     /// Says how much of its register a value of that type takes, when the register is a vector
     /// one, which is what lets a call that keeps only the bottom of one keep the value in it.
     fn sized(&mut self, reg: mir::Reg, ty: Type) {
-        if crate::term::in_vector_file(ty) {
+        if crate::term::in_vector_file(ty) && !self.x87_held(ty) {
             self.out.set_width(reg, abi::float_bytes(ty));
         }
     }

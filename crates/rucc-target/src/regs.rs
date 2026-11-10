@@ -455,6 +455,14 @@ pub struct CallRegs {
     /// The x87 registers a `long double` comes back in, which is empty on a target whose
     /// `long double` is a `double`.
     pub x87_returns: &'static [PhysReg],
+    /// Whether a `float` and a `double` are kept in memory and worked on with the x87 stack, as a
+    /// `long double` is, rather than in a vector register.
+    ///
+    /// False on every convention as written. `-mfpmath=387` on i386 turns it on with
+    /// [`CallRegs::on_x87`], which is how gcc does float arithmetic there by default and the
+    /// only way there is on a processor with no SSE. Then a `float` or a `double` argument is bytes
+    /// in the argument area, as a `long double` is, and one that comes back is in `st(0)`.
+    pub x87_floats: bool,
     /// The general purpose registers a call leaves alone, so a value in one survives it.
     pub int_saved: &'static [PhysReg],
     /// The vector registers a call leaves alone, which is none of them on SysV.
@@ -755,6 +763,9 @@ impl CallRegs {
     #[must_use]
     pub fn under(&self, convention: Convention) -> Option<&CallRegs> {
         match self.conventions.0.iter().find(|(named, _)| *named == convention) {
+            // A unit whose floats are on the x87 stack passes them that way under every
+            // convention, so the one looked up is changed the same way.
+            Some(&(_, regs)) if self.x87_floats => Some(regs.on_x87()),
             Some(&(_, regs)) => Some(regs),
             None if convention == Convention::Target => Some(self),
             None => None,
@@ -843,6 +854,20 @@ impl CallRegs {
             return self;
         }
         made(CallRegs { sse_args: &[], ..*self })
+    }
+
+    /// The same convention with every `float` and `double` kept in memory and worked on with the
+    /// x87 stack, which is what `-mfpmath=387` asks for. See [`CallRegs::x87_floats`].
+    ///
+    /// The other conventions of the platform change in the same way, since a call through one of
+    /// them passes the same values, and [`CallRegs::under`] is what changes them. Kept the way
+    /// [`CallRegs::aligned_to`] keeps its answers, see `made`.
+    #[must_use]
+    pub fn on_x87(&'static self) -> &'static CallRegs {
+        if self.x87_floats {
+            return self;
+        }
+        made(CallRegs { x87_floats: true, ..*self })
     }
 
     /// The same convention on a machine where no word may be moved at an address less aligned
@@ -1258,6 +1283,7 @@ mod tests {
             int_returns: &INT,
             sse_returns: &SSE,
             x87_returns: &NONE,
+            x87_floats: false,
             int_saved: &NONE,
             sse_saved: &NONE,
             sse_kept: None,

@@ -188,6 +188,9 @@ pub struct Predef {
     /// The macros that name the processor the unit is tuned for on 32 bit x86, see
     /// [`Options::tune`](rucc_session::Options::tune).
     pub tune: &'static [&'static str],
+    /// Whether `float` and `double` arithmetic is done on the x87 stack, which `-mfpmath=387`
+    /// asks for on 32 bit x86. See [`Options::x87_floats`](rucc_session::Options::x87_floats).
+    pub x87_floats: bool,
     /// What `-mbranch-protection=` asked for, which decides `__ARM_FEATURE_BTI_DEFAULT` and
     /// `__ARM_FEATURE_PAC_DEFAULT` on AArch64. The kernel's assembly reads both to write the same
     /// note the compiler writes for C.
@@ -250,6 +253,7 @@ impl Predef {
             tuned: false,
             processor: None,
             tune: &[],
+            x87_floats: false,
             branch_protection: BranchProtection::default(),
             protector: Protector::None,
             address: false,
@@ -300,6 +304,7 @@ impl Predef {
             tuned: opts.tuned,
             processor: opts.processor,
             tune: opts.tune,
+            x87_floats: opts.x87_floats,
             branch_protection: opts.branch_protection,
             protector: opts.protector,
             address: opts.kasan.on,
@@ -918,15 +923,19 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                     }
                 }
             }
-            d.flag("__SSE_MATH__");
-            d.flag("__SSE2_MATH__");
+            // The promise that `float` and `double` arithmetic is done in an SSE register, which
+            // gcc takes away with `-mfpmath=387`.
+            if !opts.x87_floats {
+                d.flag("__SSE_MATH__");
+                d.flag("__SSE2_MATH__");
+            }
             d.flag("__code_model_32__");
             // gcc defines the fused multiply add macros under `-m32 -mfma` only with
             // `-mfpmath=sse`, because its default does `double` arithmetic on the x87 stack. The
-            // backend here always does it in SSE and writes `vfmadd` in a unit built for `fma`, so
-            // the macros follow `fma` alone, as on x86-64.
+            // backend here does it in SSE unless `-mfpmath=387` says otherwise, and writes
+            // `vfmadd` in a unit built for `fma`, so the macros follow `fma` and the two.
             let has = |name| Feature::named(name).is_some_and(|it| opts.isa.has(it));
-            if has("fma") && opts.vector && triple.env != Env::Msvc {
+            if has("fma") && opts.vector && !opts.x87_floats && triple.env != Env::Msvc {
                 for name in ["", "F", "F32", "F64", "F32x"] {
                     d.set(&format!("__FP_FAST_FMA{name}"), "1");
                 }
@@ -4023,6 +4032,26 @@ mod tests {
         }
         for triple in ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "i686-pc-windows-msvc"] {
             assert!(!built(triple, "fma").contains("__FP_FAST_FMA"), "{triple}");
+        }
+    }
+
+    #[test]
+    fn an_i386_unit_with_floats_on_the_x87_stack_makes_no_promise_about_sse_math() {
+        // gcc 13 with `-m32 -mfpmath=387 -mfma` keeps `__SSE2__` and `__FMA__` and drops the two
+        // math macros and the five fused multiply add ones.
+        let triple: Triple = "i686-unknown-linux-gnu".parse().expect("a triple");
+        let mut choices = rucc_target::Choices::new();
+        choices.read("fma").expect("a name gcc knows");
+        let isa = choices.over(Isa::baseline());
+        let sse = built_in(&TargetInfo::new(triple), &Predef { isa, ..Predef::new() });
+        let x87 = Predef { isa, x87_floats: true, ..Predef::new() };
+        let x87 = built_in(&TargetInfo::new(triple), &x87);
+        for name in ["__SSE_MATH__ ", "__SSE2_MATH__ ", "__FP_FAST_FMA "] {
+            assert!(sse.contains(name), "{name}");
+            assert!(!x87.contains(name), "{name}");
+        }
+        for name in ["__SSE2__ ", "__FMA__ "] {
+            assert!(x87.contains(name), "{name}");
         }
     }
 

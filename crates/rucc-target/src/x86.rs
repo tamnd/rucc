@@ -163,6 +163,7 @@ pub static SYSV: CallRegs = CallRegs {
     int_returns: &SYSV_INT_RETURNS,
     sse_returns: &SYSV_SSE_RETURNS,
     x87_returns: &SYSV_X87_RETURNS,
+    x87_floats: false,
     int_saved: &SYSV_INT_SAVED,
     sse_saved: &SYSV_SSE_SAVED,
     sse_kept: None,
@@ -890,6 +891,23 @@ mod tests {
         let none = registers.under(Convention::Regparm(0)).expect("every count");
         assert_eq!(none.return_pointer_popped(Some(true)), 4);
         assert_eq!(MINGW32_STDCALL.return_pointer_popped(Some(true)), 0, "popped with the rest");
+    }
+
+    #[test]
+    fn a_unit_with_floats_on_the_x87_stack_keeps_them_there_under_every_convention() {
+        assert!(!SYSV.x87_floats);
+        let x87 = SYSV.on_x87();
+        assert!(x87.x87_floats);
+        assert!(std::ptr::eq(x87.on_x87(), x87), "asked twice, the same set comes back");
+        assert!(std::ptr::eq(SYSV.on_x87(), x87), "one copy is kept");
+        assert_eq!(CallRegs { x87_floats: false, ..*x87 }, SYSV);
+        for convention in [Convention::Stdcall, Convention::Fastcall, Convention::Regparm(2)] {
+            let under = x87.under(convention).expect("every convention");
+            let plain = SYSV.under(convention).expect("every convention");
+            assert!(under.x87_floats, "{convention:?}");
+            assert_eq!(CallRegs { x87_floats: false, ..*under }, *plain, "{convention:?}");
+        }
+        assert!(!SYSV.under(Convention::Stdcall).expect("stdcall").x87_floats);
     }
 
     #[test]
