@@ -717,6 +717,8 @@ impl Preprocessor {
             self.include(rest, hash, name == Some(names.include_next), out, cx, names);
         } else if name == Some(names.embed) {
             self.embed(rest, hash, out, cx);
+        } else if name == Some(names.ident) || name == Some(names.sccs) {
+            self.ident(&first, rest, hash, cx);
         } else {
             self.diagnostics.push(
                 Diagnostic::error("invalid preprocessing directive", first.span).with_code("E0332"),
@@ -1711,6 +1713,30 @@ impl Preprocessor {
         self.diagnostics.push(diag);
     }
 
+    /// `#ident "text"` and `#sccs "text"`, the old way to put a version string in the object.
+    ///
+    /// gcc writes the string to the assembly as an `.ident`, and that is all it does with it. The
+    /// line is taken here and the string is dropped, which is what keeps the old System V sources
+    /// that NetBSD keeps, such as `rpcbind/warmstart.c`, from failing on a directive gcc knows. The
+    /// argument is macro expanded first, as gcc's `do_ident` reads it, and anything that is not a
+    /// string then is the error gcc gives.
+    fn ident(&mut self, name: &PpToken, rest: &[PpToken], hash: Span, cx: &mut Context<'_>) {
+        let line: Vec<Tok> = rest.iter().copied().map(Tok::new).collect();
+        let line = self.expander.expand_toks(line, &self.macros, cx.interner, cx.sources);
+        self.diagnostics.append(&mut self.expander.take_diagnostics());
+        let narrow = |t: &Tok| {
+            t.kind == PpTokenKind::StringLit
+                && t.value.is_some_and(|v| cx.interner.resolve(v).starts_with('"'))
+        };
+        if !line.first().is_some_and(narrow) {
+            let spelled = ident_of(name).map_or("ident", |n| cx.interner.resolve(n));
+            let at = line.first().map_or(hash, |t| t.report_span());
+            self.diagnostics.push(
+                Diagnostic::error(format!("invalid #{spelled} directive"), at).with_code("E0332"),
+            );
+        }
+    }
+
     /// `#line 42` and `#line 42 "file.c"`.
     ///
     /// The argument is macro expanded first, which is the one place a directive other than
@@ -2162,6 +2188,8 @@ fn is_known(name: Option<Symbol>, names: &Names) -> bool {
         names.include,
         names.include_next,
         names.embed,
+        names.ident,
+        names.sccs,
     ]
     .contains(&name)
 }
@@ -2538,6 +2566,8 @@ struct Names {
     include: Symbol,
     include_next: Symbol,
     embed: Symbol,
+    ident: Symbol,
+    sccs: Symbol,
     defined: Symbol,
     once: Symbol,
     push_macro: Symbol,
@@ -2567,6 +2597,8 @@ impl Names {
             include: interner.intern("include"),
             include_next: interner.intern("include_next"),
             embed: interner.intern("embed"),
+            ident: interner.intern("ident"),
+            sccs: interner.intern("sccs"),
             defined: interner.intern("defined"),
             once: interner.intern("once"),
             push_macro: interner.intern("push_macro"),
@@ -3093,6 +3125,22 @@ mod tests {
         let mut run = Run::new();
         run.go("#frobnicate\n");
         assert_eq!(run.messages(), vec!["invalid preprocessing directive".to_owned()]);
+    }
+
+    /// `#ident` and `#sccs` with a string are taken and leave nothing behind, and a macro that
+    /// gives the string is expanded first, as gcc does. Anything else is gcc's error.
+    #[test]
+    fn ident_and_sccs_take_a_string_and_leave_nothing() {
+        let mut run = Run::new();
+        let out = run
+            .go("#ident\t\"@(#)warmstart.c\t1.7\t93/07/05 SMI\"\n#define V \"1.2\"\n#sccs V\na\n");
+        assert!(run.messages().is_empty(), "{:?}", run.messages());
+        assert_eq!(out, "a");
+
+        let mut run = Run::new();
+        run.go("#ident 12\n#sccs\n");
+        let want = ["invalid #ident directive".to_owned(), "invalid #sccs directive".to_owned()];
+        assert_eq!(run.messages(), want);
     }
 
     #[test]
