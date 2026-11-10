@@ -10,6 +10,8 @@
 //!   has `Block b[1] = *allocb(Buflen);`.
 //! - A definition with `()` takes no parameters, whatever the prototype said. games/mandel.c
 //!   defines `void threadmain()` after `void threadmain(int, char *[])`.
+//! - An automatic array of no size has the width 0, as `adecl` in `cc/dcl.c` gives it. tr2post's
+//!   chartab.c has `struct charent *cp[];` in a function.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -24,7 +26,8 @@ const SOURCE: &str = "enum { A = 4, /* note */, B, };\n\
                       int first(void) { Store b[1] = *alloc(); return b[0].ival; }\n\
                       void threadmain(int argc, char *argv[]);\n\
                       void threadmain() { }\n\
-                      int c = B;\n";
+                      int c = B;\n\
+                      int none(void) { Store *cp[]; return 3 + sizeof cp; }\n";
 
 fn fixture(what: &str) -> PathBuf {
     let dir =
@@ -71,6 +74,8 @@ fn kencc_takes_what_the_commands_write() {
     let first = body(&asm, "first").join("\n");
     assert!(first.contains("8(%rax)"), "{first}");
     assert!(!body(&asm, "threadmain").is_empty());
+    let none = body(&asm, "none").join("\n");
+    assert!(none.contains("movl\t$3, %eax"), "{none}");
 }
 
 #[test]

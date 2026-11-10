@@ -34,7 +34,7 @@ use crate::include::{
 };
 use crate::macros::{Builtin, MacroDef, MacroTable, parse_define_in};
 use crate::options::{OptionsLine, TargetLines};
-use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, built_in, command_line};
+use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, built_in, command_line, kencc_cpp};
 use crate::token::Tok;
 
 /// Why a file that has already been read does not need reading again.
@@ -273,7 +273,11 @@ impl Preprocessor {
         self.targets = TargetLines::new(x86.then_some(opts.isa));
         let names = Names::new(cx.interner, self.gnuc);
         self.chars = cond::Chars::of(target);
-        let text = if opts.kencc { String::new() } else { built_in(target, opts) };
+        let text = match (opts.kencc, opts.kencc_cpp) {
+            (true, true) => kencc_cpp(opts),
+            (true, false) => String::new(),
+            (false, _) => built_in(target, opts),
+        };
         let file = self.synthetic(BUILT_IN, text, cx, &names)?;
         // The macros that cannot be written as a `#define` line, because what they stand for
         // depends on where they are used. They go in after the generated file and before the

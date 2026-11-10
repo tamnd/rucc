@@ -110,7 +110,8 @@ fn kencc_joins_an_argument_with_the_body() {
     assert!(err.contains("expected an expression, found `=`"), "{err}");
 }
 
-/// `-fno-kencc-preprocessor` is kencc `-p`: the ANSI C preprocessor, with no predefined macro.
+/// `-fno-kencc-preprocessor` is kencc `-p`: the ANSI C preprocessor. Of the predefined macros, it
+/// has the `__DATE__` and `__TIME__` of `/bin/cpp`, which mp3enc's version.c uses, and no other.
 #[test]
 fn kencc_p_has_the_operators_of_ansi_c() {
     let (ok, out, err) = run("ansi", &["-fkencc", "-fno-kencc-preprocessor"], SOURCE);
@@ -119,4 +120,10 @@ fn kencc_p_has_the_operators_of_ansi_c() {
         out,
         "f(int i, int n){ if(i < n){}else _assert(\"x\"); 'c'; \"\\nn and n\"; \"y\"; pq; }"
     );
+    let stamps = "__DATE__ __TIME__ __STDC__ __GNUC__\n";
+    let (ok, out, err) = run("stamps", &["-fkencc", "-fno-kencc-preprocessor"], stamps);
+    assert!(ok, "{err}");
+    assert!(out.starts_with('"') && out.ends_with("\" __STDC__ __GNUC__"), "{out}");
+    let (_, out, _) = run("nostamps", &["-fkencc"], stamps);
+    assert_eq!(out, stamps.trim_end());
 }
