@@ -31,6 +31,11 @@ rucc-archive = 0
 # them is this workspace's answer to "somebody has to know this format", and neither ends up as a
 # module inside whichever crate happened to need it first.
 rucc-unpack = 0
+# rucc-9p is beside them and depends on nothing either. It is the 9P2000 protocol, bytes on a stream
+# and files on a server, and nothing in it is about C or a target. The driver reads a Plan 9 tree
+# through it, and a test of any crate above can start its small server, so it sits where every crate
+# can reach it.
+rucc-9p = 0
 # rucc-wasm-link is the static linker for wasm that runs inside rucc, for a host that cannot start
 # wasm-ld. It reads objects and archives and writes a module, all in the format of the tool
 # conventions and none of it in rucc's types, so it needs nothing below it and sits here.

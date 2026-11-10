@@ -26,6 +26,7 @@ readme = "README.md"
 # section 18.6. Internal crates are pinned exactly so that a partial publish cannot produce a
 # mixed-version build.
 [workspace.dependencies]
+rucc-9p = { version = "=0.30.15", path = "crates/rucc-9p" }
 rucc-abi = { version = "=0.30.15", path = "crates/rucc-abi" }
 rucc-archive = { version = "=0.30.15", path = "crates/rucc-archive" }
 rucc-asm = { version = "=0.30.15", path = "crates/rucc-asm" }
