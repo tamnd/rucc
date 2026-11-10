@@ -46,6 +46,8 @@ pub struct Context<'a> {
     /// `rucc_target::TargetInfo::type_names` lists and the file wrote. Declared in the file scope
     /// rather than made keywords, so a declaration can hide one the way it can in gcc.
     pub type_names: &'a [Symbol],
+    /// Whether `-fkencc` was given, which makes `USED` and `SET` the statements of kencc.
+    pub kencc: bool,
 }
 
 impl<'a> Context<'a> {
@@ -59,6 +61,7 @@ impl<'a> Context<'a> {
             pedantic: false,
             error_limit: DEFAULT_ERROR_LIMIT,
             type_names: &[],
+            kencc: false,
         }
     }
 }

@@ -310,6 +310,10 @@ impl Checker<'_> {
                 Stmt::Empty
             }
             ast::Stmt::Asm(asm) => self.asm(asm, span),
+            ast::Stmt::Used { args, .. } => {
+                self.kencc_mark(args);
+                Stmt::Empty
+            }
         };
         let stmt = self.tast.stmt(node, span);
         // The `switch` patches its cases once it has a table, and what it has to patch is the
@@ -985,6 +989,18 @@ impl Checker<'_> {
             Some(body) => self.stmt(body),
             None => self.tast.stmt(Stmt::Empty, span),
         }
+    }
+
+    /// kencc's `USED(a, b);` and `SET(a);`. kencc's `usedset` in `cc/pgen.c` gives each
+    /// expression its type and emits no code for it, so here each one is checked as the operand
+    /// of `sizeof` is. That marks a name in it as used, and nothing is evaluated.
+    fn kencc_mark(&mut self, args: ast::ExprList) {
+        let written: Vec<ast::ExprId> = self.ast[args].to_vec();
+        self.unevaluated += 1;
+        for arg in written {
+            self.expr(arg);
+        }
+        self.unevaluated -= 1;
     }
 
     /// `__label__ a, b;`, which declares labels local to the block it is written in.

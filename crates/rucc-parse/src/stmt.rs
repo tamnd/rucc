@@ -195,7 +195,41 @@ impl Parser<'_> {
         if self.at_any_label() {
             return self.labeled(AttrList::EMPTY, start);
         }
+        if let Some(set) = self.at_kencc_mark() {
+            return self.kencc_mark(set, start);
+        }
         self.expr_stmt(start)
+    }
+
+    /// Whether the cursor is at kencc's `USED(` or `SET(`, and true for `SET`. They are keywords
+    /// in kencc and identifiers in C, so they are known here by their spelling and only under
+    /// `-fkencc`. A macro of the same name was expanded before the parser saw the tokens, so
+    /// `#ifdef USED` stays false, as it is under kencc.
+    fn at_kencc_mark(&self) -> Option<bool> {
+        if !self.cx.kencc || self.cursor.peek(1).punct() != Some(Punct::LParen) {
+            return None;
+        }
+        let name = self.cursor.current().ident()?;
+        if Some(name) == self.cx.interner.find("USED") {
+            Some(false)
+        } else if Some(name) == self.cx.interner.find("SET") {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// kencc's `USED(a, b);` and `SET(a);`, which `cc.y` reads as `LUSED '(' zelist ')' ';'`. The
+    /// list can be empty, and each item is an assignment expression, as in a call.
+    fn kencc_mark(&mut self, set: bool, start: Span) -> StmtId {
+        self.cursor.bump();
+        self.cursor.bump();
+        let args = self.call_arguments();
+        if !self.expect_punct(Punct::RParen) || !self.expect_punct(Punct::Semi) {
+            skip_to_statement_end(&mut self.cursor);
+        }
+        let span = self.span_from(start);
+        self.add_stmt(Stmt::Used { set, args }, span)
     }
 
     /// The statement a keyword introduces, and [`None`] when the keyword starts an expression
