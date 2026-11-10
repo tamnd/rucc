@@ -40,8 +40,8 @@ mod timing;
 
 pub use crate::x86_64::encode::{
     Addr, Encoding, Error, Evex, Fields, Fits, Holes, ImmSize, Kind, Length, Mode, OldNops, Opmask,
-    Size, Tuple, Value, encode, encode_in, encode_masked, encode_masked_in, encoding, encoding_in,
-    nops, nops_before_2_42, nops_i386, nops_in,
+    Size, Tuple, Value, cut_in, encode, encode_cut_in, encode_in, encode_masked, encode_masked_in,
+    encoding, encoding_in, nops, nops_before_2_42, nops_i386, nops_in,
 };
 pub use crate::x86_64::insts::{
     ADDRESSES, ALIGN, Address, Form, INSTS, LITERAL, LITERALS, TEMPLATE, TEMPLATE_MEM, address,

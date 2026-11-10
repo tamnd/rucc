@@ -29,8 +29,8 @@
 
 use rucc_object::Tls;
 use rucc_target::x86_64::{
-    Addr, Encoding, ImmSize, Kind, Length, Mode, Opmask, RAX, RBX, RCX, RDX, Value, Width,
-    encode_masked, encode_masked_in, encoding_in, gpr_name, gpr_named, xmm,
+    Addr, Encoding, ImmSize, Kind, Length, Mode, Opmask, RAX, RBX, RCX, RDX, Value, Width, cut_in,
+    encode_cut_in, encode_masked, encode_masked_in, encoding_in, gpr_name, gpr_named, xmm,
 };
 use rucc_target::{PhysReg, Segment};
 
@@ -633,21 +633,30 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
         }
     }
     let mut values: Vec<Value> = operands.iter().map(|op| value(op, STANDING)).collect();
-    let (mnemonic, row) = match spelled(word, &operands, &values, mode) {
+    let mut cut = false;
+    let (mnemonic, row) = match spelled(word, &operands, &values, mode, false) {
         Ok(found) => found,
         Err(_) if operands.iter().any(|op| matches!(op, Operand::Expr(_))) => {
             // An instruction of sixteen bits has a row for two bytes, which is the widest a name
             // may have there, and gas writes the name in those rather than in the byte row.
             values = operands.iter().map(|op| value(op, WORD_STANDING)).collect();
-            match spelled(word, &operands, &values, mode) {
+            match spelled(word, &operands, &values, mode, false) {
                 Ok(found) => found,
                 Err(_) => {
                     values = operands.iter().map(|op| value(op, 0)).collect();
-                    spelled(word, &operands, &values, mode)?
+                    spelled(word, &operands, &values, mode, false)?
                 }
             }
         }
-        Err(why) => return Err(why),
+        // gas writes a number too wide for every form of the instruction as its low bits, and
+        // warns that it shortened it. See [`encode_cut_in`].
+        Err(why) => match spelled(word, &operands, &values, mode, true) {
+            Ok(found) => {
+                cut = true;
+                found
+            }
+            Err(_) => return Err(why),
+        },
     };
     if mnemonic == "fnstsw"
         && operands.iter().any(|op| matches!(op, Operand::Reg(reg, _) if *reg != RAX))
@@ -657,8 +666,9 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     special(word, &mnemonic, &operands, mode)?;
 
     let mut bytes = Vec::with_capacity(16);
-    let mut holes = encode_masked_in(mode, &mnemonic, &values, mask, &mut bytes)
-        .map_err(|why| why.to_string())?;
+    let encode = if cut { encode_cut_in } else { encode_masked_in };
+    let mut holes =
+        encode(mode, &mnemonic, &values, mask, &mut bytes).map_err(|why| why.to_string())?;
     if mode == Mode::Bits32 && moffs(&mut bytes, &operands) {
         holes.disp = holes.disp.map(|at| at - 1);
     }
@@ -1308,11 +1318,14 @@ fn outright(operand: &mut Operand, mode: Mode) {
 /// The letter is worked out last of all, after the spellings that do not need one, because a
 /// mnemonic that already carries its width is allowed to name two widths of register at once and
 /// `movzbl %cl, %edx` is exactly that. Asking the operands how wide they are would refuse it.
+///
+/// With `cut` a number too wide for every row is taken by the row [`cut_in`] finds.
 fn spelled(
     word: &str,
     operands: &[Operand],
     values: &[Value],
     mode: Mode,
+    cut: bool,
 ) -> Result<(String, &'static Encoding), String> {
     // The byte form of the checksum step has two encodings, one into a thirty two bit register
     // and one into a sixty four bit register with REX.W. Both leave the same zero extended value
@@ -1338,7 +1351,9 @@ fn spelled(
             _ => None,
         })
         .unwrap_or(0);
-    let encoding = |name: &str, kinds: &[Kind], imm| encoding_in(mode, name, kinds, imm);
+    let encoding = |name: &str, kinds: &[Kind], imm| {
+        if cut { cut_in(mode, name, kinds, imm) } else { encoding_in(mode, name, kinds, imm) }
+    };
     let names = [Some(word.to_owned()), aliased(word, mode)];
     for name in names.iter().flatten() {
         if let Some(row) = encoding(name, &kinds, imm) {
@@ -3337,6 +3352,27 @@ mod tests {
         // product now, which nothing the kernel builds writes.
         let why = refused("vpdpbusd %zmm1, %zmm2, %zmm3");
         assert!(why.contains("vpdpbusd"), "{why}");
+    }
+
+    /// A number too wide for the instruction is written as its low bits in the general row, as GNU
+    /// as 2.42 writes it with a warning. FreeBSD's `atomic_clear_char` is `andb $-256` for a mask
+    /// of `0xff`. Eight bytes is not cut, since gas refuses that too.
+    #[test]
+    fn a_number_too_wide_for_the_instruction_is_cut_to_its_low_bits_as_gas_does() {
+        let lines: &[(&str, &[u8])] = &[
+            ("andb $-256,(%rdi)", &[0x80, 0x27, 0x00]),
+            ("andb $0x1ff,%cl", &[0x80, 0xe1, 0xff]),
+            ("addb $256,%al", &[0x04, 0x00]),
+            ("andw $0x1fffe,%cx", &[0x66, 0x81, 0xe1, 0xfe, 0xff]),
+            ("andw $-65536,%cx", &[0x66, 0x81, 0xe1, 0x00, 0x00]),
+            ("orl $0x1ffffffff,%ecx", &[0x81, 0xc9, 0xff, 0xff, 0xff, 0xff]),
+            ("movb $0x1234,(%rax)", &[0xc6, 0x00, 0x34]),
+            ("cmpb $-300,%dl", &[0x80, 0xfa, 0xd4]),
+        ];
+        for &(line, want) in lines {
+            assert_eq!(bytes(line), want, "{line}");
+        }
+        assert!(!refused("addq $0x123456789,%rax").is_empty());
     }
 
     /// The instructions FreeBSD's kernel writes by hand that had no row, each checked against

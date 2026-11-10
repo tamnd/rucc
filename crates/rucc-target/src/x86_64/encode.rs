@@ -360,6 +360,7 @@ pub enum Fits {
 /// Whether gas writes that number in that many bits without a word, which is `offset_in_range` in
 /// its tc-i386.c: either the number or its negation has nothing above those bits. So a byte takes
 /// everything from -255 to 255, and -256, which gas shortens to zero with a warning, is refused.
+/// [`encode_cut_in`] takes it, for a line an assembly source wrote.
 fn quietly(imm: i64, bits: u32) -> bool {
     let above = !((1i64 << bits) - 1);
     imm & above == 0 || imm.wrapping_neg() & above == 0
@@ -5564,6 +5565,52 @@ pub fn encode_masked_in(
     mask: Opmask,
     out: &mut Vec<u8>,
 ) -> Result<Holes, Error> {
+    encoded(mode, mnemonic, values, mask, false, out)
+}
+
+/// [`encode_masked_in`] for a line an assembly source wrote, where a number too wide for every row
+/// is written in the row [`cut_in`] finds, as its low bits.
+///
+/// gas does that and warns that it shortened the number. `ATOMIC_ASM(clear, char, "andb %b1,%0",
+/// "iq", ~v)` in FreeBSD's machine/atomic.h is `andb $-256` for a `v` of `0xff`, and gas writes
+/// `80 27 00` for it. The compiler's own instructions do not come here, so a lowering that makes
+/// a constant its instruction cannot hold is still refused.
+///
+/// # Errors
+///
+/// What [`encode_masked_in`] returns.
+pub fn encode_cut_in(
+    mode: Mode,
+    mnemonic: &str,
+    values: &[Value],
+    mask: Opmask,
+    out: &mut Vec<u8>,
+) -> Result<Holes, Error> {
+    encoded(mode, mnemonic, values, mask, true, out)
+}
+
+/// The row [`encoding_in`] finds, or, when no row holds the number, the first row that counts a
+/// number either way at a width of a byte, two bytes or four. That is the row gas writes such a
+/// number in, as its low bits at that width: `andw $0x1fffe, %cx` is `66 81 e1 fe ff`, not the
+/// sign extended byte form. A row of eight bytes is not one, since gas refuses `addq
+/// $0x123456789, %rax` rather than cut it.
+#[must_use]
+pub fn cut_in(mode: Mode, mnemonic: &str, args: &[Kind], imm: i64) -> Option<&'static Encoding> {
+    encoding_in(mode, mnemonic, args, imm).or_else(|| {
+        rows_in(mode, mnemonic, args)
+            .find(|row| matches!(row.fits, Fits::Byte | Fits::Word | Fits::Long))
+    })
+}
+
+/// [`encode_masked_in`], with the row [`cut_in`] finds when `cut` says so.
+fn encoded(
+    mode: Mode,
+    mnemonic: &str,
+    values: &[Value],
+    mask: Opmask,
+    cut: bool,
+    out: &mut Vec<u8>,
+) -> Result<Holes, Error> {
     if mode == Mode::Bits32 && ONLY64.contains(&mnemonic) {
         return Err(Error::Wide { mnemonic: mnemonic.to_owned() });
     }
@@ -5593,7 +5640,12 @@ pub fn encode_masked_in(
             _ => None,
         })
         .unwrap_or(0);
-    let Some(row) = encoding_in(mode, mnemonic, args, imm) else {
+    let found = if cut {
+        cut_in(mode, mnemonic, args, imm)
+    } else {
+        encoding_in(mode, mnemonic, args, imm)
+    };
+    let Some(row) = found else {
         // Which of the two it is says something different to whoever reads it. An instruction
         // with no row at all is a hole in this description, and one whose rows are all too narrow
         // is a lowering that produced a constant the instruction it chose cannot hold.
@@ -6504,6 +6556,30 @@ mod tests {
         assert!(
             encode("andw", &[Value::Imm(-65536), Value::Reg(RCX, Width::Word)], &mut out).is_err()
         );
+    }
+
+    /// What [`encode`] refuses as too wide, [`encode_cut_in`] writes as its low bits in the general
+    /// row, which is what gas writes with a warning. Eight bytes stays refused by both.
+    #[test]
+    fn a_number_too_wide_is_cut_only_for_a_line_an_assembly_source_wrote() {
+        let cut = |mnemonic: &str, values: &[Value]| {
+            let mut out = Vec::new();
+            encode_cut_in(Mode::Bits64, mnemonic, values, Opmask::default(), &mut out)
+                .map(|_| out.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "))
+        };
+        let mut out = Vec::new();
+        assert!(encode("andb", &[Value::Imm(-256), byte(RCX)], &mut out).is_err());
+        assert_eq!(cut("andb", &[Value::Imm(-256), byte(RCX)]).unwrap(), "80 e1 00");
+        let cx = word(RCX);
+        assert_eq!(cut("andw", &[Value::Imm(0x1_fffe), cx]).unwrap(), "66 81 e1 fe ff");
+        assert_eq!(
+            cut("orl", &[Value::Imm(0x1_ffff_ffff), long(RCX)]).unwrap(),
+            "81 c9 ff ff ff ff"
+        );
+        // A number that fits is written as it always was, in the short form when there is one.
+        assert_eq!(cut("andw", &[Value::Imm(-2), cx]).unwrap(), hex("andw", &[Value::Imm(-2), cx]));
+        let big = 0x1_2345_6789;
+        assert!(cut("addq", &[Value::Imm(big), quad(RAX)]).is_err());
     }
 
     #[test]
