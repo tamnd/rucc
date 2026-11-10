@@ -53,6 +53,7 @@ mod hook;
 mod instruction;
 mod intel;
 mod lines;
+pub mod plan9;
 mod rv;
 mod sixteen;
 mod source;

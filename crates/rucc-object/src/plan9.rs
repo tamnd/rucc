@@ -60,11 +60,31 @@ pub mod amd64 {
     pub const AEND: u16 = 335;
     /// `ASIGNAME`.
     pub const ASIGNAME: u16 = 338;
+    /// `ARET`, which is also the tail call when it has a constant and a symbol.
+    pub const ARET: u16 = 169;
 
     /// `D_AL`, the first of the byte registers.
     pub const D_AL: u8 = 0;
+    /// `D_CL`, the count of a shift.
+    pub const D_CL: u8 = 1;
     /// `D_AX`, the first of the 64-bit registers. `D_R15` is `D_AX` + 15.
     pub const D_AX: u8 = 16;
+    /// `D_CX`.
+    pub const D_CX: u8 = 17;
+    /// `D_DX`.
+    pub const D_DX: u8 = 18;
+    /// `D_BX`.
+    pub const D_BX: u8 = 19;
+    /// `D_SP`, the stack pointer.
+    pub const D_SP: u8 = 20;
+    /// `D_BP`, which holds the first argument.
+    pub const D_BP: u8 = 21;
+    /// `D_SI`.
+    pub const D_SI: u8 = 22;
+    /// `D_DI`.
+    pub const D_DI: u8 = 23;
+    /// `D_R8`.
+    pub const D_R8: u8 = 24;
     /// `D_AH`.
     pub const D_AH: u8 = 32;
     /// `D_F0`, the first of the x87 registers.
@@ -237,6 +257,21 @@ impl Machine {
             Machine::Arm64 => &arm64::NAMES,
         };
         names.get(usize::from(op)).copied()
+    }
+
+    /// The opcode of a name such as `AMOVQ`, or `None` for a name the machine does not have.
+    #[must_use]
+    pub fn opcode(self, name: &str) -> Option<u16> {
+        static AMD64: std::sync::OnceLock<Map<&'static str, u16>> = std::sync::OnceLock::new();
+        static ARM64: std::sync::OnceLock<Map<&'static str, u16>> = std::sync::OnceLock::new();
+        let (cell, names): (_, &'static [&'static str]) = match self {
+            Machine::Amd64 => (&AMD64, &amd64::NAMES),
+            Machine::Arm64 => (&ARM64, &arm64::NAMES),
+        };
+        let map = cell.get_or_init(|| {
+            names.iter().enumerate().map(|(op, &name)| (name, op as u16)).collect()
+        });
+        map.get(name).copied()
     }
 
     const fn aname(self) -> u16 {

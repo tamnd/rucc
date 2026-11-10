@@ -1893,6 +1893,46 @@ fn generate(
         // An executable is an object as far as this gets: one is what each file of a link
         // contributes, and the linker is what turns them into the other. An archive is the same
         // again, with the archive writer in place of the linker.
+        EmitKind::Object | EmitKind::Archive | EmitKind::Executable
+            if target.object_format == rucc_target::ObjectFormat::Plan9 =>
+        {
+            // A Plan 9 object holds instructions and not machine code, so it is made from the
+            // listing. The linker on Plan 9 selects the encodings and lays out the text.
+            let listing = rucc_asm::print(
+                &funcs,
+                &globals,
+                &aliases,
+                names,
+                target,
+                false,
+                output(opts, target, indirect),
+            )
+            .map_err(refused)?;
+            let object = match target.tuple.arch() {
+                Arch::X86_64 => {
+                    let directory = std::env::current_dir()
+                        .ok()
+                        .and_then(|dir| dir.to_str().map(str::to_owned));
+                    rucc_asm::plan9::amd64(&listing, origin.name, directory.as_deref()).map_err(
+                        |trouble| {
+                            vec![unsupported(&format!(
+                                "a Plan 9 object, whose listing stopped on line {}: {}",
+                                trouble.line, trouble.why
+                            ))]
+                        },
+                    )?
+                }
+                _ => {
+                    return Err(vec![unsupported(&format!(
+                        "a Plan 9 object for {}, which is not written yet",
+                        target.tuple
+                    ))]);
+                }
+            };
+            let bytes = rucc_object::plan9::write_plan9(&object)
+                .map_err(|why| vec![internal(&format!("a Plan 9 object: {why:?}"))])?;
+            Ok(Artifact::Object { bytes, defines: Vec::new() })
+        }
         EmitKind::Object | EmitKind::Archive | EmitKind::Executable => {
             if opts.save_temps.wanted() {
                 let listing = rucc_asm::print(
