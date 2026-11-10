@@ -7,6 +7,9 @@
 //! left empty by the caller. A parameter whose address is taken lives in its slot, because the
 //! `va_start` of the Plan 9 `u.h` steps from `&start` to the next slot. No function keeps a frame
 //! pointer, because `rbp` holds the first argument and no register survives a call.
+//!
+//! On arm64 the register is `x0`, and the first slot is at `8(SP)` at the call, because `7c` keeps
+//! the word at `0(SP)` for the callee. A function may keep a frame pointer there.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -22,9 +25,14 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 
 /// Whether the compiler took the source, the assembly it wrote and what it said.
 fn compile(what: &str, level: &str, source: &str) -> (bool, String, String) {
-    let path = fixture(what, source);
+    compile_for("x86_64-plan9", what, level, source)
+}
+
+/// The same as [`compile`] for another Plan 9 target.
+fn compile_for(target: &str, what: &str, level: &str, source: &str) -> (bool, String, String) {
+    let path = fixture(&format!("{target}-{what}"), source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
-        .args(["--target=x86_64-plan9", "-fkencc", level, "-S", "-o", "-"])
+        .args([&format!("--target={target}"), "-fkencc", level, "-S", "-o", "-"])
         .arg(&path)
         .output()
         .expect("the compiler is built before its own tests run");
@@ -101,4 +109,38 @@ fn a_frame_only_a_frame_pointer_reaches_is_refused() {
     assert!(!ok, "a variable length array was compiled");
     assert!(err.contains("needs a frame pointer"), "{err}");
     assert!(!err.contains("not lowered yet"), "{err}");
+}
+
+#[test]
+fn on_arm64_the_first_integer_goes_in_x0_and_the_slots_start_at_8() {
+    for level in ["-O0", "-O2"] {
+        let (ok, asm, err) = compile_for("aarch64-plan9", "call", level, SOURCE);
+        assert!(ok, "{level}: {err}");
+        let c = body(&asm, "c");
+        assert!(c.contains(&"mov w0, #1"), "{level}: {c:?}");
+        assert!(c.iter().any(|line| line.ends_with(", [sp, #16]")), "{level}: {c:?}");
+        assert!(c.iter().any(|line| line.ends_with(", [sp, #24]")), "{level}: {c:?}");
+        assert!(!c.iter().any(|line| line.ends_with(", [sp, #8]")), "{level}: {c:?}");
+    }
+}
+
+#[test]
+fn on_arm64_a_parameter_whose_address_is_taken_lives_in_its_slot() {
+    let (ok, asm, err) = compile_for("aarch64-plan9", "home", "-O2", SOURCE);
+    assert!(ok, "{err}");
+    let vf = body(&asm, "vf");
+    assert!(vf.contains(&"str x0, [sp, #8]"), "{vf:?}");
+    assert!(vf.iter().any(|line| line.ends_with(", [sp, #16]")), "{vf:?}");
+}
+
+#[test]
+fn on_arm64_a_structure_comes_back_through_the_first_argument() {
+    let source = "struct S { long a, b, c; };\nextern long f(long);\n\
+                  struct S give(int x) { struct S s; s.a = f(x); s.b = 2; s.c = 3; return s; }\n";
+    let (ok, asm, err) = compile_for("aarch64-plan9", "sret", "-O2", source);
+    assert!(ok, "{err}");
+    let give = body(&asm, "give");
+    assert!(!give.iter().any(|line| line.contains("x8")), "{give:?}");
+    assert!(give.last().is_some_and(|line| line.starts_with("ldp x29")), "{give:?}");
+    assert!(give.iter().any(|line| line.starts_with("mov x0, ")), "{give:?}");
 }

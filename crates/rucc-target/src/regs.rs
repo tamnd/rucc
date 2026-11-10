@@ -1495,4 +1495,19 @@ mod tests {
         assert_eq!(places.integer(8), Where::Stack(16));
         assert_eq!(places.size(), 24);
     }
+
+    /// On arm64 the register is `x0` and the area starts one word up, where `7c` puts the first
+    /// slot, so a register argument leaves the word at 8 empty.
+    #[test]
+    fn the_slots_of_kencc_on_arm64_start_one_word_up() {
+        let regs = &crate::aarch64::PLAN9;
+        let mut places = Places::new(regs);
+        assert_eq!(places.integer(8), Where::Reg(crate::aarch64::x(0)));
+        assert_eq!(places.integer(4), Where::Stack(16));
+        assert_eq!(places.float(8), Where::Stack(24));
+        assert_eq!(places.size(), 32);
+        let mut places = Places::new(regs);
+        assert_eq!(places.float(8), Where::Stack(8));
+        assert_eq!(places.integer(8), Where::Stack(16));
+    }
 }

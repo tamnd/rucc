@@ -872,6 +872,74 @@ pub static WINDOWS: CallRegs = CallRegs {
     ..aapcs64(&rucc_abi::abis::WINDOWS_ARM64, 0, crate::VaList::CharPointer)
 };
 
+static KENCC_INT_ARGS: [PhysReg; 1] = [x(0)];
+static KENCC_INT_RETURNS: [PhysReg; 1] = [x(0)];
+static KENCC_FP_RETURNS: [PhysReg; 1] = [v(0)];
+static KENCC_SAVED: [PhysReg; 0] = [];
+// Every register `7c` may write. Left out: `x16` and `x17`, which `7l` writes between any two
+// instructions to reach a far address or make a large constant; `x26` and `x27`, which hold
+// `extern register` variables, and the kernel keeps `m` and `up` in them; `x28`, which is the
+// static base that `_main` sets and nothing may change; the frame pointer, the link register and
+// the stack pointer. `x18` has no job on Plan 9 and is handed out.
+static KENCC_INT_ORDER: [PhysReg; 24] = [
+    x(0),
+    x(1),
+    x(2),
+    x(3),
+    x(4),
+    x(5),
+    x(6),
+    x(7),
+    x(8),
+    x(9),
+    x(10),
+    x(11),
+    x(12),
+    x(13),
+    x(14),
+    x(15),
+    x(18),
+    x(19),
+    x(20),
+    x(21),
+    x(22),
+    x(23),
+    x(24),
+    x(25),
+];
+
+/// Where a call of kencc on Plan 9 puts things, per 08.2 of the rucc-plan9 plan.
+///
+/// The first argument is in `x0` when it is an integer or a pointer, and every argument has an 8
+/// byte slot, see [`CallRegs::slotted`]. `7c` puts the first slot at `8(SP)` at the call, which is
+/// one word of shadow space, so the slots start there. A call keeps no register, so a value live
+/// across one is in memory. A structure comes back through the address passed as the first
+/// argument and not through `x8`. There is no red zone, no stack protector and no profiling hook
+/// that kencc code would know about, and a `va_list` is a `char *` that walks the slots.
+///
+/// A function may keep a frame pointer, unlike on amd64, because `x29` holds no argument. `7c`
+/// never writes it, so the chain stops at the first kencc frame.
+pub static PLAN9: CallRegs = CallRegs {
+    int_args: &KENCC_INT_ARGS,
+    sse_args: &[],
+    shared_positions: true,
+    slotted: true,
+    int_returns: &KENCC_INT_RETURNS,
+    sse_returns: &KENCC_FP_RETURNS,
+    int_saved: &KENCC_SAVED,
+    sse_saved: &KENCC_SAVED,
+    sse_kept: None,
+    int_order: &KENCC_INT_ORDER,
+    shadow: 8,
+    sret: None,
+    conventions: crate::Conventions(&PLAN9_CONVENTIONS),
+    ..aapcs64(&rucc_abi::abis::KENCC_ARM64, 0, crate::VaList::CharPointer)
+};
+
+/// The one convention a function on Plan 9 may have.
+static PLAN9_CONVENTIONS: [(rucc_abi::Convention, &CallRegs); 1] =
+    [(rucc_abi::Convention::Target, &PLAN9)];
+
 const fn aapcs64(
     abi: &'static rucc_abi::AbiDescription,
     red_zone: u32,

@@ -317,6 +317,17 @@ pub static KENCC_AMD64: AbiDescription = AbiDescription {
     cleanup: Cleanup::Caller,
 };
 
+/// The convention of kencc on arm64, which `7c` follows on Plan 9.
+///
+/// Design: tamnd/rucc#4154, and 08.2 of the rucc-plan9 plan.
+///
+/// The same rules as [`KENCC_AMD64`] with `R0` for the register. The first argument goes in `R0`
+/// when it is an integer or a pointer, every argument has an 8 byte slot, and a structure goes in
+/// its slots and comes back through the address passed first. A scalar comes back in `R0` or
+/// `F0`. The slots start one word above the stack pointer at the call, which is
+/// `CallRegs::shadow` in `rucc-target`.
+pub static KENCC_ARM64: AbiDescription = AbiDescription { name: "kencc arm64", ..KENCC_AMD64 };
+
 /// The RISC-V LP64D psABI.
 ///
 /// Two eightbytes for an aggregate that fits, an address for one that does not, and one rule
@@ -960,6 +971,7 @@ pub fn for_convention(
 pub static DESCRIBED: &[&AbiDescription] = &[
     &SYSV_AMD64,
     &KENCC_AMD64,
+    &KENCC_ARM64,
     &AAPCS64,
     &DARWIN_ARM64,
     &WINDOWS_ARM64,
@@ -1016,6 +1028,7 @@ pub fn for_target(target: TargetTuple) -> Option<&'static AbiDescription> {
         // structure comes back in registers there with no flag. NetBSD keeps the System V rule.
         (Arch::X86, Os::FreeBsd | Os::OpenBsd) => &I386_SYSV_REG_STRUCT,
         (Arch::X86, _) => &I386_SYSV,
+        (Arch::Aarch64, Os::Plan9) => &KENCC_ARM64,
         (Arch::Aarch64, os) if os.is_darwin() => &DARWIN_ARM64,
         // AAPCS64 with a different variadic rule, per section 6.1, and not AAPCS64 itself, which
         // would be the almost right answer this file must not give.
