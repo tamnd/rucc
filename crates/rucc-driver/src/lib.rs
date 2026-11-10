@@ -46,6 +46,7 @@ pub mod lto;
 mod map;
 pub mod msvc;
 mod notice;
+pub mod pcc;
 pub mod phase;
 pub mod preprocess;
 pub mod schedule;
@@ -6012,7 +6013,8 @@ pub fn target_from_program(program: &str) -> Option<String> {
 /// which writes an import library and compiles nothing.
 ///
 /// The name `6c`, `7c` or `8c`, or `--driver=kencc` as the first argument, is [`kencc::run`],
-/// which reads the command line of the Plan 9 compilers.
+/// which reads the command line of the Plan 9 compilers. The name `pcc`, or `--driver=pcc`, is
+/// [`pcc::run`], which reads the command line of the APE compiler.
 pub fn run_as(program: &str, args: &[String]) -> i32 {
     if dlltool::is_dlltool(program) {
         return dlltool::run(program, args);
@@ -6025,6 +6027,12 @@ pub fn run_as(program: &str, args: &[String]) -> i32 {
     }
     if args.first().is_some_and(|first| first == "--driver=kencc") {
         return kencc::run(program, &args[1..]);
+    }
+    if pcc::is_pcc(program) {
+        return pcc::run(args);
+    }
+    if args.first().is_some_and(|first| first == "--driver=pcc") {
+        return pcc::run(&args[1..]);
     }
     match target_from_program(program) {
         Some(triple) => {

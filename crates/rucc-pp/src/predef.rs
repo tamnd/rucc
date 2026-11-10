@@ -110,6 +110,10 @@ pub struct Predef {
     /// Whether the unit is in the kencc dialect, which is `-fkencc`. kencc defines no macro, so
     /// the set is empty and only the command line defines macros.
     pub kencc: bool,
+    /// Whether a kencc unit goes through the ANSI C preprocessor, which is `-p` or
+    /// `-fno-kencc-preprocessor`. Of the macros that `/bin/cpp` defines, `__DATE__` and
+    /// `__TIME__` are then in the set. `__LINE__` and `__FILE__` are always defined.
+    pub kencc_cpp: bool,
     /// Whether the GNU extensions are on, which is `-std=gnu23` rather than `-std=c23`. It
     /// decides `__STRICT_ANSI__` and the unarmoured `linux` and `unix` macros.
     pub gnu_extensions: bool,
@@ -228,6 +232,7 @@ impl Predef {
         Predef {
             std: Std::default(),
             kencc: false,
+            kencc_cpp: false,
             gnu_extensions: true,
             gnu89_inline: false,
             gnuc: GnucVersion::default(),
@@ -280,6 +285,7 @@ impl Predef {
         Predef {
             std: opts.std,
             kencc: opts.kencc,
+            kencc_cpp: opts.kencc && opts.ansi_preprocessor,
             gnu_extensions: opts.gnu_extensions,
             gnu89_inline: opts.gnu89_inline,
             gnuc: opts.gnuc,
@@ -363,6 +369,14 @@ impl Defs {
             self.flag(name);
         }
     }
+}
+
+/// The predefined set of `/bin/cpp` in Plan 9, as the text of a file. It has the two stamps.
+pub(crate) fn kencc_cpp(opts: &Predef) -> String {
+    let mut d = Defs::new();
+    d.set("__DATE__", &format!("\"{}\"", opts.timestamp.date));
+    d.set("__TIME__", &format!("\"{}\"", opts.timestamp.time));
+    d.text
 }
 
 /// The whole predefined set for a target, as the text of a file.

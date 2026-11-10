@@ -1424,12 +1424,19 @@ impl Checker<'_> {
                 // The second of two parameters with one name, which is an error and still an
                 // object the call passes. It goes in the list without the name, since the name
                 // means the first one and the list has to stay as long as the types are.
+                // kencc does not check the names of a prototype, and mothra's panel.h has
+                // `plmenubar(Panel *pl, int, int, Icon *, Panel *pl, Icon *, ...)`.
                 Some(name) if self.scopes.lookup_here(name).is_some() => {
-                    let spelled = self.text(name).to_owned();
-                    self.report(
-                        Diagnostic::error(format!("redefinition of parameter '{spelled}'"), span)
+                    if !self.cx.kencc {
+                        let spelled = self.text(name).to_owned();
+                        self.report(
+                            Diagnostic::error(
+                                format!("redefinition of parameter '{spelled}'"),
+                                span,
+                            )
                             .with_code("E0545"),
-                    );
+                        );
+                    }
                     self.unnamed_object(object, span)
                 }
                 Some(name) => {

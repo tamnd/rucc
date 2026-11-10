@@ -430,6 +430,18 @@ impl<'a> Checker<'a> {
             Kind::Array { .. } if w.is_static && self.array_literal(expr).is_some() => {
                 self.literal_init(w, place, expr, span)
             }
+            // kencc leaves out the braces around the first element as it does inside a list,
+            // so the value goes to element 0. ppp.c has `Block b[1] = *allocb(Buflen);`.
+            kind @ Kind::Array { .. } if self.cx.kencc => match self.sub(place, kind, 0) {
+                Some(first) => {
+                    self.whole(w, first, expr, span);
+                    1
+                }
+                None => {
+                    self.excess(w, kind, span);
+                    0
+                }
+            },
             Kind::Array { .. } => {
                 // There is no value of array type, so a string literal is the only thing that
                 // can be written here without braces, and a compound literal is the one more

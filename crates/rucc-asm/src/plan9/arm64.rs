@@ -222,6 +222,18 @@ fn register(name: &str) -> Option<Op> {
     }
 }
 
+/// Whether operand `at` of `mnemonic` is always a symbol or a label. A C program can name a
+/// function or an object as a register, as games/gba/ppu.c does with `sp` and cmd/map's hex.c
+/// does with `w2`, and in these places the name is the symbol.
+fn names_a_symbol(mnemonic: &str, at: usize) -> bool {
+    match mnemonic {
+        "adrp" | "cbz" | "cbnz" => at == 1,
+        "b" | "bl" => at == 0,
+        "tbz" | "tbnz" => at == 2,
+        _ => mnemonic.starts_with("b.") && at == 0,
+    }
+}
+
 /// Split operands at the commas that are not in brackets.
 fn split(text: &str) -> Vec<&str> {
     let mut parts = Vec::new();
@@ -561,8 +573,14 @@ impl Out<'_> {
                             ));
                         }
                         _ => {
-                            let ops: Vec<Op> =
-                                ops.iter().map(|o| operand(o, number)).collect::<Result<_, _>>()?;
+                            let ops: Vec<Op> = ops
+                                .iter()
+                                .enumerate()
+                                .map(|(at, o)| match names_a_symbol(mnemonic, at) {
+                                    true => Ok(Op::Name((*o).to_owned())),
+                                    false => operand(o, number),
+                                })
+                                .collect::<Result<_, _>>()?;
                             self.insn(mnemonic, &ops, number, frame)?;
                         }
                     }
@@ -1227,6 +1245,17 @@ mod tests {
         assert_eq!((p[1].from.ty, p[1].from.name), (a7::D_CONST, a7::D_STATIC));
         assert_eq!(p[1].from.sym.as_deref(), Some("s"));
         assert_eq!((p[2].from.ty, p[2].from.name, p[2].from.offset), (a7::D_OREG, a7::D_EXTERN, 8));
+    }
+
+    #[test]
+    fn a_symbol_with_the_name_of_a_register_is_a_symbol() {
+        let listing = "\t.text\n\t.globl f\nf:\n\tstp x29, x30, [sp, #-16]!\n\tmov x29, sp\n\
+                       \tadrp x0, sp\n\tldr w0, [x0, :lo12:sp]\n\tbl w2\n\tmov sp, x29\n\
+                       \tldp x29, x30, [sp], #16\n\tret\n";
+        let p = progs(listing);
+        assert_eq!(ops(listing), ["ATEXT", "AMOVWU", "ABL", "ARETURN", "AEND"]);
+        assert_eq!(p[1].from.sym.as_deref(), Some("sp"));
+        assert_eq!(p[2].to.sym.as_deref(), Some("w2"));
     }
 
     #[test]

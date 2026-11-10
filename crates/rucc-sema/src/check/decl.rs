@@ -1268,6 +1268,18 @@ impl Checker<'_> {
             // After the initializer, because `int a[] = { 1, 2 }` has a size and an `int a[]`
             // with nothing after it does not, and the initializer is what tells them apart.
             declared.ty = self.tast[id].ty;
+            // kencc gives an automatic array of no size the width 0 and no diagnostic, as `adecl`
+            // in `cc/dcl.c` does. tr2post's chartab.c has `struct charent *cp[];` in a function.
+            if self.cx.kencc
+                && declared.duration == StorageDuration::Automatic
+                && let TypeKind::Array { elem, len: ArrayLen::Unknown } =
+                    self.types.kind(self.types.canonical(declared.ty))
+            {
+                declared.ty = self.types.array(elem, ArrayLen::Fixed(0));
+                let mut node = self.tast[id].clone();
+                node.ty = declared.ty;
+                self.tast.set_decl(id, node);
+            }
             self.check_storage_size(&declared);
         }
         if kind == DeclKind::Object {
@@ -2032,7 +2044,17 @@ impl Checker<'_> {
             );
             return previous;
         }
-        let ty = composite(&mut self.types, node.ty, declared.ty).unwrap_or(declared.ty);
+        let ty = if self.cx.kencc
+            && declared.state == Definition::Defined
+            && self.drops_the_parameters(node.ty, declared.ty)
+        {
+            // kencc defines the function with the type that the definition writes, so a
+            // definition with `()` takes no parameters whatever the prototype said. games/mandel.c
+            // has `void threadmain()` where thread.h declares `void threadmain(int, char *[])`.
+            declared.ty
+        } else {
+            composite(&mut self.types, node.ty, declared.ty).unwrap_or(declared.ty)
+        };
         // Which reading of `inline` a name is under is a fact about the name, so one declaration
         // asking for GNU's puts every declaration of it under GNU's, including the ones already
         // read. gcc refuses a name whose declarations disagree about that, and this takes the
@@ -2632,6 +2654,20 @@ impl Checker<'_> {
             None => "static assertion failed".to_owned(),
         };
         self.report(Diagnostic::error(message, span).with_code("E0613"));
+    }
+
+    /// True when `defined` is a function written with `()` and no parameters, and `declared` is
+    /// a prototype that has parameters.
+    fn drops_the_parameters(&self, declared: TypeId, defined: TypeId) -> bool {
+        let kinds = (
+            self.types.kind(self.types.canonical(declared)),
+            self.types.kind(self.types.canonical(defined)),
+        );
+        let (TypeKind::Function(before), TypeKind::Function(now)) = kinds else {
+            return false;
+        };
+        let (before, now) = (self.types.signature(before), self.types.signature(now));
+        before.prototyped && !before.params.is_empty() && !now.prototyped && now.params.is_empty()
     }
 
     /// The diagnostic for two declarations of one name that do not describe the same thing.

@@ -811,6 +811,9 @@ impl<'a> Run<'a> {
         // `[1]`, and matching that is part of what makes `-E` output diffable against GCC's,
         // per `spec/05-preprocessor.md` section 5.6.
         let mut owed = false;
+        // Whether the last thing written was an argument, which kencc joins with the
+        // punctuator after it.
+        let mut after_argument = false;
         while at < is.len() {
             let tok = is[at];
 
@@ -911,6 +914,16 @@ impl<'a> Run<'a> {
                     let placemarker = [Tok::placemarker_at(tok.span)];
                     let value = if raw.is_empty() { &placemarker[..] } else { raw };
                     emit(&mut os, value, tok, &mut owed);
+                } else if self.kencc {
+                    let value = args.expanded(idx, self).to_vec();
+                    let start = os.len();
+                    emit(&mut os, &value, tok, &mut owed);
+                    if !tok.flags.has(TokenFlags::LEADING_SPACE) && os.len() > start {
+                        self.kencc_join(&mut os, start);
+                    }
+                    after_argument = os.len() > start;
+                    at += 1;
+                    continue;
                 } else {
                     emit(&mut os, args.expanded(idx, self), tok, &mut owed);
                 }
@@ -919,9 +932,35 @@ impl<'a> Run<'a> {
             }
 
             emit_plain(&mut os, tok, &mut owed);
+            if after_argument && !tok.flags.has(TokenFlags::LEADING_SPACE) {
+                let at = os.len() - 1;
+                self.kencc_join(&mut os, at);
+            }
+            after_argument = false;
             at += 1;
         }
         os
+    }
+
+    /// Under kencc, join the punctuators `os[at - 1]` and `os[at]` when they make one, as
+    /// `+` and `=` make `+=`.
+    ///
+    /// kencc expands a macro as text and reads the text again, so an argument and the body next
+    /// to it with no space between them are read as one. games/life.c has
+    /// `#define neighbour(di, dj, op) lp[(di)*NLIFE+(dj)] op= 2` and then `neighbour(-1, -1, +)`.
+    /// Only punctuators are joined, which is all that the 9front sources need.
+    fn kencc_join(&mut self, os: &mut Vec<Tok>, at: usize) {
+        if at == 0 || at >= os.len() {
+            return;
+        }
+        let (lhs, rhs) = (os[at - 1], os[at]);
+        let punct = |t: Tok| matches!(t.kind, PpTokenKind::Punct(_));
+        if !punct(lhs) || !punct(rhs) || lhs.is_placemarker() || rhs.is_placemarker() {
+            return;
+        }
+        if let Some(joined) = self.join(lhs, rhs) {
+            os.splice(at - 1..=at, [joined]);
+        }
     }
 
     /// What a `__VA_OPT__(...)` group stands for: its substituted contents when the variadic
@@ -1005,21 +1044,17 @@ impl<'a> Run<'a> {
     /// translation unit here would stop a build over something that in practice never
     /// reaches the parser.
     fn paste(&mut self, lhs: Tok, rhs: Tok, op: Span) -> Option<Tok> {
+        if let Some(joined) = self.join(lhs, rhs) {
+            return Some(joined);
+        }
+        if self.assembly {
+            return None;
+        }
         let mut text = String::new();
         self.spell(lhs, &mut text);
         let split = text.len();
         self.spell(rhs, &mut text);
-
-        let (tokens, _) = tokenize(text.as_bytes(), 0, Options::new(), self.interner);
-        let single = tokens.len() == 2
-            && tokens[0].kind != PpTokenKind::Eof
-            && tokens[1].kind == PpTokenKind::Eof
-            && tokens[0].span.lo == 0
-            && tokens[0].span.hi as usize == text.len();
-        if !single && self.assembly {
-            return None;
-        }
-        if !single {
+        {
             let d = Diagnostic::error(
                 format!(
                     "pasting `{}` and `{}` does not give a valid preprocessing token",
@@ -1033,6 +1068,23 @@ impl<'a> Run<'a> {
             .note("the right operand is here", rhs.span);
             let d = self.in_expansions(d, self.current, op);
             self.diagnostics.push(d);
+            None
+        }
+    }
+
+    /// The one token that the spellings of `lhs` and `rhs` make together, or `None` when they
+    /// do not make exactly one.
+    fn join(&mut self, lhs: Tok, rhs: Tok) -> Option<Tok> {
+        let mut text = String::new();
+        self.spell(lhs, &mut text);
+        self.spell(rhs, &mut text);
+        let (tokens, _) = tokenize(text.as_bytes(), 0, Options::new(), self.interner);
+        let single = tokens.len() == 2
+            && tokens[0].kind != PpTokenKind::Eof
+            && tokens[1].kind == PpTokenKind::Eof
+            && tokens[0].span.lo == 0
+            && tokens[0].span.hi as usize == text.len();
+        if !single {
             return None;
         }
         Some(Tok {
