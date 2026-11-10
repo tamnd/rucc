@@ -2191,7 +2191,10 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // read: `-dM` prints what the macro is, and a program that undefines `__LDBL_DECIMAL_DIG__`
     // takes this one with it. gcc writes the number.
     d.set("__DECIMAL_DIG__", long_double.decimal_dig);
-    if target.has_decimal_float {
+    // gcc has the decimal types on AArch64 from gcc 14, so a persona older than that says none
+    // of their macros there.
+    let aarch64 = target.tuple.arch() == tuple::Arch::Aarch64;
+    if target.has_decimal_float && !(aarch64 && gnuc < 14) {
         decimals(d);
     }
 }
@@ -2301,7 +2304,10 @@ fn libgcc(d: &mut Defs, target: &TargetInfo) {
 /// negative exponent and the suffix on every constant. `__DEC64X_*` is not here: `_Decimal64x` has
 /// a suffix of its own the lexer does not read yet, so the macros would be constants nothing can
 /// use. `__DEC_EVAL_METHOD__` is not here, because gcc says it on every target.
+/// `__DECIMAL_BID_FORMAT__` says the encoding is the binary integer one, which it is on every
+/// row that has the types.
 fn decimals(d: &mut Defs) {
+    d.set("__DECIMAL_BID_FORMAT__", "1");
     let rows = [
         ("32", "DF", "7", "(-94)", "97", "1E-95", "9.999999E96", "1E-6", "0.000001E-95"),
         (
