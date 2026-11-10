@@ -127,6 +127,11 @@ pub struct Flags {
     /// as `lla`, rather than read out of the global offset table. A file built with `-fno-PIE`
     /// is read that way, and the kernel's `head.S` is one.
     pub nopic: bool,
+    /// gas on RISC-V run with `-mrelax`, its default, where the linker may shorten what the object
+    /// holds. Every instruction gas marks for that gets an `R_RISCV_RELAX`, a branch is a relocation
+    /// even to a label beside it, a distance between two places in code is a pair of relocations,
+    /// and an alignment in code is padding the linker cuts down. See [`Reader::relaxed`].
+    pub relax: bool,
 }
 
 /// The same, with what the command line said to the assembler.
@@ -222,6 +227,8 @@ pub fn read_with_debug(
             noexecstack: flags.noexecstack,
             before_2_42: flags.before_2_42,
             nopic: flags.nopic,
+            relax: flags.relax && riscv,
+            relax_now: flags.relax && riscv,
             debug: debug.cloned(),
             generating: debug.is_some(),
             ..Reader::default()
@@ -459,6 +466,9 @@ struct Fixup {
     /// The relocation `.reloc` asked for by a name that fills no bytes here, written as the file
     /// said it rather than worked out. See [`Reader::reloc`].
     named: Option<Reference>,
+    /// Whether the instruction these bytes are in may be shortened by the linker, which gives the
+    /// relocation for it an `R_RISCV_RELAX` beside it. See [`Flags::relax`].
+    relax: bool,
     line: usize,
 }
 
@@ -704,6 +714,22 @@ struct Reader {
     before_2_42: bool,
     /// [`Flags::nopic`].
     nopic: bool,
+    /// [`Flags::relax`], which is what the object is for as a whole.
+    relax: bool,
+    /// Whether the instructions being read now may be relaxed, which `.option norelax` turns off
+    /// and `.option relax` back on for a stretch of the file. Only under [`Flags::relax`].
+    relax_now: bool,
+    /// Whether `.option rvc` is in force, which makes two bytes the size of the smallest
+    /// instruction for an alignment to leave room for.
+    rvc: bool,
+    /// What each `.option push` put away, for `.option pop` to bring back.
+    options: Vec<(bool, bool, bool)>,
+    /// How many places the reader has made a label for under [`Flags::relax`], which numbers the
+    /// next. Each is a `.L0 ` in the object.
+    fakes: usize,
+    /// Every `.uleb128` of two names under [`Flags::relax`], by where it is, for the end of the
+    /// file to give a pair of relocations. See [`Reader::relaxed_lebs`].
+    lebs: Vec<(usize, u64, Sum)>,
     /// Where each run of padding in code went under [`Flags::before_2_42`], as a piece, how far
     /// into it and how long, for the end of the file to write once the mode it ends in is known.
     old_padding: Vec<(usize, u64, usize)>,
@@ -754,6 +780,7 @@ impl Reader {
             self.go(0);
         }
         self.lines.unit = if self.aarch64 { 4 } else { 1 };
+        self.lines.relaxed = self.relax;
         self.start_debug();
         let mut commenting = false;
         for (index, raw) in text.lines().enumerate() {
@@ -1585,6 +1612,7 @@ impl Reader {
                 field: None,
                 leb: None,
                 named: None,
+                relax: false,
                 line: self.line,
             });
         }
@@ -1603,6 +1631,7 @@ impl Reader {
                 field: None,
                 leb: None,
                 named: None,
+                relax: false,
                 line: self.line,
             });
         }
@@ -1656,6 +1685,7 @@ impl Reader {
             field: Some(Field::A64(field)),
             leb: None,
             named: None,
+            relax: false,
             line: self.line,
         });
         Ok(())
@@ -1803,6 +1833,9 @@ impl Reader {
         for word in &encoded.words {
             self.put(&word.to_le_bytes())?;
         }
+        if self.relax {
+            self.rv_pieces(part, at, &encoded, line.symbol.is_some());
+        }
         let Some(name) = line.symbol.filter(|_| !encoded.fixups.is_empty()) else {
             return Ok(());
         };
@@ -1813,13 +1846,23 @@ impl Reader {
             self.sym(&name);
             What::Symbol(name)
         };
+        let macro_slot = matches!(mnemonic, "la" | "lga");
         let mut high = None;
         for &(index, field) in &encoded.fixups {
             let word = at + 4 * index as u64;
             let low = matches!(field, riscv64::Fixup::PcrelLo12I | riscv64::Fixup::PcrelLo12S);
+            // The label gas makes for the `auipc` is a `.L0 ` when the object is relaxed, and the
+            // linker finds it by that symbol rather than by a section and an offset.
+            let relaxed = self.relax;
             let mut terms = if low {
                 // The `auipc` is the word in front, which is where the label goes.
-                let label = high.get_or_insert_with(|| format!(".Lpcrel_hi{}", self.pcrel_labels));
+                let label = high.get_or_insert_with(|| {
+                    if relaxed {
+                        format!("\u{1}pcrel{}", self.pcrel_labels)
+                    } else {
+                        format!(".Lpcrel_hi{}", self.pcrel_labels)
+                    }
+                });
                 let sym = self.sym(label);
                 self.syms[sym].at = Held::In { part, offset: word - 4 };
                 vec![Term { coeff: 1, what: What::Symbol(label.clone()) }]
@@ -1841,6 +1884,7 @@ impl Reader {
                 field: Some(Field::Rv(field)),
                 leb: None,
                 named: None,
+                relax: self.relax_now && rv_relaxable(field, macro_slot),
                 line: self.line,
             });
         }
@@ -1848,6 +1892,46 @@ impl Reader {
             self.pcrel_labels += 1;
         }
         Ok(())
+    }
+
+    /// Where gas would cut the section around one RISC-V instruction under [`Flags::relax`].
+    ///
+    /// The places on either side of an instruction the linker may shorten or grow are not a fixed
+    /// distance apart, and gas starts a new piece of the section after each, so a distance across
+    /// one is a pair of relocations and a distance inside one piece is a number. That is after any
+    /// word with the upper half of an address or of a number, after a `call` or a `tail`, which is
+    /// after the `jalr`, and around a branch or a jump to a label, which is a piece of variable
+    /// size whose first byte is where the piece before it ends.
+    ///
+    /// `named` says whether the instruction reaches a name, without which its fields are numbers
+    /// and only the upper halves cut.
+    fn rv_pieces(&mut self, part: usize, at: u64, encoded: &riscv64::Encoded, named: bool) {
+        let end = at + 4 * encoded.words.len() as u64;
+        // gas gives a `lui` or an `auipc` of a plain number a relocation of the upper half too,
+        // worked out at once, and cuts after it all the same, as after `li` of a number that
+        // needs a `lui`.
+        for (index, word) in encoded.words.iter().enumerate() {
+            let upper = matches!(word & 0x7f, 0x37 | 0x17);
+            if upper && !(named && encoded.fixups.iter().any(|&(other, _)| other == index)) {
+                let after = at + 4 * index as u64 + 4;
+                self.lines.variable(part, after, after);
+            }
+        }
+        for &(index, field) in encoded.fixups.iter().filter(|_| named) {
+            let word = at + 4 * index as u64;
+            match field {
+                riscv64::Fixup::Hi20
+                | riscv64::Fixup::PcrelHi20
+                | riscv64::Fixup::TprelHi20
+                | riscv64::Fixup::TprelAdd => self.lines.variable(part, word + 4, word + 4),
+                riscv64::Fixup::CallPlt => self.lines.variable(part, end, end),
+                riscv64::Fixup::Branch | riscv64::Fixup::Jal => {
+                    self.lines.variable(part, at, end);
+                    return;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// A name defined here, at wherever the current section has got to.
@@ -2518,19 +2602,33 @@ impl Reader {
                 self.go(back);
             }
 
-            // rucc writes no compressed instruction and no relaxation, so the options that turn
-            // those on and off change nothing here. An extension `arch` adds is taken when the
-            // encoder has its instructions and refused otherwise, since the kernel asks for the
-            // vector crypto code with a probe that is only this line.
+            // rucc writes no compressed instruction, so `rvc` only changes how much room an
+            // alignment leaves. `relax` and `norelax` say whether the instructions after them are
+            // marked for the linker, and only when the object is relaxed at all. `pic` and `nopic`
+            // say whether `la` goes through the GOT, as `-fpic` and `-fno-pic` do for gas. An extension
+            // `arch` adds is taken when the encoder has its instructions and refused otherwise,
+            // since the kernel asks for the vector crypto code with a probe that is only this line.
             "option" if self.riscv => {
                 let option = args.first().map_or("", |arg| arg.trim());
-                if !matches!(
-                    option,
-                    "push" | "pop" | "rvc" | "norvc" | "relax" | "norelax" | "arch"
-                ) {
-                    return Err(
-                        self.bad(&format!(".option {option} is not one this assembler takes"))
-                    );
+                match option {
+                    "push" => self.options.push((self.relax_now, self.rvc, self.nopic)),
+                    "pop" => {
+                        if let Some((relax, rvc, nopic)) = self.options.pop() {
+                            (self.relax_now, self.rvc, self.nopic) = (relax, rvc, nopic);
+                        }
+                    }
+                    "pic" => self.nopic = false,
+                    "nopic" => self.nopic = true,
+                    "rvc" => self.rvc = true,
+                    "norvc" => self.rvc = false,
+                    "relax" => self.relax_now = self.relax,
+                    "norelax" => self.relax_now = false,
+                    "arch" => {}
+                    _ => {
+                        return Err(
+                            self.bad(&format!(".option {option} is not one this assembler takes"))
+                        );
+                    }
                 }
                 for name in args.iter().skip(1).filter_map(|arg| arg.trim().strip_prefix('+')) {
                     if !RV_EXTENSIONS.contains(&name.trim()) {
@@ -3449,6 +3547,7 @@ impl Reader {
                 field: None,
                 leb: None,
                 named: None,
+                relax: false,
                 line: self.line,
             });
         }
@@ -3496,6 +3595,7 @@ impl Reader {
                 field: None,
                 leb: None,
                 named: Some(kind),
+                relax: false,
                 line: self.line,
             });
             return Ok(());
@@ -3538,6 +3638,7 @@ impl Reader {
             field: None,
             leb: None,
             named: None,
+            relax: false,
             line: self.line,
         });
         Ok(())
@@ -3567,6 +3668,7 @@ impl Reader {
             field: Some(Field::A64(aarch64::Fixup::TlsdescCall)),
             leb: None,
             named: None,
+            relax: false,
             line: self.line,
         });
         Ok(())
@@ -3589,6 +3691,9 @@ impl Reader {
         }
         for arg in args {
             let sum = self.expression(arg)?;
+            if self.relax && !signed && sum.terms.len() == 2 {
+                self.lebs.push((self.here, self.at(), sum.clone()));
+            }
             let known = self.reduce(&sum).ok().filter(|residue| residue.left.is_empty());
             if let Some(residue) = known {
                 let mut bytes = Vec::new();
@@ -3636,6 +3741,7 @@ impl Reader {
                 field: None,
                 leb: Some(signed),
                 named: None,
+                relax: false,
                 line: self.line,
             });
         }
@@ -3751,6 +3857,9 @@ impl Reader {
         let x86 = !self.aarch64 && !self.riscv;
         let fill = fill.filter(|&fill| !(exec && x86 && fill == 0x90));
         let at = self.at();
+        if self.riscv && self.relax_now && exec && fill.is_none() {
+            return self.relaxed_align(boundary);
+        }
         // The third operand is how much padding is worth it. More than that and the alignment is
         // skipped entirely, which is how a file asks for an alignment only where it is cheap.
         let most = match args.get(2).filter(|arg| !arg.trim().is_empty()) {
@@ -3815,6 +3924,42 @@ impl Reader {
             }
             None => self.pad(need, 0),
         }
+    }
+
+    /// An alignment in code in a relaxed RISC-V object.
+    ///
+    /// The linker takes bytes out in front of it, so the padding here is the most it could need,
+    /// which is the boundary less the smallest instruction, and an `R_RISCV_ALIGN` on the first
+    /// byte of it says how much there is for the linker to cut down to what the alignment needs
+    /// once it knows where the bytes went. Whatever the third operand said, as in gas, and none at
+    /// all for a boundary no bigger than an instruction, which every instruction is already on.
+    fn relaxed_align(&mut self, boundary: u64) -> Result<(), Trouble> {
+        let part = &mut self.parts[self.here];
+        part.align = part.align.max(boundary);
+        let smallest = if self.rvc { 2 } else { 4 };
+        if boundary <= smallest {
+            return Ok(());
+        }
+        let need = boundary - smallest;
+        let at = self.at();
+        let mut bytes = Vec::with_capacity(need as usize);
+        for _ in 0..need / 4 {
+            bytes.extend_from_slice(&RV_NOP.to_le_bytes());
+        }
+        if need % 4 != 0 {
+            // `c.nop`, the two byte no-op.
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+        }
+        self.put(&bytes)?;
+        self.parts[self.here].relocs.push(Reloc {
+            at: at as usize,
+            symbol: String::new(),
+            kind: Reference::Riscv(riscv64::Fixup::Align),
+            addend: need as i64,
+            after: 0,
+        });
+        self.lines.variable(self.here, at + need, at + need);
+        Ok(())
     }
 
     /// `.globl` and the two others that say who can see a name.
@@ -4391,6 +4536,13 @@ impl Reader {
             return Ok(Err(Again { grow, places: self.places(), line, within, first_round }));
         }
         self.resolve_fixups()?;
+        if self.relax {
+            self.relaxed_lebs();
+            // In the order of the bytes they are on, which is the order gas sorts them into.
+            for part in &mut self.parts {
+                part.relocs.sort_by_key(|reloc| reloc.at);
+            }
+        }
         for reloc in self.parts.iter_mut().flat_map(|part| part.relocs.iter_mut()) {
             if let Some(renamed) = self.renamed.get(&reloc.symbol) {
                 reloc.symbol.clone_from(renamed);
@@ -4503,7 +4655,7 @@ impl Reader {
                 reloc.symbol.clone_from(gas);
             }
         }
-        Ok(Ok(Assembled { parts, names, subsections: self.subsections }))
+        Ok(Ok(Assembled { parts, names, subsections: self.subsections, relax: self.relax }))
     }
 
     /// `.file 1 "dir" "name" md5 0x...`, which puts a file in the line table. The directory and the
@@ -4689,6 +4841,12 @@ impl Reader {
         let text = self.named.get(".debug_line_str").copied();
         for (n, hole) in table.holes.iter().enumerate() {
             let (to, offset) = match hole.to {
+                lines::To::Distance { part: code, from, to } => {
+                    let at = start + hole.at as u64;
+                    let (to, from) = (self.fake(code, to), self.fake(code, from));
+                    self.pair(part, at, hole.width, to, from);
+                    continue;
+                }
                 lines::To::Code { part, at } => (part, at),
                 lines::To::Text(at) => (text.unwrap_or(part), strings + at as u64),
             };
@@ -4707,6 +4865,7 @@ impl Reader {
                 field: None,
                 leb: None,
                 named: None,
+                relax: false,
                 line: self.line,
             });
         }
@@ -4730,6 +4889,42 @@ impl Reader {
         if self.debugger && !self.macho {
             self.debugger_table();
         }
+    }
+
+    /// What the tables of frames need in a relaxed RISC-V object, which is nothing in any other.
+    /// See [`crate::unwind::relaxed_table`].
+    ///
+    /// A label at the end of each function, and one at each of two rows that have something of
+    /// variable size between them, since what the linker takes out of the code is taken out of
+    /// those distances too.
+    fn relaxed_frames(&mut self) -> Vec<crate::unwind::Relaxed> {
+        if !self.relax {
+            return Vec::new();
+        }
+        let frames: Vec<(usize, u64, u64, Vec<usize>)> = self
+            .frames
+            .iter()
+            .map(|frame| {
+                let rows = frame.rows.iter().map(|&(offset, _)| offset).collect();
+                (frame.part, frame.start, frame.len, rows)
+            })
+            .collect();
+        let mut relaxed = Vec::with_capacity(frames.len());
+        for (part, start, len, rows) in frames {
+            let end = self.fake(part, start + len);
+            let mut pairs = Vec::new();
+            let mut at = 0;
+            for offset in rows {
+                let (from, to) = (start + at as u64, start + offset as u64);
+                if offset != at && !self.lines.same_piece(part, from, to) {
+                    let labels = (self.fake(part, from), self.fake(part, to));
+                    pairs.push(((at, offset), labels));
+                }
+                at = offset;
+            }
+            relaxed.push(crate::unwind::Relaxed { end, pairs });
+        }
+        relaxed
     }
 
     /// The unwind table, in `.eh_frame` or the Mac's `__eh_frame`.
@@ -4761,7 +4956,10 @@ impl Reader {
         let conv = self.conv();
         let format = if self.macho { ObjectFormat::MachO } else { ObjectFormat::Elf };
         let begins: Vec<_> = self.frames.iter().map(|frame| frame.begins).collect();
-        let Ok(table) = crate::unwind::table(&funcs, &rows, conv, format, &named, &begins) else {
+        let relaxed = self.relaxed_frames();
+        let Ok(table) =
+            crate::unwind::relaxed_table(&funcs, &rows, conv, format, &named, &begins, &relaxed)
+        else {
             return;
         };
         for frame in &self.frames {
@@ -4819,9 +5017,15 @@ impl Reader {
         let rows: Vec<_> = self.frames.iter().map(|frame| frame.rows.clone()).collect();
         let conv = self.conv();
         let begins: Vec<_> = self.frames.iter().map(|frame| frame.begins).collect();
-        let Some(mut table) =
-            crate::unwind::debug_frame(&funcs, &rows, conv, ObjectFormat::Elf, &begins)
-        else {
+        let relaxed = self.relaxed_frames();
+        let Some(mut table) = crate::unwind::relaxed_debug_frame(
+            &funcs,
+            &rows,
+            conv,
+            ObjectFormat::Elf,
+            &begins,
+            &relaxed,
+        ) else {
             return;
         };
         for frame in &self.frames {
@@ -5278,6 +5482,9 @@ impl Reader {
                 });
                 continue;
             }
+            if self.relax && self.relaxed_difference(&fixup) {
+                continue;
+            }
             let residue =
                 self.reduce_kept(&fixup.sum, fixup.jump).map_err(|why| Trouble { line, why })?;
             // A number in an instruction that is still a name is the address of the name, which
@@ -5628,6 +5835,9 @@ impl Reader {
         let line = fixup.line;
         let bad = |why: String| Trouble { line, why };
         let residue = self.reduce_kept(&fixup.sum, fixup.jump).map_err(bad)?;
+        if self.relax && field.relative() {
+            return self.relaxed_jump(fixup, field, &residue);
+        }
         let (name, addend) = match residue.left.as_slice() {
             [] if field.relative() => {
                 let at = fixup.at as usize;
@@ -5683,7 +5893,201 @@ impl Reader {
             addend,
             after: 0,
         });
+        if fixup.relax {
+            self.relax_mark(fixup.part, fixup.at, addend);
+        }
         Ok(())
+    }
+
+    /// A branch or a jump in a relaxed RISC-V object, which is a relocation against what it goes
+    /// to wherever that is, since the linker may take bytes out from between the two. The word
+    /// holds the distance as it is now when that is known, as gas writes it, so that a listing of
+    /// the object reads the same.
+    fn relaxed_jump(
+        &mut self,
+        fixup: &Fixup,
+        field: Field,
+        residue: &Residue,
+    ) -> Result<(), Trouble> {
+        let line = fixup.line;
+        let bad = |why: String| Trouble { line, why };
+        if residue.left.is_empty() {
+            let at = fixup.at as usize;
+            let bytes = &mut self.parts[fixup.part].bytes[at..at + 4];
+            let word = u32::from_le_bytes(bytes.try_into().expect("four bytes"));
+            let word = field.apply(word, residue.constant).ok_or_else(|| {
+                bad(format!("{} is out of the reach of {}", residue.constant, field.name()))
+            })?;
+            bytes.copy_from_slice(&word.to_le_bytes());
+        }
+        let name = match fixup.sum.terms.first() {
+            Some(Term { coeff: 1, what: What::Symbol(name) }) => {
+                if let Some(&sym) = self.known.get(name) {
+                    if self.syms[sym].numbered && self.syms[sym].at != Held::Undefined {
+                        self.relocated.insert(sym);
+                    }
+                }
+                name.clone()
+            }
+            Some(Term { coeff: 1, what: What::Here { part, at } }) => self.fake(*part, *at as u64),
+            _ => {
+                return Err(bad(format!(
+                    "an expression that {} cannot say, which is a name and a number added to it",
+                    field.name()
+                )));
+            }
+        };
+        self.parts[fixup.part].relocs.push(Reloc {
+            at: fixup.at as usize,
+            symbol: name,
+            kind: field.reference(),
+            addend: fixup.sum.constant,
+            after: 0,
+        });
+        Ok(())
+    }
+
+    /// The section a term of a sum is a place in, when it is one this file defines.
+    fn placed_in(&self, what: &What) -> Option<usize> {
+        match what {
+            What::Here { part, .. } => Some(self.section_of(*part)),
+            What::Symbol(name) => {
+                let &sym = self.known.get(name)?;
+                if self.equated.contains_key(&sym) {
+                    return None;
+                }
+                match self.syms[sym].at {
+                    Held::In { part, .. } => Some(self.section_of(part)),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// The name a relocation reaches a place by: the label's own, or a label made for it.
+    fn place_name(&mut self, what: &What) -> String {
+        match what {
+            What::Here { part, at } => self.fake(*part, *at as u64),
+            What::Symbol(name) => {
+                if let Some(&sym) = self.known.get(name) {
+                    if self.syms[sym].numbered {
+                        self.relocated.insert(sym);
+                    }
+                }
+                name.clone()
+            }
+        }
+    }
+
+    /// The two places of a difference `a - b`, with what is added to it, when both are in
+    /// sections this file defines. `code` asks for the place added to be in instructions, and the
+    /// place taken off may then be in any section, as the entries of a jump table in `.rodata`
+    /// are a label in the code less the table's own. Without `code` both are in one section.
+    fn difference(&self, sum: &Sum, code: bool) -> Option<(What, What)> {
+        let (added, taken) = match sum.terms.as_slice() {
+            [Term { coeff: 1, what: added }, Term { coeff: -1, what: taken }]
+            | [Term { coeff: -1, what: taken }, Term { coeff: 1, what: added }] => (added, taken),
+            _ => return None,
+        };
+        let part = self.placed_in(added)?;
+        let other = self.placed_in(taken)?;
+        if if code { !self.parts[part].shape.exec } else { other != part } {
+            return None;
+        }
+        Some((added.clone(), taken.clone()))
+    }
+
+    /// A distance to a place in code in a relaxed RISC-V object, which the linker may change by
+    /// taking bytes out of the code. gas writes it as a pair of relocations on the same zeros,
+    /// the place added and the place taken off, however near the two are and whatever section the
+    /// second is in, and so does this. Whether it was one.
+    fn relaxed_difference(&mut self, fixup: &Fixup) -> bool {
+        if fixup.reach != Reach::Near || !matches!(fixup.width, 1 | 2 | 4 | 8) {
+            return false;
+        }
+        let Some((added, taken)) = self.difference(&fixup.sum, true) else {
+            return false;
+        };
+        let bytes = fixup.width;
+        let added = self.place_name(&added);
+        let taken = self.place_name(&taken);
+        let relocs = &mut self.parts[fixup.part].relocs;
+        relocs.push(Reloc {
+            at: fixup.at as usize,
+            symbol: added,
+            kind: Reference::Sum { bytes, minus: false },
+            addend: fixup.sum.constant,
+            after: 0,
+        });
+        relocs.push(Reloc {
+            at: fixup.at as usize,
+            symbol: taken,
+            kind: Reference::Sum { bytes, minus: true },
+            addend: 0,
+            after: 0,
+        });
+        true
+    }
+
+    /// The pair of relocations on each `.uleb128` of a distance in a relaxed RISC-V object, which
+    /// gas writes for every one of them, in code or not, so that the linker writes the number
+    /// again in the same bytes once it knows where both places went.
+    fn relaxed_lebs(&mut self) {
+        for (part, at, sum) in std::mem::take(&mut self.lebs) {
+            let Some((added, taken)) = self.difference(&sum, false) else {
+                continue;
+            };
+            let added = self.place_name(&added);
+            let taken = self.place_name(&taken);
+            let relocs = &mut self.parts[part].relocs;
+            relocs.push(Reloc {
+                at: at as usize,
+                symbol: added,
+                kind: Reference::Leb { minus: false },
+                addend: sum.constant,
+                after: 0,
+            });
+            relocs.push(Reloc {
+                at: at as usize,
+                symbol: taken,
+                kind: Reference::Leb { minus: true },
+                addend: 0,
+                after: 0,
+            });
+        }
+    }
+
+    /// The `R_RISCV_ADD` and `R_RISCV_SUB` pair `bytes` wide at `at` that leaves the distance
+    /// from `from` to `to` for the linker to work out.
+    fn pair(&mut self, part: usize, at: u64, bytes: u8, to: String, from: String) {
+        let relocs = &mut self.parts[part].relocs;
+        for (symbol, minus) in [(to, false), (from, true)] {
+            let kind = Reference::Sum { bytes, minus };
+            relocs.push(Reloc { at: at as usize, symbol, kind, addend: 0, after: 0 });
+        }
+    }
+
+    /// The `R_RISCV_RELAX` beside the relocation at `at`, which reaches no symbol. gas gives it
+    /// the addend of the relocation it is beside, which the linker does not read.
+    fn relax_mark(&mut self, part: usize, at: u64, addend: i64) {
+        self.parts[part].relocs.push(Reloc {
+            at: at as usize,
+            symbol: String::new(),
+            kind: Reference::Riscv(riscv64::Fixup::Relax),
+            addend,
+            after: 0,
+        });
+    }
+
+    /// A label at a place in a section, which gas makes when a relocation in a relaxed object has
+    /// to reach a place no label of the file is at. It is a `.L0 ` in the object.
+    fn fake(&mut self, part: usize, at: u64) -> String {
+        let name = format!("\u{1}here{}", self.fakes);
+        self.fakes += 1;
+        let sym = self.sym(&name);
+        self.syms[sym].at = Held::In { part, offset: at };
+        self.relocated.insert(sym);
+        name
     }
 
     /// The same as `reduce`, except that a weak name defined here is left for the linker, and so
@@ -6884,6 +7288,28 @@ fn padlock_repeated(word: &str) -> bool {
     )
 }
 
+/// Whether gas marks a RISC-V field for the linker to relax, when relaxing is on where the
+/// instruction is. The upper half of an address only when it is read out of the global offset
+/// table for `la`, and never a branch, a jump or anything thread-local but the local-exec model.
+fn rv_relaxable(field: riscv64::Fixup, macro_slot: bool) -> bool {
+    use riscv64::Fixup as F;
+    match field {
+        F::Hi20
+        | F::Lo12I
+        | F::Lo12S
+        | F::CallPlt
+        | F::PcrelHi20
+        | F::PcrelLo12I
+        | F::PcrelLo12S
+        | F::TprelHi20
+        | F::TprelLo12I
+        | F::TprelLo12S
+        | F::TprelAdd => true,
+        F::GotHi20 => macro_slot,
+        _ => false,
+    }
+}
+
 /// The RISC-V relocation a `.reloc` names that is written as it is asked for rather than as the
 /// expression would be in `.byte` or `.quad`. The ULEB128 pair fills as many bytes as the linker
 /// wants. The others add a name to bytes of data, take one off them or set them, and the kernel's
@@ -7485,6 +7911,111 @@ _tls$tlv$init:
             assert_eq!((part.relocs[0].kind, part.relocs[0].addend), (Reference::Riscv(hi), 8));
             assert_eq!(part.bytes[4..8], u32::to_le_bytes(word));
         }
+        // `.option pic` and `.option nopic` say the same for a stretch of the file, which gcc
+        // writes at the top of a listing, and `.option pop` puts back what was there before.
+        let text = concat!(
+            ".option push\n.option pic\nla a0, x\n.option pop\nla a1, x\n",
+            ".option pic\nla a2, x\n.option nopic\nla a3, x\n",
+        );
+        let flags = Flags { nopic: true, ..Flags::default() };
+        let read = read_with(text, Arch::Riscv64, ObjectFormat::Elf, flags).unwrap();
+        let part = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        let his: Vec<_> =
+            part.relocs.iter().step_by(2).map(|reloc| (reloc.at, reloc.kind)).collect();
+        let (got, here) = (riscv64::Fixup::GotHi20, riscv64::Fixup::PcrelHi20);
+        let rv = Reference::Riscv;
+        assert_eq!(his, [(0, rv(got)), (8, rv(here)), (16, rv(got)), (24, rv(here))]);
+    }
+
+    /// A relaxed RISC-V file, with the relocations GNU as 2.42 writes for the same lines with
+    /// `-march=rv64g -mrelax`. The branch to a label beside it stays a relocation, each instruction
+    /// gas marks has an `R_RISCV_RELAX` with the addend of the relocation beside it, the padding
+    /// is three `nop`s and an `R_RISCV_ALIGN` of 12, `.option norelax` leaves one call unmarked,
+    /// and a distance from code to `.rodata` is a pair, for `.word` and for `.uleb128`.
+    #[test]
+    fn a_relaxed_riscv_file_has_the_relocations_gas_writes() {
+        let text = concat!(
+            "\t.text\nf:\tbeqz a0, 1f\n\tcall g\n\tlla a1, table+8\n\tli a2, 0x12345000\n",
+            "1:\tret\n\t.p2align 4\n\t.option push\n\t.option norelax\n\tcall h\n",
+            "\t.option pop\n\tcall g\n\t.section .rodata\n2:\t.word 1b - 2b\n\t.uleb128 1b - f\n",
+        );
+        let flags = Flags { relax: true, ..Flags::default() };
+        let read = match read_with(text, Arch::Riscv64, ObjectFormat::Elf, flags) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        // A label the file did not name is left out, since the object calls each one `.L0 `.
+        let relocs = |name: &str| -> Vec<(usize, String, Reference, i64)> {
+            let part = read.parts.iter().find(|part| part.name == name).unwrap();
+            let named = |symbol: &str| {
+                if symbol.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                    symbol.to_owned()
+                } else {
+                    String::new()
+                }
+            };
+            part.relocs.iter().map(|r| (r.at, named(&r.symbol), r.kind, r.addend)).collect()
+        };
+        let rv = Reference::Riscv;
+        let own = |at, kind, addend| (at, String::new(), kind, addend);
+        let to = |at, name: &str, kind, addend| (at, name.to_owned(), kind, addend);
+        assert_eq!(
+            relocs(".text"),
+            [
+                own(0, rv(riscv64::Fixup::Branch), 0),
+                to(4, "g", rv(riscv64::Fixup::CallPlt), 0),
+                own(4, rv(riscv64::Fixup::Relax), 0),
+                to(12, "table", rv(riscv64::Fixup::PcrelHi20), 8),
+                own(12, rv(riscv64::Fixup::Relax), 8),
+                own(16, rv(riscv64::Fixup::PcrelLo12I), 0),
+                own(16, rv(riscv64::Fixup::Relax), 0),
+                own(28, rv(riscv64::Fixup::Align), 12),
+                to(40, "h", rv(riscv64::Fixup::CallPlt), 0),
+                to(48, "g", rv(riscv64::Fixup::CallPlt), 0),
+                own(48, rv(riscv64::Fixup::Relax), 0),
+            ]
+        );
+        let sum = |bytes, minus| Reference::Sum { bytes, minus };
+        assert_eq!(
+            relocs(".rodata"),
+            [
+                own(0, sum(4, false), 0),
+                own(0, sum(4, true), 0),
+                own(4, Reference::Leb { minus: false }, 0),
+                to(4, "f", Reference::Leb { minus: true }, 0),
+            ]
+        );
+        // The same words as gas, which fills in the branch as well as leaving the relocation.
+        assert_eq!(words(&read, ".text")[..1], [0x0005_0c63]);
+        assert_eq!(words(&read, ".text")[7..10], [0x0000_0013; 3]);
+    }
+
+    /// gas cuts a relaxed section after a `lui` even when it loads a number, and a step of the
+    /// unwind table over the cut is an `R_RISCV_SET6` and an `R_RISCV_SUB6` from the place before.
+    /// Steps that do not cross one are numbers, the same as GNU as 2.42 writes them.
+    #[test]
+    fn a_relaxed_riscv_unwind_step_over_a_lui_is_left_to_the_linker() {
+        let text = concat!(
+            "\t.text\n\t.globl f\nf:\t.cfi_startproc\n\taddi sp, sp, -16\n\t.cfi_def_cfa_offset 16\n",
+            "\tli a0, 0x12345000\n\tsd ra, 8(sp)\n\t.cfi_offset ra, -8\n\taddi sp, sp, 16\n",
+            "\t.cfi_def_cfa_offset 0\n\tret\n\t.cfi_endproc\n",
+        );
+        let flags = Flags { relax: true, ..Flags::default() };
+        let read = read_with(text, Arch::Riscv64, ObjectFormat::Elf, flags).unwrap();
+        let frame = read.parts.iter().find(|part| part.name == ".eh_frame").unwrap();
+        let place = |symbol: &str| match read.names.iter().find(|name| name.name == symbol) {
+            Some(Name { at: Held::In { offset, .. }, .. }) => *offset,
+            other => panic!("{symbol}: {other:?}"),
+        };
+        let six: Vec<_> = frame
+            .relocs
+            .iter()
+            .filter_map(|reloc| match reloc.kind {
+                Reference::Riscv(fixup) => Some((fixup, place(&reloc.symbol))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(six, [(riscv64::Fixup::Set6, 12), (riscv64::Fixup::Sub6, 4)]);
     }
 
     #[test]
@@ -7680,7 +8211,7 @@ _tls$tlv$init:
                 0x0002_0001
             ]
         );
-        assert!(super::read(".option pic\n", Arch::Riscv64).is_err());
+        assert!(super::read(".option nothing\n", Arch::Riscv64).is_err());
         // The vector instructions the kernel writes go through, and an extension the encoder has
         // nothing for is refused where it is asked for, which is what the kernel's probes for
         // the vector extensions read.

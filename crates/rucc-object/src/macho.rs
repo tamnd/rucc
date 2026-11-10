@@ -585,6 +585,7 @@ mod tests {
                 name("_zeros", 3, 0, Binding::Global),
             ],
             subsections: true,
+            relax: false,
         };
         let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
         let bytes = write(&input, &target, &Info::default()).unwrap();
@@ -630,6 +631,7 @@ mod tests {
                 name("_dispatch_table.0", 1, 0, Binding::Local),
             ],
             subsections: true,
+            relax: false,
         };
         let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
         let bytes = write(&input, &target, &Info::default()).unwrap();
@@ -665,7 +667,12 @@ mod tests {
         frames.relocs.push(Reloc { at: 8, symbol: "_f".into(), kind, addend: 0, after: 0 });
         let mut f = name("_f", 0, 0, Binding::Global);
         f.sort = Sort::Func;
-        let input = Assembled { parts: vec![text, frames], names: vec![f], subsections: true };
+        let input = Assembled {
+            parts: vec![text, frames],
+            names: vec![f],
+            subsections: true,
+            relax: false,
+        };
         let target = TargetInfo::new("aarch64-apple-darwin".parse().unwrap());
         let bytes = write(&input, &target, &Info::default()).unwrap();
         let file = MachOFile64::<Endianness>::parse(&bytes[..]).unwrap();
@@ -692,7 +699,8 @@ mod tests {
         let text = part("__TEXT", "__text", vec![0; 8], 8);
         let mut f = name("_f", 0, 0, Binding::Local);
         f.sort = Sort::Func;
-        let input = Assembled { parts: vec![text], names: vec![f], subsections: true };
+        let input =
+            Assembled { parts: vec![text], names: vec![f], subsections: true, relax: false };
         let reloc = |at, symbol: &str, bytes, addend| Reloc {
             at,
             symbol: symbol.to_owned(),
@@ -743,7 +751,8 @@ mod tests {
         let mut g = name("_g", 0, 16, Binding::Local);
         g.sort = Sort::Func;
         let names = vec![f, g, name("_v", 1, 8, Binding::Global), name("_z", 2, 8, Binding::Local)];
-        let input = Assembled { parts: vec![text, data, bss], names, subsections: true };
+        let input =
+            Assembled { parts: vec![text, data, bss], names, subsections: true, relax: false };
         let reloc = |at, symbol: &str, addend| Reloc {
             at,
             symbol: symbol.to_owned(),

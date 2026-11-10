@@ -65,6 +65,9 @@ enum To {
     Place(usize, u64),
     /// A name, which is written as the name when it is global and as its section otherwise.
     Name(String),
+    /// How long a section of code is, which in a relaxed RISC-V object the linker works out from a
+    /// pair of relocations, since relaxing the code can shorten it.
+    Length(usize, u64),
 }
 
 /// The bytes of one section, with the holes in them the linker fills.
@@ -357,7 +360,11 @@ impl Reader {
         list.out.resize(list.out.len().next_multiple_of(pair), 0);
         for &(part, size) in &code {
             list.hole(address, To::Place(part, 0));
-            list.number(address, size);
+            if self.relax {
+                list.hole(address, To::Length(part, size));
+            } else {
+                list.number(address, size);
+            }
         }
         list.out.extend(std::iter::repeat_n(0, pair));
         list.length();
@@ -376,20 +383,33 @@ impl Reader {
         let start = self.at();
         self.put(&bytes.out)?;
         for (at, width, to) in bytes.holes {
-            let name = match to {
-                To::Name(name) => name,
+            let place = |this: &mut Self, part, offset| {
+                let name = format!("\u{1}debug{}", this.fixups.len());
+                let sym = this.sym(&name);
+                this.syms[sym].at = Held::In { part, offset };
+                name
+            };
+            let terms = match to {
+                To::Name(name) => vec![Term { coeff: 1, what: What::Symbol(name) }],
                 To::Place(part, offset) => {
-                    let name = format!("\u{1}debug{}", self.fixups.len());
-                    let sym = self.sym(&name);
-                    self.syms[sym].at = Held::In { part, offset };
-                    name
+                    vec![Term { coeff: 1, what: What::Symbol(place(self, part, offset)) }]
+                }
+                To::Length(part, size) => {
+                    let end = place(self, part, size);
+                    let start = format!("{end}.start");
+                    let sym = self.sym(&start);
+                    self.syms[sym].at = Held::In { part, offset: 0 };
+                    vec![
+                        Term { coeff: 1, what: What::Symbol(end) },
+                        Term { coeff: -1, what: What::Symbol(start) },
+                    ]
                 }
             };
             self.fixups.push(Fixup {
                 part: self.here,
                 at: start + at as u64,
                 width,
-                sum: Sum { constant: 0, terms: vec![Term { coeff: 1, what: What::Symbol(name) }] },
+                sum: Sum { constant: 0, terms },
                 reach: Reach::Near,
                 slot: Reference::Got,
                 branch: None,
@@ -397,6 +417,7 @@ impl Reader {
                 field: None,
                 leb: None,
                 named: None,
+                relax: false,
                 line: self.line,
             });
         }

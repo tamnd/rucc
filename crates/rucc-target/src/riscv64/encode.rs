@@ -11,8 +11,8 @@
 //! same number of words in the object as in the listing.
 //!
 //! A symbol is left as zeros and a [`Fixup`] that says which bits it goes in, at the word of the
-//! instruction it belongs to. None of them is ever marked for linker relaxation, since a listing
-//! that the linker may shorten is one whose distances the compiler no longer knows.
+//! instruction it belongs to. The assembler decides which of them the linker may relax, which it
+//! marks with a [`Fixup::Relax`] at the same place.
 
 use std::fmt;
 
@@ -163,6 +163,17 @@ pub enum Fixup {
     Set16,
     /// Four bytes set to the value, which only `.reloc` writes.
     Set32,
+    /// A byte less the value, the second half of a difference of two places in code.
+    Sub8,
+    /// Two bytes less the value.
+    Sub16,
+    /// Four bytes less the value.
+    Sub32,
+    /// The instruction at the same place may be shortened by the linker. It reaches no symbol.
+    Relax,
+    /// Padding the linker removes down to what the alignment needs. The addend is how many bytes
+    /// of it there are, and it reaches no symbol.
+    Align,
 }
 
 impl Fixup {
@@ -190,6 +201,11 @@ impl Fixup {
             Fixup::Set8 => 54,
             Fixup::Set16 => 55,
             Fixup::Set32 => 56,
+            Fixup::Sub8 => 37,
+            Fixup::Sub16 => 38,
+            Fixup::Sub32 => 39,
+            Fixup::Relax => 51,
+            Fixup::Align => 43,
         }
     }
 
@@ -217,6 +233,11 @@ impl Fixup {
             Fixup::Set8 => "R_RISCV_SET8",
             Fixup::Set16 => "R_RISCV_SET16",
             Fixup::Set32 => "R_RISCV_SET32",
+            Fixup::Sub8 => "R_RISCV_SUB8",
+            Fixup::Sub16 => "R_RISCV_SUB16",
+            Fixup::Sub32 => "R_RISCV_SUB32",
+            Fixup::Relax => "R_RISCV_RELAX",
+            Fixup::Align => "R_RISCV_ALIGN",
         }
     }
 

@@ -1340,6 +1340,7 @@ mod tests {
             frames: true,
             mach_o: false,
             version: Version::Five,
+            relaxed: false,
         }
     }
 

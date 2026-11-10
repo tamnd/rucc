@@ -1149,6 +1149,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // Whether `-mabi=` named one of the 32 bit conventions, which only a file of assembly may
     // be built for. See [`Options::rv32`].
     let mut riscv_ilp32 = false;
+    // RISC-V's `-mrelax` and `-mno-relax`, the last one winning, and what `-Wa,` says after it.
+    let mut relax = true;
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
     let mut x87_floats: Option<bool> = None;
@@ -3346,6 +3348,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 };
                 riscv_ilp32 = abi.starts_with("ilp32");
             }
+            // Whether the linker may relax the code, which gcc hands on to gas. The kernel turns
+            // it off for modules, which the module loader links and does not relax.
+            "-mrelax" | "-mno-relax" if arch == rucc_target::Arch::Riscv64 => {
+                relax = arg == "-mrelax";
+            }
             _ if arg.starts_with("-mabi=") => {
                 let want = &arg["-mabi=".len()..];
                 let have = match opts.target.arch {
@@ -4025,6 +4032,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     opts.asm_fatal_warnings = assembler.fatal_warnings;
     opts.asm_noexecstack = assembler.noexecstack;
     opts.asm_keep_slots = assembler.keep_slots;
+    opts.relax = assembler.relax.unwrap_or(relax);
     // gcc's `finish_options`, read as a table. An executable is what nothing at all means, and
     // what `-fpie` means whatever the other family said, so `-fPIE -fno-pic` is still position
     // independent. A library needs `-fpic` and no `-fpie` after it, and anything else that said
@@ -6062,6 +6070,9 @@ struct Assembler {
     /// `-mrelax-relocations=no`, which keeps the linker from rewriting a read of a slot of the
     /// global offset table.
     keep_slots: bool,
+    /// `-mrelax` or `-mno-relax` on RISC-V, the last of them, which wins over the compiler's own
+    /// flag of the same name as it does when gcc passes both to gas.
+    relax: Option<bool>,
 }
 
 /// The words of every `-Wa,` and `-Xassembler`, each one honored, taken because it describes what
@@ -6124,10 +6135,10 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
             // whatever the version. And the `.riscv.attributes` section, which this assembler
             // never writes.
             "-misa-spec=2.2" | "-mno-arch-attr" if riscv => {}
-            // That no instruction is marked for the linker to relax, which this assembler never
-            // does. The kernel asks for it on modules, which are linked by the module loader and
-            // not by `ld`. `-mrelax` is the opposite and is refused.
-            "-mno-relax" if riscv => {}
+            // Whether the linker may relax the code. The kernel turns it off on modules, which
+            // are linked by the module loader and not by `ld`.
+            "-mrelax" if riscv => out.relax = Some(true),
+            "-mno-relax" if riscv => out.relax = Some(false),
             // A directory for `.include` and `.incbin`. The assembler reads no file but its input,
             // and refuses both directives, so a place to look for one changes nothing.
             "-I" => {
@@ -11416,6 +11427,18 @@ mod tests {
         let (opts, _) = compile(&kernel);
         assert!(opts.soft_float && !opts.vector);
         assert_eq!(opts.code_model, rucc_target::CodeModel::Medany);
+        assert!(!opts.relax);
+        // Relaxation is on unless a flag turns it off, the last of `-mrelax` and `-mno-relax`
+        // wins, and what `-Wa,` says wins over both, as when gcc passes them on to gas.
+        for (line, relax) in [
+            (&[RV, "-c", "a.c"][..], true),
+            (&[RV, "-mno-relax", "-mrelax", "-c", "a.c"], true),
+            (&[RV, "-mrelax", "-mno-relax", "-c", "a.c"], false),
+            (&[RV, "-mno-relax", "-Wa,-mrelax", "-c", "a.c"], true),
+            (&[RV, "-Wa,-mno-relax", "-c", "a.S"], false),
+        ] {
+            assert_eq!(compile(line).0.relax, relax, "{line:?}");
+        }
         let (opts, _) =
             compile(&[RV, "-mabi=lp64", "-march=rv64imafdc_zicsr_zifencei", "-c", "a.c"]);
         assert!(opts.soft_float && !opts.vector);

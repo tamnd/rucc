@@ -2912,6 +2912,12 @@ pub struct Options {
     /// Whether `-Wa,-mrelax-relocations=no` was given, which reads every slot of the global offset
     /// table through the relocation the linker may not rewrite, as gas does under it.
     pub asm_keep_slots: bool,
+    /// Whether the linker may relax RISC-V code, which is gcc's and gas's default there and what
+    /// `-mno-relax` and `-Wa,-mno-relax` turn off. Under it the assembler marks the instructions
+    /// gas marks with `R_RISCV_RELAX`, leaves every distance in code to the linker and pads an
+    /// alignment with an `R_RISCV_ALIGN` the linker can take bytes out of. Nothing on another
+    /// target reads it.
+    pub relax: bool,
     /// Whether `-m16` was given, which builds for 32 bit x86 and assembles the result as
     /// `.code16gcc`: code that runs in real mode with 32 bit operands and a 32 bit stack, the way
     /// the kernel's boot and real mode trampoline are built.
@@ -3258,6 +3264,7 @@ impl Options {
             asm_fatal_warnings: false,
             asm_noexecstack: false,
             asm_keep_slots: false,
+            relax: true,
             sixteen: false,
             regparm: 0,
             rtd: false,

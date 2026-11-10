@@ -27,7 +27,7 @@
 //! there is one place that knows how an object file is laid out and one that knows what each format
 //! calls the things in it.
 
-use object::write::{Object as Writer, Relocation, SectionId, Symbol, SymbolSection};
+use object::write::{Object as Writer, Relocation, SectionId, Symbol, SymbolId, SymbolSection};
 use object::{
     Architecture, Endianness, SectionFlags, SectionKind, SymbolFlags, SymbolKind, SymbolScope, elf,
     pe,
@@ -540,6 +540,11 @@ pub struct Assembled {
     /// Whether the file said `.subsections_via_symbols`, which tells a Mach-O linker it may cut
     /// every section at every symbol in it. Nothing on the other two formats.
     pub subsections: bool,
+    /// Whether the linker may relax the RISC-V code in it, which makes every relocation reach a
+    /// label rather than a section and an offset, since the linker moves labels as it takes bytes
+    /// out and leaves addends alone. A label the assembler made is called `.L0 ` there, as gas
+    /// calls one.
+    pub relax: bool,
 }
 
 /// That, as a relocatable object in whichever of the two formats the target wants.
@@ -717,8 +722,15 @@ pub fn assembled_described(
             (Flavour::Coff, Held::Absolute(_), Sort::Untyped) => SymbolKind::Data,
             _ => flavour.sort(name.sort, name.binding),
         };
+        // The labels a relaxed object needs that the file did not write all have the one name
+        // gas gives such a label, and are told apart by where they are.
+        let spelled = if input.relax && name.name.starts_with('\u{1}') {
+            b".L0 ".to_vec()
+        } else {
+            name.name.clone().into_bytes()
+        };
         let id = obj.add_symbol(Symbol {
-            name: name.name.clone().into_bytes(),
+            name: spelled,
             value,
             size,
             kind,
@@ -804,9 +816,10 @@ pub fn assembled_described(
                 Some((part, offset)) => {
                     (obj.section_symbol(made[part]), reloc.addend + offset as i64)
                 }
-                // A relocation against no name, which `.reloc` writes for a plain number. ELF
-                // means symbol zero by that, and a local symbol at the absolute address zero is
-                // the same to a linker.
+                // A relocation against no name, which `.reloc` writes for a plain number and
+                // RISC-V writes for `R_RISCV_RELAX` and `R_RISCV_ALIGN`. ELF means symbol zero by
+                // that, which the writer cannot name, so the relocation is written against a
+                // nameless absolute local and moved to symbol zero afterwards.
                 None if reloc.symbol.is_empty() => {
                     let zero = *nothing.get_or_insert_with(|| {
                         obj.add_symbol(Symbol {
@@ -893,6 +906,8 @@ pub fn assembled_described(
         let id = crate::zlib::debug_section(&mut obj, chunk, how);
         named.insert(chunk.name.as_str(), id);
     }
+    // The labels made for the debug information of a relaxed object, one for each place.
+    let mut labels: Map<(usize, u64), SymbolId> = Map::default();
     for chunk in &info.chunks {
         let section = named[chunk.name.as_str()];
         for reloc in &chunk.relocs {
@@ -902,6 +917,41 @@ pub fn assembled_described(
                 if pe32 { crate::coff::decorate(&reloc.symbol) } else { reloc.symbol.clone() };
             let (symbol, addend) = match named.get(reloc.symbol.as_str()) {
                 Some(&id) => (obj.section_symbol(id), reloc.addend),
+                None if input.relax => match defined.get(spelled.as_str()).map(|name| name.at) {
+                    // A place in relaxed code is a label there, since the linker moves a label
+                    // when it takes bytes out in front of it and leaves an addend as it is.
+                    Some(Held::In { part, offset })
+                        if input.parts.get(part).is_some_and(|part| part.shape.exec) =>
+                    {
+                        let at = offset.saturating_add_signed(reloc.addend);
+                        let label = *labels.entry((part, at)).or_insert_with(|| {
+                            obj.add_symbol(Symbol {
+                                name: b".L0 ".to_vec(),
+                                value: at,
+                                size: 0,
+                                kind: SymbolKind::Label,
+                                scope: SymbolScope::Compilation,
+                                weak: false,
+                                section: SymbolSection::Section(made[part]),
+                                flags: SymbolFlags::None,
+                            })
+                        });
+                        (label, 0)
+                    }
+                    Some(Held::In { part, offset }) => {
+                        (obj.section_symbol(made[part]), reloc.addend + offset as i64)
+                    }
+                    _ => match symbols.get(&spelled) {
+                        Some(&symbol) => (symbol, reloc.addend),
+                        None => {
+                            let why = format!(
+                                "'{}' is named by the debug information and is not defined here",
+                                reloc.symbol
+                            );
+                            return Err(Error::Refused { why });
+                        }
+                    },
+                },
                 None => match defined.get(spelled.as_str()).map(|name| name.at) {
                     Some(Held::In { part, offset }) => {
                         (obj.section_symbol(made[part]), reloc.addend + offset as i64)
@@ -941,6 +991,9 @@ pub fn assembled_described(
         }
         together_groups(&mut bytes, &together);
         linked(&mut bytes, input, &defined)?;
+        if nothing.is_some() {
+            crate::elf::unnamed(&mut bytes);
+        }
     }
     Ok(bytes)
 }
@@ -1041,6 +1094,15 @@ fn moved(
     use crate::section::Reference;
     let name = defined.get(reloc.symbol.as_str())?;
     let Held::In { part, offset } = name.at else { return None };
+    // In a relaxed object every relocation reaches a label, as gas writes it, except for one the
+    // assembler made somewhere other than code, such as the front of `.debug_frame`, which gas
+    // reaches by the section. The strings of the line table's header are the exception to that,
+    // which gas reaches by a label as well.
+    if input.relax {
+        let code = input.parts.get(part).is_some_and(|part| part.shape.exec);
+        let made = name.name.starts_with('\u{1}') && !name.name.starts_with("\u{1}line");
+        return (made && !code).then_some((part, offset));
+    }
     // A reference to an indirect function is to whatever its resolver picks, and the place the
     // name marks is the resolver. The section and an offset would be the resolver itself, so the
     // name stays, which is what gas leaves for one too.
@@ -1214,7 +1276,12 @@ mod tests {
         // second one.
         let info = Info { source: Some("subr.c".to_owned()), ..Info::default() };
         let names = vec![at("f", 0, Sort::Func, Binding::Local)];
-        let input = Assembled { parts: vec![part(".text", vec![0xc3])], names, subsections: false };
+        let input = Assembled {
+            parts: vec![part(".text", vec![0xc3])],
+            names,
+            subsections: false,
+            relax: false,
+        };
         let bytes = assembled_described(&input, &target(), &info).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let first = file.symbols().next().expect("a symbol");
@@ -1249,7 +1316,8 @@ mod tests {
         // of, and what it said about it is the letters.
         let mut odd = part(".init.text", vec![0x90]);
         odd.shape = Shape { alloc: true, exec: true, bits: true, ..Shape::default() };
-        let input = Assembled { parts: vec![odd], names: Vec::new(), subsections: false };
+        let input =
+            Assembled { parts: vec![odd], names: Vec::new(), subsections: false, relax: false };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".init.text").expect("the section");
@@ -1269,7 +1337,8 @@ mod tests {
         let mut room = part(".bss", Vec::new());
         room.size = 4096;
         room.align = 16;
-        let input = Assembled { parts: vec![room], names: Vec::new(), subsections: false };
+        let input =
+            Assembled { parts: vec![room], names: Vec::new(), subsections: false, relax: false };
         let bytes = assembled(&input, &target()).expect("an object");
         assert!(bytes.len() < 4096, "the empty space was written out: {} bytes", bytes.len());
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1289,6 +1358,7 @@ mod tests {
             parts: vec![part(".text", vec![0; 8])],
             names: vec![at("plain", 4, Sort::Untyped, Binding::Global)],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1306,6 +1376,7 @@ mod tests {
                 at("held", 4, Sort::Object, Binding::Local),
             ],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         assert_eq!(st_info(&bytes, "run") & 0xf, elf::STT_FUNC.0);
@@ -1331,6 +1402,7 @@ mod tests {
                 visibility: Visibility::Default,
             }],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         assert_eq!(st_info(&bytes, "shared"), elf::STB_GLOBAL.0 << 4 | elf::STT_OBJECT.0);
@@ -1355,6 +1427,7 @@ mod tests {
                 visibility: Visibility::Default,
             }],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1378,6 +1451,7 @@ mod tests {
                 visibility: Visibility::Default,
             }],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &windows()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1419,6 +1493,7 @@ mod tests {
                 visibility: Visibility::Default,
             }],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1453,6 +1528,7 @@ mod tests {
                 at("shared", 28, Sort::Func, Binding::Global),
             ],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1496,7 +1572,12 @@ mod tests {
         };
         let mut name = at(".LC0", 0, Sort::Untyped, Binding::Local);
         name.at = Held::In { part: 1, offset: 0 };
-        let input = Assembled { parts: vec![text, strings], names: vec![name], subsections: false };
+        let input = Assembled {
+            parts: vec![text, strings],
+            names: vec![name],
+            subsections: false,
+            relax: false,
+        };
         let bytes = assembled(&input, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let section = file.section_by_name(".rodata.str1.1").expect("the section");
@@ -1526,7 +1607,8 @@ mod tests {
             addend: 0,
             after: 0,
         });
-        let input = Assembled { parts: vec![data], names: Vec::new(), subsections: false };
+        let input =
+            Assembled { parts: vec![data], names: Vec::new(), subsections: false, relax: false };
         let why = assembled(&input, &target()).expect_err("this cannot be written");
         assert!(format!("{why}").contains("nowhere"), "{why}");
     }
@@ -1539,6 +1621,7 @@ mod tests {
             parts: vec![part(".text", vec![0x90])],
             names: Vec::new(),
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&bare, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1548,6 +1631,7 @@ mod tests {
             parts: vec![part(".text", vec![0x90]), part(".note.GNU-stack", Vec::new())],
             names: Vec::new(),
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&said, &target()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1572,6 +1656,7 @@ mod tests {
                 },
             ],
             subsections: false,
+            relax: false,
         };
         assert_eq!(assembled_defines(&input), vec!["reachable".to_owned()]);
     }
@@ -1582,6 +1667,7 @@ mod tests {
             parts: vec![part(".text", vec![0x90])],
             names: Vec::new(),
             subsections: false,
+            relax: false,
         };
         let elsewhere = TargetInfo::new("wasm32-wasip1".parse::<Triple>().expect("a triple"));
         let why = assembled(&input, &elsewhere).expect_err("this cannot be written");
@@ -1635,6 +1721,7 @@ mod tests {
                 Name { at: Held::Undefined, ..at("g", 0, Sort::Untyped, Binding::Global) },
             ],
             subsections: false,
+            relax: false,
         };
         let target = TargetInfo::new(Triple::new(TargetArch::Riscv64, Os::Linux, Env::Gnu));
         let bytes = assembled(&input, &target).expect("an object");
@@ -1686,6 +1773,65 @@ mod tests {
         );
     }
 
+    /// A relaxed RISC-V object, as gas writes one. A relocation to a label in code reaches a `.L0 `
+    /// label at that place, and an `R_RISCV_RELAX` or `R_RISCV_ALIGN` reaches symbol zero, which is
+    /// the one BFD ld can read. A symbol of its own with no section would make ld index its table of
+    /// sections with `SHN_ABS`.
+    #[test]
+    fn a_relaxed_riscv_object_marks_reach_symbol_zero_and_code_is_reached_by_labels() {
+        let mut text = part(".text", vec![0; 32]);
+        let field = |at, symbol: &str, fixup, addend| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind: Reference::Riscv(fixup),
+            addend,
+            after: 0,
+        };
+        text.relocs = vec![
+            field(0, "\u{1}here0", RvFixup::Branch, 0),
+            field(4, "g", RvFixup::CallPlt, 0),
+            field(4, "", RvFixup::Relax, 0),
+            field(12, "", RvFixup::Align, 12),
+        ];
+        let input = Assembled {
+            parts: vec![text],
+            names: vec![
+                at("\u{1}here0", 24, Sort::Untyped, Binding::Local),
+                Name { at: Held::Undefined, ..at("g", 0, Sort::Untyped, Binding::Global) },
+            ],
+            subsections: false,
+            relax: true,
+        };
+        let target = TargetInfo::new(Triple::new(TargetArch::Riscv64, Os::Linux, Env::Gnu));
+        let bytes = assembled(&input, &target).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name(".text").expect("the section");
+        let relocs: Vec<_> = section
+            .relocations()
+            .map(|(at, reloc)| {
+                let RelocationFlags::Elf { r_type } = reloc.flags() else { panic!("ELF") };
+                let named = match reloc.target() {
+                    object::RelocationTarget::Symbol(index) => {
+                        let symbol = file.symbol_by_index(index).expect("the symbol");
+                        Some((symbol.name().expect("a name").to_owned(), symbol.address()))
+                    }
+                    object::RelocationTarget::Absolute => None,
+                    other => panic!("{other:?}"),
+                };
+                (at, r_type, named, reloc.addend())
+            })
+            .collect();
+        assert_eq!(
+            relocs,
+            [
+                (0, elf::R_RISCV_BRANCH, Some((".L0 ".to_owned(), 24)), 0),
+                (4, elf::R_RISCV_CALL_PLT, Some(("g".to_owned(), 0)), 0),
+                (4, elf::R_RISCV_RELAX, None, 0),
+                (12, elf::R_RISCV_ALIGN, None, 12),
+            ]
+        );
+    }
+
     #[test]
     fn a_file_of_assembly_for_aarch64_is_written_with_that_machine_s_relocations() {
         // `adrp x0, table` and `add x0, x0, :lo12:table+8`, then `bl g`, then the address of
@@ -1722,6 +1868,7 @@ mod tests {
                 Name { at: Held::Undefined, ..at("g", 0, Sort::Untyped, Binding::Global) },
             ],
             subsections: false,
+            relax: false,
         };
         let target = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Linux, Env::Gnu));
         let bytes = assembled(&input, &target).expect("an object");
@@ -1803,6 +1950,7 @@ mod tests {
             parts: vec![text, data],
             names: vec![table, undefined("g"), undefined("counter")],
             subsections: false,
+            relax: false,
         };
         let target = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Windows, Env::Gnu));
         let bytes = assembled(&input, &target).expect("an object");
@@ -1879,6 +2027,7 @@ mod tests {
                     ..at("g", 0, Sort::Untyped, Binding::Global)
                 }],
                 subsections: false,
+                relax: false,
             };
             let target = TargetInfo::new(Triple::new(TargetArch::Aarch64, Os::Windows, Env::Gnu));
             let why = assembled(&input, &target).expect_err("a field that cannot say it");
@@ -1896,6 +2045,7 @@ mod tests {
             parts: vec![part(".text", vec![0xc3])],
             names: Vec::new(),
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &windows()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1926,6 +2076,7 @@ mod tests {
             parts: vec![refptr, drectve],
             names: vec![at(".refptr.x", 0, Sort::Object, Binding::Global)],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &windows()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -1963,6 +2114,7 @@ mod tests {
                 at("ours", 4, Sort::Untyped, Binding::Local),
             ],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &windows()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -2001,6 +2153,7 @@ mod tests {
                 visibility: Visibility::Default,
             }],
             subsections: false,
+            relax: false,
         };
         let bytes = assembled(&input, &windows()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -2118,7 +2271,8 @@ mod tests {
             undefined("counter"),
             undefined("_GLOBAL_OFFSET_TABLE_"),
         ];
-        let input = Assembled { parts: vec![text, rodata, data], names, subsections: false };
+        let input =
+            Assembled { parts: vec![text, rodata, data], names, subsections: false, relax: false };
         let bytes = assembled(&input, &i386()).expect("an object");
 
         let header = elf::FileHeader32::<Endianness>::parse(&bytes[..]).expect("a 32 bit header");
@@ -2204,7 +2358,7 @@ mod tests {
                 ..at("x", 0, Sort::Thread, Binding::Local)
             },
         ];
-        let input = Assembled { parts: vec![text, tdata], names, subsections: false };
+        let input = Assembled { parts: vec![text, tdata], names, subsections: false, relax: false };
         let bytes = assembled(&input, &i386()).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let want: Vec<_> = kinds
@@ -2259,7 +2413,7 @@ mod tests {
             undefined("@f@8"),
             undefined("_counter"),
         ];
-        let input = Assembled { parts: vec![text, data], names, subsections: false };
+        let input = Assembled { parts: vec![text, data], names, subsections: false, relax: false };
         let target = TargetInfo::new(Triple::new(TargetArch::X86, Os::Windows, Env::Gnu));
         let bytes = assembled(&input, &target).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -2342,7 +2496,7 @@ mod tests {
                 ..at("Lfar", 0, Sort::Untyped, Binding::Local)
             },
         ];
-        let input = Assembled { parts: vec![text, rdata], names, subsections: false };
+        let input = Assembled { parts: vec![text, rdata], names, subsections: false, relax: false };
         let target = TargetInfo::new(Triple::new(TargetArch::X86, Os::Windows, Env::Gnu));
         let bytes = assembled(&input, &target).expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -2396,7 +2550,7 @@ mod tests {
                 vec![Reloc { at: 0, symbol: "foo".to_owned(), kind, addend: 0, after: 0 }];
             let names =
                 vec![Name { at: Held::Undefined, ..at("foo", 0, Sort::Untyped, Binding::Global) }];
-            let input = Assembled { parts: vec![text], names, subsections: false };
+            let input = Assembled { parts: vec![text], names, subsections: false, relax: false };
             let Err(Error::Refused { .. }) = assembled(&input, &i386()) else {
                 panic!("{kind:?} was written for i386");
             };
@@ -2412,7 +2566,7 @@ mod tests {
         data.relocs = vec![Reloc { at: 0, symbol: "foo".to_owned(), kind, addend: 300, after: 0 }];
         let names =
             vec![Name { at: Held::Undefined, ..at("foo", 0, Sort::Untyped, Binding::Global) }];
-        let input = Assembled { parts: vec![data], names, subsections: false };
+        let input = Assembled { parts: vec![data], names, subsections: false, relax: false };
         let Err(Error::Refused { why }) = assembled(&input, &i386()) else {
             panic!("an addend of 300 went into one byte");
         };
@@ -2432,7 +2586,8 @@ mod tests {
             at: Held::In { part: 1, offset: 0 },
             ..at("f", 0, Sort::Func, Binding::Global)
         }];
-        let input = Assembled { parts: vec![strings, kept], names, subsections: false };
+        let input =
+            Assembled { parts: vec![strings, kept], names, subsections: false, relax: false };
         let bytes = assembled(&input, &i386()).expect("an object");
         let header = elf::FileHeader32::<Endianness>::parse(&bytes[..]).expect("a 32 bit header");
         let endian = header.endian().expect("an endianness");
@@ -2469,8 +2624,9 @@ mod tests {
             Name { at: Held::In { part: 1, offset: 0 }, ..at("f", 0, Sort::Func, Binding::Global) },
             at("g", 0, Sort::Func, Binding::Global),
         ];
-        let bytes = assembled(&Assembled { parts, names, subsections: false }, &target())
-            .expect("an object");
+        let bytes =
+            assembled(&Assembled { parts, names, subsections: false, relax: false }, &target())
+                .expect("an object");
         let header = elf::FileHeader64::<Endianness>::parse(&bytes[..]).expect("a header");
         let endian = header.endian().expect("an endianness");
         let sections = header.sections(endian, &bytes[..]).expect("the sections");
@@ -2503,7 +2659,8 @@ mod tests {
             link: Some("nowhere".to_owned()),
             ..part("__patchable_function_entries", vec![0; 8])
         };
-        let input = Assembled { parts: vec![record], names: Vec::new(), subsections: false };
+        let input =
+            Assembled { parts: vec![record], names: Vec::new(), subsections: false, relax: false };
         assert!(assembled(&input, &target()).is_err());
     }
 
@@ -2516,6 +2673,7 @@ mod tests {
                 parts: vec![part(".text", vec![0x90])],
                 names: Vec::new(),
                 subsections: false,
+                relax: false,
             };
             let target = TargetInfo::new(Triple::new(arch, os, env));
             let bytes = assembled(&input, &target).expect("an object");
