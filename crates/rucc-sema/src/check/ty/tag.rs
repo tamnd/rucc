@@ -1107,6 +1107,17 @@ impl Checker<'_> {
         let low = values.iter().map(|&(_, value, _)| value).min().unwrap_or(0);
         let high = values.iter().map(|&(_, value, _)| value).max().unwrap_or(0);
         let candidates: &[IntKind] = match (low >= 0, short || self.cx.short_enums) {
+            // kencc gives an enumeration the widest type of its values, and `int` when they
+            // fit, so that `enum E` and `int` are one type in a prototype (06.7 of the
+            // rucc-plan9 plan).
+            (true, false) if self.cx.kencc => &[
+                IntKind::Int,
+                IntKind::UInt,
+                IntKind::Long,
+                IntKind::ULong,
+                IntKind::LongLong,
+                IntKind::ULongLong,
+            ],
             (true, false) => &[IntKind::UInt, IntKind::ULong, IntKind::ULongLong],
             (false, false) => &[IntKind::Int, IntKind::Long, IntKind::LongLong],
             (true, true) => &[

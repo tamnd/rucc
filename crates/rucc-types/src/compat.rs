@@ -66,6 +66,52 @@ pub fn compatible_pointees(types: &Types, left: TypeId, right: TypeId) -> bool {
     functions(types, &forget(a), &forget(b), &mut Vec::new())
 }
 
+/// Whether two declarations of one name agree under kencc's rule, which is [`compatible`] with
+/// the qualifiers set aside at every level.
+///
+/// kencc reads `const` and `volatile` and keeps them out of the comparison of two declarations,
+/// so `void perror(char*)` in `libc.h` and `void perror(const char*)` in APE's `stdio.h` declare
+/// one function. An enumeration still compares as the type it is represented in. Two functions
+/// agree when both are prototypes with parameters that agree, or when [`compatible`] says so.
+#[must_use]
+pub fn compatible_unqualified(types: &Types, left: TypeId, right: TypeId) -> bool {
+    let (left, right) = (types.canonical(left), types.canonical(right));
+    if left == right || compatible(types, left, right) {
+        return true;
+    }
+    match (types.kind(left), types.kind(right)) {
+        (TypeKind::Enum(_), TypeKind::Enum(_)) => false,
+        (TypeKind::Enum(id), _) => types
+            .enum_info(id)
+            .underlying
+            .is_some_and(|underlying| compatible_unqualified(types, underlying, right)),
+        (_, TypeKind::Enum(id)) => types
+            .enum_info(id)
+            .underlying
+            .is_some_and(|underlying| compatible_unqualified(types, left, underlying)),
+        (TypeKind::Pointer(a), TypeKind::Pointer(b)) => compatible_unqualified(types, a, b),
+        (TypeKind::Array { elem: a, len: x }, TypeKind::Array { elem: b, len: y }) => {
+            lengths_agree(x, y) && compatible_unqualified(types, a, b)
+        }
+        (TypeKind::Function(a), TypeKind::Function(b)) => {
+            let (a, b) = (types.signature(a), types.signature(b));
+            a.prototyped
+                && b.prototyped
+                && a.variadic == b.variadic
+                && a.convention == b.convention
+                && a.params.len() == b.params.len()
+                && compatible_unqualified(types, a.ret, b.ret)
+                && a.params
+                    .iter()
+                    .zip(&b.params)
+                    .all(|(&x, &y)| compatible_unqualified(types, x, y))
+        }
+        // The kind leaves out the qualifiers, so two scalars or one record with different
+        // qualifiers have the same kind.
+        (a, b) => a == b,
+    }
+}
+
 /// The composite type of two compatible types, 6.2.7p3, and [`None`] when they are not
 /// compatible.
 ///

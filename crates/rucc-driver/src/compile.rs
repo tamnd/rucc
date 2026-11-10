@@ -382,7 +382,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 std: opts.std,
                 gnu: opts.gnu_extensions,
                 pedantic: opts.pedantic,
-                permissive: opts.permissive,
+                // kencc takes implicit `int` and the rest of what gcc 14 made errors.
+                permissive: opts.permissive || opts.kencc,
                 gnu89_inline: opts.gnu89_inline,
                 strict_flex_arrays: opts.strict_flex_arrays,
                 optimizing: opts.opt_level.runs_optimizer(),
