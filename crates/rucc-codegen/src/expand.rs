@@ -553,7 +553,7 @@ fn to_unsigned_word(func: &mut Func, inst: Inst, arg: Value, ty: Type) {
     }
     // Half the range, as the float that spells it and the bits that spell the float.
     let bits = Type::int(from.bits());
-    let pattern = Imm::int(half_the_range(from.bits()), bits);
+    let pattern = Imm::int(half_the_range(from.bits(), ty.bits()), bits);
     let spelled = ahead_const(func, inst, pattern, bits);
     let half = ahead(func, inst, Opcode::Bitcast, &[spelled], from);
 
@@ -688,16 +688,19 @@ fn same_width(func: &mut Func, inst: Inst, value: Value, from: Type, to: Type) -
     }
 }
 
-/// The bits of the float of this width that is two to the sixty third.
+/// The bits of the float of width `float` that is half the range of an unsigned integer of width
+/// `int`, which is two to the power one less than `int`.
 ///
-/// Half of what an unsigned sixty four bit integer holds, which is the one number both conversions
-/// above are written around. The exponent is biased and the significand is zero in both formats,
-/// so it is the bias plus sixty three shifted up past the significand.
-fn half_the_range(width: u32) -> i128 {
-    match width {
-        32 => 0x5F00_0000,
-        _ => 0x43E0_0000_0000_0000,
-    }
+/// That is the one number both conversions above are written around. It is two to the sixty third
+/// for an unsigned sixty four bit integer, and two to the thirty first for an unsigned `int` on a
+/// machine of thirty two bits. The exponent is biased and the significand is zero in both formats,
+/// so it is the bias plus the power shifted up past the significand.
+fn half_the_range(float: u32, int: u32) -> i128 {
+    let (bias, significand) = match float {
+        32 => (127, 23),
+        _ => (1023, 52),
+    };
+    (bias + i128::from(int) - 1) << significand
 }
 
 /// Rewrites every byte swap the machine has no instruction for into the shifts and masks that are
@@ -2631,6 +2634,34 @@ mod tests {
         assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
         assert!(text.contains("fptosi.i64"), "converted as signed: {text}");
         assert!(text.contains("trunc.i32"), "and narrowed to what was asked: {text}");
+    }
+
+    /// `unsigned t(float x) { return x; }` on a machine of thirty two bits, where no signed integer
+    /// the machine has holds every unsigned `int`. The correction is then around two to the thirty
+    /// first, which is half the range of the answer, and not two to the sixty third.
+    #[test]
+    fn a_float_becoming_an_unsigned_int_on_i386_takes_off_half_of_thirty_two_bits() {
+        let (mut names, mut func) = one(&[f32()], &[Type::int(32)], |build, args| {
+            let n = build.unary(Opcode::FPToUI, args[0], Type::int(32));
+            build.ret(&[n]);
+        });
+        floats(&mut func, 4);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("fptoui"), "the unsigned conversion is gone: {text}");
+        assert!(text.contains("fptosi.i32"), "converted as signed at the width asked: {text}");
+        // 0x4F00_0000 is the float that is two to the thirty first.
+        assert!(text.contains("iconst.i32 1325400064"), "half of thirty two bits: {text}");
+        valid(&func, &mut names);
+
+        // The same arithmetic in the same order, over the values either side of the boundary.
+        let half = f32::from_bits(0x4F00_0000);
+        for x in [0.0_f32, 1.5, 2_147_483_520.0, 2_147_483_648.0, 3e9, 4_294_967_040.0] {
+            let mask = if x >= half { u32::MAX } else { 0 };
+            let taken = f32::from_bits(half.to_bits() & mask);
+            let low = (x - taken) as i32;
+            let top = u32::from(x >= half) << 31;
+            assert_eq!(low as u32 ^ top, x as u32, "converting {x} into an unsigned int");
+        }
     }
 
     /// `signed char a(double x) { return (signed char)x; }`, which the front end writes as a
