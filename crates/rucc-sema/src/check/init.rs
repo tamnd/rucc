@@ -704,7 +704,10 @@ impl<'a> Checker<'a> {
                 items.bump();
                 self.store_scalar(w, sub, value, item.span);
             }
-            Kind::Array { .. } if self.is_string(expr) => {
+            // A string literal fills the array only where the elements are integers, as in gcc.
+            // With `char *d[2][2] = { "a", "b", "c", "d" }` the elements of `d[0]` are pointers,
+            // so the walk goes into `d[0]` and the literal is the value of `d[0][0]`.
+            Kind::Array { elem, .. } if self.is_string(expr) && self.takes_strings(elem) => {
                 items.bump();
                 let reached = self.string_init(w, sub, expr, item.span);
                 w.reach(sub, kind, reached);
@@ -1333,6 +1336,16 @@ impl<'a> Checker<'a> {
     /// Whether what was written is a string literal, which an array takes whole.
     fn is_string(&self, expr: ast::ExprId) -> bool {
         matches!(self.ast[expr], ast::Expr::Str(_))
+    }
+
+    /// Whether a string literal with no braces fills an array of `elem` as a whole, or is the
+    /// value of its first element. gcc fills the array when the elements are integers and
+    /// reports a literal of the wrong width, so this asks only about the kind.
+    fn takes_strings(&self, elem: TypeId) -> bool {
+        matches!(
+            self.types.kind(self.types.canonical(elem)),
+            TypeKind::Int(_) | TypeKind::Bool | TypeKind::Enum(_) | TypeKind::BitInt { .. }
+        )
     }
 
     /// The element type of a string literal, which is the type its array is an array of.
