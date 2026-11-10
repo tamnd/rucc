@@ -39,6 +39,7 @@ mod glibc;
 pub mod host;
 pub mod install;
 mod kbuild;
+pub mod kencc;
 pub mod library;
 pub mod link;
 pub mod lto;
@@ -5984,12 +5985,21 @@ pub fn target_from_program(program: &str) -> Option<String> {
 ///
 /// A name ending in `dlltool`, or `--dlltool` as the first argument, is [`dlltool::run`] instead,
 /// which writes an import library and compiles nothing.
+///
+/// The name `6c`, `7c` or `8c`, or `--driver=kencc` as the first argument, is [`kencc::run`],
+/// which reads the command line of the Plan 9 compilers.
 pub fn run_as(program: &str, args: &[String]) -> i32 {
     if dlltool::is_dlltool(program) {
         return dlltool::run(program, args);
     }
     if args.first().is_some_and(|first| first == "--dlltool") {
         return dlltool::run(program, &args[1..]);
+    }
+    if kencc::is_kencc(program) {
+        return kencc::run(program, args);
+    }
+    if args.first().is_some_and(|first| first == "--driver=kencc") {
+        return kencc::run(program, &args[1..]);
     }
     match target_from_program(program) {
         Some(triple) => {
