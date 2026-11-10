@@ -685,6 +685,40 @@ fn integer(suffix: &str) -> Option<u32> {
     }
 }
 
+/// The `funct7` of a hypervisor fence: `hfence.vvma` for the guest's own translation, and
+/// `hfence.gvma` for the one from the guest's physical addresses.
+fn hfence(mnemonic: &str) -> u32 {
+    if mnemonic == "hfence.vvma" { 0x11 } else { 0x31 }
+}
+
+/// The `funct7` and the `rs2` of a hypervisor load, `hlv` and `hlvx`, by the width and the sign.
+/// `hlvx` reads with the permission to run rather than to read.
+fn hlv(mnemonic: &str) -> Option<(u32, u8)> {
+    Some(match mnemonic {
+        "hlv.b" => (0x30, 0),
+        "hlv.bu" => (0x30, 1),
+        "hlv.h" => (0x32, 0),
+        "hlv.hu" => (0x32, 1),
+        "hlvx.hu" => (0x32, 3),
+        "hlv.w" => (0x34, 0),
+        "hlv.wu" => (0x34, 1),
+        "hlvx.wu" => (0x34, 3),
+        "hlv.d" => (0x36, 0),
+        _ => return None,
+    })
+}
+
+/// The `funct7` of a hypervisor store, by the width.
+fn hsv(mnemonic: &str) -> Option<u32> {
+    Some(match mnemonic {
+        "hsv.b" => 0x31,
+        "hsv.h" => 0x33,
+        "hsv.w" => 0x35,
+        "hsv.d" => 0x37,
+        _ => return None,
+    })
+}
+
 /// Writes one instruction.
 ///
 /// # Errors
@@ -878,6 +912,39 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         ("sfence.vma", []) => out.words.push(0x1200_0073),
         ("sfence.vma", [Gpr(rs1)]) => out.words.push(r(0x73, 0, 0x09, ZERO, *rs1, ZERO)),
         ("sfence.vma", [Gpr(rs1), Gpr(rs2)]) => out.words.push(r(0x73, 0, 0x09, ZERO, *rs1, *rs2)),
+        // The hypervisor extension's fences, which take no operand, an address, or an address and
+        // the virtual machine's number, as `sfence.vma` does. FreeBSD's vmm writes them.
+        ("hfence.vvma" | "hfence.gvma", []) => {
+            out.words.push(r(0x73, 0, hfence(mnemonic), 0, 0, 0));
+        }
+        ("hfence.vvma" | "hfence.gvma", [Gpr(rs1)]) => {
+            out.words.push(r(0x73, 0, hfence(mnemonic), ZERO, *rs1, ZERO));
+        }
+        ("hfence.vvma" | "hfence.gvma", [Gpr(rs1), Gpr(rs2)]) => {
+            out.words.push(r(0x73, 0, hfence(mnemonic), ZERO, *rs1, *rs2));
+        }
+        // Svinval: the fence split in two, with its halves around the invalidations. GNU as takes
+        // only the form with both registers for these.
+        ("sinval.vma" | "hinval.vvma" | "hinval.gvma", [Gpr(rs1), Gpr(rs2)]) => {
+            let f7 = match mnemonic {
+                "sinval.vma" => 0x0b,
+                "hinval.vvma" => 0x13,
+                _ => 0x33,
+            };
+            out.words.push(r(0x73, 0, f7, ZERO, *rs1, *rs2));
+        }
+        ("sfence.w.inval", []) => out.words.push(0x1800_0073),
+        ("sfence.inval.ir", []) => out.words.push(0x1810_0073),
+        // The hypervisor's loads and stores, which reach memory as the guest sees it. They take
+        // a base with no displacement, as an atomic does.
+        (_, [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(0) })]) if hlv(mnemonic).is_some() => {
+            let (f7, rs2) = hlv(mnemonic).unwrap_or_default();
+            out.words.push(r(0x73, 4, f7, *rd, *base, rs2));
+        }
+        (_, [Gpr(rs2), Mem(Addr { base, offset: Offset::Imm(0) })]) if hsv(mnemonic).is_some() => {
+            let f7 = hsv(mnemonic).unwrap_or_default();
+            out.words.push(r(0x73, 4, f7, ZERO, *base, *rs2));
+        }
         // The branches GNU as has as the others with their operands swapped or against `zero`.
         ("bgt" | "ble" | "bgtu" | "bleu", [Gpr(rs1), Gpr(rs2), to]) => {
             let f3 = match mnemonic {
@@ -1276,6 +1343,48 @@ mod tests {
         assert!(encode("csrsi", &[Imm(0x100), Imm(32)]).is_err());
         assert!(encode("sspush", &[Gpr(10)]).is_err());
         assert!(encode("lpad", &[Imm(1 << 20)]).is_err());
+    }
+
+    /// The hypervisor extension and Svinval, with the words GNU as 2.42 writes for
+    /// `-march=rv64gch_svinval`, read back with objdump.
+    #[test]
+    fn the_hypervisor_and_svinval_instructions_are_the_words_gnu_as_writes() {
+        let words: &[(&str, &[Value], u32)] = &[
+            ("hfence.gvma", &[], 0x6200_0073),
+            ("hfence.vvma", &[], 0x2200_0073),
+            ("hfence.gvma", &[Gpr(10)], 0x6205_0073),
+            ("hfence.gvma", &[Gpr(0), Gpr(11)], 0x62b0_0073),
+            ("hfence.vvma", &[Gpr(10), Gpr(11)], 0x22b5_0073),
+            ("hlv.b", &[Gpr(10), at(11, 0)], 0x6005_c573),
+            ("hlv.bu", &[Gpr(10), at(11, 0)], 0x6015_c573),
+            ("hlv.h", &[Gpr(10), at(11, 0)], 0x6405_c573),
+            ("hlv.hu", &[Gpr(10), at(11, 0)], 0x6415_c573),
+            ("hlvx.hu", &[Gpr(10), at(11, 0)], 0x6435_c573),
+            ("hlv.w", &[Gpr(10), at(11, 0)], 0x6805_c573),
+            ("hlv.wu", &[Gpr(10), at(11, 0)], 0x6815_c573),
+            ("hlvx.wu", &[Gpr(10), at(11, 0)], 0x6835_c573),
+            ("hlv.d", &[Gpr(10), at(11, 0)], 0x6c05_c573),
+            ("hsv.b", &[Gpr(10), at(11, 0)], 0x62a5_c073),
+            ("hsv.h", &[Gpr(10), at(11, 0)], 0x66a5_c073),
+            ("hsv.w", &[Gpr(10), at(11, 0)], 0x6aa5_c073),
+            ("hsv.d", &[Gpr(10), at(11, 0)], 0x6ea5_c073),
+            ("sinval.vma", &[Gpr(10), Gpr(0)], 0x1605_0073),
+            ("sinval.vma", &[Gpr(10), Gpr(11)], 0x16b5_0073),
+            ("sfence.w.inval", &[], 0x1800_0073),
+            ("sfence.inval.ir", &[], 0x1810_0073),
+            ("hinval.vvma", &[Gpr(10), Gpr(11)], 0x26b5_0073),
+            ("hinval.gvma", &[Gpr(10), Gpr(11)], 0x66b5_0073),
+            ("csrrw", &[Gpr(6), Imm(0x600), Gpr(6)], 0x6003_1373),
+        ];
+        for &(mnemonic, values, word) in words {
+            assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
+        }
+        // A hypervisor load takes no distance, and the Svinval invalidations take both registers,
+        // as GNU as has them.
+        assert!(encode("hlv.d", &[Gpr(10), at(11, 8)]).is_err());
+        assert!(encode("hsv.w", &[Gpr(10), at(11, 4)]).is_err());
+        assert!(encode("sinval.vma", &[Gpr(10)]).is_err());
+        assert!(encode("hinval.gvma", &[Gpr(10)]).is_err());
     }
 
     /// Zba, Zbb, Zbs and Zacas, `move`, and a register instruction written with a constant, with
