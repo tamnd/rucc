@@ -55,6 +55,14 @@ pub(crate) struct Packs {
     pub(crate) order: Option<bool>,
 }
 
+impl Packs {
+    /// Sets what is in effect to `bytes`, where zero is the target's own alignments. kencc's
+    /// `#pragma pack` sets it with no stack.
+    pub(crate) fn set_current(&mut self, bytes: u32) {
+        self.current = in_effect(bytes);
+    }
+}
+
 /// The alignments `#pragma pack` takes, which is what both GCC and MSVC accept.
 ///
 /// Sixteen is the largest because it is the largest alignment any scalar has, and zero is in
@@ -174,6 +182,9 @@ impl Parser<'_> {
     /// gcc knows are taken without a word, and anything else is ignored with gcc's warning under
     /// `-Wunknown-pragmas`.
     fn pack_line(&mut self, line: &[Token], span: Span) {
+        if self.cx.kencc {
+            return self.kencc_pragma(line, span);
+        }
         let words = [0, 1].map(|at| {
             line.get(at).and_then(|token| token.ident()).map(|name| self.cx.interner.resolve(name))
         });
