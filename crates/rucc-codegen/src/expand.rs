@@ -2153,39 +2153,70 @@ fn write(func: &mut Func, inst: Inst, value: Value, into: Value, info: MemInfo) 
 /// with `"+a"` up to `"+D"` and writes its carry flag to a `"=mr"`, which gcc writes to the frame
 /// and this does too, reading it back from the slot behind the statement.
 ///
-/// Only the first such operand moves, and only when no operand is in memory already. One operand in
-/// memory is spelled from the stack pointer and needs no register, and a second needs one for its
-/// address, which is what moving it was meant to save.
+/// On x86-64 only the first such operand moves, and only when no operand is in memory already.
+/// One operand in memory is spelled from the stack pointer and needs no register, and a second
+/// needs one for its address in a template the back end reads, which is what moving it was meant
+/// to save.
 ///
-/// `held` is the registers the allocator keeps back from operands nobody pinned.
-pub fn crowded(func: &mut Func, names: &mut Interner, conv: &CallRegs, held: &[PhysReg]) {
+/// On i386 the back end reads no template and keeps every one as text, and there each slot of
+/// the frame is spelled from the stack pointer, however many there are. So one operand moves after
+/// another until the statement fits. libgcc's soft-fp `__FP_FRAC_ADD_4` and `__FP_FRAC_SUB_4` for
+/// i386 are four outputs, three of them `"=&r"`, and four inputs under `"g"`, which is eight
+/// registers against four, and the allocator stopped on addtf3.c, subtf3.c and divtf3.c. gcc
+/// reads the four `"g"` inputs from the frame, and this does the same.
+///
+/// `held` is the registers the allocator keeps back from operands nobody pinned. `many` says
+/// whether more than one operand may move, which is true on i386.
+pub fn crowded(
+    func: &mut Func,
+    names: &mut Interner,
+    conv: &CallRegs,
+    held: &[PhysReg],
+    many: bool,
+) {
     let found: Vec<Inst> = func
         .blocks()
         .flat_map(|block| func.insts(block))
         .filter(|&inst| matches!(func[inst].extra, Extra::Asm(_)))
         .collect();
-    for inst in found {
-        moved_to_memory(func, names, conv, held, inst);
+    for mut inst in found {
+        while let Some(next) = moved_to_memory(func, names, conv, held, inst, many) {
+            if !many {
+                break;
+            }
+            inst = next;
+        }
     }
 }
 
-/// The operand [`crowded`] moves, if this statement has one to move.
+/// The operand [`crowded`] moves, if this statement has one to move, and the statement as it is
+/// after the move, which is a new one when an output moved.
 fn moved_to_memory(
     func: &mut Func,
     names: &mut Interner,
     conv: &CallRegs,
     held: &[PhysReg],
     inst: Inst,
-) {
-    let Extra::Asm(asm) = func[inst].extra else { return };
+    many: bool,
+) -> Option<Inst> {
+    let Extra::Asm(asm) = func[inst].extra else { return None };
     let info = func[asm];
     let constraints = names.resolve(info.constraints).to_owned();
     let results: Vec<Value> = func[inst].results().collect();
     let args: Vec<Value> = func[func[inst].args].to_vec();
-    let Some(operands) = AsmOperands::read(&constraints, &results, &args) else { return };
+    let operands = AsmOperands::read(&constraints, &results, &args)?;
     let list: Vec<AsmOperand<'_>> = operands.iter().copied().collect();
-    if list.iter().any(|operand| operand.memory) {
-        return;
+    // A slot of the frame in memory is spelled from the stack pointer when the template is kept
+    // as text, and takes no register, so on i386 it is not counted below either.
+    let slot = |operand: &AsmOperand<'_>| {
+        many && operand.memory
+            && operand.value.is_some_and(|value| match func[value].def {
+                Def::Result { inst, .. } => func[inst].opcode == Opcode::Alloca,
+                _ => false,
+            })
+    };
+    if !many && list.iter().any(|operand| operand.memory) {
+        return None;
     }
 
     // What the statement holds while it reads: every operand with a value, and an output written
@@ -2212,6 +2243,9 @@ fn moved_to_memory(
     for (index, operand) in list.iter().enumerate() {
         if operand.result.is_some() {
             hold(&mut writes, operand, index);
+        }
+        if slot(operand) {
+            continue;
         }
         let read = operand.value.is_some_and(|value| !(operand.immediate && constant(value)));
         let early = operand.early && operand.value.is_none();
@@ -2277,7 +2311,7 @@ fn moved_to_memory(
             && matches!(bits, 8 | 16 | 32 | 64)
             && bits <= word * 8
     };
-    let Some(index) = wanted.into_iter().find(movable) else { return };
+    let index = wanted.into_iter().find(movable)?;
     let operand = list[index];
     let ty = func[operand.result.or(operand.value).expect("a movable operand has a value")].ty;
     let size = if ty.is_ptr() { word } else { ty.bits() / 8 };
@@ -2303,7 +2337,7 @@ fn moved_to_memory(
     let Some(result) = operand.result else {
         func[inst].args = func.push_values(&args);
         func[inst].extra = Extra::Asm(moved);
-        return;
+        return Some(inst);
     };
 
     // An output has one result fewer, so the statement is made again without it, and what the
@@ -2321,6 +2355,7 @@ fn moved_to_memory(
     forward.insert(result, loaded);
     func.remove_inst(inst);
     substitute(func, &forward);
+    Some(made)
 }
 
 /// Puts every constant distance a pointer is stepped by at the width of an address.

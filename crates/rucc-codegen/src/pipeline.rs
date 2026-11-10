@@ -959,9 +959,9 @@ pub fn compile_recording(
     // it could go in. Only on x86, the one machine here that names an operand in the frame without a
     // register for its address. See [`expand::crowded`].
     if std::ptr::eq(machine.shapes, &x86::MACHINE) {
-        expand::crowded(source, names, machine.conv, &X86_SCRATCH);
+        expand::crowded(source, names, machine.conv, &X86_SCRATCH, true);
     } else if std::ptr::eq(machine.shapes, &x86_64::MACHINE) {
-        expand::crowded(source, names, machine.conv, &SCRATCH);
+        expand::crowded(source, names, machine.conv, &SCRATCH, false);
     }
     // A shift a later block reads as a scaled index too, written again there so that every
     // address can take it. Only on x86, the machine whose addresses have room for the scale. See
