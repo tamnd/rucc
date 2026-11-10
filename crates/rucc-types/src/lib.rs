@@ -100,7 +100,8 @@ pub use crate::compat::{
     adjust_parameter, compatible, compatible_pointees, compatible_unqualified, composite,
 };
 pub use crate::convert::{
-    mask_of, promote, promote_bit_field, usual_arithmetic, vectors_convertible,
+    kencc_arithmetic, kencc_promote, mask_of, promote, promote_bit_field, usual_arithmetic,
+    vectors_convertible,
 };
 pub use crate::granule::{GRANULE, Keying, Tally, measure, measure_all, report as granule_report};
 pub use crate::kind::{

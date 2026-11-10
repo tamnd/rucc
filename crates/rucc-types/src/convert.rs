@@ -246,6 +246,88 @@ pub fn mask_of(types: &mut Types, id: TypeId, target: &TargetInfo) -> Option<Typ
     Some(types.vector(lane, len))
 }
 
+/// The kind of a kencc integer operand, or [`None`] where kencc has no such type.
+///
+/// An enumeration is the integer type that holds it, because kencc gives each enumeration the
+/// type of its constants. A `bool`, a `_BitInt`, a 128 bit integer and every other type are not
+/// kencc types, and the C rules stay in effect for them.
+fn kencc_int(types: &mut Types, id: TypeId) -> Option<IntKind> {
+    let id = value_type(types, id);
+    match types.kind(id) {
+        TypeKind::Int(IntKind::Int128 | IntKind::UInt128) => None,
+        TypeKind::Int(kind) => Some(kind),
+        TypeKind::Enum(e) => {
+            let underlying = types.enum_info(e).underlying?;
+            kencc_int(types, underlying)
+        }
+        _ => None,
+    }
+}
+
+/// The kencc integer kind of the given rank and sign. The ranks are those of `char`, `short`,
+/// `int`, `long` and `long long`.
+fn kencc_kind(rank: u8, unsigned: bool) -> IntKind {
+    match (rank, unsigned) {
+        (0, false) => IntKind::Char,
+        (0, true) => IntKind::UChar,
+        (1, false) => IntKind::Short,
+        (1, true) => IntKind::UShort,
+        (2, false) => IntKind::Int,
+        (2, true) => IntKind::UInt,
+        (3, false) => IntKind::Long,
+        (3, true) => IntKind::ULong,
+        (_, false) => IntKind::LongLong,
+        (_, true) => IntKind::ULongLong,
+    }
+}
+
+/// The rank and the sign of a kencc integer kind.
+fn kencc_rank(kind: IntKind, target: &TargetInfo) -> (u8, bool) {
+    let rank = match kind {
+        IntKind::Char | IntKind::SChar | IntKind::UChar => 0,
+        IntKind::Short | IntKind::UShort => 1,
+        IntKind::Int | IntKind::UInt => 2,
+        IntKind::Long | IntKind::ULong => 3,
+        _ => 4,
+    };
+    (rank, !kind.is_signed(target.char_is_signed))
+}
+
+/// The integer promotion of kencc, which keeps the sign. `unsigned char` and `unsigned short`
+/// become `unsigned int`, and `char` and `short` become `int`. This is the loop `while(k <
+/// TINT) k += 2` in `arith` of `sub.c`. [`None`] where the operand is not a kencc integer type.
+pub fn kencc_promote(types: &mut Types, id: TypeId, target: &TargetInfo) -> Option<TypeId> {
+    let (rank, unsigned) = kencc_rank(kencc_int(types, id)?, target);
+    Some(types.int(kencc_kind(rank.max(2), unsigned)))
+}
+
+/// The common type of two integer operands in kencc, from the table `tab` in `sub.c`. The rank
+/// is the larger of the two, and the type is unsigned when either operand is unsigned. So
+/// `unsigned char` with `int` is `unsigned int`, and `long long` with `unsigned int` is
+/// `unsigned long long`.
+///
+/// `promote` is the flag `f` of `arith`. The arithmetic operators set it, and the result is
+/// then at least an `int`. A comparison, a conditional and a compound assignment do not set
+/// it, so `char` with `unsigned char` is `unsigned char` there.
+///
+/// [`None`] where either operand is not a kencc integer type. A floating operand is one of
+/// them, and the C rules give its answer.
+pub fn kencc_arithmetic(
+    types: &mut Types,
+    left: TypeId,
+    right: TypeId,
+    promote: bool,
+    target: &TargetInfo,
+) -> Option<TypeId> {
+    let (a, b) = (kencc_int(types, left)?, kencc_int(types, right)?);
+    if a == b && (!promote || kencc_rank(a, target).0 >= 2) {
+        return Some(types.int(a));
+    }
+    let ((ra, ua), (rb, ub)) = (kencc_rank(a, target), kencc_rank(b, target));
+    let rank = if promote { ra.max(rb).max(2) } else { ra.max(rb) };
+    Some(types.int(kencc_kind(rank, ua || ub)))
+}
+
 /// The type of a value of type `id`, which is `id` without the parts an lvalue conversion
 /// removes.
 fn value_type(types: &mut Types, id: TypeId) -> TypeId {

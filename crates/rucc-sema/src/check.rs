@@ -728,7 +728,8 @@ impl<'a> Checker<'a> {
         // context, so taking it does not borrow the checker the two mutable ones are taken from.
         let target = self.cx.target;
         let names = self.cx.names;
-        let (trapping_math, excess_constants) = (self.cx.trapping_math, self.cx.excess_constants);
+        let (trapping_math, excess_constants, kencc) =
+            (self.cx.trapping_math, self.cx.excess_constants, self.cx.kencc);
         Conv {
             tast: &mut self.tast,
             types: &mut self.types,
@@ -736,6 +737,7 @@ impl<'a> Checker<'a> {
             names,
             trapping_math,
             excess_constants,
+            kencc,
         }
     }
 
