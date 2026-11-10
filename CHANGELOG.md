@@ -34,6 +34,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On Plan 9 targets, a copy that is too large to write out calls `memmove` and not `memcpy`, as 08.6 of the rucc-plan9 plan says. A new field, `CallRegs::copies_by_moving`, holds the rule (#4158)
 - `docs/TARGETS.md` has a Plan 9 section. It says that integer work uses no vector register on these targets, for all code and not only for the kernel (#4158)
 - Under `-fkencc`, `signof expr` and `signof (type)` give the kencc type signature of the operand as an `unsigned long` constant. The value is the same as the value that `signat` in kencc's `cc/dcl.c` gives, which a test checks for 34 types. A new function, `rucc_types::kencc_signature`, computes it. This function is also used for the signatures that `-T` will write (#4157)
+- `rucc_object::plan9` writes and reads the records of Plan 9 objects, the `.6` files that `6l` reads and the `.7` files that `7l` reads. The writer follows `6c` and `7c`: the symbol cache of 50 slots, the `ANAME` and `ASIGNAME` records, the history records with the file names split on `/`, and the `#pragma lib` record. The reader follows `6l` and `7l` and is used by the tests. The compiler does not use the writer yet (#4156)
 
 ### Fixed
 
