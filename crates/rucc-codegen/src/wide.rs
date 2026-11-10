@@ -124,12 +124,29 @@ struct Width {
     /// conventions are the only ones here whose stores are seen in the order they were made, so
     /// that is how they are told apart from AArch64.
     pairs: bool,
+    /// Whether the halves are two registers wide themselves, which is the first of two splits of a
+    /// value four registers wide. See [`Width::outer`].
+    nested: bool,
 }
 
 impl Width {
     /// The width of a register under that convention, which is how many bytes one takes saved.
     fn of(conv: &CallRegs) -> Self {
-        Self { half: conv.word * 8, pairs: conv.total_store_order }
+        Self { half: conv.word * 8, pairs: conv.total_store_order, nested: false }
+    }
+
+    /// The split before this one, on a machine of thirty two bits, where a value of a hundred and
+    /// twenty eight bits is four registers.
+    ///
+    /// gcc 14 has `_BitInt(128)` on i386, and libgcc's soft-fp uses it there as the integer of
+    /// `TImode`, which i386 does not have: `floatbitinttf.c`, `fixtfbitint.c` and their `xf`
+    /// siblings work in it with shifts, adds and compares. Such a value is split into two of
+    /// sixty four bits here, and those are then split again at the register width as every
+    /// `long long` is. The halves of the first split cross nothing, since the first split leaves
+    /// a function whose boundary has such a value alone, and no routine is named at that width,
+    /// since libgcc for i386 has none of the `ti` ones.
+    fn outer(self) -> Option<Self> {
+        (self.half == 32 && !self.nested).then_some(Self { half: 64, pairs: false, nested: true })
     }
 
     /// How many bits the value this pass splits is, which is two registers.
@@ -168,7 +185,9 @@ impl Width {
     /// division at `i64` is an instruction and not a call, so the routines one size down are in a
     /// table of their own that only a target splitting a `long long` reads.
     fn libcall(self, opcode: Opcode, mode: &str) -> Option<&'static str> {
-        if self.half == 64 {
+        if self.nested {
+            None
+        } else if self.half == 64 {
             capability::libcall(opcode, mode)
         } else {
             capability::pair_libcall(opcode, mode)
@@ -186,8 +205,25 @@ impl Width {
 /// the function's boundary somewhere the convention has no register for it. All three leave the
 /// refusal to the passes below, which name the construct they could not lower, rather than
 /// rewriting into something that guessed.
+///
+/// On a machine of thirty two bits a value of a hundred and twenty eight is split twice, into two
+/// halves of sixty four and then each of those into two words, see [`Width::outer`]. When the
+/// second split leaves the function alone, so is the first undone, and the function is split at
+/// the register width only, as it was before there was a first split.
 pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
-    halves_at(func, names, conv, Width::of(conv))
+    let width = Width::of(conv);
+    if let Some(outer) = width.outer()
+        && func.values().any(|value| outer.is_wide(func[value].ty))
+    {
+        let before = func.clone();
+        if halves_at(func, names, conv, outer) {
+            if halves_at(func, names, conv, width) {
+                return true;
+            }
+            *func = before;
+        }
+    }
+    halves_at(func, names, conv, width)
 }
 
 /// The same, splitting at that width rather than at the one the convention's registers are.
@@ -196,6 +232,14 @@ pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
 /// width no target that lowers today has.
 fn halves_at(func: &mut Func, names: &mut Interner, conv: &CallRegs, width: Width) -> bool {
     if !func.values().any(|value| width.is_wide(func[value].ty)) {
+        return false;
+    }
+    // The halves of the first of two splits have no place of their own at a boundary: what is
+    // passed is the four words, and how they are passed is a question for the second split.
+    let crosses = |signature: &Signature| {
+        signature.params.iter().chain(&signature.returns).any(|param| width.is_wide(param.ty))
+    };
+    if width.nested && (crosses(func.signature()) || func.signatures().any(crosses)) {
         return false;
     }
     let insts: Vec<Inst> = walk(func).into_iter().flat_map(|block| func.insts(block)).collect();
@@ -352,6 +396,31 @@ fn can_split(
         return true;
     }
     if !understood(data.opcode) {
+        return false;
+    }
+    // In the first of two splits a value is still wider than the machine in each half, so there is
+    // nothing to hand a routine, a register or an assembly statement at that width. A divide of two
+    // halves would be a call to a `ti` routine libgcc for i386 does not have, and so would a
+    // conversion to or from a float.
+    if width.nested
+        && matches!(
+            data.opcode,
+            Opcode::UDiv
+                | Opcode::SDiv
+                | Opcode::URem
+                | Opcode::SRem
+                | Opcode::SIToFP
+                | Opcode::UIToFP
+                | Opcode::FPToSI
+                | Opcode::FPToUI
+                | Opcode::Bitcast
+                | Opcode::Call
+                | Opcode::CallIndirect
+                | Opcode::Return
+                | Opcode::InlineAsm
+                | Opcode::RegisterValue
+        )
+    {
         return false;
     }
     // Memory SSA threads a version of memory through each access, and splitting one access into two
@@ -3224,7 +3293,7 @@ mod tests {
     ///
     /// No target with such registers lowers yet, so the pass is driven at the width directly, over
     /// the System V registers standing in for a convention that puts both halves in two of them.
-    const NARROW: super::Width = super::Width { half: 32, pairs: true };
+    const NARROW: super::Width = super::Width { half: 32, pairs: true, nested: false };
 
     /// Splits at thirty two bits, which is what the pass does on i386.
     fn narrow(func: &mut Func, names: &mut Interner) -> bool {
@@ -3488,7 +3557,10 @@ mod tests {
 
     #[test]
     fn at_sixty_four_bits_the_width_is_the_one_the_registers_say() {
-        assert_eq!(super::Width::of(&SYSV), super::Width { half: HALF, pairs: true });
+        assert_eq!(
+            super::Width::of(&SYSV),
+            super::Width { half: HALF, pairs: true, nested: false }
+        );
         assert_eq!(super::Width::of(&SYSV).mode(), "i128");
         assert_eq!(NARROW.mode(), "i64");
     }
