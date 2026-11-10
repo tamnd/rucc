@@ -722,6 +722,9 @@ fn store_head(ty: Type, address: u32) -> Option<&'static str> {
     if is_quad(ty) {
         return Some("store.f128");
     }
+    if is_half(ty) {
+        return Some("store.f16");
+    }
     if let Some(at) = float_slot(ty) {
         return Some(["store.f32", "store.f64"][at]);
     }
@@ -897,8 +900,14 @@ fn paired_int(ty: Type, at: usize) -> bool {
 /// instructions long.
 fn cross_head(opcode: Opcode, from: Type, to: Type, address: u32) -> Option<&'static str> {
     match opcode {
-        // Between the two formats, one name each way. There is no third format with a name here,
-        // so these two are the whole of it rather than the first two of a table.
+        // A half against each of the two formats, one name each way, for a machine that converts
+        // between them in one instruction. AArch64 is that machine. On one that is not,
+        // `crate::half`'s pass turns these into calls before anything asks for the name.
+        Opcode::FPExt if is_half(from) => Some(["fpext.f16.f32", "fpext.f16.f64"][float_slot(to)?]),
+        Opcode::FPTrunc if is_half(to) => {
+            Some(["fptrunc.f32.f16", "fptrunc.f64.f16"][float_slot(from)?])
+        }
+        // Between the two formats, one name each way.
         Opcode::FPExt => {
             (float_slot(from)? == 0 && float_slot(to)? == 1).then_some("fpext.f32.f64")
         }

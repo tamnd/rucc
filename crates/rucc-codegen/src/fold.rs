@@ -1185,7 +1185,7 @@ pub fn tables(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) ->
 
 /// The AArch64 loads and stores that can take the low twelve bits of a symbol's address, each with
 /// how many bytes it reads or writes, which is what the twelve bits are scaled by.
-const LOW_BITS: [(&str, u32); 21] = [
+const LOW_BITS: [(&str, u32); 23] = [
     ("ldr_8", 1),
     ("ldr_16", 2),
     ("ldr_32", 4),
@@ -1201,9 +1201,11 @@ const LOW_BITS: [(&str, u32); 21] = [
     ("str_16", 2),
     ("str_32", 4),
     ("str_64", 8),
+    ("ldr_f16", 2),
     ("ldr_f32", 4),
     ("ldr_f64", 8),
     ("ldr_f128", 16),
+    ("str_f16", 2),
     ("str_f32", 4),
     ("str_f64", 8),
     ("str_f128", 16),

@@ -51,11 +51,6 @@ fn every_entry_starts_a_line_of_its_own() {
 /// than an allowance for anything missing. What a load of four bytes means depends on which end
 /// of the value sits at the lowest address, which is a fact about the target, so those entries
 /// live in the target's model and the two that exist there today are written out.
-///
-/// A half is loaded and never stored, which is why `load.f16` is below and `store.f16` is not.
-/// The lowering pass rewrites every store of a half into a store of the sixteen bits, because the
-/// instruction that gets those bits out of a vector register and straight into memory is above
-/// the baseline this target compiles for.
 #[test]
 fn a_head_with_no_meaning_here_is_one_whose_meaning_belongs_to_the_target() {
     let missing: Vec<&str> = named().difference(&defined()).copied().collect();
@@ -76,6 +71,7 @@ fn a_head_with_no_meaning_here_is_one_whose_meaning_belongs_to_the_target() {
             "load.i8",
             "load.i8x16",
             "store.f128",
+            "store.f16",
             "store.f32",
             "store.f64",
             "store.i1",

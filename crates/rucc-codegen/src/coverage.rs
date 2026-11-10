@@ -184,18 +184,27 @@ pub static NAMES: &[(&str, &str, &str)] = &[
     ("sub.i8x16", "the same", "tamnd/rucc#3775"),
     ("xor.i16x8", "the same", "tamnd/rucc#3775"),
     ("xor.i8x16", "the same", "tamnd/rucc#3775"),
+    (
+        "fpext.f16.f32",
+        "a half widened, which `crate::half` calls a routine for at this baseline",
+        "tamnd/rucc#4234",
+    ),
+    ("fpext.f16.f64", "the same", "tamnd/rucc#4234"),
+    ("fptrunc.f32.f16", "the same, narrowed", "tamnd/rucc#4234"),
+    ("fptrunc.f64.f16", "the same", "tamnd/rucc#4234"),
+    (
+        "store.f16",
+        "a half stored, which `crate::half` writes as its bits and an integer store",
+        "tamnd/rucc#4234",
+    ),
 ];
 
 /// [`NAMES`] for `aarch64.rules`.
 ///
 /// A list of its own because the two rule files are not the same size yet and a name left out of
-/// one is not left out of the other: x86-64 moves a half through a vector register and AArch64
-/// has nothing for one so far. [`names`] is which list goes with which table.
+/// one is not left out of the other: AArch64 converts and stores a half in one instruction and
+/// x86-64 does not at its baseline. [`names`] is which list goes with which table.
 pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
-    ("load.f16", "a half, which nothing on this machine carries yet", "tamnd/rucc#2105"),
-    ("ret.f16", "the same, returned in `h0`", "tamnd/rucc#2105"),
-    ("bitcast.f16.i16", "the same, as the bits a constant or a negation is", "tamnd/rucc#2105"),
-    ("bitcast.i16.f16", "the same, the other way", "tamnd/rucc#2105"),
     (
         "umulh.i32",
         "the high half of a thirty two bit product, which only a division by a constant on a \
@@ -314,6 +323,19 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
     ),
     ("ctpop.i64", "the same", "tamnd/rucc#310"),
     ("cttz.i64", "the same", "tamnd/rucc#310"),
+    (
+        "fpext.f16.f32",
+        "a half widened, which `crate::half` calls a routine for at this baseline",
+        "tamnd/rucc#4234",
+    ),
+    ("fpext.f16.f64", "the same", "tamnd/rucc#4234"),
+    ("fptrunc.f32.f16", "the same, narrowed", "tamnd/rucc#4234"),
+    ("fptrunc.f64.f16", "the same", "tamnd/rucc#4234"),
+    (
+        "store.f16",
+        "a half stored, which `crate::half` writes as its bits and an integer store",
+        "tamnd/rucc#4234",
+    ),
 ];
 
 /// [`NAMES`] for `riscv64.rules`, a list of its own for the reason [`AARCH64_NAMES`] gives.
@@ -354,6 +376,11 @@ pub static RISCV64_NAMES: &[(&str, &str, &str)] = &[
     ("ret.f16", "the same, returned in `fa0`", "tamnd/rucc#3284"),
     ("bitcast.f16.i16", "the same, as the bits a constant or a negation is", "tamnd/rucc#3284"),
     ("bitcast.i16.f16", "the same, the other way", "tamnd/rucc#3284"),
+    ("store.f16", "the same, stored", "tamnd/rucc#3284"),
+    ("fpext.f16.f32", "the same, widened, which needs the half extension here", "tamnd/rucc#3284"),
+    ("fpext.f16.f64", "the same", "tamnd/rucc#3284"),
+    ("fptrunc.f32.f16", "the same, narrowed", "tamnd/rucc#3284"),
+    ("fptrunc.f64.f16", "the same", "tamnd/rucc#3284"),
     (
         "load.f128",
         "a `long double`, which is a quad here and has no rules on this machine yet",

@@ -319,9 +319,11 @@ f9000921	str x1, [x9, #16]	str_64
 a9410921	ldp x1, x2, [x9, #16]	ldp_64
 29020921	stp w1, w2, [x9, #16]	stp_32
 a9010921	stp x1, x2, [x9, #16]	stp_64
+7d402121	ldr h1, [x9, #16]	ldr_f16
 bd401121	ldr s1, [x9, #16]	ldr_f32
 fd400921	ldr d1, [x9, #16]	ldr_f64
 3dc00521	ldr q1, [x9, #16]	ldr_f128
+7d002121	str h1, [x9, #16]	str_f16
 bd001121	str s1, [x9, #16]	str_f32
 fd000921	str d1, [x9, #16]	str_f64
 3d800521	str q1, [x9, #16]	str_f128
@@ -438,6 +440,10 @@ ad008921	stp q1, q2, [x9, #16]	stp_f128
 4e181c61	ins v1.d[1], x3	ins_d
 1e624041	fcvt s1, d2	fcvt_f64_f32
 1e22c041	fcvt d1, s2	fcvt_f32_f64
+1ee24041	fcvt s1, h2	fcvt_f16_f32
+1e23c041	fcvt h1, s2	fcvt_f32_f16
+1ee2c041	fcvt d1, h2	fcvt_f16_f64
+1e63c041	fcvt h1, d2	fcvt_f64_f16
 1e220041	scvtf s1, w2	scvtf_32_f32
 1e620041	scvtf d1, w2	scvtf_32_f64
 9e220041	scvtf s1, x2	scvtf_64_f32
@@ -458,6 +464,8 @@ ad008921	stp q1, q2, [x9, #16]	stp_f128
 9e670041	fmov d1, x2	fmov_to_f64
 1e260041	fmov w1, s2	fmov_from_f32
 9e660041	fmov x1, d2	fmov_from_f64
+1e270041	fmov s1, w2	fmov_to_f16
+1e260041	fmov w1, s2	fmov_from_f16
 1e222020	fcmp s1, s2	fcmp_f32
 1e622020	fcmp d1, d2	fcmp_f64
 1e232040	fcmp s2, s3	fcmp_set_eq_f32

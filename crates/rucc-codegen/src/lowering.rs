@@ -371,7 +371,7 @@ impl Step {
             }
             Self::Overflows => expand::overflows(func, conv.word * 8),
             Self::Decimals => decimal::calls(func, names, conv.abi),
-            Self::HalfFloats => half::calls(func, names, conv.abi),
+            Self::HalfFloats => half::calls(func, names, conv.abi, built.converts),
             Self::Halves => return wide::halves(func, names, conv),
             Self::Widths => return widths::integers(func, conv),
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
@@ -567,6 +567,10 @@ pub struct Built {
     /// function has the large system extensions, and nothing on any other machine. See
     /// [`locked::paired`].
     pub pairs: Option<locked::Exclusive>,
+    /// Whether the machine converts a half to and from `float` and `double` in one instruction
+    /// and stores one in one, which is AArch64, in which case [`half::calls`] keeps those as they
+    /// are rather than calling a routine.
+    pub converts: bool,
 }
 
 /// Runs the whole group over one function, in the order [`Step::GROUP`] gives.
@@ -831,7 +835,7 @@ mod tests {
                 build.ret(&[answer]);
             });
             let switching = (Goal::Speed, None, true, true);
-            let built = Built { fused, pairs: None };
+            let built = Built { fused, pairs: None, converts: false };
             let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, &[], built, true);
             assert_eq!((ran.of(Step::Maths).found, ran.of(Step::Maths).left), (1, left));
         }

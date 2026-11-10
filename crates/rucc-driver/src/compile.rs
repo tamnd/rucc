@@ -11260,6 +11260,40 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("movl\t$1, %eax"), "and at eight it is: {text}");
     }
 
+    /// `_Float16` on AArch64 is moved with `ldr h` and `str h`, widened and narrowed with `fcvt`,
+    /// and computed at `float` between the two, which is what gcc writes. No routine is called,
+    /// and libgcc on that machine has none of the ones x86-64 calls.
+    #[test]
+    fn a_half_is_loaded_converted_and_stored_by_instructions_on_aarch64() {
+        let source = "_Float16 ld(_Float16 *p) { return *p; }\n\
+                      void st(_Float16 *p, _Float16 v) { p[3] = v; }\n\
+                      _Float16 add(_Float16 a, _Float16 b) { return a + b; }\n\
+                      int lt(_Float16 a, _Float16 b) { return a < b; }\n\
+                      double wide(_Float16 a) { return a; }\n\
+                      _Float16 narrow(double d) { return d; }\n\
+                      _Float16 from(int i) { return i; }\n\
+                      int to(_Float16 a) { return a; }\n\
+                      _Float16 neg(_Float16 a) { return -a; }\n\
+                      _Float16 k(void) { return (_Float16)1.5f; }\n";
+        let built = |emit: EmitKind| {
+            let mut opts = options();
+            opts.emit = emit;
+            opts.target = "aarch64-unknown-freebsd".parse::<Triple>().unwrap();
+            let ran = run(&opts, source);
+            assert_eq!(ran.messages, Vec::<String>::new());
+            ran
+        };
+        let text = built(EmitKind::Asm).text().to_owned();
+        for wanted in ["ldr h0, [x0]", "str h0, [x0", "fcvt s0, h0", "fcvt h0, s0", "fcvt d0, h0"] {
+            assert!(text.contains(wanted), "{wanted}: {text}");
+        }
+        assert!(!text.contains("hf2"), "no routine: {text}");
+        let Artifact::Object { bytes, .. } = built(EmitKind::Object).artifact else {
+            panic!("an object")
+        };
+        assert!(!bytes.windows(3).any(|w| w == b"hf2"));
+    }
+
     /// tamnd/rucc#4088. The `__sync` names at sixteen bytes are written in place on AArch64, as
     /// gcc writes them: the loop of `ldaxp` and `stlxp`, or `caspal` in a function built for the
     /// large system extensions. The C11 names still call libatomic at this width, as on x86-64.
