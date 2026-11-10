@@ -910,7 +910,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                     // The same four extensions as the x86-64 baseline, because they are what the
                     // Pentium 4 has and what the backend emits. `__SSE2_MATH__` is the promise
                     // that `double` arithmetic happens in an SSE register, which is also why
-                    // `__FLT_EVAL_METHOD__` is zero here rather than the two that x87 math gives.
+                    // `__FLT_EVAL_METHOD__` is zero here unless `-mfpmath=387` makes it two.
                     for name in Isa::baseline().macros() {
                         d.flag(&name);
                     }
@@ -2209,9 +2209,14 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // precision to have, and glibc's `<math.h>` reads the last of the three.
     // gcc says the C99 one on AArch64 alone, since only that backend defines it, and gcc 13 on
     // Ubuntu and gcc 10 to 15 on the BSDs leave it out on x86-64 and RISC-V.
-    d.set("__FLT_EVAL_METHOD__", "0");
+    // The answer is 2 where the arithmetic is on the x87 stack, because there a `float` or a
+    // `double` expression is evaluated in `long double`, and gcc says 2 for both names there in
+    // every dialect and under `-ffast-math` as well. A header reads it to make `float_t` and
+    // `double_t` a `long double`.
+    let eval = if opts.x87_floats { "2" } else { "0" };
+    d.set("__FLT_EVAL_METHOD__", eval);
     d.set_if(target.tuple.arch() == tuple::Arch::Aarch64, "__FLT_EVAL_METHOD_C99__", "0");
-    d.set("__FLT_EVAL_METHOD_TS_18661_3__", "0");
+    d.set("__FLT_EVAL_METHOD_TS_18661_3__", eval);
     // How a decimal floating expression is evaluated, which gcc says on every target, whether or
     // not the target has the decimal types. It is 2 in gcc, and a program that reads it is asking
     // what gcc would do. clang does not say it, so the rows whose reference is clang leave it out.
@@ -4052,6 +4057,20 @@ mod tests {
         }
         for name in ["__SSE2__ ", "__FMA__ "] {
             assert!(x87.contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_i386_unit_with_floats_on_the_x87_stack_evaluates_them_in_long_double() {
+        // gcc 13 for i686 says 2 for both names with the x87 math it has by default, and 0 with
+        // `-msse2 -mfpmath=sse`, in every dialect.
+        let triple: Triple = "i686-unknown-linux-gnu".parse().expect("a triple");
+        let sse = built_in(&TargetInfo::new(triple), &Predef::new());
+        let x87 = Predef { x87_floats: true, ..Predef::new() };
+        let x87 = built_in(&TargetInfo::new(triple), &x87);
+        for name in ["__FLT_EVAL_METHOD__", "__FLT_EVAL_METHOD_TS_18661_3__"] {
+            assert!(sse.contains(&format!("#define {name} 0\n")), "{name}");
+            assert!(x87.contains(&format!("#define {name} 2\n")), "{name}");
         }
     }
 

@@ -335,7 +335,8 @@ impl<'a> Eval<'a> {
                     Conversion::Arithmetic
                     | Conversion::Bool
                     | Conversion::Pointer
-                    | Conversion::Hardbool,
+                    | Conversion::Hardbool
+                    | Conversion::Excess,
                 operand,
             } => self.convert(expr, operand),
             // An array or a function becoming a pointer is the address of the thing itself,

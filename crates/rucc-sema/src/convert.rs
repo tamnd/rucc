@@ -42,7 +42,8 @@ use rucc_base::Interner;
 use rucc_base::float::Status;
 use rucc_target::TargetInfo;
 use rucc_types::{
-    Qualifiers, TypeId, TypeKind, Types, is_arithmetic, is_floating, is_pointer, is_void, pointee,
+    FloatKind, Qualifiers, TypeId, TypeKind, Types, is_arithmetic, is_floating, is_pointer,
+    is_void, pointee,
 };
 
 use crate::eval::{Eval, bare, int_shape};
@@ -194,7 +195,32 @@ impl Conv<'_> {
     ///
     /// [`None`] where either operand is not arithmetic, which is not a failure of this rule but
     /// a question it does not answer, since `p + 1` is pointer arithmetic and never reaches it.
+    ///
+    /// An operand computed in `long double` for `__FLT_EVAL_METHOD__` 2 keeps its wide value
+    /// here, and then the other operand is brought to `long double` as well, so `a * b < c`
+    /// compares the product that was not rounded. Both operands come back in that wider type
+    /// then. [`Self::evaluated`] is the form that also says what type the result stands as.
     pub fn usual_arithmetic(&mut self, lhs: ExprId, rhs: ExprId) -> Option<(ExprId, ExprId)> {
+        let (lhs, rhs, _) = self.evaluated(lhs, rhs, false)?;
+        Some((lhs, rhs))
+    }
+
+    /// The usual arithmetic conversions for an operator that computes a value, with the type
+    /// that value has in the program.
+    ///
+    /// The two operands come back in the type the operation is done in, and the type beside
+    /// them is the common type of 6.3.1.8. The two are the same except under
+    /// `__FLT_EVAL_METHOD__` 2, where an operation on `float` or `double` is done in `long
+    /// double`. `operation` says that the caller computes something new from the two, as `*` and
+    /// `+` do, which is always done in the wider type. A comparison and a conditional only move
+    /// a value, and they widen only where an operand already has the wider value.
+    /// [`Self::excess`] gives the result its own type back.
+    pub fn evaluated(
+        &mut self,
+        lhs: ExprId,
+        rhs: ExprId,
+        operation: bool,
+    ) -> Option<(ExprId, ExprId, TypeId)> {
         let (lhs, rhs) = (self.value_promoting_bits(lhs), self.value_promoting_bits(rhs));
         let common = rucc_types::usual_arithmetic(
             self.types,
@@ -202,7 +228,62 @@ impl Conv<'_> {
             self.tast[rhs].ty,
             self.target,
         )?;
-        Some((self.arithmetic(lhs, common), self.arithmetic(rhs, common)))
+        let wide = match self.excess_type(common) {
+            Some(wide) if operation || self.is_excess(lhs) || self.is_excess(rhs) => wide,
+            _ => common,
+        };
+        let (lhs, rhs) = (self.unexcess(lhs), self.unexcess(rhs));
+        Some((self.arithmetic(lhs, wide), self.arithmetic(rhs, wide), common))
+    }
+
+    /// The type an operation on a value of `ty` is done in under `__FLT_EVAL_METHOD__` 2,
+    /// where that is wider than `ty`.
+    ///
+    /// That is `long double` for `float` and `double` and for `_Float32`, `_Float64` and
+    /// `_Float32x`, which TS 18661-3 puts under the same rule, and [`None`] for every other type
+    /// and on every target that does its arithmetic in the type of the operands. A complex type
+    /// is computed in its own type. See [`TargetInfo::excess_precision`].
+    pub fn excess_type(&mut self, ty: TypeId) -> Option<TypeId> {
+        if !self.target.excess_precision() {
+            return None;
+        }
+        match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Float(
+                FloatKind::Float
+                | FloatKind::Double
+                | FloatKind::Float32
+                | FloatKind::Float64
+                | FloatKind::Float32x,
+            ) => Some(self.types.float(FloatKind::LongDouble)),
+            _ => None,
+        }
+    }
+
+    /// Whether an expression is a value computed in `long double` that stands as a narrower
+    /// type. See [`Conversion::Excess`].
+    pub fn is_excess(&self, expr: ExprId) -> bool {
+        matches!(self.tast[expr].kind, ExprKind::Convert { kind: Conversion::Excess, .. })
+    }
+
+    /// The wide value under a value computed in `long double`, and any other expression as it is.
+    ///
+    /// This is what an operator, a cast, an assignment, an argument and a `return` take, so
+    /// that the excess precision lasts until a conversion to a type removes it.
+    pub fn unexcess(&self, expr: ExprId) -> ExprId {
+        match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Excess, operand } => operand,
+            _ => expr,
+        }
+    }
+
+    /// An operation's result standing as the type the program gives it, where the operation was
+    /// done in a wider type for `__FLT_EVAL_METHOD__` 2, and the result as it is where not.
+    pub fn excess(&mut self, node: ExprId, ty: TypeId) -> ExprId {
+        let from = self.tast[node].ty;
+        if from == ty || self.types.canonical(from) == self.types.canonical(ty) {
+            return node;
+        }
+        self.write(Conversion::Excess, node, ty)
     }
 
     /// A scalar as a condition, which is a comparison against zero and not a truncation.
@@ -212,6 +293,7 @@ impl Conv<'_> {
     /// wrong about one of them.
     pub fn to_bool(&mut self, expr: ExprId) -> ExprId {
         let expr = self.value(expr);
+        let expr = self.unexcess(expr);
         let boolean = self.types.boolean();
         if self.tast[expr].ty == boolean {
             return expr;
@@ -241,8 +323,13 @@ impl Conv<'_> {
     /// a diagnostic the caller owes rather than a node this refuses to write.
     pub fn to_type(&mut self, expr: ExprId, ty: TypeId) -> ExprId {
         let expr = self.value(expr);
-        let from = self.tast[expr].ty;
         let target = self.read_as(ty);
+        // A value computed in `long double` is converted from that, so `double d = f * g;` with
+        // two `float` operands keeps the product that was not rounded to a `float`. The excess
+        // is what such a conversion removes, and it is removed once. A vector is the exception,
+        // since a scalar in every lane is written as that scalar converted to the lane first.
+        let expr = if is_arithmetic(self.types, target) { self.unexcess(expr) } else { expr };
+        let from = self.tast[expr].ty;
         // Asked of the canonical form as well as of the identifier, because a typedef is a name
         // for a type rather than a type of its own and there is nothing to convert between a
         // name and what it names. The two do not share an identifier, since a typedef keeps its

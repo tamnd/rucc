@@ -1435,6 +1435,19 @@ impl TargetInfo {
         Self::for_tuple(triple.tuple())
     }
 
+    /// Whether `float` and `double` expressions are evaluated in `long double`, which is
+    /// `__FLT_EVAL_METHOD__` 2.
+    ///
+    /// That is the case when the arithmetic is done on the x87 stack, as `-mfpmath=387` asks
+    /// and as a 32 bit BSD unit does by default, because each x87 operation gives a result in
+    /// the precision of the stack and not in the precision of its operands. gcc says 2 there
+    /// and evaluates the expression in `long double` in the front end, so a value is rounded
+    /// to its own type only where the program assigns it, casts it, passes it or returns it.
+    #[must_use]
+    pub fn excess_precision(&self) -> bool {
+        self.call_regs.is_some_and(|regs| regs.x87_floats) && self.long_double_format.is_x87()
+    }
+
     /// The type names this target's compiler has before any header is read, and what each is.
     ///
     /// Empty everywhere but AArch64, where gcc has the Advanced SIMD and SVE types and glibc's

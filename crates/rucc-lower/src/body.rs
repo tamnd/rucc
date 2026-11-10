@@ -8177,7 +8177,7 @@ impl<'u> Body<'_, 'u> {
                 let place = self.place(operand);
                 Some(self.taken(place, span))
             }
-            Conversion::Arithmetic | Conversion::Pointer => {
+            Conversion::Arithmetic | Conversion::Pointer | Conversion::Excess => {
                 if let Some(value) = self.complex_to_real(operand, ty, span) {
                     return Some(value);
                 }
