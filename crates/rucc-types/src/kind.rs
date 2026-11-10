@@ -264,7 +264,8 @@ impl IntKind {
 
 /// The real floating types.
 ///
-/// Nine of them, which is three standard ones and six from C23 Annex H. The interchange types
+/// Nine of them, which is three standard ones and six from C23 Annex H, and then four more: the
+/// three decimal types and AArch64's `__fp16`. The interchange types
 /// `_Float16`, `_Float32`, `_Float64` and `_Float128` name an IEEE format outright, and the
 /// extended types `_Float32x` and `_Float64x` name whatever the target has that is wider than
 /// the interchange type they are named after, which makes `_Float64x` the x87 format on x86 and
@@ -276,6 +277,11 @@ impl IntKind {
 /// floating types from C23 are, and they are real floating types like the others in every way
 /// except the one that matters most: a decimal and a binary type never meet in an operation, so
 /// the usual arithmetic conversions have no answer for the pair and the program is refused.
+///
+/// `__fp16` is the half precision type of the Arm C Language Extensions, which gcc has on Arm and
+/// AArch64 only. It is binary16 like `_Float16` and is a type to store a value in rather than one
+/// to compute in: the promotions make it a `float` wherever it is a value, so `h + h` is a
+/// `float` where the same sum of two `_Float16` is a `_Float16`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FloatKind {
     /// `_Float16`, always the binary16 format.
@@ -307,6 +313,8 @@ pub enum FloatKind {
     Decimal64,
     /// `_Decimal128`, the decimal128 format in the binary integer encoding.
     Decimal128,
+    /// `__fp16`, the binary16 format, which the promotions turn into a `float`.
+    Fp16,
 }
 
 impl FloatKind {
@@ -315,7 +323,7 @@ impl FloatKind {
     /// Not in rank order, because there is no such order to put them in: which of `long double`
     /// and `_Float64x` is the wider one is a question about the target, and on Apple the answer
     /// is the second.
-    pub const ALL: [FloatKind; 12] = [
+    pub const ALL: [FloatKind; 13] = [
         FloatKind::Float16,
         FloatKind::Float,
         FloatKind::Float32,
@@ -328,6 +336,7 @@ impl FloatKind {
         FloatKind::Decimal32,
         FloatKind::Decimal64,
         FloatKind::Decimal128,
+        FloatKind::Fp16,
     ];
 
     /// A dense index, so that one of these can select a slot in a fixed size array.
@@ -345,6 +354,7 @@ impl FloatKind {
             FloatKind::Decimal32 => 9,
             FloatKind::Decimal64 => 10,
             FloatKind::Decimal128 => 11,
+            FloatKind::Fp16 => 12,
         }
     }
 
@@ -384,6 +394,9 @@ impl FloatKind {
             FloatKind::Decimal32 => 12,
             FloatKind::Decimal64 => 13,
             FloatKind::Decimal128 => 14,
+            // Never an operand of the conversions either, because the promotions have made it
+            // a `float` before they run.
+            FloatKind::Fp16 => 7,
         }
     }
 
@@ -403,6 +416,7 @@ impl FloatKind {
             FloatKind::Decimal32 => "_Decimal32",
             FloatKind::Decimal64 => "_Decimal64",
             FloatKind::Decimal128 => "_Decimal128",
+            FloatKind::Fp16 => "__fp16",
         }
     }
 }

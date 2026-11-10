@@ -215,6 +215,7 @@ const fn floating(kind: FloatKind) -> &'static str {
         FloatKind::Decimal32 => "_Decimal32",
         FloatKind::Decimal64 => "_Decimal64",
         FloatKind::Decimal128 => "_Decimal128",
+        FloatKind::Fp16 => "__fp16",
     }
 }
 

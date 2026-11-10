@@ -1417,7 +1417,7 @@ impl Walk<'_> {
         let fits = match builtin {
             TypeName::Vector(..) => matches!(kind, TypeKind::Vector { .. }),
             TypeName::Poly(_) => matches!(kind, TypeKind::Int(_)),
-            TypeName::Sizeless | TypeName::Float128 => false,
+            TypeName::Sizeless | TypeName::Float128 | TypeName::Fp16 => false,
         };
         fits.then_some(builtin)
     }
@@ -1484,7 +1484,16 @@ impl Walk<'_> {
             }
         }
         for name in ["__fp16", "__bf16"] {
-            kept.push(self.base_named(name, Encoding::Float, 2));
+            // A unit that wrote `__fp16` itself has an entry for it from the walk already, and gcc
+            // writes one.
+            let walked = self.out.iter().position(
+                |shape| matches!(shape, Shape::Base { name: had, .. } if had.as_str() == name),
+            );
+            let at = match walked {
+                Some(at) => at,
+                None => self.base_named(name, Encoding::Float, 2),
+            };
+            kept.push(at);
         }
         kept
     }

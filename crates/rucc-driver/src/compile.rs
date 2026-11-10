@@ -12800,6 +12800,42 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("bitcast.i64 %1"), "{text}");
     }
 
+    /// tamnd/rucc#4088. `__fp16` on AArch64 is two bytes in memory and a `float` as a value. The
+    /// types are what gcc 15 for aarch64-unknown-freebsd15.1 names with `_Generic`, and the
+    /// argument to `printf` is a `double`. x86-64 has no such type.
+    #[test]
+    fn an_fp16_is_a_half_in_memory_and_a_float_as_a_value_on_aarch64() {
+        let source = "_Static_assert(sizeof(__fp16) == 2 && _Alignof(__fp16) == 2, \"size\");\n\
+                      __fp16 h;\n\
+                      _Static_assert(_Generic(h, __fp16: 1, default: 0), \"stored\");\n\
+                      _Static_assert(_Generic(h, _Float16: 0, default: 1), \"a type of its own\");\n\
+                      _Static_assert(_Generic(+h, float: 1, default: 0), \"promoted\");\n\
+                      _Static_assert(_Generic(h + h, float: 1, default: 0), \"a float sum\");\n\
+                      _Static_assert(_Generic(h * 2.0, double: 1, default: 0), \"a double\");\n\
+                      _Static_assert(sizeof(h - h) == 4, \"four bytes\");\n\
+                      float f(__fp16 *p) { return *p + p[1]; }\n\
+                      void g(__fp16 *p, double x) { *p = x; }\n\
+                      __fp16 k(__fp16 a) { return a; }\n\
+                      int printf(const char *, ...);\n\
+                      void v(void) { printf(\"%f\", h); }\n";
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.target = "aarch64-unknown-freebsd".parse::<Triple>().unwrap();
+        let ran = run(&opts, source);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        let text = ran.text().to_owned();
+        assert!(text.contains("fpext.f32"), "a half is widened to a float: {text}");
+        assert!(text.contains("fadd %"), "and added as one: {text}");
+        assert!(text.contains("fptrunc.f16"), "and stored as a half: {text}");
+        assert!(text.contains("fpext.f64"), "a variadic argument is a double: {text}");
+        opts.emit = EmitKind::Object;
+        let ran = run(&opts, source);
+        assert_eq!(ran.messages, Vec::<String>::new());
+
+        opts.target = "x86_64-unknown-freebsd".parse::<Triple>().unwrap();
+        assert!(run(&opts, "__fp16 h;\n").failed(), "no __fp16 on x86-64");
+    }
+
     /// The infinities and nans of the interchange types are constants, as for `double`.
     ///
     /// glibc's `math.h` writes `HUGE_VAL_F128` as `__builtin_huge_valf128 ()` once `__GNUC__` is
