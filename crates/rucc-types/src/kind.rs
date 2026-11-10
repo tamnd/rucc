@@ -264,8 +264,8 @@ impl IntKind {
 
 /// The real floating types.
 ///
-/// Nine of them, which is three standard ones and six from C23 Annex H, and then four more: the
-/// three decimal types and AArch64's `__fp16`. The interchange types
+/// Nine of them, which is three standard ones and six from C23 Annex H, and then five more: the
+/// four decimal types and AArch64's `__fp16`. The interchange types
 /// `_Float16`, `_Float32`, `_Float64` and `_Float128` name an IEEE format outright, and the
 /// extended types `_Float32x` and `_Float64x` name whatever the target has that is wider than
 /// the interchange type they are named after, which makes `_Float64x` the x87 format on x86 and
@@ -315,6 +315,9 @@ pub enum FloatKind {
     Decimal128,
     /// `__fp16`, the binary16 format, which the promotions turn into a `float`.
     Fp16,
+    /// `_Decimal64x`, the decimal format wider than decimal64, which is decimal128. It is not
+    /// the same type as `_Decimal128`, and loses to it in an operation on both.
+    Decimal64x,
 }
 
 impl FloatKind {
@@ -323,7 +326,7 @@ impl FloatKind {
     /// Not in rank order, because there is no such order to put them in: which of `long double`
     /// and `_Float64x` is the wider one is a question about the target, and on Apple the answer
     /// is the second.
-    pub const ALL: [FloatKind; 13] = [
+    pub const ALL: [FloatKind; 14] = [
         FloatKind::Float16,
         FloatKind::Float,
         FloatKind::Float32,
@@ -337,6 +340,7 @@ impl FloatKind {
         FloatKind::Decimal64,
         FloatKind::Decimal128,
         FloatKind::Fp16,
+        FloatKind::Decimal64x,
     ];
 
     /// A dense index, so that one of these can select a slot in a fixed size array.
@@ -355,13 +359,20 @@ impl FloatKind {
             FloatKind::Decimal64 => 10,
             FloatKind::Decimal128 => 11,
             FloatKind::Fp16 => 12,
+            FloatKind::Decimal64x => 13,
         }
     }
 
-    /// Whether this is one of the three decimal types.
+    /// Whether this is one of the four decimal types.
     #[must_use]
     pub const fn is_decimal(self) -> bool {
-        matches!(self, FloatKind::Decimal32 | FloatKind::Decimal64 | FloatKind::Decimal128)
+        matches!(
+            self,
+            FloatKind::Decimal32
+                | FloatKind::Decimal64
+                | FloatKind::Decimal128
+                | FloatKind::Decimal64x
+        )
     }
 
     /// What decides between two of these when they have the same format.
@@ -389,8 +400,10 @@ impl FloatKind {
             FloatKind::Float32 => 9,
             FloatKind::Float64 => 10,
             FloatKind::Float128 => 11,
-            // Never compared with a binary type, and each decimal is its own format, so these
-            // only have to be distinct.
+            // Never compared with a binary type. Only `_Decimal128` and the extended
+            // `_Decimal64x` share a format, and the interchange type wins there, as it does for
+            // the binary types.
+            FloatKind::Decimal64x => 2,
             FloatKind::Decimal32 => 12,
             FloatKind::Decimal64 => 13,
             FloatKind::Decimal128 => 14,
@@ -417,6 +430,7 @@ impl FloatKind {
             FloatKind::Decimal64 => "_Decimal64",
             FloatKind::Decimal128 => "_Decimal128",
             FloatKind::Fp16 => "__fp16",
+            FloatKind::Decimal64x => "_Decimal64x",
         }
     }
 }

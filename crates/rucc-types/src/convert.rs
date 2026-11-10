@@ -283,12 +283,14 @@ fn floating(types: &mut Types, left: TypeId, right: TypeId, target: &TargetInfo)
         (Some(kind), None) | (None, Some(kind)) => kind,
         // A decimal and a binary type have no common type, and the pair falls through to the
         // integer rules, which have no answer either, so the operation is refused. Two decimals
-        // go to the wider one, which is the whole of their ranking.
+        // go to the wider one. `_Decimal128` and `_Decimal64x` are one width, and there the
+        // interchange type wins over the extended one, as it does for the binary types.
         (Some(a), Some(b)) if a.is_decimal() || b.is_decimal() => {
             if a.is_decimal() != b.is_decimal() {
                 return None;
             }
-            if float_width(a, target) >= float_width(b, target) { a } else { b }
+            let rank = |kind: FloatKind| (float_width(kind, target), kind.tie_break());
+            if rank(a) >= rank(b) { a } else { b }
         }
         (Some(a), Some(b)) => {
             if float_rank(a, target) >= float_rank(b, target) {

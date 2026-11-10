@@ -230,6 +230,8 @@ pub enum FloatConstantType {
     Decimal64,
     /// `dl` or `DL`, which is `_Decimal128`.
     Decimal128,
+    /// `d64x` or `D64x`, which is `_Decimal64x`, in the decimal128 format.
+    Decimal64x,
 }
 
 impl FloatConstantType {
@@ -257,7 +259,7 @@ impl FloatConstantType {
             FloatConstantType::Float80 => target.long_double_format,
             FloatConstantType::Decimal32 => Format::Decimal32,
             FloatConstantType::Decimal64 => Format::Decimal64,
-            FloatConstantType::Decimal128 => Format::Decimal128,
+            FloatConstantType::Decimal128 | FloatConstantType::Decimal64x => Format::Decimal128,
         }
     }
 
@@ -281,6 +283,7 @@ impl FloatConstantType {
             FloatConstantType::Decimal32 => "_Decimal32",
             FloatConstantType::Decimal64 => "_Decimal64",
             FloatConstantType::Decimal128 => "_Decimal128",
+            FloatConstantType::Decimal64x => "_Decimal64x",
         }
     }
 
@@ -305,6 +308,7 @@ impl FloatConstantType {
             FloatConstantType::Decimal32 => "df",
             FloatConstantType::Decimal64 => "dd",
             FloatConstantType::Decimal128 => "dl",
+            FloatConstantType::Decimal64x => "d64x",
         }
     }
 }
@@ -797,12 +801,15 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
                     matches!(second, Some(b'F' | b'D' | b'L'))
                 };
                 // C23's spelling, `d32`, `d64` and `d128` with the `d` in either case, which is
-                // the same three types as gcc's letters.
+                // the same three types as gcc's letters, and `d64x` for `_Decimal64x`, whose `x`
+                // is lower case as in `f64x`.
                 let digits = rest[1..].iter().take_while(|byte| byte.is_ascii_digit()).count();
-                let named = match &rest[1..=digits] {
-                    b"32" => Some(FloatConstantType::Decimal32),
-                    b"64" => Some(FloatConstantType::Decimal64),
-                    b"128" => Some(FloatConstantType::Decimal128),
+                let extended = rest.get(1 + digits) == Some(&b'x');
+                let named = match (&rest[1..=digits], extended) {
+                    (b"32", false) => Some(FloatConstantType::Decimal32),
+                    (b"64", false) => Some(FloatConstantType::Decimal64),
+                    (b"128", false) => Some(FloatConstantType::Decimal128),
+                    (b"64", true) => Some(FloatConstantType::Decimal64x),
                     _ => None,
                 };
                 if let Some(named) = named {
@@ -810,7 +817,7 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
                         return Err(FloatError::DecimalFloat);
                     }
                     ty = Some(named);
-                    1 + digits
+                    1 + digits + usize::from(extended)
                 } else if decimal {
                     if !target.has_decimal_float {
                         return Err(FloatError::DecimalFloat);
@@ -1231,10 +1238,14 @@ mod tests {
             ("1.1D32", FloatConstantType::Decimal32),
             ("2e1d64", FloatConstantType::Decimal64),
             ("4.5e3d128", FloatConstantType::Decimal128),
+            ("1.5d64x", FloatConstantType::Decimal64x),
+            ("7E2D64x", FloatConstantType::Decimal64x),
         ] {
             assert_eq!(float(text).map(|parsed| parsed.ty), Ok(ty), "{text}");
         }
         assert_eq!(float("1.0ddi"), Err(FloatError::DecimalInvalid));
+        // The `x` of `d64x` is lower case only, as gcc has it.
+        assert_eq!(float("1.0d64X"), Err(FloatError::InvalidSuffix));
         // The letters have to agree about case, so these are not decimal floats and not
         // constants either.
         for text in ["1.0Df", "1.0dF", "1.0dD", "1.0Dl"] {

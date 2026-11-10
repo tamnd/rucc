@@ -153,6 +153,8 @@ pub enum Keyword {
     Decimal64,
     /// `_Decimal128`.
     Decimal128,
+    /// `_Decimal64x`, which gcc has from gcc 15.
+    Decimal64x,
     /// `_Float16`.
     Float16,
     /// `_Float32`.
@@ -533,6 +535,7 @@ static KEYWORDS: &[Entry] = &[
     e("_Decimal32", Keyword::Decimal32, ALWAYS),
     e("_Decimal64", Keyword::Decimal64, ALWAYS),
     e("_Decimal128", Keyword::Decimal128, ALWAYS),
+    e("_Decimal64x", Keyword::Decimal64x, ALWAYS),
     e("_Float16", Keyword::Float16, ALWAYS),
     e("_Float32", Keyword::Float32, ALWAYS),
     e("_Float64", Keyword::Float64, ALWAYS),

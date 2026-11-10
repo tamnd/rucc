@@ -415,6 +415,7 @@ impl Checker<'_> {
             FloatConstantType::Decimal32 => FloatKind::Decimal32,
             FloatConstantType::Decimal64 => FloatKind::Decimal64,
             FloatConstantType::Decimal128 => FloatKind::Decimal128,
+            FloatConstantType::Decimal64x => FloatKind::Decimal64x,
         };
         let value = constant.value;
         // `2.0i` is an imaginary constant, which C calls `_Imaginary` and gcc has never had. In

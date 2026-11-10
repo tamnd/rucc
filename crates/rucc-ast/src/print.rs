@@ -140,6 +140,7 @@ const BUILTIN_SPELLINGS: &[(BuiltinSet, &str)] = &[
     (BuiltinSet::DECIMAL32, "_Decimal32"),
     (BuiltinSet::DECIMAL64, "_Decimal64"),
     (BuiltinSet::DECIMAL128, "_Decimal128"),
+    (BuiltinSet::DECIMAL64X, "_Decimal64x"),
 ];
 
 /// Whether writing `next` straight after `last` would make one token out of two.
