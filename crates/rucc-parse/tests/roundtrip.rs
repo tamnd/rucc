@@ -410,3 +410,13 @@ fn the_kencc_statements_come_back() {
     assert!(text.contains("USED();"), "{text}");
     assert!(text.contains("SET(*p);"), "{text}");
 }
+
+#[test]
+fn a_kencc_designation_comes_back_with_the_equals_sign() {
+    let fixture = Fixture { kencc: true, ..Fixture::new(Std::C89) };
+    let text = round_trip_in(
+        fixture,
+        "struct P { int x, y; }; struct R { struct P a, b; } r = { .a .x 1, [0] 2, .b { .y 3 } };",
+    );
+    assert!(text.contains(".a.x = 1"), "{text}");
+}

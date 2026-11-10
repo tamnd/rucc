@@ -67,7 +67,8 @@ impl Parser<'_> {
     /// That fourth is narrower than it looks and the width was measured rather than guessed.
     /// gcc 16 takes it only where the designation is one array designator and nothing else:
     /// `.x 7` is an error, `[0][1] 7` is an error, and `[0 ... 2] 7` is taken. So the rule is
-    /// one designator, an array one, and then the value.
+    /// one designator, an array one, and then the value. Under `-fkencc` the `=` can be left out
+    /// after any designation, as in `.y 1` and `[0][1] 7`, because kencc reads them so.
     fn designation(&mut self) -> DesignatorList {
         if let Some(name) = self.cursor.current().ident() {
             if self.cursor.peek(1).punct() == Some(Punct::Colon) {
@@ -106,6 +107,11 @@ impl Parser<'_> {
         }
         if out.is_empty() {
             return DesignatorList::EMPTY;
+        }
+        // kencc's `qual` in `cc.y` is `[e]` or `.tag` with the `=` optional, and a run of them
+        // makes one designation, so under `-fkencc` every designation can leave out the `=`.
+        if self.cx.kencc && !self.cursor.at_punct(Punct::Eq) {
+            return self.ast.add_designator_list(&out);
         }
         let array = matches!(out[..], [Designator::Index(_) | Designator::Range { .. }]);
         if array && !self.cursor.at_punct(Punct::Eq) {
