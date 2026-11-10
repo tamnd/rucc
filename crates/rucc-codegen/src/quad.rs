@@ -318,11 +318,12 @@ fn constant(func: &mut Func, inst: Inst, word: u32) {
     becomes(func, inst, Opcode::Load, extra, &[slot]);
 }
 
-/// A narrower float becoming a quad, which is one of two routines and never rounds.
+/// A narrower float becoming a quad, which is one of three routines and never rounds.
 ///
-/// Only from the two formats the runtime has a routine from. A `_Float16` widening straight to this
-/// format is not one of them and neither is the eighty bit format, which this machine has no
-/// register for anyway, and both are left alone and refused below.
+/// From the two formats the runtime has a routine from, and from the eighty bit format, whose
+/// routine `__extendxftf2` libgcc and compiler-rt define and the runtime does not, as for the
+/// `i128.f80` rows of [`capability::LIBCALLS`]. libgfortran's `trigd.c` widens a `long double` to a
+/// `__float128` in `_gfortran_sind_r16`. A `_Float16` is [`crate::half`]'s and is left alone here.
 fn widen(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
@@ -332,13 +333,14 @@ fn widen(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, in
     let mode = match func[arg].ty.format() {
         Some(Float::F32) => "f32.f128",
         Some(Float::F64) => "f64.f128",
+        Some(Float::F80) => "f80.f128",
         _ => return,
     };
     let routine = routine(Opcode::FPExt, mode);
     into_call(func, names, abi, inst, routine, &[arg]);
 }
 
-/// A quad becoming a narrower float, which is the other direction of the same pair and rounds.
+/// A quad becoming a narrower float, which is the other direction of the same three and rounds.
 fn narrow(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
@@ -348,6 +350,7 @@ fn narrow(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, i
     let mode = match ty.format() {
         Some(Float::F32) => "f128.f32",
         Some(Float::F64) => "f128.f64",
+        Some(Float::F80) => "f128.f80",
         _ => return,
     };
     let routine = routine(Opcode::FPTrunc, mode);
@@ -858,12 +861,14 @@ mod tests {
     }
 
     #[test]
-    fn the_two_narrower_formats_are_a_routine_each_way() {
+    fn the_three_narrower_formats_are_a_routine_each_way() {
         for (from, to, routine) in [
             (Float::F32, Float::F128, "__extendsftf2"),
             (Float::F64, Float::F128, "__extenddftf2"),
+            (Float::F80, Float::F128, "__extendxftf2"),
             (Float::F128, Float::F32, "__trunctfsf2"),
             (Float::F128, Float::F64, "__trunctfdf2"),
+            (Float::F128, Float::F80, "__trunctfxf2"),
         ] {
             let mut names = Interner::new();
             let (mut func, entry, params) =

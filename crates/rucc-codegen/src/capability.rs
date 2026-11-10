@@ -397,6 +397,10 @@ pub static LIBCALLS: &[(Opcode, &str, &str)] = &[
     (Opcode::FPExt, "f64.f128", "__extenddftf2"),
     (Opcode::FPTrunc, "f128.f32", "__trunctfsf2"),
     (Opcode::FPTrunc, "f128.f64", "__trunctfdf2"),
+    // The eighty bit float against the quad. The runtime does not define these two, and libgcc and
+    // compiler-rt do, as for the `i128.f80` rows below.
+    (Opcode::FPExt, "f80.f128", "__extendxftf2"),
+    (Opcode::FPTrunc, "f128.f80", "__trunctfxf2"),
     (Opcode::SIToFP, "i32.f128", "__floatsitf"),
     (Opcode::SIToFP, "i64.f128", "__floatditf"),
     (Opcode::UIToFP, "i32.f128", "__floatunsitf"),
