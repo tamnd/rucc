@@ -1784,19 +1784,19 @@ fn integers(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     let sig_atomic = if wasm32 { "long int" } else { "int" };
     d.set("__SIG_ATOMIC_MAX__", if sig_atomic == "int" { "0x7fffffff" } else { "0x7fffffffL" });
     d.set("__SIG_ATOMIC_MIN__", "(-__SIG_ATOMIC_MAX__ - 1)");
-    // The widest `_BitInt` this compiler builds, which is narrower than gcc 16's sixty five
-    // thousand five hundred and thirty five because a folded constant here is a hundred and
-    // twenty eight bits wide. A program that reads this macro to decide what to write gets an
-    // answer it can rely on, which is the point of saying a number smaller than gcc's rather
-    // than saying gcc's and refusing what it asked for. `MAX_BIT_INT_WIDTH` in `rucc-sema` is
-    // the same number and has to be changed with it.
+    // The widest `_BitInt` this compiler builds, which `TargetInfo::bit_int_max_width` says and
+    // `rucc-sema` checks a width against. It is gcc's 65535 on x86-64 and AArch64, where the back
+    // end computes a wider one a limb at a time (tamnd/rucc#2490), and 128 on a target whose back
+    // end does not. A program that reads this macro to decide what to write gets an answer it can
+    // rely on, which is the point of saying a smaller number than gcc's there rather than saying
+    // gcc's and refusing what it asked for.
     // gcc 14 is the first release with `_BitInt`, and gcc 14 and 15 have it on x86 and AArch64
     // alone, which is where the `__LIBGCC_BITINT_*` macros below are too. So a persona that
     // claims an older gcc, or a RISC-V gcc 15, does not say the macro, and a header that tests
     // it does not reach for the type. RISC-V under gcc 16 keeps it, as it was before.
     let riscv = target.tuple.arch() == tuple::Arch::Riscv64;
     let bitint = opts.gnuc.major >= 14 && !(riscv && opts.gnuc.major < 16);
-    d.set_if(bitint, "__BITINT_MAXWIDTH__", "128");
+    d.set_if(bitint, "__BITINT_MAXWIDTH__", &target.bit_int_max_width().to_string());
 
     let wchar = wchar(target);
     d.set("__WCHAR_TYPE__", wchar.spelling);
@@ -3649,7 +3649,8 @@ mod tests {
         }
         assert!(!gcc12.contains("__BITINT_MAXWIDTH__"));
         let gcc14 = set_claiming("x86_64-unknown-freebsd", 14);
-        for line in ["__GXX_ABI_VERSION 1019", "__FLT_IS_IEC_60559__ 1", "__BITINT_MAXWIDTH__ 128"]
+        for line in
+            ["__GXX_ABI_VERSION 1019", "__FLT_IS_IEC_60559__ 1", "__BITINT_MAXWIDTH__ 65535"]
         {
             assert!(has(&gcc14, &format!("#define {line}")), "{line}");
         }
@@ -3768,9 +3769,25 @@ mod tests {
         // compiler without the type at all.
         let mut opts = Predef::new();
         let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse().unwrap());
-        assert!(has(&built_in(&target, &opts), "#define __BITINT_MAXWIDTH__ 128"));
+        assert!(has(&built_in(&target, &opts), "#define __BITINT_MAXWIDTH__ 65535"));
         opts.std = Std::C17;
-        assert!(has(&built_in(&target, &opts), "#define __BITINT_MAXWIDTH__ 128"));
+        assert!(has(&built_in(&target, &opts), "#define __BITINT_MAXWIDTH__ 65535"));
+    }
+
+    /// tamnd/rucc#2490. gcc's 65535 where the back end computes a `_BitInt` wider than 128 bits a
+    /// limb at a time, which is x86-64 and AArch64, and 128 where it does not yet.
+    #[test]
+    fn the_widest_bit_int_is_gcc_s_where_the_back_end_computes_a_limb_at_a_time() {
+        for (triple, widest) in [
+            ("x86_64-unknown-freebsd", "65535"),
+            ("aarch64-unknown-freebsd", "65535"),
+            ("aarch64-unknown-netbsd", "65535"),
+            ("i686-unknown-linux-gnu", "128"),
+            ("riscv64-unknown-linux-gnu", "128"),
+        ] {
+            let text = set_claiming(triple, 16);
+            assert!(has(&text, &format!("#define __BITINT_MAXWIDTH__ {widest}")), "{triple}");
+        }
     }
 
     #[test]

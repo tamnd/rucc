@@ -3039,6 +3039,12 @@ impl Unit<'_> {
                 // width the target's addresses have. An address the linker has to fill in is
                 // the arm below, and is the only one that stays a pointer.
                 let ty = if ty.is_ptr() { Type::int(self.target.pointer_width) } else { ty };
+                // A `_BitInt` wider than an immediate is the bytes of its object, which is the
+                // folded `i128` with its sign carried up through the rest (tamnd/rucc#2490).
+                if ty.bits() > 128 {
+                    let bytes = wide_bytes(number, size, self.target.little_endian);
+                    return Some(Datum::Bytes(self.module.push_bytes(&bytes)));
+                }
                 let imm = self.module.add_imm(Imm::int(number, ty));
                 Some(Datum::Scalar { ty, value: imm })
             }
@@ -3374,6 +3380,22 @@ impl Unit<'_> {
                     here rather than at the link";
         self.diagnostics.push(Diagnostic::error(message, span).with_code("E0686").note(note, span));
     }
+}
+
+/// The bytes of a `_BitInt` object wider than an immediate holding `number`, which is the
+/// two's complement of it at the object's size with the sign carried through every byte past
+/// the sixteen an `i128` fills. The bits past the type's width are the sign as well, and the
+/// psABIs leave those unspecified, so any value there is one a reader accepts.
+fn wide_bytes(number: i128, size: u64, little_endian: bool) -> Vec<u8> {
+    let fill = if number < 0 { 0xff } else { 0 };
+    let mut bytes = vec![fill; cap(size)];
+    let low = number.to_le_bytes();
+    let take = low.len().min(bytes.len());
+    bytes[..take].copy_from_slice(&low[..take]);
+    if !little_endian {
+        bytes.reverse();
+    }
+    bytes
 }
 
 /// A count of bytes as a length of a slice of them, saturating on a target whose addresses are

@@ -188,6 +188,7 @@ pub mod jumps;
 pub mod kept;
 pub mod layout;
 pub mod lifetimes;
+pub mod limbs;
 pub mod locked;
 pub mod lower;
 pub mod lowering;
