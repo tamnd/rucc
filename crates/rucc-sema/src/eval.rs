@@ -197,8 +197,8 @@ impl<'a> Eval<'a> {
     /// before it asks for a constant. So `const u32 hbr2 = 540000;` makes `case hbr2:` a label
     /// at `-O2` and an error at `-O0`, which is what the kernel's msm DisplayPort driver writes.
     /// An automatic object counts where its initializer folds this way too, so `const int m = n +
-    /// 1;` after `const int n = 4;` does. A static assertion at file scope, an enumerator, a
-    /// bit-field width and an alignment are not folded first, so they keep the stricter rule.
+    /// 1;` after `const int n = 4;` does. An enumerator and a bit-field width in a body are folded
+    /// first too. Anything at file scope and an alignment are not, so they keep the stricter rule.
     #[must_use]
     pub fn optimized(mut self, optimized: bool) -> Eval<'a> {
         self.objects |= optimized;

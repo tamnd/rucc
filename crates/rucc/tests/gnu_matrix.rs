@@ -1329,3 +1329,50 @@ fn constant_p_of_a_const_object_is_one_in_a_constant_of_a_body_when_optimizing()
     let out = compile("constant-p-const-o0", &["--emit=ir", "-O0"], source);
     assert!(!out.status.success(), "-O0 took the static assertion");
 }
+
+/// tamnd/rucc#4347. NetBSD's `BUILD_BUG_ON` makes a bit-field width out of what
+/// `__builtin_choose_expr` picks with `__builtin_constant_p`. At `-O2` that reads a `const` local
+/// as its value, so the width has to read it the same way, as gcc does. A false assertion is still
+/// a negative width, and at file scope the width keeps the stricter rule. A width that names an
+/// object on its own was not read as a value before, so even a `constexpr` one was refused.
+#[test]
+fn a_bit_field_width_in_a_body_reads_a_const_object_when_optimizing() {
+    let bug = "#define BUILD_BUG_ON(e) struct bb { unsigned int c : \\\n\
+               (__builtin_choose_expr(__builtin_constant_p(e), !(e), 1)) ? 1 : -1; }\n";
+    let holds = format!(
+        "{bug}int f(void) {{\n\
+             const unsigned long vgabase = 0x3c0;\n\
+             BUILD_BUG_ON(!(vgabase <= 0x3c4));\n\
+             return 0;\n\
+         }}\n"
+    );
+    for level in ["-O0", "-O2"] {
+        let out = compile("bug-on-holds", &["--emit=ir", level], &holds);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{level} refused the assertion:\n{said}");
+    }
+    let fails = holds.replace("0x3c4", "0x3b0");
+    let out = compile("bug-on-fails", &["--emit=ir", "-O2"], &fails);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "-O2 took a false assertion");
+    assert!(said.contains("negative width"), "{said}");
+
+    let plain = "int g(void) {\n\
+                     const int n = 4;\n\
+                     struct s { unsigned c : n; } x = { 9 };\n\
+                     return x.c;\n\
+                 }\n";
+    let _ = ir("width-const-o2", &["-O2"], plain);
+    let out = compile("width-const-o0", &["--emit=ir", "-O0"], plain);
+    assert!(!out.status.success(), "-O0 took a const object as a width");
+    let out = compile("width-const-pedantic", &["--emit=ir", "-O2", "-pedantic"], plain);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("width not an integer constant expression"), "{said}");
+
+    // A named constant is one at every level, as in gcc.
+    let _ = ir("width-constexpr", &["-std=c23"], &plain.replace("const int", "constexpr int"));
+
+    let file = "const int n = 4;\nstruct s { unsigned c : n; };\n";
+    let out = compile("width-const-file", &["--emit=ir", "-O2"], file);
+    assert!(!out.status.success(), "-O2 took a const object as a width at file scope");
+}

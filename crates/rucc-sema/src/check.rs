@@ -612,8 +612,9 @@ impl<'a> Checker<'a> {
         value
     }
 
-    /// The same, for a case label or a static assertion in a body, with whether a `const` object
-    /// was read to get it, which gcc does there once it optimizes. See [`Eval::optimized`].
+    /// The same, for a case label, a static assertion, an enumerator or a bit-field width in a
+    /// body, with whether a `const` object was read to get it, which gcc does there once it
+    /// optimizes. See [`Eval::optimized`].
     ///
     /// # Errors
     ///
