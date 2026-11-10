@@ -1270,15 +1270,15 @@ impl Checker<'_> {
             declared.ty = self.tast[id].ty;
             // kencc gives an automatic array of no size the width 0 and no diagnostic, as `adecl`
             // in `cc/dcl.c` does. tr2post's chartab.c has `struct charent *cp[];` in a function.
-            if self.cx.kencc
-                && declared.duration == StorageDuration::Automatic
-                && let TypeKind::Array { elem, len: ArrayLen::Unknown } =
+            if self.cx.kencc && declared.duration == StorageDuration::Automatic {
+                if let TypeKind::Array { elem, len: ArrayLen::Unknown } =
                     self.types.kind(self.types.canonical(declared.ty))
-            {
-                declared.ty = self.types.array(elem, ArrayLen::Fixed(0));
-                let mut node = self.tast[id].clone();
-                node.ty = declared.ty;
-                self.tast.set_decl(id, node);
+                {
+                    declared.ty = self.types.array(elem, ArrayLen::Fixed(0));
+                    let mut node = self.tast[id].clone();
+                    node.ty = declared.ty;
+                    self.tast.set_decl(id, node);
+                }
             }
             self.check_storage_size(&declared);
         }

@@ -443,11 +443,11 @@ impl Checker<'_> {
         // `-fexcess-precision=fast` asked otherwise. So `0.1f == 0.1` holds, and `x == 0.1` for a
         // `double` x that was assigned `0.1` does not, as in gcc. The lexer read the digits a
         // second time in the format of `long double` for this.
-        if let Some(wide) = constant.wide.filter(|_| self.cx.excess_constants)
-            && let Some(long) = self.conv().excess_type(ty)
-        {
-            let node = self.constant(Const::Float(wide), long, span);
-            return self.conv().excess(node, ty);
+        if let Some(wide) = constant.wide.filter(|_| self.cx.excess_constants) {
+            if let Some(long) = self.conv().excess_type(ty) {
+                let node = self.constant(Const::Float(wide), long, span);
+                return self.conv().excess(node, ty);
+            }
         }
         self.constant(Const::Float(value), ty, span)
     }
@@ -2274,14 +2274,14 @@ impl Checker<'_> {
         // kencc's `typeext` in `cc/sub.c`: a record given where the type of one of its unnamed
         // members is wanted gives that member. acid has `*s = *res` with a `Store` on the left
         // and a `Node`, which holds a `Store`, on the right.
-        if self.cx.kencc
-            && let Some(path) = self.promotion(bare_target, bare_source)
-        {
-            let mut base = value;
-            for index in path {
-                base = self.member_node(base, index, span);
+        if self.cx.kencc {
+            if let Some(path) = self.promotion(bare_target, bare_source) {
+                let mut base = value;
+                for index in path {
+                    base = self.member_node(base, index, span);
+                }
+                return self.conv().to_type(base, target);
             }
-            return self.conv().to_type(base, target);
         }
         if let Some(built) = self.put_in_transparent_union(bare_target, value, span) {
             return built;

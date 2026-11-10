@@ -212,9 +212,9 @@ impl Width {
 /// the register width only, as it was before there was a first split.
 pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
     let width = Width::of(conv);
-    if let Some(outer) = width.outer()
-        && func.values().any(|value| outer.is_wide(func[value].ty))
-    {
+    let outer =
+        width.outer().filter(|outer| func.values().any(|value| outer.is_wide(func[value].ty)));
+    if let Some(outer) = outer {
         let before = func.clone();
         if halves_at(func, names, conv, outer) {
             if halves_at(func, names, conv, width) {
