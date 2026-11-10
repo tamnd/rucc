@@ -2403,9 +2403,10 @@ fn library_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 #[must_use]
 pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
     let mut dirs = link.search.clone();
-    // A BSD is linked against `/usr/lib` of the tree `--sysroot` named, or of this machine.
+    // A BSD is linked against the `-B` directories and `/usr/lib` of the tree `--sysroot` named,
+    // or of this machine.
     if target.os.is_bsd() {
-        dirs.extend(bsd::dirs(target, link.sysroot.as_deref()));
+        dirs.extend(bsd::dirs(target, link.sysroot.as_deref(), &link.prefixes));
         return dirs;
     }
     // A cross link searches the sysroot's directory and, for a libc that is a stub, the one its
@@ -4364,6 +4365,8 @@ mod tests {
         let link = LinkOptions {
             sysroot: Some(root.clone()),
             search: vec![PathBuf::from("/opt/lib")],
+            // No `-B` directory, which would come before the tree's. See `bsd::dirs`.
+            prefixes: Vec::new(),
             ..cached()
         };
         let dragonfly = Triple::new(Arch::X86_64, Os::DragonFly, Env::None);

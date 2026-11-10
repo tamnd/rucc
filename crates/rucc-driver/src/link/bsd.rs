@@ -123,12 +123,36 @@ fn native(target: Triple, host: Option<Triple>) -> bool {
     })
 }
 
-/// The directories the start files, the C library and `libgcc` are in.
+/// The directories the start files, the C library and `libgcc` are in, in the order GCC looks in
+/// them.
 ///
-/// Each BSD keeps all three in `/usr/lib`. DragonFly keeps the files of its base GCC in
-/// `/usr/lib/gcc80`, which comes first because GCC puts its own directory before the system's.
-pub(super) fn dirs(target: Triple, root: Option<&Path>) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+/// GCC looks two times. First it looks in the multilib directory of each place, and then in each
+/// place itself. Here only a 32-bit x86 program has a multilib directory, because `-m32` on amd64
+/// is the one multilib of a BSD GCC. For a `-B` directory, the multilib directory is `32` under it.
+/// For the system, it is `MULTILIB_OSDIRNAMES` under `/usr/lib`: `../lib32` in GCC's
+/// `i386/t-freebsd64` and `../lib/i386` in NetBSD's `i386/t-netbsd64`. An i386 tree has neither
+/// directory, so the files of an i386 link do not change. GCC prints the path with the `..` in it,
+/// and so does this.
+///
+/// The places are each `-B` directory, as GCC puts them in its start file prefixes before the
+/// system directories, and then the system's. Each BSD keeps the start files, the C library and
+/// `libgcc` in `/usr/lib`. DragonFly keeps the files of its base GCC in `/usr/lib/gcc80`, which
+/// comes before `/usr/lib` because GCC puts its own directory before the system's.
+///
+/// A `-B` word that is not a directory is the start of a file name, such as `i386-elf-`, and not a
+/// place. This leaves it out. GCC also gives the linker a `-L` only for a directory.
+pub(super) fn dirs(target: Triple, root: Option<&Path>, prefixes: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if target.arch == Arch::X86 {
+        dirs.extend(prefixes.iter().map(|dir| dir.join("32")));
+        match target.os {
+            Os::FreeBsd(_) => dirs.push(under(root, "/usr/lib/../lib32")),
+            Os::NetBsd => dirs.push(under(root, "/usr/lib/../lib/i386")),
+            _ => {}
+        }
+    }
+    dirs.extend(prefixes.iter().cloned());
+    dirs.retain(|dir| dir.is_dir());
     if target.os == Os::DragonFly {
         let gcc = under(root, "/usr/lib/gcc80");
         if gcc.is_dir() {
@@ -239,7 +263,7 @@ pub(super) fn line(
             ),
         });
     }
-    let dirs = dirs(target, root);
+    let dirs = dirs(target, root, &opts.prefixes);
     // `LINK_PIE_SPEC`, which is `-pie` only when the link is neither static nor shared. NetBSD's
     // `LINK_SPEC` has its own `%{pie:-pie}`, which a static link keeps.
     let pie =
@@ -552,6 +576,7 @@ mod tests {
     use rucc_target::Env;
 
     use super::*;
+    use crate::link::{find_in_search, search_dirs};
 
     fn bsd(arch: Arch, os: Os) -> Triple {
         Triple::new(arch, os, Env::None)
@@ -859,6 +884,67 @@ mod tests {
         let ours = at(&archive.display().to_string());
         assert_eq!(args[ours - 1], "-lc");
         assert_eq!(args[ours + 1], "-lgcc");
+    }
+
+    #[test]
+    fn a_b_directory_is_searched_before_the_system_one() {
+        // The tree of `rb probes`: a `crt1.o` in a `-B` directory and one in the sysroot.
+        let root = tree("b-dir", &["rb-b/crt1.o", "usr/lib/crt1.o", "usr/lib/crti.o"]);
+        let b = root.join("rb-b");
+        let opts = LinkOptions { prefixes: vec![b.clone()], ..against(&root) };
+        for os in [Os::FreeBsd(15), Os::NetBsd] {
+            let target = bsd(Arch::X86_64, os);
+            assert_eq!(find_in_search(&opts, target, "crt1.o"), Some(b.join("crt1.o")), "{os}");
+            assert_eq!(search_dirs(&opts, target), [b.clone(), root.join("usr/lib")], "{os}");
+        }
+        // The start file comes from the `-B` directory, and the `-B` directory is given to the
+        // linker before the system's, as GCC's `%D` gives it.
+        let line = text(freebsd(), &opts, &main_o());
+        assert!(line.contains("-o a.out =/rb-b/crt1.o =/usr/lib/crti.o"), "{line}");
+        assert!(line.contains(" -L=/rb-b -L=/usr/lib main.o"), "{line}");
+        // A `-B` word that is not a directory is not a place to look in.
+        let word = LinkOptions { prefixes: vec![root.join("rb-b/x86_64-ld-")], ..against(&root) };
+        assert_eq!(search_dirs(&word, freebsd()), [root.join("usr/lib")]);
+        fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn a_32_bit_program_on_amd64_takes_the_32_bit_files() {
+        // `-m32 -Brb-sysroot/usr/lib32 --sysroot=rb-sysroot`, as `buildworld` links lib32.
+        let root = tree(
+            "lib32",
+            &[
+                "usr/lib/crt1.o",
+                "usr/lib/crti.o",
+                "usr/lib/libc.so",
+                "usr/lib32/crt1.o",
+                "usr/lib32/crti.o",
+            ],
+        );
+        let lib32 = root.join("usr/lib32");
+        let opts = LinkOptions { prefixes: vec![lib32.clone()], ..against(&root) };
+        let i386 = bsd(Arch::X86, Os::FreeBsd(15));
+        // GCC on FreeBSD prints `rb-sysroot/usr/lib/../lib32/crt1.o`.
+        let multilib = root.join("usr/lib/../lib32");
+        assert_eq!(find_in_search(&opts, i386, "crt1.o"), Some(multilib.join("crt1.o")));
+        assert_eq!(search_dirs(&opts, i386), [multilib, lib32.clone(), root.join("usr/lib")]);
+        let line = text(i386, &opts, &[]);
+        assert!(line.contains("-o a.out =/usr/lib/../lib32/crt1.o =/usr/lib/../lib32/crti.o"));
+        assert!(line.contains(" -L=/usr/lib/../lib32 -L=/usr/lib32 -L=/usr/lib "), "{line}");
+        // NetBSD keeps its 32-bit files in `/usr/lib/i386`. This tree has none, so the file is
+        // the one in the `-B` directory, which is what GCC on NetBSD prints.
+        let netbsd = bsd(Arch::X86, Os::NetBsd);
+        assert_eq!(find_in_search(&opts, netbsd, "crt1.o"), Some(lib32.join("crt1.o")));
+        // An amd64 program does not look in the 32-bit directory of the system.
+        let amd64 = LinkOptions { prefixes: Vec::new(), ..against(&root) };
+        let found = find_in_search(&amd64, bsd(Arch::X86_64, Os::FreeBsd(15)), "crt1.o");
+        assert_eq!(found, Some(root.join("usr/lib/crt1.o")));
+        fs::remove_dir_all(&root).expect("clean up");
+
+        let root = tree("netbsd-i386", &["usr/lib/crt0.o", "usr/lib/i386/crt0.o"]);
+        let found = find_in_search(&against(&root), netbsd, "crt0.o");
+        assert_eq!(found, Some(root.join("usr/lib/../lib/i386/crt0.o")));
+        fs::remove_dir_all(&root).expect("clean up");
     }
 
     #[test]
