@@ -13067,6 +13067,39 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
     }
 
+    /// tamnd/rucc#4325. On i386 FreeBSD the x87 format rounds to 53 bits, so gcc makes
+    /// `_Float64x` binary128, as `_Float128` is. The arithmetic is the libgcc routines of that
+    /// format, and the type is still a type of its own.
+    #[test]
+    fn float64x_is_binary128_on_i386_freebsd() {
+        let source = concat!(
+            "int size = sizeof(_Float64x), align = _Alignof(_Float64x);\n",
+            "int other = _Generic((_Float64x)0, _Float128: 1, long double: 2, _Float64x: 3);\n",
+            "int mant = __FLT64X_MANT_DIG__;\n",
+            "_Float64x f(_Float64x a, _Float64x b) { return a * b + 1.5f64x; }\n",
+            "_Float64x g(long double a, _Float64x b) { return a + b; }\n",
+        );
+        let mut opts = Options::new("i386-unknown-freebsd14.3".parse::<Triple>().unwrap());
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, source);
+        assert_eq!(result.errors, 0, "{:?}", result.messages);
+        let text = result.text();
+        for wanted in ["__multf3", "__addtf3", "__extendxftf2"] {
+            assert!(text.contains(wanted), "no {wanted}\n{text}");
+        }
+        assert!(!text.contains("fmul"), "{text}");
+        for (name, value) in [("size", 16), ("align", 16), ("other", 3), ("mant", 113)] {
+            let at = text.find(&format!("{name}:\n")).unwrap_or_else(|| panic!("{name}\n{text}"));
+            let line = text[at..].lines().nth(1).unwrap_or_default();
+            assert_eq!(line.trim(), format!(".long\t{value}"), "{name}\n{text}");
+        }
+        // NetBSD keeps the 64 bits of the x87 format, and `_Float64x` is that format there.
+        opts.target = "i486--netbsdelf".parse::<Triple>().unwrap();
+        let result = run(&opts, source);
+        assert_eq!(result.errors, 0, "{:?}", result.messages);
+        assert!(!result.text().contains("__multf3"), "{}", result.text());
+    }
+
     /// The two x86 names for the `__float128` infinity are constants, as the `_Float128` ones are.
     ///
     /// libquadmath writes `HUGE_VALQ` as `__builtin_huge_valq()` and its `nanq` and the rest use
