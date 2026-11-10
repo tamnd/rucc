@@ -45,6 +45,7 @@ pub mod link;
 pub mod lto;
 mod map;
 pub mod msvc;
+pub mod ninep;
 mod notice;
 pub mod pcc;
 pub mod phase;
@@ -262,7 +263,7 @@ options:
   -iquote -isystem -idirafter <dir>   the other chains, -nostdinc drops ours
   -I-, -iprefix <p>, -iwithprefix[before] <dir>   the older spellings of those
   -include <file>, -imacros <file>    read <file> first, the second for its macros only
-  --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too
+  --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too, 9p:<addr> on 9P
   -P, -dM                with -E: leave out the markers, or dump the macros
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP -MG   where the rule goes, what it builds, targets with no recipe, missing headers
@@ -4219,6 +4220,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         let guard = rucc_target::Guard::in_segment(rucc_target::Segment::Gs, 20);
         opts.guard = Some(rucc_target::Guard { fail: "__stack_chk_fail_local", ..guard });
     }
+    // A sysroot on a 9P server is the text `9p:` and the address, and the paths under it are read
+    // from the server. The text is kept as the root so that a message names the server.
+    opts.nine_p =
+        sysroot.as_deref().and_then(|root| root.to_str()?.strip_prefix("9p:")).map(str::to_owned);
     link.sysroot = sysroot.clone();
     // Where a sysroot for a target that is not this machine would be. Read once, here, rather than
     // inside the link line, because a link line that read the environment could only be tested on a
@@ -5138,7 +5143,10 @@ fn write_deps(
 /// not preprocess in one run is worth more than one that stops at the first, and the exit
 /// status is still a failure either way.
 fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
-    let fs = OsFileSystem::new();
+    let fs = match ninep::Sources::new(opts) {
+        Ok(fs) => fs,
+        Err(why) => return complain(why),
+    };
     let mut stderr = host::stderr();
     let mut failed = false;
     for job in &plan.jobs {
@@ -5173,6 +5181,9 @@ fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
             failed = true;
         }
     }
+    if opts.time {
+        fs.report(&mut stderr);
+    }
     i32::from(failed)
 }
 
@@ -5199,7 +5210,10 @@ fn assembly_wants_cpp(job: &Job) -> bool {
 /// exit status is a failure either way. An input that is already assembly or an object has no
 /// compile phase and is passed over here, which the plan has already said in its notes.
 fn compile_all(opts: &Options, plan: &Plan) -> i32 {
-    let fs = OsFileSystem::new();
+    let fs = match ninep::Sources::new(opts) {
+        Ok(fs) => fs,
+        Err(why) => return complain(why),
+    };
     let mut stderr = host::stderr();
     let mut failed = false;
     let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
@@ -5262,6 +5276,9 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
             let _ = writeln!(stderr, "rucc: error: {e}");
             failed = true;
         }
+    }
+    if opts.time {
+        fs.report(&mut stderr);
     }
     failed |= !write_coverage(opts, &fired, &mut stderr);
     failed |= !write_pressure(opts, &pressure, &mut stderr);
@@ -5356,7 +5373,10 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         Err(why) => return complain(format!("could not make a place for the object files: {why}")),
     };
 
-    let fs = OsFileSystem::new();
+    let fs = match ninep::Sources::new(opts) {
+        Ok(fs) => fs,
+        Err(why) => return complain(why),
+    };
     let mut failed = false;
     // One per job, in job order, which is what lets the link line below be rebuilt with the real
     // paths in it: every job contributes exactly one file to the line and does so in this order.
@@ -5440,6 +5460,9 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
                 let _ = writeln!(stderr, "rucc: error: {out}: {e}");
                 failed = true;
             }
+        }
+        if opts.time {
+            fs.report(&mut stderr);
         }
         failed |= !write_coverage(opts, &fired, &mut stderr);
         failed |= !write_pressure(opts, &pressure, &mut stderr);
@@ -5556,7 +5579,10 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
         }
     };
 
-    let fs = OsFileSystem::new();
+    let fs = match ninep::Sources::new(opts) {
+        Ok(fs) => fs,
+        Err(why) => return complain(why),
+    };
     let mut failed = false;
     let mut members: Vec<rucc_archive::Member> = Vec::with_capacity(plan.jobs.len());
     let mut names = job.members.iter();
@@ -5639,6 +5665,9 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
                 }
             }
             members.push(rucc_archive::Member { name: member.clone(), body: bytes, defines });
+        }
+        if opts.time {
+            fs.report(&mut stderr);
         }
         failed |= !write_coverage(opts, &fired, &mut stderr);
         failed |= !write_pressure(opts, &pressure, &mut stderr);

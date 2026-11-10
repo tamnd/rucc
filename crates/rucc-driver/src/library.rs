@@ -357,7 +357,11 @@ pub fn system_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
             None
         },
     };
-    candidates(target, &machine).into_iter().filter(|dir| dir.is_dir()).collect()
+    // A sysroot on a 9P server is not on this machine, so the disk cannot say which of its
+    // directories are there. All of them stay, and a directory that the server does not have
+    // costs one walk for each header looked for in it.
+    let remote = sysroot.and_then(Path::to_str).is_some_and(|root| root.starts_with("9p:"));
+    candidates(target, &machine).into_iter().filter(|dir| remote || dir.is_dir()).collect()
 }
 
 /// The system header directories for this compile, which is step 3 of section 8.5.
