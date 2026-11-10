@@ -212,7 +212,8 @@ fn rewrite<'a>(arg: &'a str, flag: &str) -> Result<(&'a str, &'a str), CliError>
 enum Query {
     /// `-dumpmachine`, the triple.
     Machine,
-    /// `-dumpversion`, the major number of the GCC release this compiler claims to be.
+    /// `-dumpversion`, the major number of the GCC release this compiler claims to be, or the
+    /// whole release on a BSD target.
     Version,
     /// `-dumpfullversion`, the same release in all three numbers.
     FullVersion,
@@ -220,6 +221,10 @@ enum Query {
     Multiarch,
     /// `-print-multi-os-directory`, where the libraries are from GCC's own directory.
     MultiOsDirectory,
+    /// `-print-multi-directory`, the multilib directory of the options given.
+    MultiDirectory,
+    /// `-print-multi-lib`, each multilib directory and the options that select it.
+    MultiLib,
     /// `-print-search-dirs`, in the three lines GCC prints.
     SearchDirs,
     /// `-print-sysroot`, the root the headers and the libraries are read under.
@@ -1438,6 +1443,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-dumpfullversion" => query = Some(Query::FullVersion),
             "-print-multiarch" => query = Some(Query::Multiarch),
             "-print-multi-os-directory" => query = Some(Query::MultiOsDirectory),
+            "-print-multi-directory" => query = Some(Query::MultiDirectory),
+            "-print-multi-lib" => query = Some(Query::MultiLib),
             "-print-search-dirs" => query = Some(Query::SearchDirs),
             "-print-sysroot" => query = Some(Query::Sysroot),
             // Both spellings, because this one is ours rather than GCC's and our own documents
@@ -4728,6 +4735,10 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
     };
     Ok(match query {
         Query::Machine => machine(opts.target, link.pinned),
+        // The FreeBSD ports and the NetBSD tools build GCC without
+        // `--with-gcc-major-version-only`, so their GCC prints the whole release here. Configure
+        // scripts on those systems read the minor number from it.
+        Query::Version if opts.target.os.is_bsd() => opts.gnuc.to_string(),
         Query::Version => opts.gnuc.dumpversion(),
         Query::FullVersion => opts.gnuc.to_string(),
         Query::Multiarch => link::multiarch(opts.target),
@@ -4735,6 +4746,13 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
         Query::MultiOsDirectory => {
             link::multi_os_directory(opts.target, link.sysroot.as_deref()).to_owned()
         }
+        // A BSD GCC has no multilib, so it has one directory, `.`, and no option selects another.
+        // A Linux GCC can have a multilib for `-m32` or `-mx32`, and this compiler does not know
+        // its list, so the flag stays unknown there rather than give a wrong answer.
+        Query::MultiDirectory if opts.target.os.is_bsd() => ".".to_owned(),
+        Query::MultiLib if opts.target.os.is_bsd() => ".;".to_owned(),
+        Query::MultiDirectory => return Err(err("unknown option `-print-multi-directory`")),
+        Query::MultiLib => return Err(err("unknown option `-print-multi-lib`")),
         // The three lines GCC prints, in its order and with its punctuation, because what reads
         // them is a script written against that shape. There is no installation directory to
         // report: this compiler is one binary that works wherever it is copied, and the headers
@@ -10262,6 +10280,12 @@ mod tests {
         // asking any GCC for its whole version work.
         assert_eq!(ask("14.2.0", &["-dumpfullversion", "-dumpversion"]), "14.2.0");
         assert_eq!(ask("14.2.0", &["-dumpversion", "-dumpfullversion"]), "14");
+        // The BSD GCCs are built without `--with-gcc-major-version-only`.
+        for bsd in ["--target=x86_64-unknown-freebsd15.1", "--target=x86_64--netbsd"] {
+            assert_eq!(ask("15.2.0", &[bsd, "-dumpversion"]), "15.2.0");
+            assert_eq!(ask("14.4.0", &[bsd, "-dumpversion"]), "14.4.0");
+            assert_eq!(ask("14.4.0", &[bsd, "-dumpfullversion"]), "14.4.0");
+        }
         assert_eq!(ask("4.9.4", &["-dumpfullversion", "-dumpversion"]), "4.9.4");
         assert_eq!(
             ask("14.2.0", &["-dumpmachine", "-dumpversion", LINUX]),
@@ -10356,6 +10380,13 @@ mod tests {
         assert_eq!(printed(&[target, "-m32", "-print-multiarch"]), "i386-linux-gnu");
         let os = printed(&[target, "-print-multi-os-directory"]);
         assert!(os == "../lib" || os == "../lib64", "{os}");
+        // A BSD GCC has no multilib, and its three answers say so.
+        for bsd in ["--target=x86_64-unknown-freebsd15.1", "--target=x86_64--netbsd"] {
+            assert_eq!(printed(&[bsd, "-print-multi-os-directory"]), ".");
+            assert_eq!(printed(&[bsd, "-print-multi-directory"]), ".");
+            assert_eq!(printed(&[bsd, "-print-multi-lib"]), ".;");
+        }
+        assert!(refused(&[target, "-print-multi-lib"]).contains("unknown option"));
         // A name nothing holds comes back unchanged, which is GCC's rule and is what makes the
         // answer safe to paste into a link line whether or not the file is there.
         assert_eq!(printed(&[target, "-print-file-name=no-such-library.a"]), "no-such-library.a");

@@ -2348,9 +2348,13 @@ fn libc_word(target: Triple) -> &'static str {
 ///
 /// GCC builds the answer in. Debian, Ubuntu, Arch and Alpine give `../lib`, and Fedora and the
 /// other Red Hat systems give `../lib64` for a 64-bit target. For `-m32`, Debian gives `../lib32`
-/// and Fedora gives `../lib`. This compiler reads the machine to get the same answers.
+/// and Fedora gives `../lib`. This compiler reads the machine to get the same answers. A BSD GCC
+/// has no multilib and gives `.`.
 #[must_use]
 pub fn multi_os_directory(target: Triple, sysroot: Option<&Path>) -> &'static str {
+    if target.os.is_bsd() {
+        return ".";
+    }
     if target.os != Os::Linux {
         return "../lib";
     }
@@ -3195,6 +3199,9 @@ mod tests {
         assert_eq!(multi_os_directory(x86, Some(&fedora)), "../lib");
         let alpine = a_machine("alpine", &["usr/lib/libc.so"]);
         assert_eq!(multi_os_directory(linux(), Some(&alpine)), "../lib");
+        let freebsd = Triple::new(Arch::X86_64, Os::FreeBsd(Os::FREEBSD_RELEASE), Env::None);
+        assert_eq!(multi_os_directory(freebsd, Some(&alpine)), ".");
+        assert_eq!(multi_os_directory(freebsd, None), ".");
         for root in [debian, fedora, alpine] {
             fs::remove_dir_all(&root).expect("clean up");
         }
