@@ -277,6 +277,46 @@ pub static WIN64: AbiDescription = AbiDescription {
     cleanup: Cleanup::Caller,
 };
 
+/// The convention of kencc on amd64, which `6c` follows on Plan 9.
+///
+/// Design: tamnd/rucc#4154, and 08.2 of the rucc-plan9 plan.
+///
+/// One register, `BP`, and only for the first argument, and only when that argument is an integer
+/// or a pointer (`typechlpv` in `6c/txt.c`). Every argument has an 8 byte slot in the argument
+/// area, the first one too, so the register stands in for the first slot and the slot stays
+/// empty. A structure always goes in its slots, whatever its size. The register half of this is
+/// `CallRegs::slotted` in `rucc-target`.
+///
+/// A structure always comes back through the address the caller passes as the first argument, so
+/// that address is in `BP` and everything else moves one slot along. A scalar comes back in `AX`
+/// or `X0`. kencc has no wider integer than `vlong`, and there is no rule for a wider one here.
+pub static KENCC_AMD64: AbiDescription = AbiDescription {
+    name: "kencc amd64",
+    banks: Banks { integer: 1, float: 0, shared: true, integer_width: 8, float_width: 16 },
+    scalars: Scalars {
+        in_memory: None,
+        wide_integer_is_all_or_nothing: true,
+        wide_integer_starts_even: false,
+        wide_integer_drains: false,
+        wide_is_by_reference: false,
+        wide_integer_returns_in: None,
+        wide_integer_in_memory: true,
+        decimal_in_integers: false,
+        quad_returns_by_reference: false,
+    },
+    returns: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::Anything, Travel::ByReference),
+    ],
+    arguments: &[Rule::new(Test::Anything, Travel::InMemory)],
+    return_pointer: ReturnPointer::FirstArgument,
+    variadic: Variadic::SameAsFixed,
+    stack_args: StackArgs::RegisterSized,
+    narrow: Narrow::Unspecified,
+    bit_ints: BitInts::Untaught,
+    cleanup: Cleanup::Caller,
+};
+
 /// The RISC-V LP64D psABI.
 ///
 /// Two eightbytes for an aggregate that fits, an address for one that does not, and one rule
@@ -919,6 +959,7 @@ pub fn for_convention(
 /// Every ABI described here, which is what the report and the tests iterate.
 pub static DESCRIBED: &[&AbiDescription] = &[
     &SYSV_AMD64,
+    &KENCC_AMD64,
     &AAPCS64,
     &DARWIN_ARM64,
     &WINDOWS_ARM64,
@@ -962,6 +1003,7 @@ pub static DESCRIBED: &[&AbiDescription] = &[
 pub fn for_target(target: TargetTuple) -> Option<&'static AbiDescription> {
     Some(match (target.arch(), target.os()) {
         (Arch::X86_64, Os::Windows) => &WIN64,
+        (Arch::X86_64, Os::Plan9) => &KENCC_AMD64,
         (Arch::X86_64, _) => &SYSV_AMD64,
         // Windows on 32-bit x86 is not i386 SysV: small structures come back in registers. This
         // is the cdecl half. stdcall, fastcall and thiscall each clean up differently and each

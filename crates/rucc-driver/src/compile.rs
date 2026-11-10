@@ -1787,6 +1787,15 @@ fn generate(
                     rucc_codegen::lower::Unsupported::Registers { .. } => {
                         Diagnostic::error(said, span)
                     }
+                    // The same for a frame only a frame pointer reaches, on a target whose
+                    // convention has none. kencc refuses the same programs.
+                    rucc_codegen::lower::Unsupported::Frameless => Diagnostic::error(said, span)
+                        .note(
+                            "Plan 9 passes the first argument in the frame pointer register, so \
+                             a variable length array, `alloca` or an over-aligned local is not \
+                             possible here",
+                            span,
+                        ),
                     // A `musttail` call that cannot be made is the program's error, said in gcc's
                     // words at the call.
                     rucc_codegen::lower::Unsupported::MustTail { .. } => {

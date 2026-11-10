@@ -127,6 +127,11 @@ fn refused(
                 Opcode::ApplyArgs => {
                     return Some(("the function keeps its arguments in the frame", UNABLE));
                 }
+                // An address in the argument area this function was handed, which the call would
+                // write its own arguments over.
+                Opcode::SpEntry => {
+                    return Some(("the function uses the argument area it was handed", UNABLE));
+                }
                 Opcode::SetjmpMarker => {
                     let why = "the function saves a place to come back to";
                     return Some((why, "caller uses setjmp"));

@@ -1226,6 +1226,13 @@ pub enum Unsupported {
         /// How many bytes it wanted, which is the whole of what is wrong.
         bytes: u32,
     },
+    /// A function that needs a frame pointer, on a convention that has none.
+    ///
+    /// A variable length array, an `alloca` or a local aligned past what a call leaves the stack
+    /// pointer on is reached through a frame pointer, and on the Plan 9 convention the register
+    /// for one holds the first argument and survives no call. See
+    /// [`rucc_target::CallRegs::frameless`].
+    Frameless,
     /// A call `musttail` asked for that cannot be made as a jump, which is the program's error
     /// and not a part of this compiler that is missing. See [`crate::tail::mark`].
     MustTail {
@@ -1382,7 +1389,9 @@ impl Unsupported {
             | Unsupported::Register { inst, .. }
             | Unsupported::MustTail { inst, .. } => Some(inst),
             Unsupported::Unported { inst, .. } | Unsupported::Registers { inst, .. } => inst,
-            Unsupported::Argument { .. } | Unsupported::Naked { .. } => None,
+            Unsupported::Argument { .. } | Unsupported::Naked { .. } | Unsupported::Frameless => {
+                None
+            }
         }
     }
 }
@@ -1434,6 +1443,10 @@ impl fmt::Display for Unsupported {
             Unsupported::Naked { bytes } => write!(
                 f,
                 "this function is `naked` and wants {bytes} bytes of frame, which there is no prologue to take"
+            ),
+            Unsupported::Frameless => write!(
+                f,
+                "this function needs a frame pointer, and the calling convention of this target has none"
             ),
         }
     }
@@ -5300,8 +5313,12 @@ impl<'a> Lowering<'a> {
     /// signature did not name and finished with the rest once the frame is laid out. Sema refuses
     /// the builtin on every other machine, and this does too, since on x86-64 the return address
     /// sits between the two and zero would be the wrong answer.
+    ///
+    /// The exception is a convention that gives every argument a slot. There the front end asks
+    /// for this itself, as the bottom of the argument area, to keep a parameter whose address is
+    /// taken in its own slot. That is the address it wants on every machine, return address or not.
     fn sp_entry(&mut self, inst: Inst) -> Result<(), Unsupported> {
-        if !self.on_aarch64() {
+        if !self.on_aarch64() && !self.conv.slotted {
             return Err(self.unsupported(inst));
         }
         let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
@@ -9711,8 +9728,11 @@ impl<'a> Lowering<'a> {
         }
         // And a convention with no argument registers at all, which is i386, has nothing to save
         // either, and its list is the address of the first word past the named arguments too.
+        // Nor does a convention that gives every argument a slot, which is kencc's: a register is
+        // only for the first argument, and that is always a named one.
         let registerless = conv.int_args.is_empty() && conv.sse_args.is_empty();
-        let in_memory = self.conv.abi.variadic == Variadic::AlwaysMemory || registerless;
+        let in_memory =
+            self.conv.abi.variadic == Variadic::AlwaysMemory || registerless || conv.slotted;
         let applies = self.saves_arguments();
         let area = (variadic && !in_memory || applies).then(|| match applies {
             true => varargs::Area::every(&conv),

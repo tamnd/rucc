@@ -197,6 +197,7 @@ fn refused(func: &Func, an: &Analyses) -> Option<&'static str> {
                 Opcode::Alloca
                 | Opcode::VaStart
                 | Opcode::ApplyArgs
+                | Opcode::SpEntry
                 | Opcode::StackSave
                 | Opcode::FrameAddress
                 | Opcode::ReturnAddress

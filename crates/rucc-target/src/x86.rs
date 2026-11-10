@@ -160,6 +160,8 @@ pub static SYSV: CallRegs = CallRegs {
     int_args: &SYSV_INT_ARGS,
     sse_args: &SYSV_SSE_ARGS,
     shared_positions: false,
+    slotted: false,
+    frameless: false,
     int_returns: &SYSV_INT_RETURNS,
     sse_returns: &SYSV_SSE_RETURNS,
     x87_returns: &SYSV_X87_RETURNS,

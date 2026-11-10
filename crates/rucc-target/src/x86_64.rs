@@ -1688,6 +1688,8 @@ pub static MS_ON_SYSV: CallRegs = CallRegs {
     int_args: &WIN64_INT_ARGS,
     sse_args: &WIN64_SSE_ARGS,
     shared_positions: true,
+    slotted: false,
+    frameless: false,
     int_returns: &WIN64_INT_RETURNS,
     sse_returns: &WIN64_SSE_RETURNS,
     x87_returns: &WIN64_X87_RETURNS,
@@ -1713,6 +1715,8 @@ const SYSV_REGISTERS: CallRegs = CallRegs {
     int_args: &SYSV_INT_ARGS,
     sse_args: &SYSV_SSE_ARGS,
     shared_positions: false,
+    slotted: false,
+    frameless: false,
     int_returns: &SYSV_INT_RETURNS,
     sse_returns: &SYSV_SSE_RETURNS,
     x87_returns: &SYSV_X87_RETURNS,
@@ -1768,6 +1772,53 @@ const SYSV_REGISTERS: CallRegs = CallRegs {
     chkstk: None,
     conventions: Conventions::ONLY,
 };
+
+static KENCC_INT_ARGS: [PhysReg; 1] = [RBP];
+static KENCC_INT_RETURNS: [PhysReg; 2] = [RAX, RDX];
+static KENCC_SSE_RETURNS: [PhysReg; 1] = [xmm(0)];
+static KENCC_SAVED: [PhysReg; 0] = [];
+// Every register `6c` may write, which is all of them but the stack pointer and `R14` and `R15`.
+// `6c/txt.c` reserves those two in every function for `extern register`, so a value kept in one
+// would be safe across a call into kencc code, but the kernel keeps `m` and `up` in them, and so
+// rucc does not use them either. `BP` holds the first argument and is not handed out, because a
+// function that needs a frame pointer must not lose the argument in its prologue.
+static KENCC_INT_ORDER: [PhysReg; 12] = [RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, RBX, R12, R13];
+
+/// Where a call of kencc on Plan 9 puts things, per 08.2 of the rucc-plan9 plan.
+///
+/// The first argument is in `BP` when it is an integer or a pointer, and every argument has an 8
+/// byte slot in the argument area, see [`CallRegs::slotted`]. A call keeps no register, so a
+/// value live across one is in memory. The stack is 8 byte aligned, because `6l` does not round a
+/// frame to more. There is no red zone, because the kernel writes a note frame below the stack
+/// pointer of the process. There is no stack protector and no profiling hook that kencc code
+/// would know about, and a `va_list` is a `char *` that walks the slots.
+pub static PLAN9: CallRegs = CallRegs {
+    abi: &rucc_abi::abis::KENCC_AMD64,
+    int_args: &KENCC_INT_ARGS,
+    sse_args: &[],
+    shared_positions: true,
+    slotted: true,
+    frameless: true,
+    int_returns: &KENCC_INT_RETURNS,
+    sse_returns: &KENCC_SSE_RETURNS,
+    x87_returns: &[],
+    int_saved: &KENCC_SAVED,
+    sse_saved: &KENCC_SAVED,
+    sse_kept: None,
+    int_order: &KENCC_INT_ORDER,
+    vector_count: None,
+    red_zone: 0,
+    stack_align: 8,
+    trusted_align: 8,
+    list: crate::VaList::CharPointer,
+    guard: None,
+    trace: None,
+    conventions: Conventions(&PLAN9_CONVENTIONS),
+    ..SYSV_REGISTERS
+};
+
+/// The one convention a function on Plan 9 may have.
+static PLAN9_CONVENTIONS: [(Convention, &CallRegs); 1] = [(Convention::Target, &PLAN9)];
 
 static WIN64_INT_ARGS: [PhysReg; 4] = [RCX, RDX, R8, R9];
 static WIN64_SSE_ARGS: [PhysReg; 4] = [xmm(0), xmm(1), xmm(2), xmm(3)];
@@ -1861,6 +1912,8 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         int_args: &WIN64_INT_ARGS,
         sse_args: &WIN64_SSE_ARGS,
         shared_positions: true,
+        slotted: false,
+        frameless: false,
         int_returns: &WIN64_INT_RETURNS,
         sse_returns: &WIN64_SSE_RETURNS,
         x87_returns: &WIN64_X87_RETURNS,

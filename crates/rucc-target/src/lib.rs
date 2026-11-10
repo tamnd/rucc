@@ -1623,6 +1623,8 @@ impl TargetInfo {
             // same routine.
             (tuple::Arch::X86_64, tuple::Os::Windows, tuple::Env::Gnu) => Some(&x86_64::MINGW64),
             (tuple::Arch::X86_64, tuple::Os::Windows, _) => Some(&x86_64::WIN64),
+            // kencc's convention, which is not SysV. See [`x86_64::PLAN9`].
+            (tuple::Arch::X86_64, tuple::Os::Plan9, _) => Some(&x86_64::PLAN9),
             // Apple's x86-64 follows SysV, and its divergences from it are on AArch64.
             (tuple::Arch::X86_64, _, _) => Some(&x86_64::SYSV),
             // Windows on AArch64 reserves `x18`, passes every argument of a variadic function in
