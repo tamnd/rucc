@@ -3401,6 +3401,27 @@ mod tests {
         }
     }
 
+    /// The XOP rotates and byte permute that <xopintrin.h> writes, each checked against what GNU
+    /// as 2.42 writes for the same line.
+    #[test]
+    fn the_xop_rotates_and_permute_are_read() {
+        let lines: &[(&str, &[u8])] = &[
+            ("vprotq $-32, %xmm1, %xmm2", &[0x8f, 0xe8, 0x78, 0xc3, 0xd1, 0xe0]),
+            ("vprotq $40, %xmm9, %xmm12", &[0x8f, 0x48, 0x78, 0xc3, 0xe1, 0x28]),
+            ("vprotq $1, 16(%rax), %xmm2", &[0x8f, 0xe8, 0x78, 0xc3, 0x50, 0x10, 0x01]),
+            ("vprotd $-16, %xmm1, %xmm2", &[0x8f, 0xe8, 0x78, 0xc2, 0xd1, 0xf0]),
+            ("vprotd $7, %xmm10, %xmm3", &[0x8f, 0xc8, 0x78, 0xc2, 0xda, 0x07]),
+            ("vprotw $3, %xmm1, %xmm2", &[0x8f, 0xe8, 0x78, 0xc1, 0xd1, 0x03]),
+            ("vprotb $5, %xmm1, %xmm2", &[0x8f, 0xe8, 0x78, 0xc0, 0xd1, 0x05]),
+            ("vpperm %xmm4, %xmm3, %xmm2, %xmm1", &[0x8f, 0xe8, 0x68, 0xa3, 0xcb, 0x40]),
+            ("vpperm %xmm12, %xmm11, %xmm10, %xmm9", &[0x8f, 0x48, 0x28, 0xa3, 0xcb, 0xc0]),
+            ("vpperm %xmm4, 32(%rdi), %xmm2, %xmm1", &[0x8f, 0xe8, 0x68, 0xa3, 0x4f, 0x20, 0x40]),
+        ];
+        for &(line, want) in lines {
+            assert_eq!(bytes(line), want, "{line}");
+        }
+    }
+
     /// The AVX-512 instructions the intrinsics in the runtime headers write, each checked against
     /// what GNU as writes for the same line.
     #[test]
