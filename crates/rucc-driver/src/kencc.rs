@@ -7,7 +7,7 @@
 //! [`crate::run`].
 //!
 //! The driver is used when the program name is `6c`, `7c` or `8c`, or when the first argument
-//! is `--driver=kencc`. Options that start with `--`, such as `--target=` and `--sysroot=`, can
+//! is `--driver=kencc`. [`crate::pcc`] puts the command line of APE's `pcc` into this one. Options that start with `--`, such as `--target=` and `--sysroot=`, can
 //! come before the kencc options. They go to rucc unchanged. kencc itself never sees such an
 //! option, because its option reader stops at `--`.
 //!
@@ -365,6 +365,13 @@ pub fn run(program: &str, args: &[String]) -> i32 {
             return 1;
         }
     };
+    execute(&plan)
+}
+
+/// Run the compiles of `plan`, and return the exit code.
+#[must_use]
+pub fn execute(plan: &Plan) -> i32 {
+    use std::io::Write as _;
     for note in &plan.notes {
         let _ = writeln!(crate::host::stderr(), "{note}");
     }

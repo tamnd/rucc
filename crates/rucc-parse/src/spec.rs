@@ -1199,6 +1199,12 @@ impl Parser<'_> {
         }
         self.cursor.bump();
         while !self.cursor.at_punct(Punct::RBrace) && !self.cursor.is_eof() {
+            // The grammar of kencc in `cc.y` has `enum ','` and `enum ',' enum`, so a run of
+            // commas with no enumerator between them is one comma. nusb's asix.c has
+            // `= 0x04, /* ... */,` in an enum.
+            if self.cx.kencc && self.cursor.eat_punct(Punct::Comma) {
+                continue;
+            }
             let start = self.cursor.span();
             let before = self.cursor.index();
             let Some((name, _)) = self.expect_ident() else { break };

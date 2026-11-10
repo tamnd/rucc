@@ -2271,6 +2271,18 @@ impl Checker<'_> {
         if compatible(&self.types, bare_target, bare_source) {
             return self.conv().to_type(value, target);
         }
+        // kencc's `typeext` in `cc/sub.c`: a record given where the type of one of its unnamed
+        // members is wanted gives that member. acid has `*s = *res` with a `Store` on the left
+        // and a `Node`, which holds a `Store`, on the right.
+        if self.cx.kencc
+            && let Some(path) = self.promotion(bare_target, bare_source)
+        {
+            let mut base = value;
+            for index in path {
+                base = self.member_node(base, index, span);
+            }
+            return self.conv().to_type(base, target);
+        }
         if let Some(built) = self.put_in_transparent_union(bare_target, value, span) {
             return built;
         }

@@ -80,3 +80,43 @@ fn kencc_defines_no_macro_and_takes_no_macro_in_an_include() {
     assert!(ok);
     assert_eq!(out, "1");
 }
+
+/// kencc reads the expansion again as text, so an argument and a punctuator of the body with no
+/// space between them make one token. games/life.c has `op= 2` with `+` for `op`. The text of
+/// `-E` is the same in C, so the test compiles the source.
+const JOIN: &str = "#define N(op) x op= 2\n\
+                    #define M(a) a+b\n\
+                    void f(int x, int b){ N(+); N(<<); x = M(+); }\n";
+
+/// Whether the compiler took `source` with `flags`, and what it said.
+fn compiles(what: &str, flags: &[&str], source: &str) -> (bool, String) {
+    let path = fixture(what, source);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=x86_64-plan9", "-fsyntax-only", "-w"])
+        .args(flags)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn kencc_joins_an_argument_with_the_body() {
+    let (ok, err) = compiles("join", &["-fkencc"], JOIN);
+    assert!(ok, "{err}");
+    let (ok, err) = compiles("nojoin", &[], JOIN);
+    assert!(!ok);
+    assert!(err.contains("expected an expression, found `=`"), "{err}");
+}
+
+/// `-fno-kencc-preprocessor` is kencc `-p`: the ANSI C preprocessor, with no predefined macro.
+#[test]
+fn kencc_p_has_the_operators_of_ansi_c() {
+    let (ok, out, err) = run("ansi", &["-fkencc", "-fno-kencc-preprocessor"], SOURCE);
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "f(int i, int n){ if(i < n){}else _assert(\"x\"); 'c'; \"\\nn and n\"; \"y\"; pq; }"
+    );
+}
