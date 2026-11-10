@@ -17,18 +17,17 @@ pub(crate) fn att(word: &str, args: &[String]) -> Result<(String, Vec<String>), 
     let word = word.to_ascii_lowercase();
     let jump = is_jump(&word);
     let mut width = None;
-    let mut register_width = None;
+    let mut any_register = false;
     let mut out = Vec::with_capacity(args.len());
     for arg in args.iter().rev() {
-        let (text, stated) = sized(arg.trim());
+        let (text, decoration) = decorated(arg.trim());
+        let (text, stated) = sized(text);
         if stated.is_some() {
             width = stated;
         }
         let operand = operand(text, jump)?;
-        if let Some(letter) = sigiled(text) {
-            register_width = register_width.or(letter);
-        }
-        out.push(operand);
+        any_register |= sigiled(text).is_some();
+        out.push(operand + &decoration);
     }
     let word = match word.as_str() {
         // The two widening moves carry both widths in the AT&T name, the source's first.
@@ -44,8 +43,9 @@ pub(crate) fn att(word: &str, args: &[String]) -> Result<(String, Vec<String>), 
             }
         }
         "movsxd" => "movslq".to_owned(),
-        // A width only needs saying when no register says it.
-        _ if register_width.is_none() && !jump => match width {
+        // A width only needs saying when no register says it. A vector register says it as
+        // well, so `movd xmm0, dword ptr [rsp]` is `movd` and not `movdl`.
+        _ if !any_register && !jump => match width {
             Some(letter) => format!("{word}{letter}"),
             None => word,
         },
@@ -59,16 +59,47 @@ fn is_jump(word: &str) -> bool {
     word == "call" || word == "jmp" || word.starts_with("loop") || word.starts_with('j')
 }
 
-/// The operand without a `byte ptr` in front, and the letter that says.
+/// The operand without a `byte ptr` in front, and the letter that says. The widths of a vector
+/// have no letter, since the vector register the instruction also names says the width.
 fn sized(text: &str) -> (&str, Option<char>) {
     let lower = text.to_ascii_lowercase();
-    for (name, letter) in [("byte", 'b'), ("word", 'w'), ("dword", 'l'), ("qword", 'q')] {
+    for (name, letter) in [
+        ("byte", Some('b')),
+        ("word", Some('w')),
+        ("dword", Some('l')),
+        ("qword", Some('q')),
+        ("xmmword", None),
+        ("ymmword", None),
+        ("zmmword", None),
+    ] {
         let Some(rest) = lower.strip_prefix(name) else { continue };
         let Some(after) = rest.trim_start().strip_prefix("ptr") else { continue };
         let cut = text.len() - after.len();
-        return (text[cut..].trim(), Some(letter));
+        return (text[cut..].trim(), letter);
     }
     (text, None)
+}
+
+/// The operand without the AVX-512 marks in braces after it, and the marks as AT&T writes them.
+/// A mask register gets its sigil, and a zeroing or a broadcast such as `{1to16}` stays as it is.
+/// Both go after the operand in AT&T as well, so `zmm2 {k1}` is `%zmm2{%k1}` and
+/// `dword ptr [rax] {1to16}` is `(%rax){1to16}`.
+fn decorated(text: &str) -> (&str, String) {
+    let mut rest = text;
+    let mut marks = Vec::new();
+    while let Some(inner) = rest.strip_suffix('}') {
+        let Some(open) = inner.rfind('{') else { break };
+        let mark = inner[open + 1..].trim();
+        let bare = mark.strip_prefix('%').unwrap_or(mark);
+        marks.push(if named_register(bare).is_some() {
+            format!("{{%{bare}}}")
+        } else {
+            format!("{{{mark}}}")
+        });
+        rest = inner[..open].trim_end();
+    }
+    marks.reverse();
+    (rest, marks.concat())
 }
 
 /// Whether the operand is a register, and its width letter if it has one.
@@ -128,17 +159,18 @@ fn address(text: &str) -> Result<String, String> {
             let known = named_register(name).is_some() || matches!(name, "rip" | "eip");
             known.then(|| name.to_owned())
         };
+        // A product of two numbers, as in `[rsp+0x1*0x10]`, is part of the displacement below.
         if let Some((left, right)) = term.split_once('*') {
-            let (name, times) = match register(left) {
-                Some(name) => (name, right.trim()),
-                None => (
-                    register(right).ok_or_else(|| format!("'{term}' scales no register"))?,
-                    left.trim(),
-                ),
+            let scaled = match (register(left), register(right)) {
+                (Some(name), _) => Some((name, right.trim())),
+                (None, Some(name)) => Some((name, left.trim())),
+                (None, None) => None,
             };
-            index = Some(name);
-            scale = Some(times.to_owned());
-            continue;
+            if let Some((name, times)) = scaled {
+                index = Some(name);
+                scale = Some(times.to_owned());
+                continue;
+            }
         }
         if let Some(name) = register(term) {
             if negative {
@@ -253,5 +285,41 @@ mod tests {
         assert_eq!(line("jmp", &["1b"]), "jmp 1b");
         assert_eq!(line("call", &["rax"]), "call *%rax");
         assert_eq!(line("jmp", &["qword ptr [rax + 8]"]), "jmp *8(%rax)");
+    }
+
+    /// Lines of the BLAKE3 code in OpenZFS, which FreeBSD's kernel builds. GNU as 2.42 writes the
+    /// same bytes for each AT&T line as for the Intel line it comes from.
+    #[test]
+    fn the_vector_lines_of_blake3_read_as_att() {
+        assert_eq!(
+            line("vpand", &["ymm1", "ymm0", "ymmword ptr [ADD0+rip]"]),
+            "vpand ADD0(%rip), %ymm0, %ymm1"
+        );
+        assert_eq!(
+            line("vmovdqa", &["ymmword ptr [rsp+0x280]", "ymm0"]),
+            "vmovdqa %ymm0, 0x280(%rsp)"
+        );
+        assert_eq!(line("movd", &["xmm13", "dword ptr [rsp+0x110]"]), "movd 0x110(%rsp), %xmm13");
+        assert_eq!(
+            line("pinsrd", &["xmm13", "dword ptr [BLAKE3_BLOCK_LEN+rip]", "2"]),
+            "pinsrd $2, BLAKE3_BLOCK_LEN(%rip), %xmm13"
+        );
+        assert_eq!(
+            line("vmovdqa32", &["xmm0 {k1}", "xmmword ptr [rsp+0x1*0x10]"]),
+            "vmovdqa32 0x1*0x10(%rsp), %xmm0{%k1}"
+        );
+        assert_eq!(
+            line("vpaddd", &["zmm2{k1}", "zmm0", "dword ptr [ADD16+rip] {1to16}"]),
+            "vpaddd ADD16(%rip){1to16}, %zmm0, %zmm2{%k1}"
+        );
+        assert_eq!(
+            line("vinserti32x4", &["zmm8", "zmm8", "xmmword ptr [r10+rdx-0x2*0x10]", "0x02"]),
+            "vinserti32x4 $0x02, -0x2*0x10(%r10,%rdx), %zmm8, %zmm8"
+        );
+        assert_eq!(
+            line("mov", &["r10d", "dword ptr [rsp+0x110+8*rax]"]),
+            "mov 0x110(%rsp,%rax,8), %r10d"
+        );
+        assert_eq!(line("cmp", &["byte ptr [rax]", "0"]), "cmpb $0, (%rax)");
     }
 }
