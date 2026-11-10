@@ -67,6 +67,10 @@
 //! compares and exchanges at, which is the two floating operations: a compare and exchange of a
 //! float wants the value carried through an integer of the same width, an eighty bit float has no
 //! such width, and until that is worked out the refusal in `lower.rs` is the honest answer.
+//!
+//! An ordered load or store of a float wider than a register, which is a `double` on i386, is
+//! first made the same access of the integer of its width and a bitcast. The machine moves eight
+//! bytes at once only through `cmpxchg8b`, so the access is the one a `long long` has.
 
 use rucc_ir::{
     Block, Builder, Extra, Flags, Func, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, RmwOp,
@@ -88,6 +92,7 @@ use rucc_ir::{
 /// The function is changed in place. It gains two blocks and loses one instruction for each one
 /// rewritten, and every function without one of these is untouched.
 pub fn loops(func: &mut Func, word: u32, narrowest: u32) {
+    as_bits(func, word);
     let stores: Vec<Inst> = func
         .blocks()
         .flat_map(|block| func.insts(block))
@@ -110,6 +115,61 @@ pub fn loops(func: &mut Func, word: u32, narrowest: u32) {
 /// exchange covers.
 fn wide(ty: Type, word: u32) -> bool {
     ty.is_int() && ty.lanes() == 1 && ty.bits() > word * 8 && ty.bits() <= word * 16
+}
+
+/// Whether the value is a float of eight bytes or less that is wider than a register, which is a
+/// `double` on i386.
+fn wide_float(ty: Type, word: u32) -> bool {
+    ty.is_float() && ty.lanes() == 1 && ty.bits() > word * 8 && ty.bits() <= 64
+}
+
+/// Every ordered load and store of a float wider than a register, as the same access of an integer
+/// of the same width and a bitcast (tamnd/rucc#4329).
+///
+/// The machine moves eight bytes at once only through `cmpxchg8b`, and that compares and exchanges
+/// integers. So the bits of a `double` go through the integer of the same width, and the access is
+/// the one a `long long` has. A float of more than eight bytes is left alone, since no integer of
+/// its width is in two registers here.
+fn as_bits(func: &mut Func, word: u32) {
+    let found: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| {
+            match func[inst].opcode {
+                Opcode::AtomicLoad => func[inst].first_result,
+                Opcode::AtomicStore => func[func[inst].args].first().copied(),
+                _ => None,
+            }
+            .is_some_and(|value| wide_float(func[value].ty, word))
+        })
+        .collect();
+    for inst in found {
+        let span = func.span(inst);
+        if func[inst].opcode == Opcode::AtomicStore {
+            let [value, addr] = func[func[inst].args] else { continue };
+            let bits = Type::int(func[value].ty.bits());
+            let cast = ahead(func, inst, Opcode::Bitcast, &[value], bits);
+            func[inst].args = func.push_values(&[cast, addr]);
+            continue;
+        }
+        let Some(old) = func[inst].first_result else { continue };
+        let ty = func[old].ty;
+        let made = func.create_inst(func[inst], &[Type::int(ty.bits())], span);
+        func.insert_before(made, inst);
+        let bits = func[made].first_result.expect("a load has a result");
+        let cast = ahead(func, inst, Opcode::Bitcast, &[bits], ty);
+        func.remove_inst(inst);
+        replace(func, old, cast);
+    }
+}
+
+/// A new instruction of one result in front of `inst`, and that result.
+fn ahead(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value], ty: Type) -> Value {
+    let args = func.push_values(args);
+    let span = func.span(inst);
+    let made = func.create_inst(InstData { args, ..InstData::new(opcode) }, &[ty], span);
+    func.insert_before(made, inst);
+    func[made].first_result.expect("an instruction created with one result has one")
 }
 
 /// Whether this is an ordered store of an integer wider than a register.
@@ -488,5 +548,46 @@ mod tests {
         let ops = opcodes(&func);
         assert!(!ops.contains(&Opcode::AtomicStore) && ops.contains(&Opcode::Cmpxchg), "{ops:?}");
         verified(&func, &mut names);
+    }
+
+    /// tamnd/rucc#4329. A `double` there is loaded and stored as the `long long` of the same bits,
+    /// so the load is an ordered load of eight bytes and the store the exchange loop above. On a
+    /// machine with eight byte registers it is left as it was.
+    #[test]
+    fn a_double_wider_than_a_register_goes_through_its_bits() {
+        let f64 = Type::float(Float::F64);
+        for word in [4, 8] {
+            let mut names = Interner::new();
+            let signature = Signature::new().with_params(&[Type::PTR, f64]).with_returns(&[f64]);
+            let mut func = Func::new(names.intern("swap"), signature);
+            let entry = func.create_block();
+            let addr = func.append_param(entry, Type::PTR);
+            let value = func.append_param(entry, f64);
+            let mut build = Builder::new(&mut func, entry);
+            let old = build.atomic_load(f64, addr, info(8), Flags::NONE);
+            build.atomic_store(value, addr, info(8), Flags::NONE);
+            build.ret(&[old]);
+            loops(&mut func, word, 8);
+            verified(&func, &mut names);
+
+            let text = printed(&func, &mut names);
+            let ops = opcodes(&func);
+            if word == 8 {
+                assert!(ops.contains(&Opcode::AtomicStore), "{text}");
+                assert!(!ops.contains(&Opcode::Bitcast), "{text}");
+                continue;
+            }
+            assert_eq!(ops.iter().filter(|&&op| op == Opcode::Bitcast).count(), 2, "{text}");
+            assert!(
+                !ops.contains(&Opcode::AtomicStore) && ops.contains(&Opcode::Cmpxchg),
+                "{text}"
+            );
+            let load = only(&func, Opcode::AtomicLoad);
+            let bits = func[load].first_result.expect("a load has a result");
+            assert_eq!(func[bits].ty, Type::int(64), "{text}");
+            let ret = only(&func, Opcode::Return);
+            let returned = func[func[ret].args][0];
+            assert_eq!(func[returned].ty, f64, "{text}");
+        }
     }
 }
