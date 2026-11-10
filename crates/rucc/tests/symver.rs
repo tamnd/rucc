@@ -244,8 +244,8 @@ fn the_attribute_is_checked_in_gcc_s_words() {
 /// only declares. gas 2.42 and gcc 13 make that a reference to the versioned name, so the call and
 /// the address are against an undefined `qsort_r@FBSD_1.0` and `__qsort_r_compat` is not in the
 /// object. With nothing using it there is no symbol at all, and the listing keeps the `.symver`
-/// for gas to do the same. `@@` is a default version, which only the definition can give, and gas
-/// turns it down.
+/// as it was written, for gas to do the same. `@@@` is the same reference. `@@` is a default
+/// version, which only the definition can give, and gas turns it down.
 #[test]
 fn a_symver_of_a_name_from_elsewhere_is_a_versioned_reference() {
     const DECLARED: &str = "void __qsort_r_compat(void);\n\
@@ -277,15 +277,23 @@ fn a_symver_of_a_name_from_elsewhere_is_a_versioned_reference() {
     }
     let (ok, text, err) = assembly("listing", "x86_64-unknown-freebsd15.1", &[], &used);
     assert!(ok, "{err}");
-    assert!(text.contains("\t.symver\t__qsort_r_compat,qsort_r@FBSD_1.0\n"), "{text}");
+    assert!(text.contains(".symver __qsort_r_compat, qsort_r@FBSD_1.0\n"), "{text}");
 
+    let dir = dir("spellings");
     let triple = used.replace("qsort_r@FBSD", "qsort_r@@@FBSD");
-    let (ok, text, err) = assembly("triple", TARGET, &[], &triple);
-    assert!(ok, "{err}");
-    assert!(text.contains("\t.symver\t__qsort_r_compat,qsort_r@FBSD_1.0\n"), "{text}");
-
     let default = used.replace("qsort_r@FBSD", "qsort_r@@FBSD");
-    let (ok, _, err) = assembly("default", TARGET, &[], &default);
-    assert!(!ok);
-    assert!(err.contains("'qsort_r@@FBSD_1.0' is aliased to undefined symbol"), "{err}");
+    std::fs::write(dir.join("triple.c"), &triple).expect("the fixture can be written");
+    std::fs::write(dir.join("default.c"), &default).expect("the fixture can be written");
+    let flag = format!("--target={TARGET}");
+    let (ok, _, err) = run(&dir, &[&flag, "-O2", "-c", "triple.c", "-o", "triple.o"]);
+    assert!(ok, "{err}");
+    let (refused, _, err) = run(&dir, &[&flag, "-O2", "-c", "default.c", "-o", "default.o"]);
+    let triple = std::fs::read(dir.join("triple.o")).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(has(&triple, "qsort_r@FBSD_1.0"), "the versioned reference");
+    assert!(!has(&triple, "qsort_r@@FBSD_1.0"), "no default version");
+    assert!(!refused);
+    let why =
+        "invalid attempt to declare external version name as default in symbol `qsort_r@@FBSD_1.0'";
+    assert!(err.contains(why), "{err}");
 }

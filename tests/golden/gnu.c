@@ -338,9 +338,9 @@ long asks_for_four(int a) { return make_four(a).c; }
 // An `asm` written at file scope, whose template is directives and therefore says what the
 // object file itself holds rather than what any function does. A section, a label, the bytes
 // under it, and a second label whose distance from the first is the size: that is the whole of
-// what the incbin header writes, and what a hand written table of constants writes as well. Each
-// label becomes an object of its own, and they are laid out in the order written so that the
-// distance the template computed is the distance the program gets.
+// what the incbin header writes, and what a hand written table of constants writes as well. On
+// ELF every such block is module asm, which goes to the assembler as it was written, in the order
+// written, as gcc hands it to GNU as. The C declarations of its labels stay declarations.
 __asm__(".section .rodata\n"
         ".globl table\n"
         ".balign 8\n"
@@ -362,18 +362,16 @@ int reads_the_table(int i) { return table[i] + table_count; }
 // A `.set` in one of those, which says a name stands for another name and is therefore a second
 // symbol at the first one's address. What the directives around it said about the name is what
 // the name gets, so this one is weak and another object defining it wins. The name it stands for
-// is a `static` function nothing in the file calls, and the equate is the only thing keeping it:
-// being what a name stands for is a use of it, the same way an attribute alias is.
-static void the_default(void) { use(0); }
+// is a `static` function nothing in the file calls. The compiler does not read the block, so,
+// as with gcc, `used` is what keeps the function.
+static void __attribute__((used)) the_default(void) { use(0); }
 
 __asm__(".weak an_override\n.set an_override, the_default");
 
-// Bytes written before any label, and a label written as a number. The bytes are a global like
-// the rest and are given a name here because a global has one, and they land in front of the
-// label under them so that `stuff[0]` is the byte written under `stuff`. A number is a local
-// label, which may be written again further down and is therefore nothing the object file holds a
-// name for: it is a place the template measures from, and the bytes either side of one stay in
-// the same global, which is what makes the last line below the distance between the two.
+// Bytes written before any label, and a label written as a number. A number is a local label,
+// which may be written again further down and is therefore nothing the object file holds a name
+// for: it is a place the template measures from, and the assembler works out the last line below
+// as the distance between the two.
 __asm__(".data\n"
         ".byte 41\n"
         "stuff:\n"
@@ -388,12 +386,10 @@ int reads_the_stuff(int i) { return stuff[i]; }
 
 // How far one of the block's own places is from the bytes that say so, which is a distance the
 // linker works out because it is what placed the two sections the distance is measured between.
-// The place is written as a local label and the object file holds no name for one of those, so
-// what the relocation names is the global the label stands inside and how far into it the label
-// is, which names the same byte in the terms a symbol table has. A table of these in one section
-// pointing at code in another is what every alternative instruction table in a kernel header is.
+// A table of these in one section pointing at code in another is what every alternative
+// instruction table in a kernel header is.
 __asm__(".data\n"
-        "measured:\n"
+        "measured_bytes:\n"
         ".byte 42\n"
         "663:\n"
         ".byte 43\n"

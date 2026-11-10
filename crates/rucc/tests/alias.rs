@@ -189,19 +189,39 @@ extern int b __attribute__((alias(a)));
 
 /// A `.symver` in an `asm` at file scope is a second name with the version in its spelling, bound
 /// the way the name it stands for is. xz writes one for a name it declared with the alias
-/// attribute, so the version lands on what that alias stands for.
+/// attribute. On ELF the block reaches the assembler as it was written, and the object has the
+/// names gcc and gas 2.42 give it: `get_522`, `get@XZ_5.2.2` and `get@@XZ_5.2`, all defined.
 #[test]
 fn a_symbol_version_is_a_second_name_written_back_as_the_symver_it_came_from() {
-    let text = asm(
-        "symver",
-        "\
+    let source = "\
 void get(void) {}
 extern void get_522(void) __attribute__((alias(\"get\")));
 __asm__(\".symver get_522, get@XZ_5.2.2\");
 __asm__(\".symver get, get@@@XZ_5.2\");
-",
-    );
-    assert!(text.contains("\t.symver\tget,get@XZ_5.2.2\n"), "{text}");
-    assert!(text.contains("\t.symver\tget,get@@XZ_5.2\n"), "{text}");
-    assert!(!text.contains(".globl\tget@"), "{text}");
+";
+    let text = asm("symver", source);
+    assert!(text.contains(".symver get_522, get@XZ_5.2.2\n"), "{text}");
+    assert!(text.contains(".symver get, get@@@XZ_5.2\n"), "{text}");
+
+    let path = fixture("symver-object", source);
+    let dir = path.parent().expect("the fixture is in a directory").to_owned();
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={TARGET}"))
+        .arg("-c")
+        .arg("-o")
+        .arg(dir.join("one.o"))
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let object = std::fs::read(dir.join("one.o")).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    let has = |name: &str| {
+        let spelled = format!("\0{name}\0");
+        object.windows(spelled.len()).any(|window| window == spelled.as_bytes())
+    };
+    for name in ["get_522", "get@XZ_5.2.2", "get@@XZ_5.2"] {
+        assert!(has(name), "{name} is not in the object");
+    }
+    assert!(!has("get@@@XZ_5.2"), "the rename was not made");
 }
