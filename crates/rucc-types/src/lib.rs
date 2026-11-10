@@ -1376,6 +1376,30 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_9_record_is_a_whole_number_of_words() {
+        let mut types = Types::new();
+        let ushort = types.int(IntKind::UShort);
+        let char_ = types.int(IntKind::Char);
+        let chars = types.array(char_, ArrayLen::Fixed(7));
+        // The `Optab` of 7l, which 7c makes sixteen bytes and every table in the linker counts on.
+        let fields = [member(ushort), member(chars)];
+        for (triple, size, word) in
+            [("aarch64-plan9", 16, 8), ("x86_64-plan9", 16, 8), ("i386-plan9", 12, 4)]
+        {
+            let plan9 = target(triple);
+            let laid_out = lay_out_on(&plan9, &types, RecordKind::Struct, &fields);
+            assert_eq!(laid_out.layout, Layout::new(size, word), "{triple}");
+            let union = lay_out_on(&plan9, &types, RecordKind::Union, &fields);
+            assert_eq!(union.layout, Layout::new(8, word), "{triple}");
+            let packed = RecordOptions { pack: Some(2), ..RecordOptions::default() };
+            let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &plan9)
+                .expect("a record every member of which has a layout");
+            assert_eq!(laid_out.layout, Layout::new(10, 2), "{triple}");
+        }
+        assert_eq!(lay_out(&types, RecordKind::Struct, &fields).layout, Layout::new(10, 2));
+    }
+
+    #[test]
     fn packed_drops_every_member_to_a_byte_and_bit_fields_to_the_next_free_bit() {
         let mut interner = Interner::new();
         let types = Types::new();

@@ -1286,6 +1286,13 @@ pub struct TargetInfo {
     /// the zero width bit-field, the zero length array and the flexible array member. All four
     /// were measured and all four agree.
     pub empty_record_size: u64,
+    /// The least alignment a record has, in bytes, whatever its members are.
+    ///
+    /// One everywhere but Plan 9. There the compilers round every `struct` and `union` up to the
+    /// word and align a record member to the word, which is `Asu2` and `Ael1` in `align` in each
+    /// compiler's `swt.c`: eight bytes on amd64 and arm64 and four on 386. So `struct { short s;
+    /// char c[7]; }` is sixteen bytes there and not ten. `#pragma pack` and `packed` remove it.
+    pub record_align: u64,
     /// What `__builtin_va_list` is, which is the type every `va_list` in every header is a
     /// typedef of.
     ///
@@ -1710,6 +1717,10 @@ impl TargetInfo {
             empty_record_size: match target.env() {
                 tuple::Env::Msvc => 4,
                 _ => 0,
+            },
+            record_align: match target.os() {
+                tuple::Os::Plan9 => layout.pointer_size,
+                _ => 1,
             },
             va_list: va_list(target),
             regs,
