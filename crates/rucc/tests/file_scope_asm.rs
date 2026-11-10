@@ -1,14 +1,14 @@
 //! What an `asm` at file scope made of directives puts in the object, end to end.
 //!
-//! The compiler reads such a block into globals when it can, and hands it to the assembler with
-//! the rest of the listing when it cannot. Three blocks every BSD source file writes came out wrong
-//! from the reading, with no error. NetBSD's `__RCSID` lost the flags of `.ident`, the note its
-//! start files brand a program with lost `SHT_NOTE`, an `.ident` lost its string, and FreeBSD's
+//! On ELF every such block goes to the assembler with the rest of the listing. The compiler used to
+//! read some blocks into globals itself, and three blocks every BSD source file writes came out
+//! wrong from the reading, with no error. NetBSD's `__RCSID` lost the flags of `.ident`, the note
+//! its start files brand a program with lost `SHT_NOTE`, an `.ident` lost its string, and FreeBSD's
 //! `__weak_reference` made a local symbol of a weak one. Each is checked here against what gcc and
 //! GNU as write for the same file on x86-64 Linux. See tamnd/rucc#4090.
 //!
-//! `-frucc-asm-reader=off` sends every block to the assembler. A file has to give the same object
-//! either way, which is the last test here.
+//! `-frucc-asm-reader=off` is still taken and changes nothing. A file gives the same object with it
+//! and without it.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -85,6 +85,7 @@ struct Symbol {
     bind: usize,
     kind: usize,
     visibility: usize,
+    size: usize,
 }
 
 /// Every symbol of the object, with a name.
@@ -99,6 +100,7 @@ fn symbols(object: &[u8]) -> Vec<Symbol> {
             bind: usize::from(object[at + 4] >> 4),
             kind: usize::from(object[at + 4] & 0xf),
             visibility: usize::from(object[at + 5] & 3),
+            size: word(object, at + 16, 8),
         })
         .filter(|symbol| !symbol.name.is_empty())
         .collect()
@@ -191,23 +193,28 @@ fn a_binding_in_one_block_reaches_a_name_defined_anywhere_in_the_file() {
     assert!(symbols.iter().all(|s| s.name != "alias" || s.bind != STB_LOCAL));
 }
 
+/// A data block with one label, which the reading used to count as exact.
+const DATA: &str = "__asm__(\".data\\n.globl table\\ntable:\\n.long 1, 2\\n\");\nint x;\n";
+
 #[test]
 fn the_object_is_the_same_with_the_reader_off() {
-    for (what, source) in [("netbsd", NETBSD), ("weak", WEAK)] {
+    for (what, source) in [("netbsd", NETBSD), ("weak", WEAK), ("data", DATA)] {
         let read = object(&format!("{what}-on"), source, &[]);
         let off = object(&format!("{what}-off"), source, &["-frucc-asm-reader=off"]);
         assert!(read == off, "{what}");
     }
 }
 
-/// A block the reader reads exactly goes to the assembler under the switch, which gives a label
-/// no type and no size, the way GNU as does.
+/// A label in a block goes to the assembler, which gives it no type and no size, the way GNU as
+/// does. The reading the compiler used to make of a block like this one gave `table` the type
+/// `STT_OBJECT` and the size 8, which gcc does not.
 #[test]
-fn the_reader_off_hands_every_block_to_the_assembler() {
-    let source = "__asm__(\".data\\n.globl table\\ntable:\\n.long 1, 2\\n\");\nint x;\n";
-    let off = object("data-off", source, &["-frucc-asm-reader=off"]);
-    let table = symbols(&off).into_iter().find(|s| s.name == "table").expect("table");
-    assert_eq!((table.bind, table.kind), (STB_GLOBAL, STT_NOTYPE), "{table:?}");
+fn a_label_in_a_block_gets_no_type_and_no_size() {
+    for flags in [&[][..], &["-frucc-asm-reader=off"][..]] {
+        let bytes = object(&format!("data-{}", flags.len()), DATA, flags);
+        let table = symbols(&bytes).into_iter().find(|s| s.name == "table").expect("table");
+        assert_eq!((table.bind, table.kind, table.size), (STB_GLOBAL, STT_NOTYPE, 0), "{table:?}");
+    }
 }
 
 #[test]

@@ -833,8 +833,8 @@ fn switches(args: &[String]) -> Vec<String> {
     // The `-f` flags that name a path or that are about the diagnostics, as prefixes. The trace
     // names a file, and the fuel is there to find the pass that broke an object by comparing it
     // with the object built without the fuel, which only works if the fuel leaves no mark of its own.
-    // The switch for the reader of `asm` at file scope is there to show that both paths give the
-    // same object, which needs the same thing.
+    // The switch for the reader of `asm` at file scope changes nothing, and a flag that changes
+    // nothing leaves no mark either.
     const NOT_RECORDED: &str = "-ffile-prefix-map= -fdebug-prefix-map= -fmacro-prefix-map= \
         -fprofile-prefix-map= -fdiagnostics- -fno-diagnostics- -fmessage-length= -fmax-errors= \
         -fdump- -fopt-info -fuse-ld= -fcolor-diagnostics -fno-color-diagnostics -frucc-trace= \
@@ -2640,8 +2640,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 opts.trace = Some(path.to_owned());
             }
-            "-frucc-asm-reader=on" => opts.asm_reader = true,
-            "-frucc-asm-reader=off" => opts.asm_reader = false,
+            // On ELF every `asm` at file scope goes to the assembler and off ELF every one is read,
+            // so the switch that chose between the two has nothing left to choose. It is still
+            // taken, because builds and tests that compare the two paths pass it.
+            "-frucc-asm-reader=on" | "-frucc-asm-reader=off" => {}
             _ if arg.starts_with("-frucc-asm-reader=") => {
                 let value = &arg["-frucc-asm-reader=".len()..];
                 return Err(err(format!("-frucc-asm-reader= takes `on` or `off`, not `{value}`")));
