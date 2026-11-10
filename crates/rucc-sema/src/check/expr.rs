@@ -443,11 +443,11 @@ impl Checker<'_> {
         // `-fexcess-precision=fast` asked otherwise. So `0.1f == 0.1` holds, and `x == 0.1` for a
         // `double` x that was assigned `0.1` does not, as in gcc. The lexer read the digits a
         // second time in the format of `long double` for this.
-        if let Some(wide) = constant.wide.filter(|_| self.cx.excess_constants)
-            && let Some(long) = self.conv().excess_type(ty)
-        {
-            let node = self.constant(Const::Float(wide), long, span);
-            return self.conv().excess(node, ty);
+        if let Some(wide) = constant.wide.filter(|_| self.cx.excess_constants) {
+            if let Some(long) = self.conv().excess_type(ty) {
+                let node = self.constant(Const::Float(wide), long, span);
+                return self.conv().excess(node, ty);
+            }
         }
         self.constant(Const::Float(value), ty, span)
     }
