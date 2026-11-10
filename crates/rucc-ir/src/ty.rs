@@ -132,6 +132,10 @@ pub enum Float {
     D64,
     /// IEEE decimal128 in the binary integer encoding, which is `_Decimal128`.
     D128,
+    /// The brain float, which is `__bf16`: the top sixteen bits of a binary32, so eight bits of
+    /// precision and the range of a `float`. No machine here computes with one, and the back end
+    /// does the work at `f32` and moves the bits as an `f16` (see `rucc-codegen`'s `brain`).
+    BF16,
 }
 
 impl Float {
@@ -142,7 +146,7 @@ impl Float {
     #[must_use]
     pub const fn bits(self) -> u32 {
         match self {
-            Self::F16 => 16,
+            Self::F16 | Self::BF16 => 16,
             Self::F32 => 32,
             Self::F64 => 64,
             Self::F80 => 80,
@@ -209,12 +213,17 @@ impl Float {
             Self::D32 => Format::Decimal32,
             Self::D64 => Format::Decimal64,
             Self::D128 => Format::Decimal128,
+            Self::BF16 => Format::BFloat16,
         }
     }
 
     /// What goes in the width field of a packed type, which is the width with a flag for decimal.
     const fn code(self) -> u32 {
-        if self.is_decimal() { self.bits() | DECIMAL } else { self.bits() }
+        match self {
+            Self::BF16 => self.bits() | BRAIN,
+            _ if self.is_decimal() => self.bits() | DECIMAL,
+            _ => self.bits(),
+        }
     }
 
     /// The inverse of [`Float::code`].
@@ -223,6 +232,7 @@ impl Float {
             c if c == DECIMAL | 32 => Some(Self::D32),
             c if c == DECIMAL | 64 => Some(Self::D64),
             c if c == DECIMAL | 128 => Some(Self::D128),
+            c if c == BRAIN | 16 => Some(Self::BF16),
             _ => Self::from_bits(code),
         }
     }
@@ -230,7 +240,11 @@ impl Float {
 
 impl fmt::Display for Float {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let letter = if self.is_decimal() { 'd' } else { 'f' };
+        let letter = match self {
+            Self::BF16 => "bf",
+            _ if self.is_decimal() => "d",
+            _ => "f",
+        };
         write!(f, "{letter}{}", self.bits())
     }
 }
@@ -247,6 +261,10 @@ const KIND_SHIFT: u32 = 29;
 // anywhere near that wide, so the flag costs no width, and it is on the float kind only, since
 // an integer does use the whole field.
 const DECIMAL: u32 = 1 << 15;
+
+// The bit below it says the brain float, which is the one binary format that shares its width
+// with another one, `f16`.
+const BRAIN: u32 = 1 << 14;
 
 impl Type {
     /// The widest integer that can be represented, which is what limits `_BitInt`.
@@ -333,12 +351,12 @@ impl Type {
     #[must_use]
     pub const fn bits(self) -> u32 {
         match self.kind() {
-            Kind::Float => self.field() & !DECIMAL,
+            Kind::Float => self.field() & !(DECIMAL | BRAIN),
             _ => self.field(),
         }
     }
 
-    /// The width field as it is packed, which on a float carries the decimal flag as well.
+    /// The width field as it is packed, which on a float carries the decimal and brain flags.
     const fn field(self) -> u32 {
         self.0 >> BITS_SHIFT & BITS_MASK
     }
@@ -456,6 +474,14 @@ impl Type {
             Some((head, lanes)) => (head, parse_u32(lanes).filter(|&n| n > 1)?),
             None => (text, 1),
         };
+        if let Some(bits) = head.strip_prefix("bf") {
+            let lane = Self::float(Float::from_code(parse_u32(bits)? | BRAIN)?);
+            return match lanes {
+                1 => Some(lane),
+                _ if lanes > Self::MAX_LANES => None,
+                _ => Some(Self::vector(lane, lanes)),
+            };
+        }
         let bits = parse_u32(head.strip_prefix(['i', 'f', 'd'])?)?;
         let lane = match head.as_bytes()[0] {
             b'i' if bits > 0 && bits <= Self::MAX_BITS => Self::int(bits),
@@ -688,6 +714,24 @@ mod tests {
         assert_eq!(Float::from_bits(64), Some(Float::F64));
         assert_eq!(Type::parse("d16"), None);
         assert_eq!(Type::parse("d80"), None);
+    }
+
+    #[test]
+    fn a_brain_float_is_its_own_type_at_the_width_of_a_half() {
+        let ty = Type::float(Float::BF16);
+        assert_ne!(ty, Type::float(Float::F16));
+        assert_eq!((ty.bits(), ty.format()), (16, Some(Float::BF16)));
+        assert_eq!(Float::BF16.encoding(), Format::BFloat16);
+        assert!(!Float::BF16.is_decimal());
+        assert_eq!(ty.to_string(), "bf16");
+        assert_eq!(Type::parse("bf16"), Some(ty));
+        let vector = Type::vector(ty, 8);
+        assert_eq!((vector.to_string().as_str(), vector.lane()), ("bf16x8", ty));
+        assert_eq!(Type::parse("bf16x8"), Some(vector));
+        assert_eq!(Float::from_bits(16), Some(Float::F16));
+        for text in ["bf32", "bf8", "bf", "bf16x1", "bf016"] {
+            assert_eq!(Type::parse(text), None, "{text}");
+        }
     }
 
     #[test]

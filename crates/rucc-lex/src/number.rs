@@ -232,6 +232,8 @@ pub enum FloatConstantType {
     Decimal128,
     /// `d64x` or `D64x`, which is `_Decimal64x`, in the decimal128 format.
     Decimal64x,
+    /// `bf16` or `BF16`, which is `__bf16`. gcc writes its `__BFLT16_*__` macros with it.
+    BFloat16,
 }
 
 impl FloatConstantType {
@@ -260,6 +262,7 @@ impl FloatConstantType {
             FloatConstantType::Decimal32 => Format::Decimal32,
             FloatConstantType::Decimal64 => Format::Decimal64,
             FloatConstantType::Decimal128 | FloatConstantType::Decimal64x => Format::Decimal128,
+            FloatConstantType::BFloat16 => Format::BFloat16,
         }
     }
 
@@ -284,6 +287,7 @@ impl FloatConstantType {
             FloatConstantType::Decimal64 => "_Decimal64",
             FloatConstantType::Decimal128 => "_Decimal128",
             FloatConstantType::Decimal64x => "_Decimal64x",
+            FloatConstantType::BFloat16 => "__bf16",
         }
     }
 
@@ -309,6 +313,7 @@ impl FloatConstantType {
             FloatConstantType::Decimal64 => "dd",
             FloatConstantType::Decimal128 => "dl",
             FloatConstantType::Decimal64x => "d64x",
+            FloatConstantType::BFloat16 => "bf16",
         }
     }
 }
@@ -782,6 +787,19 @@ fn float_suffix(mut rest: &[u8], target: &TargetInfo) -> Result<FloatSuffix, Flo
                 remarks = remarks.with(Remarks::EXTENDED_SUFFIX);
                 1
             }
+            // All lower case or all upper case, as gcc takes it, and only where the type is.
+            b'b' | b'B' => {
+                let rest_of = if byte == b'b' { b"f16" } else { b"F16" };
+                if rest.get(1..4) != Some(&rest_of[..]) {
+                    return Err(FloatError::InvalidSuffix);
+                }
+                if !target.type_names().iter().any(|&(name, _)| name == "__bf16") {
+                    return Err(FloatError::UnsupportedType);
+                }
+                ty = Some(FloatConstantType::BFloat16);
+                remarks = remarks.with(Remarks::EXTENDED_SUFFIX);
+                4
+            }
             b'w' | b'W' => {
                 // `__float80` is the x87 format, and the type exists where `long double` is that
                 // format, which is the test `__float80` itself is held to. Asking the
@@ -1148,6 +1166,8 @@ mod tests {
             ("1.0f128", FloatConstantType::Float128),
             ("1.0f32x", FloatConstantType::Float32x),
             ("1.0F64x", FloatConstantType::Float64x),
+            ("1.0bf16", FloatConstantType::BFloat16),
+            ("1.0BF16", FloatConstantType::BFloat16),
         ];
         for (text, ty) in cases {
             assert_eq!(float(text).expect("a constant").ty, ty, "{text} has the wrong type");
@@ -1168,6 +1188,20 @@ mod tests {
         assert_eq!(bits("0.1q"), 0x3ffb_9999_9999_9999_9999_9999_9999_999a);
         assert_eq!(bits("0.1f128"), 0x3ffb_9999_9999_9999_9999_9999_9999_999a);
         assert_eq!(bits("1.0l"), 0x3fff_8000_0000_0000_0000);
+        // gcc 15 on x86-64 FreeBSD: `0.1bf16` is 0x3dcd, which is `0.1f` rounded to eight bits,
+        // and `__BFLT16_MAX__` is the largest finite one.
+        assert_eq!(bits("0.1bf16"), 0x3dcd);
+        assert_eq!(bits("3.38953138925153547590470800371487867e+38BF16"), 0x7f7f);
+    }
+
+    #[test]
+    fn the_brain_float_suffix_is_one_case_and_only_where_the_type_is() {
+        for text in ["1.0bF16", "1.0Bf16", "1.0bf1", "1.0bf32", "1.0b"] {
+            assert!(float(text).is_err(), "{text}");
+        }
+        let wasm = TargetInfo::new("wasm32-wasip1".parse::<Triple>().expect("a known triple"));
+        assert!(floating("1.0bf16", Std::C23, &wasm).is_err());
+        assert!(floating("1.0bf16", Std::C23, &aarch64()).is_ok());
     }
 
     #[test]

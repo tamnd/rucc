@@ -61,6 +61,7 @@ fn letters(ty: Type) -> Option<&'static str> {
         Float::D64 => "dd",
         Float::D128 => "td",
         Float::F16 => "hf",
+        Float::BF16 => "bf",
         Float::F32 => "sf",
         Float::F64 => "df",
         Float::F80 => "xf",

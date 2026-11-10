@@ -1944,7 +1944,7 @@ const HALF: Characteristics = Characteristics {
     is_iec_60559: "1",
 };
 
-/// The brain float, which nothing here names yet and which every format table has a row for.
+/// The brain float, which is `__bf16`.
 const BFLOAT16: Characteristics = Characteristics {
     mant_dig: "8",
     dig: "2",
@@ -2199,6 +2199,12 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     if target.has_float16 && gnuc >= half_since {
         family(d, gnuc, "FLT16", &HALF, |value| format!("{value}F16"));
     }
+    // `__bf16` became an arithmetic type in gcc 13 on x86 and AArch64, and the family came with it.
+    // It is written where the type is a name rucc knows.
+    let brain = target.type_names().iter().any(|&(name, _)| name == "__bf16");
+    if brain && gnuc >= 13 {
+        family(d, gnuc, "BFLT16", &BFLOAT16, |value| format!("{value}BF16"));
+    }
     family(d, gnuc, "FLT32", &SINGLE, |value| format!("{value}F32"));
     family(d, gnuc, "FLT64", &DOUBLE, |value| format!("{value}F64"));
     if target.has_float128 {
@@ -2235,8 +2241,8 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
 ///
 /// gcc writes a group of macros for each floating mode the machine has. `MANT_DIG` comes for
 /// every mode, and the rest only for a mode the compiler has a type for, named after that type's
-/// `float.h` family. `BF` stops at `MANT_DIG` here, since there is no `__BFLT16_*__` family for it
-/// to name.
+/// `float.h` family. `BF` stops at `MANT_DIG` here. gcc 13 and later may name the `__BFLT16_*__`
+/// family for it where `__bf16` is a type, and no reference row measures that yet.
 fn libgcc(d: &mut Defs, target: &TargetInfo) {
     let Some(triple) = Triple::from_tuple(target.tuple) else {
         return;
@@ -3569,6 +3575,43 @@ mod tests {
             assert!(has(&gcc15, &format!("#define {line}")), "{line}");
         }
         assert!(has(&set_for("x86_64-unknown-linux-gnu"), "#define __GXX_ABI_VERSION 1021"));
+    }
+
+    /// tamnd/rucc#4088. The brain float's family is there where `__bf16` is a type, which is from
+    /// gcc 13 on x86-64 and AArch64. The values are the reference rows'.
+    #[test]
+    fn the_brain_float_family_is_where_gcc_has_the_type() {
+        for (triple, since) in [
+            ("x86_64-unknown-freebsd", 13),
+            ("aarch64-unknown-freebsd", 13),
+            ("aarch64-unknown-netbsd", 13),
+        ] {
+            assert!(!set_claiming(triple, since - 1).contains("__BFLT16_"), "{triple}");
+            let text = set_claiming(triple, since);
+            for line in [
+                "__BFLT16_MANT_DIG__ 8",
+                "__BFLT16_DIG__ 2",
+                "__BFLT16_MIN_EXP__ (-125)",
+                "__BFLT16_MAX_10_EXP__ 38",
+                "__BFLT16_DECIMAL_DIG__ 4",
+                "__BFLT16_MAX__ 3.38953138925153547590470800371487867e+38BF16",
+                "__BFLT16_NORM_MAX__ 3.38953138925153547590470800371487867e+38BF16",
+                "__BFLT16_MIN__ 1.17549435082228750796873653722224568e-38BF16",
+                "__BFLT16_EPSILON__ 7.81250000000000000000000000000000000e-3BF16",
+                "__BFLT16_DENORM_MIN__ 9.18354961579912115600575419704879436e-41BF16",
+                "__BFLT16_IS_IEC_60559__ 0",
+                "__BFLT16_HAS_QUIET_NAN__ 1",
+            ] {
+                assert!(has(&text, &format!("#define {line}")), "{triple}: {line}");
+            }
+        }
+        // Not on i386 and RISC-V (tamnd/rucc#4276), where rucc has no `__bf16` yet, and not where
+        // gcc has no type.
+        for triple in
+            ["i686-unknown-linux-gnu", "riscv64-unknown-freebsd", "wasm32-unknown-unknown"]
+        {
+            assert!(!set_claiming(triple, 15).contains("__BFLT16_"), "{triple}");
+        }
     }
 
     /// tamnd/rucc#4088. Some of those names depend on the machine too. AArch64 had `_Float16`

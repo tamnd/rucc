@@ -12896,6 +12896,47 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(run(&opts, "__fp16 h;\n").failed(), "no __fp16 on x86-64");
     }
 
+    /// tamnd/rucc#4088. `__bf16` is a type of its own on x86-64 and AArch64, and the
+    /// arithmetic on it is done at `float` and written in place, with no call for the widening or
+    /// for the narrowing. gcc 15 calls nothing for these either. Before this, the name was not a
+    /// type anywhere.
+    #[test]
+    fn a_brain_float_is_computed_at_float_with_no_call_on_two_machines() {
+        let source = "_Static_assert(sizeof(__bf16) == 2 && _Alignof(__bf16) == 2, \"size\");\n\
+                      __bf16 k = 1.5bf16;\n\
+                      _Static_assert(_Generic(k, __bf16: 1, default: 0), \"a type\");\n\
+                      _Static_assert(_Generic(k, _Float16: 0, default: 1), \"of its own\");\n\
+                      __bf16 add(__bf16 a, __bf16 b) { return a * b + a; }\n\
+                      float wide(__bf16 a) { return a; }\n\
+                      __bf16 narrow(double d) { return d; }\n\
+                      __bf16 from(long long x) { return x; }\n\
+                      __bf16 from_wide(unsigned __int128 x) { return x; }\n\
+                      unsigned to(__bf16 a) { return a; }\n\
+                      int less(__bf16 a, __bf16 b) { return a < b; }\n\
+                      __bf16 neg(__bf16 a) { return -a; }\n\
+                      void put(__bf16 *p, __bf16 a) { p[1] = a; }\n";
+        for triple in ["x86_64-unknown-freebsd", "aarch64-unknown-freebsd"] {
+            let mut opts = options();
+            opts.target = triple.parse::<Triple>().unwrap();
+            opts.emit = EmitKind::Asm;
+            let ran = run(&opts, source);
+            assert_eq!(ran.messages, Vec::<String>::new(), "{triple}");
+            let text = ran.text().to_owned();
+            let routines =
+                ["bfsf2", "sfbf2", "dfbf2", "hfsf2", "sfhf2", "floatdibf", "tibf", "floattidf"];
+            for routine in routines {
+                assert!(!text.contains(routine), "{triple}: {routine} in {text}");
+            }
+            opts.emit = EmitKind::Object;
+            assert_eq!(run(&opts, source).messages, Vec::<String>::new(), "{triple}");
+        }
+        let mut opts = options();
+        opts.target = "i686-unknown-linux-gnu".parse::<Triple>().unwrap();
+        assert!(run(&opts, "__bf16 k;\n").failed(), "no __bf16 on i386 yet");
+        opts.target = "riscv64-unknown-freebsd".parse::<Triple>().unwrap();
+        assert!(run(&opts, "__bf16 k;\n").failed(), "no __bf16 on RISC-V yet");
+    }
+
     /// The infinities and nans of the interchange types are constants, as for `double`.
     ///
     /// glibc's `math.h` writes `HUGE_VAL_F128` as `__builtin_huge_valf128 ()` once `__GNUC__` is

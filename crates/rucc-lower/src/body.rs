@@ -8240,7 +8240,11 @@ impl<'u> Body<'_, 'u> {
                 // At one width the two are a decimal and a binary format, and the conversion into
                 // the decimal is the widening, which is the way libgcc names its routines.
                 let decimal = into.format().is_some_and(rucc_ir::Float::is_decimal);
-                let wider = into.bits() > out.bits() || (into.bits() == out.bits() && decimal);
+                // A half from a brain float is the widening of the two at sixteen bits, since the
+                // brain float from a half is libgcc's `__trunchfbf2`.
+                let half = into.format() == Some(rucc_ir::Float::F16);
+                let wider =
+                    into.bits() > out.bits() || (into.bits() == out.bits() && (decimal || half));
                 let opcode = if wider { Opcode::FPExt } else { Opcode::FPTrunc };
                 self.build(span).unary(opcode, value, into)
             }
