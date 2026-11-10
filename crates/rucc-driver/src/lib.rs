@@ -5520,6 +5520,11 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
         // Wasm has no archive format of its own. wasm-ld reads the GNU one with its symbol index,
         // which is what `llvm-ar` writes for wasm members too.
         ObjectFormat::Wasm => rucc_archive::Flavour::Gnu,
+        // A Plan 9 library has a `__.SYMDEF` of its own layout, which `ar` on Plan 9 writes and
+        // this does not yet.
+        ObjectFormat::Plan9 => {
+            return complain("a Plan 9 library is not written yet; use ar on Plan 9");
+        }
     };
 
     let fs = OsFileSystem::new();

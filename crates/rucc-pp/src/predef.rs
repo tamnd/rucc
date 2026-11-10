@@ -1118,6 +1118,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__ANSI_COMPAT");
             d.flag("__ELF__");
         }
+        // kencc defines no macro that names the system, and the Plan 9 headers test none. The
+        // objects are not ELF, so `__ELF__` is not here either.
+        Os::Plan9 => {}
         Os::None => {
             // Freestanding. `__ELF__` still holds, because the object format is a property of
             // the target rather than of having an operating system under it, and a wasm module

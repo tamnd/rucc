@@ -27,7 +27,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use rucc_sysroot::{Kernel, Options, Sysroot, Wall, include_paths};
-use rucc_target::{Env, Os, Triple};
+use rucc_target::{Arch, Env, Os, Triple};
 
 use crate::link::Distro;
 
@@ -79,6 +79,7 @@ pub fn candidates(target: Triple, machine: &Machine) -> Vec<PathBuf> {
         Os::Darwin => darwin(machine.sdk.as_deref().or(root)),
         Os::Windows => windows(target.env, root, machine.include.as_deref()),
         Os::FreeBsd(_) | Os::NetBsd | Os::OpenBsd | Os::DragonFly => bsd(target, root),
+        Os::Plan9 => plan9(target, root),
         // Freestanding. There is no library, so there are no headers of one, and the nine the
         // compiler ships are the whole of what a program may include.
         Os::None => Vec::new(),
@@ -130,6 +131,20 @@ fn bsd(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
         _ => &["/usr/local/include", "/usr/include"],
     };
     dirs.iter().map(|dir| under(sysroot, dir)).collect()
+}
+
+/// The directories kencc searches on Plan 9: `/$objtype/include`, then `/sys/include`. The
+/// machine's directory holds `u.h` and `ureg.h`, and every other header is in `/sys/include`.
+fn plan9(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let objtype = match target.arch {
+        Arch::X86_64 => "amd64",
+        Arch::Aarch64 => "arm64",
+        _ => "386",
+    };
+    [format!("/{objtype}/include"), "/sys/include".into()]
+        .iter()
+        .map(|dir| under(sysroot, dir))
+        .collect()
 }
 
 /// The SDK, which on an Apple platform is the whole of it.
@@ -525,6 +540,22 @@ mod tests {
                 under("usr/include")
             ]
         );
+    }
+
+    #[test]
+    fn plan_9_searches_the_machine_directory_and_then_sys_include() {
+        let machine = Machine { sysroot: Some("/opt/9front".into()), ..on(Os::Linux) };
+        let dirs = |arch| candidates(Triple::new(arch, Os::Plan9, Env::None), &machine);
+        // Joined and not spelled out, because a host can use a backslash as the separator.
+        let under = |objtype| {
+            let root = PathBuf::from("/opt/9front");
+            [root.join(objtype).join("include"), root.join("sys").join("include")]
+        };
+        assert_eq!(dirs(Arch::X86_64), under("amd64"));
+        assert_eq!(dirs(Arch::Aarch64), under("arm64"));
+        assert_eq!(dirs(Arch::X86), under("386"));
+        // With no tree to read, a host that is not Plan 9 has no Plan 9 headers.
+        assert!(candidates(triple(Os::Plan9, Env::None), &on(Os::Linux)).is_empty());
     }
 
     #[test]

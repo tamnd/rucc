@@ -1,0 +1,20 @@
+target    x86_64-plan9
+format    plan9
+emulation none
+loader    none
+sysroot   <cache>/sysroots/x86_64-plan9
+
+[static]
+  refused: there is no cross link line for x86_64-plan9 yet, because its object format is plan9 and that linker takes a different line rather than a different spelling of this one
+
+[static-pie]
+  refused: there is no cross link line for x86_64-plan9 yet, because its object format is plan9 and that linker takes a different line rather than a different spelling of this one
+
+[dynamic]
+  refused: there is no cross link line for x86_64-plan9 yet, because its object format is plan9 and that linker takes a different line rather than a different spelling of this one
+
+[dynamic-no-pie]
+  refused: there is no cross link line for x86_64-plan9 yet, because its object format is plan9 and that linker takes a different line rather than a different spelling of this one
+
+[shared]
+  refused: there is no cross link line for x86_64-plan9 yet, because its object format is plan9 and that linker takes a different line rather than a different spelling of this one

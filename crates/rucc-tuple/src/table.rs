@@ -376,6 +376,20 @@ pub const TARGETS: &[TargetEntry] = &[
         note: "open, therefore admissible, therefore not excluded on principle",
     },
     TargetEntry {
+        tuple: "x86_64-plan9",
+        tier: Tier::Recognized,
+        planned: Tier::SupportedWithEvidence,
+        host: Host::No,
+        note: "9front with kencc as the reference, .6 objects, and a 32-bit long",
+    },
+    TargetEntry {
+        tuple: "aarch64-plan9",
+        tier: Tier::Recognized,
+        planned: Tier::SupportedWithEvidence,
+        host: Host::No,
+        note: "9front with kencc as the reference, .7 objects, and a signed char",
+    },
+    TargetEntry {
         tuple: "x86_64-none",
         tier: Tier::InProgress,
         planned: Tier::Supported,

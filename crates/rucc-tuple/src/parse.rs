@@ -189,6 +189,8 @@ fn parse_os(s: &str) -> Option<(Os, Option<Version>, Option<Env>)> {
         "win32" | "windows" => return Some((Os::Windows, None, None)),
         "none" | "unknown" | "freestanding" | "elf" => return Some((Os::None, None, None)),
         "wasi" => return Some((Os::Wasi, Some(Version::major(1)), None)),
+        // The 9 is part of the name and not a release, so `plan9` is not `plan` at version 9.
+        "plan9" => return Some((Os::Plan9, None, None)),
         _ => {}
     }
 
