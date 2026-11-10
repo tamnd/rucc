@@ -401,6 +401,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 ms_extensions: sess.ms_extensions(),
                 plan9_extensions: sess.plan9_extensions(),
                 kencc: opts.kencc,
+                kencc_strict_void: opts.kencc_strict_void,
                 trapping_math: opts.trapping_math,
                 isa: opts.isa,
                 x87: opts.x87,
@@ -1187,6 +1188,11 @@ fn optimize(
     // call to `puts` needs both of those to be off.
     settings.builtins = opts.builtins && opts.hosted;
     settings.no_builtin.clone_from(&opts.no_builtin);
+    // The C library of Plan 9 has less than the standard says. `putchar` is a macro alone, and
+    // there is no `floorf`.
+    if target.object_format == rucc_target::ObjectFormat::Plan9 {
+        settings.library = rucc_opt::libcall::Library::Plan9;
+    }
     settings.kasan = opts.kasan.on;
     // What a function with no `target` attribute is built for, which the inliner compares a
     // callee with one against.

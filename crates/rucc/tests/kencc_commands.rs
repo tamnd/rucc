@@ -67,12 +67,13 @@ fn kencc_takes_what_the_commands_write() {
     // B is 5, after the empty enumerator.
     let c = asm.lines().skip_while(|l| *l != "c:").nth(1).unwrap_or("");
     assert_eq!(c.trim(), ".long\t5");
-    // The `Store` in a `Node` is at 4, after the `char`, and the copy reads it from there.
+    // The `Store` in a `Node` is at 8, after the `char`, because kencc aligns a record member to
+    // the word. The copy reads it from there.
     let copy = body(&asm, "copy").join("\n");
-    assert!(copy.contains("4(%"), "{copy}");
-    // The first element of the array is the `Store` of the node, so `ival` is at 8.
+    assert!(copy.contains("8(%"), "{copy}");
+    // The first element of the array is the `Store` of the node, so `ival` is at 12.
     let first = body(&asm, "first").join("\n");
-    assert!(first.contains("8(%rax)"), "{first}");
+    assert!(first.contains("12(%rax)"), "{first}");
     assert!(!body(&asm, "threadmain").is_empty());
     let none = body(&asm, "none").join("\n");
     assert!(none.contains("movl\t$3, %eax"), "{none}");

@@ -349,6 +349,12 @@ fn reg(n: u8) -> Addr7 {
     Addr7::register(a7::D_REG, n)
 }
 
+/// The stack pointer as an operand. 7l reads register 31 as the zero register unless the type
+/// is `D_SP`.
+fn sp() -> Addr7 {
+    Addr7::register(a7::D_SP, RSP)
+}
+
 fn freg(n: u8) -> Addr7 {
     Addr7::register(a7::D_FREG, n)
 }
@@ -507,7 +513,7 @@ impl Out<'_> {
         let size = frame.size.unwrap_or(0);
         if frame.fp {
             self.emit(Self::op("MOV", 0)?, reg(FP), oreg(RSP, size));
-            self.emit3(Self::op("ADD", 0)?, con(size), RSP, reg(FP));
+            self.above_sp(size, FP)?;
         }
         let mut released = false;
         for (at, l) in body.iter().enumerate() {
@@ -674,6 +680,9 @@ impl Out<'_> {
                     Op::Sp => return Err(bad()),
                     _ => r(n)?,
                 };
+                if let (Op::X(d), "add" | "sub", Op::Sp, [Op::Imm(0)]) = (d, m, n, rest) {
+                    return self.above_sp(0, gpr(*d, line)?);
+                }
                 let from = self.second(rest, line)?;
                 let rd = if matches!(d, Op::Sp) { RSP } else { r(d)? };
                 self.emit3(sized(base, d)?, from, rn, reg(rd));
@@ -752,9 +761,7 @@ impl Out<'_> {
                 [Op::F(d, _), Op::F(s, _)] => {
                     self.emit(Self::op("FMOVD", line)?, freg(*s), freg(*d));
                 }
-                [Op::X(d), Op::Sp] => {
-                    self.emit3(Self::op("ADD", line)?, con(0), RSP, reg(gpr(*d, line)?));
-                }
+                [Op::X(d), Op::Sp] => self.above_sp(0, gpr(*d, line)?)?,
                 [Op::Sp, _] => {
                     return Err(trouble(line, "a change of sp in the body of a function"));
                 }
@@ -1053,6 +1060,18 @@ impl Out<'_> {
 
     /// The second operand of an operation: a register, a shifted or an extended register, or a
     /// constant.
+    /// `rd = sp + offset`. 7l takes the constant 0 for the zero register, so `ADD $0, RSP, Rd`
+    /// matches the register form of `ADD` and gives zero. The zero offset is a `MOV` from a
+    /// `D_SP` operand, which 7l writes as `add rd, sp, #0`.
+    fn above_sp(&mut self, offset: i64, rd: u8) -> Result<(), Trouble> {
+        if offset == 0 {
+            self.emit(Self::op("MOV", 0)?, sp(), reg(rd));
+        } else {
+            self.emit3(Self::op("ADD", 0)?, con(offset), RSP, reg(rd));
+        }
+        Ok(())
+    }
+
     fn second(&self, ops: &[Op], line: usize) -> Result<Addr7, Trouble> {
         let bad = || trouble(line, format!("the operand {ops:?} has no equivalent in 7l"));
         Ok(match ops {
@@ -1256,6 +1275,20 @@ mod tests {
         assert_eq!(ops(listing), ["ATEXT", "AMOVWU", "ABL", "ARETURN", "AEND"]);
         assert_eq!(p[1].from.sym.as_deref(), Some("sp"));
         assert_eq!(p[2].to.sym.as_deref(), Some("w2"));
+    }
+
+    #[test]
+    fn the_stack_pointer_with_no_offset_is_a_move_from_d_sp() {
+        // 7l takes `ADD $0, RSP, R2` for the register form, where register 31 is the zero
+        // register, so find1 in 7l's obj.c wrote through a null pointer.
+        let listing = "\t.text\n\t.globl f\nf:\n\tadd x2, sp, #0\n\tmov x3, sp\n\
+                       \tadd x4, sp, #8\n\tret\n";
+        let p = progs(listing);
+        assert_eq!(ops(listing), ["ATEXT", "AMOV", "AMOV", "AADD", "ARETURN", "AEND"]);
+        for (q, to) in [(&p[1], 2), (&p[2], 3)] {
+            assert_eq!((q.from.ty, q.from.reg, q.to.ty, q.to.reg), (a7::D_SP, RSP, a7::D_REG, to));
+        }
+        assert_eq!((p[3].from.offset, p[3].reg, p[3].to.reg), (8, RSP, 4));
     }
 
     #[test]

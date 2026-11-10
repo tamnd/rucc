@@ -2664,6 +2664,14 @@ pub struct Options {
     /// The kencc driver sets it for `-p`, which runs `/bin/cpp` on the file before the compiler
     /// reads it. `#` and `##` are then operators, and the rest of the language stays kencc.
     pub ansi_preprocessor: bool,
+    /// Whether a `-fkencc` unit compares `void *` with other pointers as ANSI C does, from
+    /// `-fkencc-strict-void`.
+    ///
+    /// The kencc driver sets it for `-V`. Without it, kencc takes a pointer to `void` as the same
+    /// type as any other pointer when it compares two declarations, at any depth in a function
+    /// type. APE's `sys/socket.h` declares `getpeername(int, void *, int *)`, and the definition
+    /// takes a `struct sockaddr *`.
+    pub kencc_strict_void: bool,
     /// Whether a tentative definition is offered to the linker as a common symbol, from
     /// `-fcommon` and `-fno-common`.
     ///
@@ -3241,6 +3249,7 @@ impl Options {
             plan9_extensions: false,
             kencc: false,
             ansi_preprocessor: false,
+            kencc_strict_void: false,
             common: None,
             zero_initialized_in_bss: true,
             strict_aliasing: true,

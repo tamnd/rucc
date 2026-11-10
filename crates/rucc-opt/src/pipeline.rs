@@ -934,6 +934,9 @@ pub struct Options {
     pub builtins: bool,
     /// The library names `-fno-builtin-<name>` took away one at a time.
     pub no_builtin: Vec<String>,
+    /// Which C library the program links against, which says which calls a fold of
+    /// [`crate::libcall`] may leave behind.
+    pub library: libcall::Library,
     /// Whether the unit is built with `-fsanitize=kernel-address`, under which a `memset` and a
     /// `memcpy` or `memmove` that is not one small access stay calls. See
     /// [`libcall::write_out`].
@@ -976,6 +979,7 @@ impl Default for Options {
             interposition: Pic::Executable,
             builtins: true,
             no_builtin: Vec::new(),
+            library: libcall::Library::Standard,
             kasan: false,
             isa: Isa::NONE,
             simd128: false,
@@ -1362,8 +1366,14 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             (None, None) => Fuel::unlimited(),
         };
         let started = Instant::now();
-        let mut folded =
-            libcall::fold(module, names, &opts.no_builtin, opts.interposition, &mut fuel);
+        let mut folded = libcall::fold(
+            module,
+            names,
+            &opts.no_builtin,
+            opts.interposition,
+            opts.library,
+            &mut fuel,
+        );
         let written = libcall::write_out(
             module,
             names,

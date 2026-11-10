@@ -440,13 +440,19 @@ impl Builder {
         let style = options.bit_fields.unwrap_or(target.bit_field_style);
         let unnamed_aligns = target.unnamed_bit_field_aligns_under(style);
         // One byte, not zero: a record with no members at all has an alignment of one, which is
-        // what both compilers report for the GNU empty structure.
+        // what both compilers report for the GNU empty structure. Plan 9 starts from the word,
+        // and a pack there replaces the word, which is `packflg` in `align` in `swt.c`.
+        let least = match (options.packed, options.pack) {
+            (true, _) => 1,
+            (false, Some(pack)) => target.record_align.min(pack),
+            (false, None) => target.record_align,
+        };
         Builder {
             kind,
             options,
             at: 0,
             bits: 0,
-            align: 1,
+            align: least.max(1),
             max: target.max_object_size(),
             empty: target.empty_record_size,
             unit: None,

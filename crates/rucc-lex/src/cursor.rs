@@ -64,6 +64,10 @@ pub(crate) struct Cursor<'a> {
     src: &'a [u8],
     pos: u32,
     trigraphs: bool,
+    /// Whether a carriage return with no newline after it is a line ending. kencc reads it as
+    /// an ordinary byte, and kbdfs.c has one in the character constant `'^M'` of its control
+    /// key table.
+    lone_cr_ends_line: bool,
     /// Offsets of backslashes that spliced a line but had whitespace after them. Collected
     /// rather than reported here, because the cursor has no diagnostics and because the
     /// lexer is the thing that knows a span is worth attaching to a token.
@@ -76,7 +80,13 @@ impl<'a> Cursor<'a> {
         // Phase 1. A UTF-8 byte order mark at the very start is not part of the program, and
         // a surprising number of headers shipped by vendors on Windows have one.
         let pos = if src.starts_with(&[0xEF, 0xBB, 0xBF]) { 3 } else { 0 };
-        Cursor { src, pos, trigraphs, loose_splices: Vec::new() }
+        Cursor { src, pos, trigraphs, lone_cr_ends_line: true, loose_splices: Vec::new() }
+    }
+
+    /// The same cursor, reading a carriage return with no newline after it as itself when `on`
+    /// is set, which is what kencc does. A CRLF pair is still one line ending.
+    pub(crate) fn keeping_lone_cr(self, on: bool) -> Cursor<'a> {
+        Cursor { lone_cr_ends_line: !on, ..self }
     }
 
     /// The current file offset.
@@ -128,8 +138,13 @@ impl<'a> Cursor<'a> {
                     // Phase 1. A file with CRLF endings must lex the same as one without,
                     // and a lone CR is a line ending on nothing anybody still uses but costs
                     // one comparison to accept.
-                    let next = if self.src.get(p + 1) == Some(&b'\n') { p + 2 } else { p + 1 };
-                    return Some(Step { byte: b'\n', next: next as u32, clean: false });
+                    if self.src.get(p + 1) == Some(&b'\n') {
+                        return Some(Step { byte: b'\n', next: p as u32 + 2, clean: false });
+                    }
+                    if !self.lone_cr_ends_line {
+                        return Some(Step { byte: b'\r', next: p as u32 + 1, clean });
+                    }
+                    return Some(Step { byte: b'\n', next: p as u32 + 1, clean: false });
                 }
                 b'?' if self.trigraphs => {
                     let Some(mapped) = self.trigraph_at(p) else {

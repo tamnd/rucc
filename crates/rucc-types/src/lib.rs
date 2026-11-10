@@ -98,7 +98,8 @@ pub use crate::classify::{
     pointee_as_written, real_part,
 };
 pub use crate::compat::{
-    adjust_parameter, compatible, compatible_pointees, compatible_unqualified, composite,
+    adjust_parameter, compatible, compatible_kencc, compatible_pointees, compatible_unqualified,
+    composite,
 };
 pub use crate::convert::{
     kencc_arithmetic, kencc_promote, mask_of, promote, promote_bit_field, usual_arithmetic,
@@ -1372,6 +1373,30 @@ mod tests {
         // operating system would have put both of them at four.
         assert_eq!(windows().empty_record_size, 4);
         assert_eq!(mingw.empty_record_size, 0);
+    }
+
+    #[test]
+    fn a_plan_9_record_is_a_whole_number_of_words() {
+        let mut types = Types::new();
+        let ushort = types.int(IntKind::UShort);
+        let char_ = types.int(IntKind::Char);
+        let chars = types.array(char_, ArrayLen::Fixed(7));
+        // The `Optab` of 7l, which 7c makes sixteen bytes and every table in the linker counts on.
+        let fields = [member(ushort), member(chars)];
+        for (triple, size, word) in
+            [("aarch64-plan9", 16, 8), ("x86_64-plan9", 16, 8), ("i386-plan9", 12, 4)]
+        {
+            let plan9 = target(triple);
+            let laid_out = lay_out_on(&plan9, &types, RecordKind::Struct, &fields);
+            assert_eq!(laid_out.layout, Layout::new(size, word), "{triple}");
+            let union = lay_out_on(&plan9, &types, RecordKind::Union, &fields);
+            assert_eq!(union.layout, Layout::new(8, word), "{triple}");
+            let packed = RecordOptions { pack: Some(2), ..RecordOptions::default() };
+            let laid_out = layout_record(&types, RecordKind::Struct, &fields, &packed, &plan9)
+                .expect("a record every member of which has a layout");
+            assert_eq!(laid_out.layout, Layout::new(10, 2), "{triple}");
+        }
+        assert_eq!(lay_out(&types, RecordKind::Struct, &fields).layout, Layout::new(10, 2));
     }
 
     #[test]
