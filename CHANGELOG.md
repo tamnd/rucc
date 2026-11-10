@@ -171,6 +171,12 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - `cargo doc` builds again. A public field in `rucc-codegen` linked to a private method, which `-D warnings` turns into an error, so the documentation job had failed since #4064. (#4085)
 - On x86-64, a register the shrink wrap rename moved a value into is no longer taken for a scratch register when the prologue then stays at the top of the function. `_parse_integer_limit` in lib/kstrtox.c of Linux 7.3 had its hex digit moved from `%rbx` to `%r10`, the wrap found nothing left that wanted the frame, and the copy of the digit into `%r10` was taken out, so every hex number the kernel parsed came out wrong and its scanf and cmdline KUnit suites failed. (#4087)
 - On x86-64, a lone `ret` the layout copied over every jump to it no longer stays behind when nothing falls into it. `set_worker_dying` in kernel/workqueue.c of Linux 7.3 kept one after the jump back from the block that clears `last_woken_worker`, and objtool said it was an unreachable instruction. (#4114)
+- On Plan 9 targets, `printf("\n")` is no longer folded into `putchar`, and no call is folded into a function that the module does not declare, such as `floorf`. Plan 9 libstdio has `putchar` only as a macro (#4331)
+- The kencc driver searches the current directory for an include last, as `macinc` in kencc does (#4331)
+- Under `-fkencc`, `void *` agrees with any pointer in two declarations of one name, as `rsametype` in kencc does. `-V` of the kencc driver makes the rule strict through `-fkencc-strict-void`. A block scope `extern` is forgotten at the end of its block (#4331)
+- On Plan 9 targets, the size of each `struct` and `union` is a multiple of the word, and a record member is aligned to the word, as in kencc. This is 8 bytes on amd64 and arm64 and 4 bytes on 386. A new field, `TargetInfo::record_align`, holds the rule (#4331)
+- The Plan 9 arm64 writer gives `mov xN, sp` and `add xN, sp, #0` as a `MOV` from `D_SP`, because 7l reads `ADD $0, RSP, Rd` with the zero register (#4331)
+- `return;` in a function that returns a pointer no longer stops the compiler with a panic. The value is a null pointer (#4331)
 
 ## 0.30.15
 
