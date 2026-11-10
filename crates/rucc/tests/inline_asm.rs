@@ -1246,12 +1246,47 @@ fn a_clobber_list_may_name_the_vector_registers_the_template_uses() {
 
 #[test]
 fn a_vector_register_there_is_none_of_without_avx512_is_still_refused() {
-    for name in ["xmm16", "zmm0", "xmm01"] {
+    // gcc says "the register `%zmm16` cannot be clobbered in `asm` for the current target" for
+    // the first four, and "unknown register name" for the last three.
+    for name in ["xmm16", "ymm31", "zmm16", "k1", "xmm01", "zmm32", "k8"] {
         let source = format!("void f(void) {{ asm volatile(\"nop\" : : : \"{name}\"); }}\n");
         let (ok, _, said) = run("xmm-none", &source);
         assert!(!ok, "{name} was taken");
         assert!(said.contains("no name for"), "{said}");
     }
+}
+
+#[test]
+fn a_clobber_list_may_name_a_zmm_register_of_the_sixteen_without_avx512() {
+    // `zmm0` is `xmm0` at its full width, and gcc takes it without AVX-512 as it takes `ymm0`.
+    let text = asm(
+        "zmm-low",
+        "double f(double x) { asm volatile(\"vpxorq %%zmm0, %%zmm0, %%zmm0\" : : : \"zmm0\");\n\
+         return x + 1; }\n",
+    );
+    assert!(body(&text, "f").contains("vpxorq"), "{text}");
+}
+
+#[test]
+fn a_function_built_for_avx512_may_name_every_register_avx512_has_in_a_clobber_list() {
+    // The shape of `get_zmm_regs` in NetBSD's tests/lib/libc/sys/t_ptrace_x86_wait.h, which fills
+    // all 32 vector registers and the eight opmask registers and lists them all.
+    let mut clobbers: Vec<String> = (0..32).map(|n| format!("\"%zmm{n}\"")).collect();
+    clobbers.extend((0..8).map(|n| format!("\"%k{n}\"")));
+    let source = format!(
+        "__attribute__((target(\"avx512f\"))) void f(void *out, const void *fill) {{\n\
+         asm volatile(\"vmovaps (%1), %%zmm31\\n\\tkmovq (%1), %%k7\\n\\t\
+         vmovaps %%zmm31, (%0)\\n\\tkmovq %%k7, 64(%0)\" : : \"a\" (out), \"r\" (fill) : {});\n\
+         }}\n\
+         void g(void) {{ asm volatile(\"nop\" : : : \"xmm16\", \"k1\"); }}\n",
+        clobbers.join(", ")
+    );
+    let (ok, _, said) = run("zmm-avx512", &source);
+    assert!(!ok, "g is not built for AVX-512: {said}");
+    let source =
+        source.replace("void g(void)", "__attribute__((target(\"avx512f\"))) void g(void)");
+    let (ok, _, said) = run("zmm-avx512", &source);
+    assert!(ok, "{said}");
 }
 
 #[test]

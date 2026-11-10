@@ -799,9 +799,6 @@ fn vector_letter(constraint: &str) -> bool {
     })
 }
 
-/// The x86-64 vector register one entry of a clobber list names, spelled `xmm0` or `ymm0` with or
-/// without the sigil, or nothing for any other entry. Only the sixteen there are without AVX-512,
-/// so `zmm0` and `xmm16` are still refused as names this has no register for.
 /// The registers a template kept as text spells, written `%%rax` in an extended one, each with
 /// the file it is in. Anything after the sigils that is not a general purpose or a vector register,
 /// `%%cr3` or `%%gs`, is not one the allocator hands out and is left out.
@@ -1056,15 +1053,43 @@ fn x87_named(entry: &str) -> bool {
     entry.strip_prefix("mm").is_some_and(digit)
 }
 
+/// The x86-64 vector register one entry of a clobber list names, spelled `xmm0`, `ymm0` or `zmm0`
+/// with or without the sigil, or nothing for any other entry. The three are one register at three
+/// widths, and gcc takes `zmm0` to `zmm15` in a clobber list without AVX-512, as it takes `ymm0`
+/// without AVX. Only the sixteen there are without AVX-512, so `xmm16` is not one of them, see
+/// [`avx512_named`].
 fn vector_named(entry: &str) -> Option<PhysReg> {
+    let number = vector_number(entry)?;
+    (number < 16).then(|| x86_64::xmm(number))
+}
+
+/// The number of the vector register a clobber entry names at any width, `zmm31` as 31.
+fn vector_number(entry: &str) -> Option<u8> {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix('%').unwrap_or(entry);
-    let number = entry.strip_prefix("xmm").or_else(|| entry.strip_prefix("ymm"))?;
+    let number = ["xmm", "ymm", "zmm"].iter().find_map(|wide| entry.strip_prefix(wide))?;
     if number.len() > 1 && number.starts_with('0') {
         return None;
     }
     let number: u8 = number.parse().ok()?;
-    (number < 16).then(|| x86_64::xmm(number))
+    (number < 32).then_some(number)
+}
+
+/// Whether a clobber entry names a register that only AVX-512 has: one of the vector registers
+/// 16 to 31 at any width, which only x86-64 has, or one of the opmask registers `k0` to `k7`.
+///
+/// gcc takes these in a clobber list only in a function built for AVX-512, by `-mavx512f` or by
+/// a `target("avx512f")` attribute, and refuses them in any other: "the register `%zmm16` cannot
+/// be clobbered in `asm` for the current target". This compiler puts no value in any of them, so
+/// a template that ruins them ruins nothing it has put there. The NetBSD tests of the AVX-512
+/// state, in tests/lib/libc/sys and tests/kernel/arch/x86, list all of them.
+fn avx512_named(entry: &str, sixty_four: bool) -> bool {
+    if vector_number(entry).is_some_and(|number| number >= 16) {
+        return sixty_four;
+    }
+    let entry = entry.trim().trim_matches('"');
+    let entry = entry.strip_prefix('%').unwrap_or(entry);
+    entry.strip_prefix('k').is_some_and(|rest| matches!(rest.as_bytes(), [b'0'..=b'7']))
 }
 
 /// Whether a line of a template names, by number, an operand `wanted` says yes to.
@@ -1768,6 +1793,9 @@ struct Lowering<'a> {
     /// instruction in an `asm` template asks about. A `target` attribute on the function says what
     /// it is built for in place of the command line.
     avx: bool,
+    /// Whether the function is built for a processor with AVX-512, which is what lets a clobber
+    /// list name `zmm16` or `k1`. Read the same way as [`Self::avx`].
+    avx512: bool,
     /// What the function wants its stack to look like, filled in as the walk finds out.
     stack: Stack,
     /// What a `va_start` in this function has to write, or nothing for a function that takes no
@@ -2014,6 +2042,8 @@ impl<'a> Lowering<'a> {
             debug,
             avx: rucc_target::Feature::named("avx")
                 .is_some_and(|avx| source.target.unwrap_or(isa).has(avx)),
+            avx512: rucc_target::Feature::named("avx512f")
+                .is_some_and(|avx512| source.target.unwrap_or(isa).has(avx512)),
             stack: Stack::default(),
             varargs: None,
             slots: vec![None; counts.values],
@@ -6937,7 +6967,7 @@ impl<'a> Lowering<'a> {
         // is where there is nothing for it to go on.
         let clobbers = self.names.resolve(info.clobbers).to_string();
         let clobbered =
-            if steps.is_empty() { Vec::new() } else { Self::clobbered(inst, &clobbers)? };
+            if steps.is_empty() { Vec::new() } else { self.clobbered(inst, &clobbers)? };
 
         // A template with a label in it is not one run of instructions, and what it is instead is
         // in [`Self::woven`], which is also where a template goes whose instructions read what the
@@ -7048,7 +7078,7 @@ impl<'a> Lowering<'a> {
             )
         } else {
             (
-                Self::clobbered_x86(inst, &clobbers, self.gpr, self.conv.sse_class)?,
+                self.clobbered_x86(inst, &clobbers)?,
                 spelled_registers(template, self.gpr, self.conv.sse_class),
                 // A call in an x86 template writes what the list names and nothing more, as gcc
                 // reads it. The kernel's paravirt calls name every register the called function
@@ -8426,8 +8456,11 @@ impl<'a> Lowering<'a> {
     /// Nothing is dropped. A name this has no register for is refused, because the list is the
     /// program telling the compiler which registers it may not leave anything in, and an entry
     /// nobody read is a register something may still be left in. See [`Self::assembly`] for the
-    /// two entries that are not registers and for why they are skipped rather than refused.
-    fn clobbered(inst: Inst, clobbers: &str) -> Result<Vec<PhysReg>, Unsupported> {
+    /// two entries that are not registers and for why they are skipped rather than refused. The
+    /// x87 stack and the registers only AVX-512 has are read and skipped, since this puts nothing
+    /// in them, see [`avx512_named`].
+    fn clobbered(&self, inst: Inst, clobbers: &str) -> Result<Vec<PhysReg>, Unsupported> {
+        let sixty_four = !std::ptr::eq(self.selector.shapes, &rucc_target::x86::MACHINE);
         let refused = || Unsupported::Assembly { inst, refused: Written::Clobber };
         let mut named = Vec::new();
         for entry in clobbers.split(',') {
@@ -8445,6 +8478,9 @@ impl<'a> Lowering<'a> {
             if x87_named(entry) {
                 continue;
             }
+            if self.avx512 && avx512_named(entry, sixty_four) {
+                continue;
+            }
             let (reg, _) = x86_64::gpr_named(entry).ok_or_else(refused)?;
             if !named.contains(&reg) {
                 named.push(reg);
@@ -8454,14 +8490,15 @@ impl<'a> Lowering<'a> {
     }
 
     /// [`Self::clobbered`] for a template kept as text, where a clobber may also name a vector
-    /// register, `xmm0` or its wider spelling `ymm0`, which busybox's `xorbuf16_aligned_long` does.
-    /// Each comes back with the file it is in, since `xmm0` and `rax` are both register nought.
+    /// register, `xmm0` or its wider spellings `ymm0` and `zmm0`, which busybox's
+    /// `xorbuf16_aligned_long` does. Each comes back with the file it is in, since `xmm0` and `rax`
+    /// are both register nought.
     fn clobbered_x86(
+        &self,
         inst: Inst,
         clobbers: &str,
-        gpr: RegClass,
-        sse: RegClass,
     ) -> Result<Vec<(PhysReg, RegClass)>, Unsupported> {
+        let (gpr, sse) = (self.gpr, self.conv.sse_class);
         let mut named = Vec::new();
         let mut general = Vec::new();
         for entry in clobbers.split(',') {
@@ -8474,7 +8511,7 @@ impl<'a> Lowering<'a> {
                 None => general.push(entry),
             }
         }
-        for reg in Self::clobbered(inst, &general.join(","))? {
+        for reg in self.clobbered(inst, &general.join(","))? {
             named.push((reg, gpr));
         }
         Ok(named)
@@ -13028,7 +13065,7 @@ mod tests {
     #[test]
     fn a_clobber_this_has_no_register_for_is_refused() {
         let (mut names, mut source, block, _) = blank(&[]);
-        clobbering(&mut source, block, &mut names, "pause", "", "zmm0", &[], &[]);
+        clobbering(&mut source, block, &mut names, "pause", "", "zmm16", &[], &[]);
         Builder::new(&mut source, block).ret(&[]);
 
         let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default())
