@@ -1923,19 +1923,20 @@ fn generate(
                 output(opts, target, indirect),
             )
             .map_err(refused)?;
+            let directory =
+                std::env::current_dir().ok().and_then(|dir| dir.to_str().map(str::to_owned));
+            let stopped = |trouble: rucc_asm::Trouble| {
+                vec![unsupported(&format!(
+                    "a Plan 9 object, whose listing stopped on line {}: {}",
+                    trouble.line, trouble.why
+                ))]
+            };
             let mut object = match target.tuple.arch() {
-                Arch::X86_64 => {
-                    let directory = std::env::current_dir()
-                        .ok()
-                        .and_then(|dir| dir.to_str().map(str::to_owned));
-                    rucc_asm::plan9::amd64(&listing, origin.name, directory.as_deref()).map_err(
-                        |trouble| {
-                            vec![unsupported(&format!(
-                                "a Plan 9 object, whose listing stopped on line {}: {}",
-                                trouble.line, trouble.why
-                            ))]
-                        },
-                    )?
+                Arch::X86_64 => rucc_asm::plan9::amd64(&listing, origin.name, directory.as_deref())
+                    .map_err(stopped)?,
+                Arch::Aarch64 => {
+                    rucc_asm::plan9::arm64(&listing, origin.name, directory.as_deref())
+                        .map_err(stopped)?
                 }
                 _ => {
                     return Err(vec![unsupported(&format!(
