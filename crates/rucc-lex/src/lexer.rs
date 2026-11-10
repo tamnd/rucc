@@ -129,7 +129,7 @@ impl<'a> Lexer<'a> {
     #[must_use]
     pub fn new(src: &'a [u8], file_start: BytePos, opts: Options) -> Lexer<'a> {
         Lexer {
-            cursor: Cursor::new(src, opts.trigraphs),
+            cursor: Cursor::new(src, opts.trigraphs).keeping_lone_cr(opts.kencc),
             file_start,
             at_line_start: true,
             leading_space: false,

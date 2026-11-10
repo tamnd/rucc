@@ -177,6 +177,8 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - On Plan 9 targets, the size of each `struct` and `union` is a multiple of the word, and a record member is aligned to the word, as in kencc. This is 8 bytes on amd64 and arm64 and 4 bytes on 386. A new field, `TargetInfo::record_align`, holds the rule (#4331)
 - The Plan 9 arm64 writer gives `mov xN, sp` and `add xN, sp, #0` as a `MOV` from `D_SP`, because 7l reads `ADD $0, RSP, Rd` with the zero register (#4331)
 - `return;` in a function that returns a pointer no longer stops the compiler with a panic. The value is a null pointer (#4331)
+- Under `-fkencc`, an array can have a `struct` or `union` element type that is not complete yet, as in kencc. The lex output of grap declares `extern struct symtab symtab[];` (#4331)
+- Under `-fkencc`, a carriage return with no newline after it is an ordinary byte and not a line ending, as in kencc. The control key table of aux/kbdfs has one in a character constant (#4331)
 
 ## 0.30.15
 

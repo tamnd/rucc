@@ -218,6 +218,28 @@ mod tests {
     }
 
     #[test]
+    fn kencc_keeps_a_lone_carriage_return_inside_a_character_constant() {
+        let texts = |opts: Options| {
+            let mut interner = Interner::new();
+            let (tokens, errors) = tokenize(b"'\r', 'a'\r\n'b'", 0, opts, &mut interner);
+            let texts: Vec<_> = tokens
+                .iter()
+                .filter(|t| !t.is_eof())
+                .map(|t| match t.value {
+                    Some(sym) => interner.resolve(sym).to_owned(),
+                    None => t.punct().map_or_else(String::new, |p| p.as_str().to_owned()),
+                })
+                .collect();
+            (texts, errors.len())
+        };
+        assert_eq!(
+            texts(Options::new().for_kencc(true)),
+            (vec!["'\r'".into(), ",".into(), "'a'".into(), "'b'".into()], 0)
+        );
+        assert_ne!(texts(Options::new()).1, 0);
+    }
+
+    #[test]
     fn c23_digit_separators_stay_inside_the_number() {
         assert_eq!(spellings("1'000'000"), vec!["1'000'000"]);
         // The apostrophe only separates when an identifier character follows, so this is a
