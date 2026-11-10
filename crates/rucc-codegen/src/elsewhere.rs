@@ -309,6 +309,11 @@ impl Elsewhere {
         if pic == Pic::Absolute && copies && format == ObjectFormat::Elf {
             return Self { names: indirect.collect(), ..Self::default() };
         }
+        // A Plan 9 loader links every program at one fixed address and has no slots at all, so
+        // each name is reached directly, as `6c` and `7c` do.
+        if format == ObjectFormat::Plan9 {
+            return Self::default();
+        }
         // A declared function marked hidden or protected is promised to be in this image, so the
         // distance to it is one the linker has. The kernel's compressed loader is built `-fPIE`
         // under `#pragma GCC visibility push(hidden)` and its link script asserts there is no

@@ -4054,9 +4054,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // The BSDs are the exception to the first row. gcc builds a position independent executable
     // by default only when it was configured with `--enable-default-pie`, and the FreeBSD ports
     // gcc, NetBSD's own gcc and the upstream OpenBSD and DragonFly configurations are not.
-    let bsd = opts.target.os.is_bsd();
+    // Plan 9 is the same, since its loaders link each program at a fixed address and have no
+    // global offset table.
+    let absolute = opts.target.os.is_bsd() || opts.target.os == rucc_target::Os::Plan9;
     opts.pic = match (pie, pic) {
-        (None, None) if bsd => Pic::Absolute,
+        (None, None) if absolute => Pic::Absolute,
         (Some(true), _) | (None, None) => Pic::Executable,
         (_, Some(true)) => Pic::Library,
         _ => Pic::Absolute,

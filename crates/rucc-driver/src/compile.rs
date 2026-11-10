@@ -988,8 +988,19 @@ pub(crate) fn joined(opts: &Options, units: &[rucc_lto::Unit<'_>]) -> Result<Vec
 /// which is the same for mingw-w64 and for MSVC: lld reads `/DEFAULTLIB:` in both modes and looks
 /// for `libws2_32.a` as well as `ws2_32.lib` under mingw-w64. A library with no `.lib` or `.a` on
 /// the end gets `.lib`, and one with a space in it is quoted. Only COFF has a section to put them
-/// in, so everywhere else they are dropped, which is what clang and gcc do too.
+/// in, so everywhere else they are dropped, which is what clang and gcc do too. A Plan 9 object
+/// has a record for a library, the `#pragma lib` of kencc, so there the names are kept as they
+/// are written and nothing else is.
 fn linker_options(comments: &[rucc_parse::Comment], target: &TargetInfo) -> Vec<String> {
+    if target.object_format == rucc_target::ObjectFormat::Plan9 {
+        return comments
+            .iter()
+            .filter_map(|comment| match comment {
+                rucc_parse::Comment::Lib(lib) => Some(lib.clone()),
+                rucc_parse::Comment::Linker(_) => None,
+            })
+            .collect();
+    }
     if target.tuple.os().object_format() != Some(ObjectFormat::Coff) {
         return Vec::new();
     }
@@ -1296,6 +1307,7 @@ fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
     match (target.tuple.os().object_format(), opts.pic) {
         (Some(ObjectFormat::Elf), Pic::Library) => IrPic::Library,
         (Some(ObjectFormat::Elf), Pic::Absolute) => IrPic::Absolute,
+        (Some(ObjectFormat::Plan9), _) => IrPic::Absolute,
         _ => IrPic::Executable,
     }
 }
@@ -1546,8 +1558,11 @@ fn generate(
         // Not in i386 position independent code, whose table would be found with an absolute
         // `lea` that the place the code is loaded at does not move. The EFI stub is built that way
         // and runs wherever the firmware put it, and a bit test or a search needs no address.
+        // Not in a Plan 9 object either, which has no record for the address of a label in the
+        // text. `6c` writes each `switch` as a search, and so does rucc there.
         jump_tables: opts.jump_tables
-            && !(target.tuple.arch() == Arch::X86 && replaceable(target, opts) != IrPic::Absolute),
+            && !(target.tuple.arch() == Arch::X86 && replaceable(target, opts) != IrPic::Absolute)
+            && target.object_format != rucc_target::ObjectFormat::Plan9,
         cmov: opts.cmov,
         isa: opts.isa,
         profile: match profile {
@@ -1893,6 +1908,50 @@ fn generate(
         // An executable is an object as far as this gets: one is what each file of a link
         // contributes, and the linker is what turns them into the other. An archive is the same
         // again, with the archive writer in place of the linker.
+        EmitKind::Object | EmitKind::Archive | EmitKind::Executable
+            if target.object_format == rucc_target::ObjectFormat::Plan9 =>
+        {
+            // A Plan 9 object holds instructions and not machine code, so it is made from the
+            // listing. The linker on Plan 9 selects the encodings and lays out the text.
+            let listing = rucc_asm::print(
+                &funcs,
+                &globals,
+                &aliases,
+                names,
+                target,
+                false,
+                output(opts, target, indirect),
+            )
+            .map_err(refused)?;
+            let mut object = match target.tuple.arch() {
+                Arch::X86_64 => {
+                    let directory = std::env::current_dir()
+                        .ok()
+                        .and_then(|dir| dir.to_str().map(str::to_owned));
+                    rucc_asm::plan9::amd64(&listing, origin.name, directory.as_deref()).map_err(
+                        |trouble| {
+                            vec![unsupported(&format!(
+                                "a Plan 9 object, whose listing stopped on line {}: {}",
+                                trouble.line, trouble.why
+                            ))]
+                        },
+                    )?
+                }
+                _ => {
+                    return Err(vec![unsupported(&format!(
+                        "a Plan 9 object for {}, which is not written yet",
+                        target.tuple
+                    ))]);
+                }
+            };
+            // Each `#pragma lib` names a library that the linker loads, as with kencc.
+            for lib in module.linker_options() {
+                object.history.push(rucc_object::plan9::History::library(lib, 1));
+            }
+            let bytes = rucc_object::plan9::write_plan9(&object)
+                .map_err(|why| vec![internal(&format!("a Plan 9 object: {why:?}"))])?;
+            Ok(Artifact::Object { bytes, defines: Vec::new() })
+        }
         EmitKind::Object | EmitKind::Archive | EmitKind::Executable => {
             if opts.save_temps.wanted() {
                 let listing = rucc_asm::print(

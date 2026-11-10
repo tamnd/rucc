@@ -1630,10 +1630,13 @@ pub fn compile_recording(
         None => landing.filter(|_| asked && !source.attrs.set.contains(ir::AttrSet::NOCF)),
     };
     // Only x86-64, where a frame without a frame pointer is pushes and a subtraction and the
-    // unwinder reads rows, and only when optimizing, as gcc does.
+    // unwinder reads rows, and only when optimizing, as gcc does. Not in the kencc convention,
+    // because a Plan 9 loader makes the frame itself from the size on the `TEXT` record and puts
+    // the adjustment at the entry, so the code has to keep it there.
     let wraps = flags.reloads
         && std::ptr::eq(machine.shapes, &x86_64::MACHINE)
-        && !machine.conv.unwind_codes;
+        && !machine.conv.unwind_codes
+        && !std::ptr::eq(machine.conv, &x86_64::PLAN9);
     let convention = Convention {
         protect,
         probe,
