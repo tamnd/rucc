@@ -61,3 +61,60 @@ fn an_object_for_arm64_is_refused_until_it_is_written() {
     let why = compile("aarch64-plan9", "-O2").expect_err("the arm64 object is not written yet");
     assert!(why.contains("Plan 9 object"), "{why}");
 }
+
+/// The assembly that the object is made from, for a source given here.
+fn assembly(source: &str, args: &[&str]) -> String {
+    let dir = std::env::temp_dir().join(format!(
+        "rucc-plan9-asm-{}-{}",
+        std::process::id(),
+        args.join("")
+    ));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("two.c");
+    std::fs::write(&path, source).expect("the fixture can be written");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=x86_64-plan9", "-S", "-o", "-"])
+        .args(args)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn a_name_is_reached_directly_with_no_slot_and_no_table() {
+    let source = "extern int f(void);\nextern int v;\nint (*a(void))(void) { return f; }\nint *b(void) { return &v; }\nint c(int x) { switch (x) { case 0: return 4; case 1: return 9; case 2: return 1; case 3: return 7; case 4: return 2; case 5: return 8; } return 0; }\n";
+    for level in ["-O0", "-O2"] {
+        let text = assembly(source, &[level]);
+        assert!(!text.contains("GOTPCREL"), "{level}: {text}");
+        assert!(!text.contains(".Ljt"), "{level}: {text}");
+        assert!(!text.contains("-.L"), "{level}: {text}");
+    }
+}
+
+#[test]
+fn the_frame_is_made_at_the_entry() {
+    // gcc moves the frame down to the one path that needs it. A Plan 9 loader puts it at the
+    // entry from the size on the `TEXT` record, so it stays there.
+    let source = "extern int g(int);\nint f(int *p) { if (!p) return 0; return g(*p) + 1; }\n";
+    let text = assembly(source, &["-O2"]);
+    let body: Vec<&str> = text
+        .lines()
+        .skip_while(|l| *l != "f:")
+        .filter(|l| l.starts_with('\t') && !l.starts_with("\t."))
+        .collect();
+    assert!(body.first().is_some_and(|l| l.starts_with("\tsubq\t")), "{text}");
+}
+
+#[test]
+fn position_independent_code_is_not_the_default() {
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=x86_64-plan9", "-dM", "-E", "-"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("__PIE__") && !text.contains("__PIC__"), "{text}");
+}

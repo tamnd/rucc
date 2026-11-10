@@ -910,9 +910,11 @@ impl Out<'_> {
             skip.insert(insns[0].0);
             for (k, (at, l)) in insns.iter().enumerate() {
                 if is_release(l, size) {
-                    if let Some((_, next)) = insns.get(k + 1) {
+                    if let Some((after, next)) = insns.get(k + 1) {
                         if ends(next)
-                            && !body[*at + 1..].iter().any(|l| matches!(l.item, Item::Label(_)))
+                            && !body[*at + 1..*after]
+                                .iter()
+                                .any(|l| matches!(l.item, Item::Label(_)))
                         {
                             skip.insert(*at);
                         }
@@ -939,6 +941,15 @@ impl Out<'_> {
                     self.insn(prefix, mnemonic, operands, l.number, &body[at + 1..])?;
                 }
             }
+        }
+        // A body that ends in a call that does not return, such as `exits`, ends with no jump.
+        // `6l` follows the code from one instruction to the next to lay it out, and it would go
+        // on into the next function and put the branch targets of this one after the last
+        // function, where it gives them the frame of that function. `6c` ends each function
+        // with a `RET`, and so does this.
+        let jmp = self.op("JMP", 0)?;
+        if self.progs.last().is_none_or(|p| p.op != a6::ARET && p.op != jmp) {
+            self.push(a6::ARET, Addr6::default(), Addr6::default());
         }
         Ok(())
     }
@@ -1415,6 +1426,17 @@ mod tests {
     }
 
     #[test]
+    fn a_body_that_ends_in_a_call_gets_a_return() {
+        let p = progs(
+            "f:\n\tsubq\t$8, %rsp\n\ttestl\t%eax, %eax\n\tje\t.Lf_1\n\taddq\t$8, %rsp\n\tret\n.Lf_1:\n\tcall\texits\ng:\n\tret\n",
+        );
+        assert_eq!(
+            names(&p),
+            ["ATEXT", "ATESTL", "AJEQ", "ARET", "ACALL", "ARET", "ATEXT", "ARET", "AEND"]
+        );
+    }
+
+    #[test]
     fn a_comparison_has_its_operands_in_the_other_order() {
         let p = progs("f:\n\tcmpl\t%ecx, %edx\n\tjl\t.Lf_1\n.Lf_1:\n\tcmpl\t$7, %eax\n\tret\n");
         assert_eq!(names(&p), ["ATEXT", "ACMPL", "AJLT", "ACMPL", "ARET", "AEND"]);
@@ -1457,6 +1479,18 @@ mod tests {
         );
         assert_eq!(names(&p), ["ATEXT", "ASUBQ", "ATESTL", "AJEQ", "AADDQ", "ARET", "AEND"]);
         assert_eq!(p[0].to.offset, 0);
+    }
+
+    #[test]
+    fn a_release_is_taken_out_when_a_label_comes_later_in_the_body() {
+        // The release before the first return goes, though a block follows it. Left in, the
+        // frame would be released twice, once here and once by the linker.
+        let p = progs(
+            "f:\n\tsubq\t$8, %rsp\n\ttestl\t%eax, %eax\n\tje\t.Lf_1\n\taddq\t$8, %rsp\n\t.cfi_def_cfa_offset 8\n\tret\n\
+             .Lf_1:\n\tmovl\t$1, %eax\n\taddq\t$8, %rsp\n\tret\n",
+        );
+        assert_eq!(names(&p), ["ATEXT", "ATESTL", "AJEQ", "ARET", "AMOVL", "ARET", "AEND"]);
+        assert_eq!(p[0].to.offset, 8);
     }
 
     #[test]
