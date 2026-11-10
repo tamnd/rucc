@@ -98,7 +98,8 @@ pub use crate::classify::{
     pointee_as_written, real_part,
 };
 pub use crate::compat::{
-    adjust_parameter, compatible, compatible_pointees, compatible_unqualified, composite,
+    adjust_parameter, compatible, compatible_kencc, compatible_pointees, compatible_unqualified,
+    composite,
 };
 pub use crate::convert::{
     kencc_arithmetic, kencc_promote, mask_of, promote, promote_bit_field, usual_arithmetic,

@@ -1947,6 +1947,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // kencc `-p`: the ANSI C preprocessor reads the file, and the compiler reads kencc.
             "-fno-kencc-preprocessor" => opts.ansi_preprocessor = true,
             "-fkencc-preprocessor" => opts.ansi_preprocessor = false,
+            "-fkencc-strict-void" => opts.kencc_strict_void = true,
+            "-fno-kencc-strict-void" => opts.kencc_strict_void = false,
             // Both directions of this one are recorded, and what they decide is whether lowering
             // names the type each access goes through. Turning it off is the front end leaving the
             // name off rather than a pass being told to ignore one it can see, which is one

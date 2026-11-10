@@ -38,7 +38,7 @@ use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind};
 use rucc_types::{
-    compatible, compatible_unqualified, composite, is_complete, is_function, is_void, layout,
+    compatible, compatible_kencc, composite, is_complete, is_function, is_void, layout,
 };
 
 use crate::asm::FileAsm;
@@ -1977,6 +1977,7 @@ impl Checker<'_> {
         // A declaration with linkage in a block whose block has closed is still the name's, and
         // what finds it is the table of them. One at file scope takes it over from there, which
         // is what puts the function or object among the top level declarations it was never in.
+        let hidden = binding.is_none();
         let binding = match binding {
             None if declared.linkage == Linkage::External => {
                 let found = self.out_of_sight.get(&declared.name).copied();
@@ -2013,11 +2014,14 @@ impl Checker<'_> {
         if !compatible(&self.types, node.ty, declared.ty) {
             // kencc sets the qualifiers aside when it compares two declarations, and the type
             // of the first one stays the type of the name.
-            if !(self.cx.kencc && compatible_unqualified(&self.types, node.ty, declared.ty)) {
+            let strict = self.cx.kencc_strict_void;
+            if !(self.cx.kencc && compatible_kencc(&self.types, node.ty, declared.ty, strict)) {
                 // kencc's `adecl` binds an `extern` in a block to the type it is written with
                 // and does not compare it with the declaration outside. games/nes/ppu.c has
                 // `extern int nmi;` where dat.h has `extern u8int irq, nmi;`.
-                if self.cx.kencc && !self.scopes.at_file_scope() {
+                // And the same when the `extern` in a block came first. pc.y has
+                // `extern void yyparse(void);` in main, and yaccpar defines `int yyparse(void)`.
+                if self.cx.kencc && (!self.scopes.at_file_scope() || hidden) {
                     return self.declare(declared);
                 }
                 self.conflicting_types(declared.name, declared.ty, Some(previous), declared.span);

@@ -75,11 +75,51 @@ pub fn compatible_pointees(types: &Types, left: TypeId, right: TypeId) -> bool {
 /// agree when both are prototypes with parameters that agree, or when [`compatible`] says so.
 #[must_use]
 pub fn compatible_unqualified(types: &Types, left: TypeId, right: TypeId) -> bool {
+    unqualified(types, left, right, Void::Strict)
+}
+
+/// Whether two declarations of one name agree under kencc's `sametype`, which is
+/// [`compatible_unqualified`] with kencc's rule for `void *`.
+///
+/// A pointer to `void` is the same type as any other pointer, also below more pointers and arrays.
+/// Inside a function type, in the return type and the parameters, it is the same only when
+/// `strict` is false, which is kencc without `-V`. APE's `sys/socket.h` declares
+/// `getpeername(int, void *, int *)`, and the definition takes a `struct sockaddr *`.
+#[must_use]
+pub fn compatible_kencc(types: &Types, left: TypeId, right: TypeId, strict: bool) -> bool {
+    let void = if strict { Void::Top } else { Void::Everywhere };
+    unqualified(types, left, right, void)
+}
+
+/// Where a pointer to `void` agrees with any other pointer in [`unqualified`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Void {
+    /// Nowhere, as in C.
+    Strict,
+    /// Outside a function type only. Inside one the rule is [`Void::Strict`].
+    Top,
+    /// At every depth.
+    Everywhere,
+}
+
+/// [`compatible_unqualified`], with the rule `void` for a pointer to `void`.
+fn unqualified(types: &Types, left: TypeId, right: TypeId, void: Void) -> bool {
     let (left, right) = (types.canonical(left), types.canonical(right));
     if left == right || compatible(types, left, right) {
         return true;
     }
+    let below = if void == Void::Top { Void::Strict } else { void };
+    let compatible_unqualified =
+        |types: &Types, left: TypeId, right: TypeId| unqualified(types, left, right, below);
     match (types.kind(left), types.kind(right)) {
+        (TypeKind::Pointer(a), TypeKind::Pointer(b))
+            if void != Void::Strict
+                && [a, b]
+                    .iter()
+                    .any(|&p| matches!(types.kind(types.canonical(p)), TypeKind::Void)) =>
+        {
+            true
+        }
         (TypeKind::Enum(_), TypeKind::Enum(_)) => false,
         (TypeKind::Enum(id), _) => types
             .enum_info(id)
@@ -89,9 +129,11 @@ pub fn compatible_unqualified(types: &Types, left: TypeId, right: TypeId) -> boo
             .enum_info(id)
             .underlying
             .is_some_and(|underlying| compatible_unqualified(types, left, underlying)),
-        (TypeKind::Pointer(a), TypeKind::Pointer(b)) => compatible_unqualified(types, a, b),
+        // kencc's `rsametype` stays in its loop for a pointer and an array, so the rule for
+        // `void` stays the same below them. A function type and a record call it again.
+        (TypeKind::Pointer(a), TypeKind::Pointer(b)) => unqualified(types, a, b, void),
         (TypeKind::Array { elem: a, len: x }, TypeKind::Array { elem: b, len: y }) => {
-            lengths_agree(x, y) && compatible_unqualified(types, a, b)
+            lengths_agree(x, y) && unqualified(types, a, b, void)
         }
         (TypeKind::Function(a), TypeKind::Function(b)) => {
             let (a, b) = (types.signature(a), types.signature(b));

@@ -147,6 +147,10 @@ pub struct Context<'a> {
     /// Whether the unit is in the kencc dialect, which is `-fkencc`. The tag names an anonymous
     /// member too, and a member name is found breadth first.
     pub kencc: bool,
+    /// Whether a `-fkencc` unit compares `void *` with other pointers as ANSI C does, which is
+    /// `-fkencc-strict-void` and kencc's `-V`. Without it, two declarations of one name agree
+    /// when one has a pointer to `void` where the other has any pointer.
+    pub kencc_strict_void: bool,
     /// Whether an operation may raise an exception the program then looks at, which is
     /// `-ftrapping-math` and is on by default.
     ///
@@ -206,6 +210,7 @@ impl<'a> Context<'a> {
             ms_extensions: false,
             plan9_extensions: false,
             kencc: false,
+            kencc_strict_void: false,
             trapping_math: true,
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
             x87: true,
