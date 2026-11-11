@@ -127,6 +127,12 @@ pub enum CfiOp {
     /// then the memory the old rule points at is above the stack pointer and is where a signal
     /// handler's own frame goes.
     Restore(u16),
+    /// That register's value in the caller cannot be found, which is what `.cfi_undefined` says.
+    ///
+    /// The start code of a program says it of the return address, so that an unwinder stops there:
+    /// nothing called the entry point, and the word above the stack pointer is not an address.
+    /// Only a file of assembly says this. The compiler's own functions never do.
+    Undefined(u16),
     /// Put the whole rule set on a stack, so that an epilogue can undo its own changes without
     /// the next one starting from what it left behind.
     ///

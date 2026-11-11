@@ -89,6 +89,9 @@ const ADVANCE_LOC2: u8 = 0x03;
 const ADVANCE_LOC4: u8 = 0x04;
 const OFFSET_EXTENDED: u8 = 0x05;
 const OFFSET_EXTENDED_SF: u8 = 0x11;
+const DEF_CFA_SF: u8 = 0x12;
+const DEF_CFA_OFFSET_SF: u8 = 0x13;
+const UNDEFINED: u8 = 0x07;
 const RESTORE_EXTENDED: u8 = 0x06;
 const REMEMBER_STATE: u8 = 0x0a;
 const RESTORE_STATE: u8 = 0x0b;
@@ -766,15 +769,28 @@ impl Table {
     /// One row, as the opcode DWARF spells it.
     fn row(&mut self, op: CfiOp) {
         match op {
-            CfiOp::DefCfa { reg, offset } => {
-                self.out.bytes.push(DEF_CFA);
-                uleb(&mut self.out.bytes, u64::from(reg));
-                uleb(&mut self.out.bytes, above(offset));
-            }
-            CfiOp::DefCfaOffset(offset) => {
-                self.out.bytes.push(DEF_CFA_OFFSET);
-                uleb(&mut self.out.bytes, above(offset));
-            }
+            CfiOp::DefCfa { reg, offset } => match above(offset) {
+                Some(offset) => {
+                    self.out.bytes.push(DEF_CFA);
+                    uleb(&mut self.out.bytes, u64::from(reg));
+                    uleb(&mut self.out.bytes, offset);
+                }
+                None => {
+                    self.out.bytes.push(DEF_CFA_SF);
+                    uleb(&mut self.out.bytes, u64::from(reg));
+                    sleb(&mut self.out.bytes, i64::from(offset) / self.slot);
+                }
+            },
+            CfiOp::DefCfaOffset(offset) => match above(offset) {
+                Some(offset) => {
+                    self.out.bytes.push(DEF_CFA_OFFSET);
+                    uleb(&mut self.out.bytes, offset);
+                }
+                None => {
+                    self.out.bytes.push(DEF_CFA_OFFSET_SF);
+                    sleb(&mut self.out.bytes, i64::from(offset) / self.slot);
+                }
+            },
             CfiOp::DefCfaRegister(reg) => {
                 self.out.bytes.push(DEF_CFA_REGISTER);
                 uleb(&mut self.out.bytes, u64::from(reg));
@@ -785,6 +801,10 @@ impl Table {
             }
             CfiOp::Restore(reg) => {
                 self.out.bytes.push(RESTORE_EXTENDED);
+                uleb(&mut self.out.bytes, u64::from(reg));
+            }
+            CfiOp::Undefined(reg) => {
+                self.out.bytes.push(UNDEFINED);
                 uleb(&mut self.out.bytes, u64::from(reg));
             }
             CfiOp::RememberState => self.out.bytes.push(REMEMBER_STATE),
@@ -1286,10 +1306,13 @@ fn small(reg: u16) -> u8 {
     u8::try_from(reg).expect("a register number the caller checked")
 }
 
-/// An offset from the end of the frame, written unsigned because it is always positive: the end of
-/// a frame is above the stack pointer and never below it.
-fn above(offset: i32) -> u64 {
-    u64::try_from(offset).expect("a frame that ends above the stack pointer")
+/// An offset from the end of the frame, written unsigned when it is not negative, which is every
+/// frame the compiler writes: the end of a frame is above the stack pointer. A file of assembly can
+/// say a frame ends below it, as the i386 start code of FreeBSD does after it pops the word the
+/// kernel left, and that is `None`, for the signed form gas writes. The signed form counts in
+/// slots of the header's data alignment, as gas counts it.
+fn above(offset: i32) -> Option<u64> {
+    u64::try_from(offset).ok()
 }
 
 /// One number, seven bits at a time, low bits first, with the high bit set on every byte but the
