@@ -572,3 +572,46 @@ fn the_object_lists_the_call_in_the_section_named() {
     let loc = elf.section("__mcount_loc").expect("the others' section");
     assert_eq!(elf.size(loc), 16);
 }
+
+/// Two functions with arguments, one that has a copy of the other inlined into it, and one that
+/// asked to be left out.
+const CALLED: &str = "\
+static inline long add1(long x) { return x + 1; }
+long sum(long x, long y) { return x + y; }
+long user(long x) { return add1(x) * 2; }
+__attribute__((no_instrument_function)) long quiet(long x) { return x; }
+";
+
+/// On AArch64 and RISC-V the hook is `_mcount` called from the top of the body with the address
+/// the function returns to, which is what gcc writes there and what the C library's `_mcount` is
+/// written for. NetBSD's on RISC-V reads that address in `a0`, and its profiled libraries are built
+/// for both machines, so a refusal of `-pg` there was thousands of units of a world build.
+///
+/// The address is the one the frame record saved, read once the frame is there, and the arguments
+/// are kept across the call the way they are across any other. A body inlined into another
+/// function is not a second call, which is why the call goes in after the inliner has run, and a
+/// function that said `no_instrument_function` gets none.
+#[test]
+fn the_hook_on_aarch64_and_riscv64_is_a_call_given_the_return_address() {
+    for (target, record, read, call) in [
+        ("aarch64-unknown-netbsd", "stp x29, x30, [sp, #-16]!", "ldr x0, [x29, #8]", "bl _mcount"),
+        ("riscv64-unknown-netbsd", "sd ra, 8(sp)", "ld a0, 8(s0)", "call _mcount"),
+    ] {
+        let (ok, text, err) = run(target, target, &["-O2", "-pg"], CALLED);
+        assert!(ok, "{target}: {err}");
+        for name in ["sum", "user"] {
+            let lines = insts(&text, name);
+            let calls = lines.iter().filter(|line| line.contains("_mcount")).count();
+            assert_eq!(calls, 1, "{target} {name}: {lines:?}");
+            assert!(at(&lines, record) < at(&lines, read), "{target} {name}: {lines:?}");
+            assert!(at(&lines, read) < at(&lines, call), "{target} {name}: {lines:?}");
+        }
+        // The two arguments are moved out of the registers the hook may write before it runs.
+        let lines = insts(&text, "sum");
+        let first = if target.starts_with("aarch64") { ", x0" } else { ", a0" };
+        assert!(at(&lines, first) < at(&lines, read), "{target}: {lines:?}");
+        assert!(!text.contains("bl add1") && !text.contains("call add1"), "{target}: {text}");
+        let lines = insts(&text, "quiet");
+        assert!(!lines.iter().any(|line| line.contains("_mcount")), "{target}: {lines:?}");
+    }
+}

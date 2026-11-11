@@ -937,6 +937,20 @@ pub fn compile_recording(
     // way it reaches a block the unwinder starts. Before the lowerings, so that a load or a store
     // at a width the machine does not have is rewritten with the rest. See [`pads`].
     pads::spill(source, machine.conv.word);
+    // The profiler's hook on a machine where it is an ordinary call, put in now so that the
+    // lowerings, the allocator and the frame all see it as one: the function is no longer a leaf,
+    // the arguments are kept across it like across any call, and the return address it is given
+    // is read the way `__builtin_return_address (0)` is. Here and not in the front end because
+    // the inliner runs in between, and a copy of a body inlined into another function would call
+    // the hook a second time with the other function's address. Not in a naked function or in
+    // one that said `no_instrument_function`, the same as the hook in the prologue.
+    if let Some(trace) = machine.conv.trace.filter(|trace| trace.called)
+        && flags.profile != Profile::No
+        && !source.attrs.set.contains(ir::AttrSet::NO_INSTRUMENT)
+        && !source.attrs.set.contains(ir::AttrSet::NAKED)
+    {
+        profiled(source, names, trace.late);
+    }
     // A copy or fill gcc writes as a string instruction only where it may not write vector moves, so a
     // function with the vector registers keeps the threshold measured against the C library. See
     // [`crate::rolled`].
@@ -1224,8 +1238,12 @@ pub fn compile_recording(
     // before any of this runs.
     // A function that said `no_instrument_function` gets none either, as with gcc, which is how the
     // kernel's `notrace` keeps the tracer out of itself.
+    // A hook that is an ordinary call is in the body already, see `profiled`, and is nothing to
+    // the prologue.
     let profile = match machine.conv.trace {
-        Some(_) if !source.attrs.set.contains(ir::AttrSet::NO_INSTRUMENT) => flags.profile,
+        Some(trace) if !trace.called && !source.attrs.set.contains(ir::AttrSet::NO_INSTRUMENT) => {
+            flags.profile
+        }
         _ => Profile::No,
     };
     // A tail call is a call on a machine with no instruction to jump away with, and the frame is
@@ -1971,6 +1989,32 @@ pub fn compile_recording(
 
 /// Which registers a function's returns clear: what its `zero_call_used_regs` said if it said
 /// anything, and what `-fzero-call-used-regs=` said if not.
+/// Puts the call to the profiler's hook at the top of the function, given the address the
+/// function returns to, which is what gcc writes for `-pg` on AArch64 and RISC-V. See
+/// [`rucc_target::Trace::called`].
+///
+/// In front of everything in the entry block, which is where gcc's is: its arguments are still
+/// the block's parameters there, so what the hook may write is the allocator's question and the
+/// answer is the one it gives for any call.
+fn profiled(source: &mut ir::Func, names: &mut Interner, hook: &str) {
+    let Some(entry) = source.entry() else { return };
+    let Some(first) = source.insts(entry).next() else { return };
+    let span = source.span(first);
+    let data =
+        ir::InstData { extra: ir::Extra::Depth(0), ..ir::InstData::new(ir::Opcode::ReturnAddress) };
+    let site = source.create_inst(data, &[ir::Type::PTR], span);
+    source.insert_before(site, first);
+    let address = source[site].first_result.expect("the return address is a value");
+    let signature = source.add_signature(ir::Signature::new().with_params(&[ir::Type::PTR]));
+    let callee = Some(names.intern(hook));
+    let varargs = source.push_abis(&[]);
+    let extra = ir::Extra::Call(source.add_call(ir::CallInfo { callee, signature, varargs }));
+    let args = source.push_values(&[address]);
+    let data = ir::InstData { args, extra, ..ir::InstData::new(ir::Opcode::Call) };
+    let call = source.create_inst(data, &[], span);
+    source.insert_before(call, first);
+}
+
 fn zeroing(command: Option<Zeroing>, set: ir::AttrSet) -> Option<Zeroing> {
     let arg = set.contains(ir::AttrSet::ZERO_ARG);
     let wide = set.contains(ir::AttrSet::ZERO_WIDE);

@@ -62,7 +62,7 @@ use crate::flags::{Compare, FlagInsts, Reader, Reads};
 use crate::frame::{Canary, ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, Targets};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
-use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile};
+use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile, Trace};
 use crate::short::ShortInsts;
 
 /// The general purpose registers.
@@ -838,9 +838,14 @@ static FP_ORDER: [PhysReg; 32] = [
 /// define on this machine, read through the global offset table since the C library is shared. The
 /// driver reads it directly instead in code that is not position independent, and moves it into
 /// the task for a kernel.
+///
+/// The profiler's hook is `_mcount`, called from the top of the body with the link register the
+/// function was entered with, which is what gcc writes for `-pg` here and what the C libraries of
+/// Linux and the BSDs define. See [`Trace::called`].
 pub static AAPCS64: CallRegs = CallRegs {
     chain: Some(X18),
     guard: Some(Guard::global("__stack_chk_guard", true)),
+    trace: Some(Trace { early: "_mcount", late: "_mcount", fentry: false, called: true }),
     ..aapcs64(&rucc_abi::abis::AAPCS64, 0, crate::VaList::Aapcs)
 };
 
@@ -1003,9 +1008,8 @@ const fn aapcs64(
         // it somewhere else under another name, and a command line that asks for a protector there
         // is told so rather than given one that reads the wrong word.
         guard: None,
-        // None, and a different mechanism rather than a missing number. gcc's hook on this machine is `_mcount` called with the
-        // caller's link register, and `-mfentry` does not exist here, so it waits for the frame code
-        // too rather than being described as something it is not.
+        // None here, and the Linux convention above says what the hook is. Apple and Windows
+        // profile a build some other way.
         trace: None,
         // Linux and Apple both grow a stack by faulting, as System V does on x86-64.
         chkstk: None,

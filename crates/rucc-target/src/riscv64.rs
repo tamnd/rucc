@@ -55,7 +55,7 @@ use crate::flags::FlagInsts;
 use crate::frame::{Canary, ClassMoves, FrameInsts, Pair, Probe};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
-use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile};
+use crate::regs::{CallRegs, ClassInfo, Guard, PhysReg, RegClass, RegFile, Trace};
 use crate::short::ShortInsts;
 
 /// The integer registers.
@@ -344,9 +344,10 @@ pub static LP64D: CallRegs = CallRegs {
     dwarf: &RISCV64_DWARF,
     dwarf_return_address: DWARF_RETURN_ADDRESS,
     guard: Some(Guard::global("__stack_chk_guard", true)),
-    // gcc's hook here is `_mcount` with the return address in `ra`, and a kernel's is the
-    // patchable entry instead, so it waits for the frame code rather than being described now.
-    trace: None,
+    // gcc's hook here is `_mcount`, called from the top of the body with the address in `ra` the
+    // function was entered with as its argument, which NetBSD's `_mcount` reads from `a0`. A
+    // kernel uses the patchable entry instead. See [`Trace::called`].
+    trace: Some(Trace { early: "_mcount", late: "_mcount", fentry: false, called: true }),
     // Linux grows a stack by faulting.
     chkstk: None,
     conventions: crate::Conventions::ONLY,
