@@ -3431,6 +3431,9 @@ static ENCODINGS: &[Encoding] = &[
     bytes("fldl", &M, Long, &[0xDD], ext(0, 0), NO_IMM),
     bytes("fildl", &M, Long, &[0xDB], ext(0, 0), NO_IMM),
     bytes("fildll", &M, Long, &[0xDF], ext(0, 5), NO_IMM),
+    // The same load under the name with `q` for its eight bytes. GNU as takes both names.
+    // compiler-rt writes this one in `x86_64/floatundixf.S`.
+    bytes("fildq", &M, Long, &[0xDF], ext(0, 5), NO_IMM),
     bytes("fstps", &M, Long, &[0xD9], ext(0, 3), NO_IMM),
     bytes("fstpl", &M, Long, &[0xDD], ext(0, 3), NO_IMM),
     bytes("fistpl", &M, Long, &[0xDB], ext(0, 3), NO_IMM),
@@ -3541,6 +3544,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("fldz", &NO_ARGS, Long, &[0xD9, 0xEE], NO_MODRM, NO_IMM),
     bytes("fnstsw", &R, Long, &[0xDF, 0xE0], NO_MODRM, NO_IMM),
     bytes("fnstsw", &M, Long, &[0xDD], ext(0, 7), NO_IMM),
+    // The same two stores of the status word with `fwait` in front of them. The msun of FreeBSD
+    // writes `fstsw %ax` in its x87 `fmod`, `remainder` and `remquo` for amd64 and for i386.
+    waits("fstsw", &R, Long, &[0xDF, 0xE0], NO_MODRM),
+    waits("fstsw", &M, Long, &[0xDD], ext(0, 7)),
     // The stores that keep the value on the stack, the two byte integers and the conversions that
     // cut toward zero whatever the control word says. The compiler writes none of these either.
     // musl's `src/math/x86_64` writes `fsts` and `fistl` by hand, and the rest are the other

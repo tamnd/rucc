@@ -680,7 +680,7 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
             Err(_) => return Err(why),
         },
     };
-    if mnemonic == "fnstsw"
+    if (mnemonic == "fnstsw" || mnemonic == "fstsw")
         && operands.iter().any(|op| matches!(op, Operand::Reg(reg, _) if *reg != RAX))
     {
         return Err(format!("'{word}' only writes the status word into ax"));
@@ -3292,6 +3292,28 @@ mod tests {
         // `fwait` is an instruction rather than a prefix, so a REX byte goes behind it and not in
         // front: a prefix is about whatever follows it, and what follows the wait is the store.
         assert_eq!(bytes("fstcw (%r8)"), vec![0x9b, 0x41, 0xd9, 0x38]);
+        // The status word, which the x87 `fmod`, `remainder` and `remquo` of FreeBSD's msun read
+        // with the waiting name. Like `fnstsw` it goes to `ax` or to memory and nowhere else.
+        assert_eq!(bytes("fstsw %ax"), vec![0x9b, 0xdf, 0xe0]);
+        assert_eq!(bytes("fstsw (%rax)"), vec![0x9b, 0xdd, 0x38]);
+        assert_eq!(bytes("fstsw 8(%rsp)"), vec![0x9b, 0xdd, 0x7c, 0x24, 0x08]);
+        assert!(refused("fstsw %bx").contains("ax"));
+        let bytes32 = |line: &str| {
+            let (word, rest) = line.split_once(' ').unwrap();
+            one_in(word, &crate::source::split(rest, ','), Mode::Bits32)
+                .map(|written| written.bytes)
+        };
+        assert_eq!(bytes32("fstsw %ax"), Ok(vec![0x9b, 0xdf, 0xe0]));
+        assert_eq!(bytes32("fstsw (%eax)"), Ok(vec![0x9b, 0xdd, 0x38]));
+    }
+
+    /// `fildq` is the name GNU as also takes for `fildll`, the load of an eight byte integer.
+    /// compiler-rt writes it in `x86_64/floatundixf.S`. The bytes are what GNU as writes.
+    #[test]
+    fn fildq_is_the_load_of_an_eight_byte_integer() {
+        assert_eq!(bytes("fildq (%rsp)"), vec![0xdf, 0x2c, 0x24]);
+        assert_eq!(bytes("fildq 8(%rdi)"), vec![0xdf, 0x6f, 0x08]);
+        assert_eq!(bytes("fildq (%rsp)"), bytes("fildll (%rsp)"));
     }
 
     #[test]
