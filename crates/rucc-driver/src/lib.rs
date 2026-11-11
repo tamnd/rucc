@@ -1998,7 +1998,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // includes it.
             "-fplan9-extensions" => opts.plan9_extensions = true,
             "-fno-plan9-extensions" => opts.plan9_extensions = false,
-            "-fkencc" => opts.kencc = true,
+            // kencc folds and optimizes nothing on the rule that a signed overflow or an access
+            // through a pointer of another type does not happen. The Plan 9 sources lean on both:
+            // `MAXINT+1` is `MININT` in libpcm, and `*(float*)src` reads a sample. So the dialect
+            // implies `-fno-strict-overflow` and `-fno-strict-aliasing`, and a later flag on the
+            // command line can still turn them back on.
+            "-fkencc" => {
+                opts.kencc = true;
+                opts.wrapping = Wrapping::ALL;
+                opts.strict_aliasing = false;
+            }
             "-fno-kencc" => opts.kencc = false,
             // kencc `-p`: the ANSI C preprocessor reads the file, and the compiler reads kencc.
             "-fno-kencc-preprocessor" => opts.ansi_preprocessor = true,
@@ -9334,6 +9343,18 @@ mod tests {
 
         let (opts, _) = compile(&["-c", "-fno-strict-overflow", "-fno-wrapv-pointer", "a.c"]);
         assert_eq!(opts.wrapping, Wrapping { signed: true, pointer: false, trap: false });
+    }
+
+    #[test]
+    fn kencc_assumes_no_overflow_and_no_aliasing_rule() {
+        let (opts, _) = compile(&["-c", "-fkencc", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping::ALL, "kencc wraps a signed overflow");
+        assert!(!opts.strict_aliasing, "kencc has no aliasing rule");
+
+        // A later flag still wins, as with the other groups.
+        let (opts, _) = compile(&["-c", "-fkencc", "-fno-wrapv", "-fstrict-aliasing", "a.c"]);
+        assert_eq!(opts.wrapping, Wrapping { signed: false, pointer: true, trap: false });
+        assert!(opts.strict_aliasing);
     }
 
     /// And the other answer to the signed question cannot be held at the same time as the first.
