@@ -132,6 +132,8 @@ d3442c20	ubfx x0, x1, #4, #8
 b3783c20	bfi x0, x1, #8, #16
 33001c20	bfi w0, w1, #0, #8
 b3505c20	bfxil x0, x1, #16, #8
+b377dbfa	bfc x26, #9, #55
+331d0fe0	bfc w0, #3, #4
 d37e7420	ubfiz x0, x1, #2, #30
 937d7c20	sbfiz x0, x1, #3, #32
 d3410820	ubfm x0, x1, #1, #2

@@ -1098,6 +1098,16 @@ impl At<'_> {
             "ubfm" | "sbfm" | "bfm" | "ubfx" | "sbfx" | "bfxil" | "bfi" | "ubfiz" | "sbfiz" => {
                 self.bitfield(values)?
             }
+            // A field cleared, which is `bfi` from the zero register. FreeBSD's arm64 locore.S
+            // clears the low bits of a table index this way.
+            "bfc" => match values {
+                [d, lsb @ Value::Imm(_), width @ Value::Imm(_)] => {
+                    let (wd, _) = self.zr(d)?;
+                    let at = At { mnemonic: "bfi", operands: 4 };
+                    at.bitfield(&[*d, Value::Gpr(wd, 31), *lsb, *width])?
+                }
+                _ => return Err(self.unwritten()),
+            },
             "extr" => match values {
                 [d, n, mm, Value::Imm(lsb)] => {
                     let ((wd, rd), (wn, rn), (wm, rmm)) = (self.zr(d)?, self.zr(n)?, self.zr(mm)?);
