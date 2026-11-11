@@ -1602,21 +1602,31 @@ impl Reader {
                 }
                 sum
             } else {
+                let mut constant = hole.addend;
                 let what = if hole.name == "." {
-                    What::Here { part, at: here.1 }
+                    Some(What::Here { part, at: here.1 })
+                } else if let (None, Ok(number)) =
+                    (self.numbered(&hole.name)?, crate::instruction::number(&hole.name))
+                {
+                    // A branch to a number, which is what a name `.set` to one reads as here.
+                    // FreeBSD's pmbr.S has `.set LOAD,0x7c00` and `jmp LOAD`. It is no name, and
+                    // gas writes the distance to it against no symbol, with the number added.
+                    constant = constant.wrapping_add(number);
+                    None
                 } else {
                     // Written down as a name the file mentions, which is what a call to something
                     // in another object is and the only way it gets into the symbol table at all.
                     let name = self.named(&hole.name)?;
                     self.sym(&name);
-                    What::Symbol(name)
+                    Some(What::Symbol(name))
                 };
+                let terms = what.map(|what| Term { coeff: 1, what });
                 Sum {
-                    constant: hole.addend,
-                    terms: vec![
-                        Term { coeff: 1, what },
-                        Term { coeff: -1, what: What::Here { part, at: end as i64 } },
-                    ],
+                    constant,
+                    terms: terms
+                        .into_iter()
+                        .chain([Term { coeff: -1, what: What::Here { part, at: end as i64 } }])
+                        .collect(),
                 }
             };
             self.fixups.push(Fixup {
@@ -5733,21 +5743,7 @@ impl Reader {
                                 .to_owned(),
                         ));
                     }
-                    // Four bytes or eight, and eight only from a directive, since no instruction
-                    // counts eight bytes of distance. `.quad key - .` is how the kernel's jump
-                    // label table says where each key is. Two is a jump or a call in sixteen bit
-                    // code, or a `.word`, and one is a `.byte`, which the boot header has in front
-                    // of everything else.
-                    let wide = fixup.width == 8 && fixup.reach == Reach::Near;
-                    let short = fixup.width == 2;
-                    let tiny = fixup.width == 1;
-                    if fixup.width != 4 && !wide && !short && !tiny {
-                        return Err(bad(format!(
-                            "a distance written into {} bytes, and one, two, four and eight are \
-                             the only widths a relocation says one at",
-                            fixup.width
-                        )));
-                    }
+                    let plain = pc_relative(&fixup).map_err(bad)?;
                     // A linker writes `symbol + addend - here`, and what was asked for is
                     // `symbol + constant - there`, so the addend is the constant plus however far
                     // these bytes are past the place the distance is counted from. That is zero
@@ -5772,21 +5768,33 @@ impl Reader {
                     }
                     let kind = if table {
                         self.front(fixup.width, line)?
-                    } else if wide {
-                        Reference::AwayWide
-                    } else if short {
-                        Reference::Short
-                    } else if tiny {
-                        Reference::Tiny
-                    } else if fixup.reach == Reach::Branch && !near {
+                    } else if plain == Reference::Data && fixup.reach == Reach::Branch && !near {
                         Reference::Call
                     } else {
-                        Reference::Data
+                        plain
                     };
                     // The same distance said the other way, for the format that wants it apart
                     // from the addend rather than folded into it. See `rucc_object::Reloc`.
                     let after = (offset - fixup.at as i64 - i64::from(fixup.width)).max(0);
                     (name.clone(), kind, addend, after as u8)
+                }
+                // A number less a place in this section, which is what a branch to a number is and
+                // what `.long 0x1234 - .` asks for. gas writes the distance against no symbol at
+                // all, `*ABS*`, with the number in the addend, and never asks for a stub for it.
+                // `R_X86_64_PC32 *ABS*+0x7bfc` is `call 0x7c00` on x86-64.
+                [Left { coeff: -1, at: Some((part, offset)), .. }]
+                    if !self.aarch64 && !self.riscv && !self.coff && !self.macho =>
+                {
+                    if *part != fixup.part {
+                        return Err(bad(
+                            "a distance that is subtracted from somewhere in another section"
+                                .to_owned(),
+                        ));
+                    }
+                    let kind = pc_relative(&fixup).map_err(bad)?;
+                    let addend = residue.constant + fixup.at as i64 - offset;
+                    let after = (offset - fixup.at as i64 - i64::from(fixup.width)).max(0);
+                    (String::new(), kind, addend, after as u8)
                 }
                 [Left { coeff: 1, what: What::Here { .. }, .. }] => {
                     return Err(bad(
@@ -6312,6 +6320,25 @@ struct Left {
     /// Which section it is in and how far into it, when this file is the one that knows. Nothing
     /// for a name the linker has to find, which has no place here to be at.
     at: Option<(usize, i64)>,
+}
+
+/// The relocation for a distance from the bytes of `fixup`, by how many bytes it has.
+///
+/// Four bytes or eight, and eight only from a directive, since no instruction counts eight bytes of
+/// distance. `.quad key - .` is how the kernel's jump label table says where each key is. Two is a
+/// jump or a call in sixteen bit code, or a `.word`, and one is a `.byte`, which the boot header has
+/// in front of everything else.
+fn pc_relative(fixup: &Fixup) -> Result<Reference, String> {
+    match fixup.width {
+        8 if fixup.reach == Reach::Near => Ok(Reference::AwayWide),
+        4 => Ok(Reference::Data),
+        2 => Ok(Reference::Short),
+        1 => Ok(Reference::Tiny),
+        width => Err(format!(
+            "a distance written into {width} bytes, and one, two, four and eight are the only \
+             widths a relocation says one at"
+        )),
+    }
 }
 
 /// An expression, kept as a sum so that it survives until the names in it have values.
@@ -10717,6 +10744,43 @@ nop
             Ok(_) => panic!("'{text}' was read and should not have been"),
             Err(trouble) => trouble.why,
         }
+    }
+
+    /// A branch to a number, or to a name `.set` to one, is the distance to the number against no
+    /// symbol, with the number in the addend. So is a number less `.` in a directive. FreeBSD's
+    /// pmbr.S has `.set LOAD,0x7c00` and `jmp LOAD` in sixteen bit code. The relocations and the
+    /// bytes are the ones gas 2.42 writes for the same lines.
+    #[test]
+    fn a_branch_to_a_number_is_a_distance_against_no_symbol() {
+        let read = i386(
+            "\t.code16\n\t.set LOAD,0x7c00\n\tjmp LOAD\n\tcall LOAD\n\tjmp 0x7c00\n\
+             \t.code32\n\tjmp LOAD\n\tcall 0x7c00\n\t.long 0x1234 - .\n",
+        );
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (1, "", Reference::Short, 0x7bfe),
+                (4, "", Reference::Short, 0x7bfe),
+                (7, "", Reference::Short, 0x7bfe),
+                (10, "", Reference::Data, 0x7bfc),
+                (15, "", Reference::Data, 0x7bfc),
+                (19, "", Reference::Data, 0x1234),
+            ]
+        );
+        let text = bytes(&read, ".text");
+        assert_eq!([text[0], text[3], text[6], text[9], text[14]], [0xe9, 0xe8, 0xe9, 0xe9, 0xe8]);
+        assert!(read.names.iter().all(|name| !name.name.starts_with(['3', '0'])));
+
+        // x86-64 asks for the plain distance and not the stub a call to a name gets.
+        let read = assembled("\tjmp 0x7c00\n\tcall 0x7c00\n\t.long 0x1234 - .\n");
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (1, "", Reference::Data, 0x7bfc),
+                (6, "", Reference::Data, 0x7bfc),
+                (10, "", Reference::Data, 0x1234),
+            ]
+        );
     }
 
     /// A call on i386 goes through the stub only when the file asks with `@PLT`, and is the plain
