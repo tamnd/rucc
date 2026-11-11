@@ -69,6 +69,7 @@ use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::{Binding, Scopes};
 use crate::tast::{Const, Tast, Used};
 
+mod acid;
 mod advice;
 mod aggregate_return;
 mod annotate;
@@ -151,6 +152,9 @@ pub struct Context<'a> {
     /// `-fkencc-strict-void` and kencc's `-V`. Without it, two declarations of one name agree
     /// when one has a pointer to `void` where the other has any pointer.
     pub kencc_strict_void: bool,
+    /// Whether the acid declarations of kencc's `-a` are collected, which is `--emit=acid`. They
+    /// come back in [`Checked::acid`].
+    pub acid: bool,
     /// Whether an operation may raise an exception the program then looks at, which is
     /// `-ftrapping-math` and is on by default.
     ///
@@ -211,6 +215,7 @@ impl<'a> Context<'a> {
             plan9_extensions: false,
             kencc: false,
             kencc_strict_void: false,
+            acid: false,
             trapping_math: true,
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
             x87: true,
@@ -309,6 +314,9 @@ pub struct Checked {
     pub types: Types,
     /// What went wrong, in the order it was found.
     pub diagnostics: Vec<Diagnostic>,
+    /// The acid text of `-a`, in pieces, with the place in the source that caused each piece.
+    /// Empty unless [`Context::acid`] was set.
+    pub acid: Vec<(Span, String)>,
 }
 
 impl Checked {
@@ -452,6 +460,8 @@ pub struct Checker<'a> {
     /// tamnd/rucc#3052. It is by the number of the name rather than a map, since hashing the name
     /// each time was still most of what asking cost on a duktape source file's headers.
     pub(in crate::check) gnu_names: std::cell::RefCell<attr::AttrNames>,
+    /// The acid writer, present when [`Context::acid`] is set.
+    pub(in crate::check) acid: Option<Box<acid::Acid>>,
 }
 
 impl<'a> Checker<'a> {
@@ -494,6 +504,7 @@ impl<'a> Checker<'a> {
             registers: rucc_base::hash::Set::default(),
             refused_pragmas: rucc_base::hash::Set::default(),
             gnu_names: std::cell::RefCell::default(),
+            acid: cx.acid.then(Box::default),
         };
         checker.declare_type_names();
         checker
@@ -635,7 +646,8 @@ impl<'a> Checker<'a> {
     pub fn finish(mut self) -> Checked {
         self.tast.record_strict_flex_arrays(self.cx.strict_flex_arrays);
         self.tast.record_gnuc(self.cx.gnuc);
-        Checked { tast: self.tast, types: self.types, diagnostics: self.errors.finish() }
+        let acid = self.acid.map(|acid| acid.out).unwrap_or_default();
+        Checked { tast: self.tast, types: self.types, diagnostics: self.errors.finish(), acid }
     }
 
     /// Declares an object in the current scope without a declaration to read it from.

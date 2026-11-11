@@ -230,6 +230,7 @@ impl Checker<'_> {
                 if register {
                     self.registers.insert(id);
                 }
+                self.acid_decl(id, self.ast[item.declarator].name_span);
                 declared.push(id);
             }
         }
@@ -644,10 +645,15 @@ impl Checker<'_> {
         };
         self.scopes.push();
         let params = self.prototype_params(params);
+        // kencc numbers the block of a function before the parameters, and writes the line of
+        // each parameter in the order of the list.
+        let outer = self.acid_function(Some(name));
+        self.acid_open();
         for &decl in &params {
             if let Some(name) = self.tast[decl].name {
                 self.scopes.declare(name, Binding::Decl(decl));
             }
+            self.acid_decl(decl, self.tast.decl_span(decl));
         }
         let last_param = params.last().copied();
         let params = self.tast.add_decl_refs(&params);
@@ -663,6 +669,8 @@ impl Checker<'_> {
         });
         let stmt = self.body_block(body);
         self.close_body(previous);
+        self.acid_close();
+        self.acid_function(outer);
         self.scopes.pop();
         (stmt, params)
     }

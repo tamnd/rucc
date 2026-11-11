@@ -578,9 +578,11 @@ impl Checker<'_> {
     /// A block, which is a scope.
     fn block(&mut self, body: ast::StmtList) -> crate::stmt::StmtList {
         self.scopes.push();
+        self.acid_open();
         let outer = self.open_scope();
         let list = self.statements(body);
         self.close_scope(outer);
+        self.acid_close();
         self.scopes.pop();
         list
     }
@@ -688,6 +690,7 @@ impl Checker<'_> {
         // The scope is the loop's rather than the body's, which is what makes the `i` in
         // `for (int i = 0; ...)` visible to the condition and gone after the loop.
         self.scopes.push();
+        self.acid_open();
         let outer = self.open_scope();
         let init = match init {
             ForInit::None => None,
@@ -715,6 +718,7 @@ impl Checker<'_> {
         });
         let body = self.loop_body(body);
         self.close_scope(outer);
+        self.acid_close();
         self.scopes.pop();
         Stmt::For { init, cond, step, body }
     }
