@@ -85,6 +85,9 @@ pub struct Tag {
     pub ty: TypeId,
 }
 
+/// The enumerators and the tags of one scope, in the order they were declared.
+pub(crate) type ScopeTypes = (Vec<(Symbol, Binding)>, Vec<(Symbol, Tag)>);
+
 /// The scopes of one translation unit.
 #[derive(Debug, Default)]
 pub struct Scopes {
@@ -176,6 +179,22 @@ impl Scopes {
     #[must_use]
     pub fn tag(&self, name: Symbol) -> Option<Tag> {
         self.tags.get(name)
+    }
+
+    /// The enumerators and the tags of the innermost scope, in the order they were declared.
+    ///
+    /// The objects of the scope are not in the list. A function definition declares its
+    /// parameters again in the scope of its body, and it gives the rest of its parameter list to
+    /// the body with this list.
+    #[must_use]
+    pub fn innermost_types(&self) -> ScopeTypes {
+        let ordinary = self
+            .ordinary
+            .innermost()
+            .into_iter()
+            .filter(|(_, binding)| matches!(binding, Binding::Enumerator { .. }))
+            .collect();
+        (ordinary, self.tags.innermost())
     }
 
     /// What tag a name names in the innermost scope alone.

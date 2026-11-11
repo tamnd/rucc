@@ -644,6 +644,13 @@ impl Checker<'_> {
             _ => (self.int(), false),
         };
         self.scopes.push();
+        let (enumerators, tags) = self.prototype_types(params);
+        for (name, binding) in enumerators {
+            self.scopes.declare(name, binding);
+        }
+        for (name, tag) in tags {
+            self.scopes.declare_tag(name, tag);
+        }
         let params = self.prototype_params(params);
         // kencc numbers the block of a function before the parameters, and writes the line of
         // each parameter in the order of the list.

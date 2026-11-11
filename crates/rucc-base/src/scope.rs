@@ -162,6 +162,17 @@ impl<V: Copy> ScopeMap<V> {
         let top = self.bindings.get(&name)?.last()?;
         (top.depth == depth).then_some(top.value)
     }
+
+    /// Each name bound in the innermost scope with its value, in the order of the bindings.
+    ///
+    /// A function definition needs it. The enumerators and the tags that its parameter list
+    /// declares are in scope in the body as well, and the parameter list closes before the body
+    /// opens.
+    #[must_use]
+    pub fn innermost(&self) -> Vec<(Symbol, V)> {
+        let mark = self.marks.last().copied().unwrap_or(0);
+        self.log[mark..].iter().filter_map(|&name| Some((name, self.get_here(name)?))).collect()
+    }
 }
 
 #[cfg(test)]
