@@ -1840,7 +1840,12 @@ pub fn compile_recording(
             layout::forward(&mut func, machine.branch, names);
         }
     }
-    layout::blocks(&mut func, machine.branch, &fused, names, &fusable, &loops, flags.reorder);
+    // At `-Os` the order is the shape of the graph and not the traces, as gcc's `simple` order is
+    // at `-Os`: a trace puts a block that is not expected to run at the end of the function, and
+    // the jump there and the jump back are each 5 or 6 bytes where the jump over it was 2. See
+    // `crate::layout`.
+    let traced = flags.reorder && flags.goal == Goal::Speed;
+    layout::blocks(&mut func, machine.branch, &fused, names, &fusable, &loops, traced);
     if flags.reorder {
         layout::returns(&mut func, machine.branch, machine.insts.ret, names);
     }

@@ -54,8 +54,13 @@ fn function<'a>(text: &'a str, name: &str) -> &'a str {
 fn a_long_long_comparison_is_a_borrow() {
     for level in ["-O2", "-Os"] {
         let text = listing("i686-unknown-linux-gnu", SOURCE, level);
-        for (name, jump) in [("lt", "jb"), ("sgt", "jl"), ("le", "jae"), ("over", "jae")] {
+        // At `-Os` the call is laid out after the branch, so the branch jumps over it on the
+        // opposite condition.
+        let pairs =
+            [("lt", "jb", "jae"), ("sgt", "jl", "jge"), ("le", "jae", "jb"), ("over", "jae", "jb")];
+        for (name, jump, over) in pairs {
             let body = function(&text, name);
+            let jump = if level == "-Os" { over } else { jump };
             assert!(body.contains("\tsbbl\t"), "{level} {name}:\n{body}");
             assert!(body.contains(&format!("\t{jump}\t")), "{level} {name}:\n{body}");
             assert!(!body.contains("\tset"), "{level} {name}:\n{body}");

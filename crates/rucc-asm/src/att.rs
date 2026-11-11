@@ -1233,6 +1233,21 @@ impl Writer<'_> {
                 mnemonic = "movl";
                 args[0] = format!("${}", args[0]);
             }
+            // A test of a number below 128 looks at the low byte only, and gcc writes it as a
+            // `testb` of that byte. Each flag is the same: `ZF` and `PF` are of the low byte of the
+            // result in both, `SF` is 0 in both since bit 7 and bit 31 of the number are 0, and
+            // `CF` and `OF` are 0. `testl $32, %edx` is six bytes and `testb $32, %dl` is three,
+            // and with `eax` it is five against two. Each `long long` shift by a register tests
+            // the count against 32 so.
+            let byte = (mnemonic == "testl" && self.arch == Arch::X86)
+                .then(|| low_byte_test(&args))
+                .flatten();
+            if let Some(byte) = byte {
+                mnemonic = "testb";
+                if let Some(byte) = byte {
+                    args[1] = byte.to_owned();
+                }
+            }
             if args.is_empty() {
                 let _ = writeln!(self.out, "\t{mnemonic}");
             } else {
@@ -1493,6 +1508,25 @@ impl Writer<'_> {
             Some(u32::MAX) | None => format!("{}{func_name}_?", self.directives.local()),
             Some(number) => format!("{}{func_name}_{number}", self.directives.local()),
         }
+    }
+}
+
+/// For a `testl` whose number is from 0 to 127, the operand a `testb` reads: `None` for memory,
+/// which is the same address, or the low byte of the register. Nothing for a register with no low
+/// byte on i386 or for another number.
+fn low_byte_test(args: &[String]) -> Option<Option<&'static str>> {
+    let [number, operand] = args else { return None };
+    let number: i64 = number.strip_prefix('$')?.parse().ok()?;
+    if !(0..128).contains(&number) {
+        return None;
+    }
+    match operand.as_str() {
+        "%eax" => Some(Some("%al")),
+        "%ebx" => Some(Some("%bl")),
+        "%ecx" => Some(Some("%cl")),
+        "%edx" => Some(Some("%dl")),
+        reg if reg.starts_with('%') => None,
+        _ => Some(None),
     }
 }
 
@@ -2810,5 +2844,18 @@ mod tests {
         // starts in the last four bytes of one.
         let wanted = "\n.Lf_0:\n\t.p2align\t6,,4\n.Lf_1:\n";
         assert!(text.contains(wanted), "{text}");
+    }
+
+    #[test]
+    fn a_test_of_a_number_below_128_is_a_test_of_the_low_byte() {
+        let args = |number: &str, operand: &str| [number.to_owned(), operand.to_owned()];
+        assert_eq!(low_byte_test(&args("$32", "%edx")), Some(Some("%dl")));
+        assert_eq!(low_byte_test(&args("$127", "%eax")), Some(Some("%al")));
+        assert_eq!(low_byte_test(&args("$1", "4(%esp)")), Some(None));
+        // No low byte on i386, a bit 7 that would make the sign flag differ, and a negative one.
+        assert_eq!(low_byte_test(&args("$32", "%esi")), None);
+        assert_eq!(low_byte_test(&args("$128", "%eax")), None);
+        assert_eq!(low_byte_test(&args("$-1", "%eax")), None);
+        assert_eq!(low_byte_test(&args("$sym", "%eax")), None);
     }
 }
