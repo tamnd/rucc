@@ -508,6 +508,34 @@ const SANITIZERS: [&str; 35] = [
     "memory",
 ];
 
+/// The names of gcc's `-fsanitize=undefined` family, the group with the checks in it. None of them
+/// makes gcc define a macro.
+const UNDEFINED: [&str; 23] = [
+    "undefined",
+    "shift",
+    "shift-base",
+    "shift-exponent",
+    "integer-divide-by-zero",
+    "unreachable",
+    "vla-bound",
+    "null",
+    "return",
+    "signed-integer-overflow",
+    "bounds",
+    "bounds-strict",
+    "alignment",
+    "object-size",
+    "float-divide-by-zero",
+    "float-cast-overflow",
+    "nonnull-attribute",
+    "returns-nonnull-attribute",
+    "bool",
+    "enum",
+    "vptr",
+    "pointer-overflow",
+    "builtin",
+];
+
 /// Reads one `--param` of the shadow checks into `kasan`, and says whether `spec` was one.
 fn asan_param(kasan: &mut rucc_session::Kasan, spec: &str) -> Result<bool, String> {
     let Some((name, value)) = spec.split_once('=') else { return Ok(false) };
@@ -3869,6 +3897,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         opts.kasan.abort = aborts.contains(&"kernel-address") || aborts.contains(&"all");
     } else if shadow_offset.is_some() {
         return Err(err("-fasan-shadow-offset should only be used with -fsanitize=kernel-address"));
+    }
+    // A run that writes no code puts in no checks, so under `-E` and `-fsyntax-only` the checks of
+    // `-fsanitize=undefined` that this compiler does not make yet are taken. gcc defines no macro
+    // for any of them, so the text and the diagnostics are the same as gcc's. The shadow and the
+    // thread sanitizers stay refused there, as gcc defines `__SANITIZE_ADDRESS__`,
+    // `__SANITIZE_HWADDRESS__` and `__SANITIZE_THREAD__` for them. NetBSD's t_ubsan.c is
+    // compiled with `-fsanitize=undefined`.
+    if matches!(opts.emit, EmitKind::Preprocessed | EmitKind::SyntaxOnly) {
+        sanitizers.retain(|asked| !UNDEFINED.contains(asked));
     }
     if let Some(first) = sanitizers.first() {
         return Err(err(format!(
@@ -10255,6 +10292,19 @@ mod tests {
             assert_eq!(opts.safety, rucc_session::Safety::Off, "{taken} asks for no checking");
         }
         assert!(refused(&["-fsanitize-recover=bogus", "-c", "a.c"]).contains("is not a sanitizer"));
+
+        // A run that writes no code takes the checks of `undefined`, as it puts in none. The
+        // sanitizers that make gcc define a macro stay refused there.
+        for mode in ["-E", "-fsyntax-only"] {
+            for asked in ["-fsanitize=undefined", "-fsanitize=null,pointer-overflow"] {
+                let (opts, _) = compile(&[asked, mode, "a.c"]);
+                assert_eq!(opts.safety, rucc_session::Safety::Off, "{asked} {mode}");
+            }
+            for asked in ["-fsanitize=address", "-fsanitize=thread", "-fsanitize=undefined,leak"] {
+                assert!(!refused(&[asked, mode, "a.c"]).is_empty(), "{asked} {mode}");
+            }
+        }
+        assert!(refused(&["-fsanitize=undefined", "-S", "a.c"]).contains("undefined"));
 
         // The two kinds of coverage gcc has are taken, on one flag or two, and any other is
         // refused rather than dropped, because a fuzzer with no feedback runs blind.
