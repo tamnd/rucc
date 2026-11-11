@@ -2,9 +2,11 @@
  *
  * Every value here is the compiler's answer and not the library's, so every one of them is
  * defined over the compiler's own macros and overrides whatever the system header said. The
- * system header is included first all the same, because on a hosted implementation it is
- * where `PATH_MAX`, `NAME_MAX` and the rest of the POSIX limits live, and a program that
- * includes `<limits.h>` expects those too.
+ * system header is included first all the same, because it is where `PATH_MAX`, `NAME_MAX`
+ * and the rest of the POSIX limits live, and a program that includes `<limits.h>` expects
+ * those too. GCC includes it under `-ffreestanding` as well, through its syslimits.h, and so
+ * does this. FreeBSD's rtld builds strcspn.c of libc with `-ffreestanding`, and that file uses
+ * `LONG_BIT` from the system header.
  *
  * `_GCC_LIMITS_H_` is set before the chain rather than after it. glibc's own `<limits.h>`
  * reads that name to decide whether the compiler's header has already been seen, and
@@ -18,7 +20,7 @@
 #define _GCC_LIMITS_H_
 #endif
 
-#if defined(__STDC_HOSTED__) && __STDC_HOSTED__ && __has_include_next(<limits.h>)
+#if __has_include_next(<limits.h>)
 #include_next <limits.h>
 #endif
 
