@@ -416,6 +416,10 @@ pub struct Checker<'a> {
     /// The state of the kencc format check, under `-fkencc-format` only. See
     /// `check/varargck.rs`.
     pub(in crate::check) varargck: Option<varargck::Varargck>,
+    /// The prototype of each name that a kencc definition with `()` defines. kencc's `tmerge`
+    /// gives the type of such a definition the parameters of the prototype, so the signature of
+    /// the name under `-T` is the one of the prototype.
+    pub(in crate::check) kencc_prototypes: rucc_base::hash::Map<Symbol, TypeId>,
     /// The typedef name that each anonymous member was written with, by the record that holds
     /// it and the type of the member, under `-fplan9-extensions`. gcc takes the name as a member
     /// name, so two anonymous members that reach the same typedef name are duplicates.
@@ -515,6 +519,7 @@ impl<'a> Checker<'a> {
             incomplete_lines: Vec::new(),
             incomplete_records: rucc_base::hash::Set::default(),
             varargck: None,
+            kencc_prototypes: rucc_base::hash::Map::default(),
             anonymous_spellings: rucc_base::hash::Map::default(),
             typeof_spellings: rucc_base::hash::Map::default(),
             annotations: annotate::Annotations::default(),

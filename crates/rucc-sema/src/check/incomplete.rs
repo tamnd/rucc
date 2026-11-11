@@ -107,7 +107,8 @@ impl Checker<'_> {
     /// is the one of the declaration at file scope. A name with no declaration at file scope has
     /// no type at the end of the file in kencc, because the type of a declaration in a block goes
     /// at the end of the block, and its signature is zero. `mk/run.c` has `extern int runerrs`
-    /// only in a function, and `6c -T` gives `runerrs` the signature zero.
+    /// only in a function, and `6c -T` gives `runerrs` the signature zero. A function that a
+    /// definition with `()` defines after a prototype has the signature of the prototype.
     pub(in crate::check) fn kencc_signatures(&self) -> Map<String, u32> {
         let mut out = Map::default();
         for index in 0..self.tast.counts().decls {
@@ -118,7 +119,8 @@ impl Checker<'_> {
             }
             let value = match self.scopes.lookup(name) {
                 Some(Binding::Decl(at_file_scope)) => {
-                    match self.kencc_signature(self.tast[at_file_scope].ty) {
+                    let ty = self.kencc_prototypes.get(&name).copied();
+                    match self.kencc_signature(ty.unwrap_or(self.tast[at_file_scope].ty)) {
                         0 => KENCC_SIGN_INTERN,
                         value => value,
                     }
