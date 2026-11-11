@@ -8896,21 +8896,42 @@ impl<'a> Lowering<'a> {
         let template = self.names.resolve(info.template).to_string();
         let mut text = String::with_capacity(template.len());
         let mut chars = template.chars().peekable();
+        // Inside `{att|intel}`, and past the `|` in it, which is the half nobody reads. A template
+        // that goes on to [`Self::kept`] keeps its braces for it.
+        let mut dialect = false;
+        let mut skipped = false;
         while let Some(c) = chars.next() {
-            if c != '%' {
-                text.push(c);
-                continue;
+            match c {
+                '{' if !mixed => {
+                    dialect = true;
+                    continue;
+                }
+                '|' if dialect => {
+                    skipped = true;
+                    continue;
+                }
+                '}' if dialect => {
+                    dialect = false;
+                    skipped = false;
+                    continue;
+                }
+                _ if skipped => continue,
+                '%' => {}
+                _ => {
+                    text.push(c);
+                    continue;
+                }
             }
             match chars.peek().copied() {
-                Some(c @ ('%' | '=')) if mixed => {
+                Some(c @ ('%' | '=' | '{' | '|' | '}')) if mixed => {
                     chars.next();
                     text.push('%');
                     text.push(c);
                     continue;
                 }
-                Some('%') => {
+                Some(c @ ('%' | '{' | '|' | '}')) => {
                     chars.next();
-                    text.push('%');
+                    text.push(c);
                     continue;
                 }
                 Some('=') => {
@@ -8928,6 +8949,13 @@ impl<'a> Lowering<'a> {
             let index: usize = digits.parse().map_err(|_| refused())?;
             let sign = if mixed { "%%" } else { "%" };
             match (depths.get(index).ok_or_else(refused)?, renumbered[index]) {
+                // `%y` is the register with its depth written even for the top, `%st(0)`, which
+                // gcc asks for where the assembler wants a register and not the bare `%st`.
+                // libgcc's `sfp-exceptions.c` and libgfortran's `fpu-387.h` raise an exception
+                // with `fdiv {%y0, %0|%0, %y0}` on `+t`.
+                (Some(depth), _) if modifier == Some('y') => {
+                    text.push_str(&format!("{sign}st({depth})"));
+                }
                 (Some(_), _) if modifier.is_some() => return Err(refused()),
                 (Some(0), _) => text.push_str(&format!("{sign}st")),
                 (Some(depth), _) => text.push_str(&format!("{sign}st({depth})")),

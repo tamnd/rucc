@@ -114,3 +114,27 @@ int pick(long double a, long double b, int x, int y) { return a < b ? x : y; }
         assert!(!text.contains("fnstsw"), "{level}: the status word\n{text}");
     }
 }
+
+/// `%y` on an operand on the x87 stack is the register with its depth, `%st(0)` for the top.
+/// libgcc's `sfp-exceptions.c` raises the invalid exception with `fdiv {%y0, %0|%0, %y0}` on a
+/// `float` in `+t`, and NetBSD builds it for its 32 bit compat libgcc.
+#[test]
+fn y_names_the_top_of_the_x87_stack_with_its_depth() {
+    let source = "void invalid(void) { float f = 0.0f; \
+        __asm__ __volatile__(\"fdiv\\t{%y0, %0|%0, %y0}\" : \"+t\" (f)); }\n";
+    let dir = std::env::temp_dir().join(format!("rucc-i386-x87-y-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, source).expect("the fixture can be written");
+    for level in ["-O0", "-O2"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=i686-unknown-linux-gnu", "-mfpmath=387", "-S", "-o", "-", level])
+            .arg(&path)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(text.contains("fdiv\t%st(0), %st\n"), "{level}:\n{text}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
