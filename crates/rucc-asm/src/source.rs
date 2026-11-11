@@ -851,6 +851,14 @@ impl Reader {
                 i += 1;
                 continue;
             }
+            // A quote and the character after it is that character's number, so the character is
+            // not a comment whatever it is. FreeBSD's boot0.S writes `.set ASCII_BEL,'#'`.
+            if ch == '\'' && i + 1 < bytes.len() {
+                let used = if bytes[i + 1] == b'\\' && i + 2 < bytes.len() { 3 } else { 2 };
+                out.extend(bytes[i..i + used].iter().map(|&byte| byte as char));
+                i += used;
+                continue;
+            }
             if rest.starts_with("/*") {
                 *commenting = true;
                 i += 2;
@@ -7411,6 +7419,20 @@ mod tests {
             Ok(assembled) => assembled,
             Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
         }
+    }
+
+    /// A quote and a `#` is the number of `#` and not a comment, with the closing quote or
+    /// without it. FreeBSD's boot0.S writes `.set ASCII_BEL,'#'`.
+    #[test]
+    fn a_quoted_hash_is_a_character_and_not_a_comment() {
+        let out = assembled(concat!(
+            "\t.set BEL,'#'\n",
+            "\tmovb $BEL,%al\n",
+            "\tmovb $'#,%al\n",
+            "\t.byte '#\n",
+            "\t.byte '\\'', '/ # a comment\n",
+        ));
+        assert_eq!(bytes(&out, ".text"), [0xb0, 0x23, 0xb0, 0x23, 0x23, 0x27, 0x2f]);
     }
 
     /// `.symver` as gas 2.42 writes it. `@` and `@@` are a copy at the same place that keeps the
