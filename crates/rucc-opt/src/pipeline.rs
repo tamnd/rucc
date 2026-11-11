@@ -962,6 +962,11 @@ pub struct Options {
     pub stack_reuse: bool,
     /// Which rewriter runs where the level names one. See [`Rewriter`].
     pub rewriter: Rewriter,
+    /// Whether the passes may put integer lanes in the vector registers where the target has
+    /// them, which is `vectorize`, `lanes` and `sroa`. True is the default. Plan 9 turns it off,
+    /// since kencc never does it and a Plan 9 kernel does not save the vector registers when it
+    /// enters (section 09.3 of the rucc-plan9 plan).
+    pub integer_vectors: bool,
 }
 
 impl Default for Options {
@@ -987,6 +992,7 @@ impl Default for Options {
             conserve_stack: false,
             stack_reuse: false,
             rewriter: Rewriter::Default,
+            integer_vectors: true,
         }
     }
 }
@@ -1345,9 +1351,9 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         let sse2 = rucc_target::Feature::named("sse2").is_some_and(|it| opts.isa.has(it));
         Arc::new(
             outside::Outside::of(module)
-                .with_vectors(sse2)
-                .with_simd128(opts.simd128)
-                .with_neon(opts.neon)
+                .with_vectors(sse2 && opts.integer_vectors)
+                .with_simd128(opts.simd128 && opts.integer_vectors)
+                .with_neon(opts.neon && opts.integer_vectors)
                 .knowing_twice(module, names),
         )
     } else {
