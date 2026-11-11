@@ -34,6 +34,7 @@ pub mod compile;
 pub mod deps;
 pub mod dlltool;
 pub mod fetch;
+mod foreign;
 mod gcov;
 mod glibc;
 pub mod host;
@@ -1068,6 +1069,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // gcc says to it. Weighed after the loop, because `-fgnuc-version=` may come after them.
     // `spec/04-driver-and-cli.md` section 4.12.
     let mut newer: Vec<(u32, String)> = Vec::new();
+    // The C++ and Objective-C options the line has, which gcc warns about on each C unit, and the
+    // ones it no longer supports, which it warns about once. Weighed after the plan, because the
+    // warning is cc1's and the plan says which units cc1 reads. tamnd/rucc#4390.
+    let mut foreign_hits: Vec<foreign::Hit> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
     // What `--fetch` named, and whether `--offline` forbade it. Both are weighed after the loop
     // because either can be written after the other.
     let mut fetch: Option<String> = None;
@@ -1776,6 +1782,20 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ if arg.starts_with("-std=") => {
                 let name = &arg["-std=".len()..];
+                // A C++ dialect leaves the C one as it was, which is gcc's answer on a C unit.
+                if Std::from_flag(name).is_none() {
+                    if let Some(option) = foreign::lookup(arg) {
+                        foreign_option(
+                            arg,
+                            &option,
+                            &opts,
+                            &mut foreign_hits,
+                            &mut removed,
+                            &mut newer,
+                        );
+                        continue;
+                    }
+                }
                 let (std, gnu) = Std::from_flag(name)
                     .ok_or_else(|| err(format!("unknown dialect `{name}`, see --help")))?;
                 opts.std = std;
@@ -3541,6 +3561,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         newer.push((warnings::since(name), format!("unknown option `{arg}`")));
                     }
                 }
+                // A C++ or Objective-C warning, which gcc takes on a C unit with a warning.
+                if let Some(named) = name.strip_prefix("error=") {
+                    let foreign = foreign::lookup(&format!("-W{named}"));
+                    if foreign.is_some_and(|option| option.kind == foreign::Kind::Warn) {
+                        foreign_hits.push(foreign::Hit::werror(arg, opts.warnings_are_errors));
+                    }
+                } else if named.is_none() {
+                    if let Some(option) = foreign::lookup(arg) {
+                        foreign_option(
+                            arg,
+                            &option,
+                            &opts,
+                            &mut foreign_hits,
+                            &mut removed,
+                            &mut newer,
+                        );
+                    }
+                }
             }
             // What gcc's own build of libgcc passes, which defines the `__LIBGCC_*__` macros the
             // library reads. gcc takes the negative form too.
@@ -3562,6 +3600,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             | "-mthreads"
             | "-fpch-deps"
             | "-fno-pch-deps" => {}
+            // An option gcc takes for C++ or Objective-C and not for C, which a build that passes
+            // one set of flags to every unit gives a C unit too.
+            _ if foreign::lookup(arg).is_some() => {
+                let option = foreign::lookup(arg).unwrap_or_else(|| unreachable!());
+                foreign_option(arg, &option, &opts, &mut foreign_hits, &mut removed, &mut newer);
+            }
             _ if arg.starts_with('-') && arg.len() > 1 => {
                 // Silently ignoring an unknown flag is how a build ends up not doing what
                 // its author asked. spec/13-gnu-compat.md section 13.4 makes this an error
@@ -4491,6 +4535,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         )));
     }
     let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
+    // gcc's driver says it once, and cc1 says it on every C unit it reads, but not on preprocessed
+    // assembly, where it takes every C family option. `-w` stops both.
+    if opts.warnings {
+        notes.extend(removed.iter().map(|arg| format!("switch '{arg}' is no longer supported")));
+        for job in &plan.jobs {
+            if !matches!(job.kind, InputKind::C | InputKind::CHeader | InputKind::PreprocessedC) {
+                continue;
+            }
+            let compiles = job.phases.contains(&Phase::Compile);
+            for (message, error) in foreign::said(&foreign_hits, compiles, opts.warnings_are_errors)
+            {
+                if error {
+                    return Err(err(format!("{message} [-Werror]")));
+                }
+                notes.push(message.to_owned());
+            }
+        }
+    }
     if opts.rv32
         && (plan.link.is_some() || plan.jobs.iter().any(|job| job.phases.contains(&Phase::Compile)))
     {
@@ -4520,6 +4582,36 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         verbose,
         notes,
     })
+}
+
+/// Keeps what gcc does with `option`, a C++ or Objective-C option written as `arg`, for after the
+/// plan. A `-W` one is weighed by whether `-Werror` came before it, so that is kept with it.
+fn foreign_option(
+    arg: &str,
+    option: &foreign::Foreign,
+    opts: &Options,
+    hits: &mut Vec<foreign::Hit>,
+    removed: &mut Vec<String>,
+    newer: &mut Vec<(u32, String)>,
+) {
+    use foreign::{Group, Kind};
+    if option.since > 0 {
+        newer.push((option.since, format!("unknown option `{arg}`")));
+    }
+    let group = if arg.starts_with("-nostdinc") {
+        Group::Nostdinc
+    } else if arg.starts_with("-W") {
+        Group::Warning
+    } else if arg.starts_with("-std=") {
+        Group::Std
+    } else {
+        Group::Flag
+    };
+    match option.kind {
+        Kind::Warn => hits.push(foreign::Hit::new(group, option, opts.warnings_are_errors)),
+        Kind::Removed => removed.push(arg.to_owned()),
+        Kind::Ignore => {}
+    }
 }
 
 /// `-fhardened`, as GCC 14 and later do it.
@@ -9834,6 +9926,62 @@ mod tests {
         {
             compile(&[flag, "-c", "a.c"]);
         }
+    }
+
+    /// tamnd/rucc#4390 and #4260. NetBSD passes `-fno-rtti` and `-std=gnu++14` to the assembly units
+    /// of its libraries, and FreeBSD passes `-nostdinc++` to C units, and gcc takes all three, with
+    /// the warnings below on a C unit and none on preprocessed assembly. Measured with gcc 13 and 15.
+    #[test]
+    fn a_cxx_option_on_a_c_unit_is_taken_with_gcc_s_warning() {
+        let rtti = "command-line option '-fno-rtti' is valid for C++/ObjC++ but not for C";
+        assert_eq!(notes(&["-fno-rtti", "-c", "a.S"]), Vec::<String>::new());
+        assert_eq!(notes(&["-fno-rtti", "-std=gnu++14", "-c", "a.S"]), Vec::<String>::new());
+        assert_eq!(notes(&["-fno-rtti", "-c", "a.c"]), [rtti]);
+        // Once for each unit cc1 reads, and once for an option written twice.
+        assert_eq!(notes(&["-fno-rtti", "-fno-rtti", "-c", "a.c", "b.c", "c.S"]), [rtti, rtti]);
+        assert_eq!(notes(&["-w", "-fno-rtti", "-c", "a.c"]), Vec::<String>::new());
+        assert_eq!(refused(&["-fno-rtti", "-Werror", "-c", "a.c"]), format!("{rtti} [-Werror]"));
+        assert_eq!(notes(&["-fno-rtti", "-Werror", "-Wno-error", "-c", "a.c"]), [rtti]);
+        // The order of cc1's line: `-nostdinc++`, the `-W` options, `-std=` and then `-f`.
+        let said = notes(&["-fno-rtti", "-std=c++1y", "-Wabi-tag", "-nostdinc++", "-c", "a.c"]);
+        assert_eq!(
+            said,
+            [
+                "command-line option '-nostdinc++' is valid for C++/ObjC++ but not for C",
+                "command-line option '-Wabi-tag' is valid for C++/ObjC++ but not for C",
+                "command-line option '-std=c++14' is valid for C++/ObjC++ but not for C",
+                rtti,
+            ]
+        );
+        // `-Werror` is in force for what cc1 reads after it, so `-nostdinc++` is never an error,
+        // a `-W` option is when `-Werror` was written before it, and `-std=` is when the run
+        // compiles, as cc1 reads it after the `-W` options then.
+        assert_eq!(notes(&["-Werror", "-nostdinc++", "-c", "a.c"]).len(), 1);
+        assert_eq!(notes(&["-Wabi-tag", "-Werror", "-c", "a.c"]).len(), 1);
+        assert!(refused(&["-Werror", "-Wabi-tag", "-c", "a.c"]).ends_with("[-Werror]"));
+        assert!(refused(&["-Werror", "-std=gnu++14", "-c", "a.c"]).ends_with("[-Werror]"));
+        assert_eq!(notes(&["-Werror", "-std=gnu++14", "-E", "a.c"]).len(), 1);
+        assert_eq!(
+            notes(&["-Werror=abi-tag", "-c", "a.c"]),
+            ["'-Werror=' argument '-Werror=abi-tag' is not valid for C"]
+        );
+        assert_eq!(notes(&["-Wno-error=abi-tag", "-c", "a.c"]), Vec::<String>::new());
+        // A C++ dialect leaves the C one alone.
+        let (opts, _) = compile(&["-std=gnu11", "-std=gnu++14", "-c", "a.c"]);
+        let (c11, _) = compile(&["-std=gnu11", "-c", "a.c"]);
+        assert_eq!((opts.std, opts.gnu_extensions), (c11.std, c11.gnu_extensions));
+        // An option gcc no longer has is said once by the driver, whatever the units are, and one
+        // gcc ignores is not said at all.
+        assert_eq!(
+            notes(&["-fall-virtual", "-c", "a.S"]),
+            ["switch '-fall-virtual' is no longer supported"]
+        );
+        assert_eq!(notes(&["-fconserve-space", "-c", "a.c"]), Vec::<String>::new());
+        // An option gcc 14 does not have yet is unknown to a claim of gcc 14.
+        assert!(
+            refused(&["-fgnuc-version=14.2", "-fmodules", "-c", "a.c"]).contains("unknown option")
+        );
+        assert_eq!(notes(&["-fgnuc-version=15.1", "-fmodules", "-c", "a.S"]), Vec::<String>::new());
     }
 
     #[test]
