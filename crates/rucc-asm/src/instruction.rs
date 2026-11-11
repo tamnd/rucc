@@ -2616,6 +2616,39 @@ mod tests {
         assert_eq!(bytes("movq %mm0, (%r9)"), [0x41, 0x0f, 0x7f, 0x01]);
     }
 
+    /// The SSE forms that the FreeBSD world writes by hand: `pmovmskb` from a vector register in
+    /// the string functions of libc, `movq` between two vector registers in ecp_nistz256-x86.S and
+    /// `pinsrw` into an MMX register in ghash-x86.S. The bytes are what GNU as writes for each line.
+    #[test]
+    fn the_sse_forms_of_the_freebsd_world_are_what_gas_writes() {
+        let long: &[(&str, &[u8])] = &[
+            ("pmovmskb %xmm1,%eax", &[0x66, 0x0f, 0xd7, 0xc1]),
+            ("pmovmskb %xmm9,%r10d", &[0x66, 0x45, 0x0f, 0xd7, 0xd1]),
+            ("pmovmskb %xmm15,%eax", &[0x66, 0x41, 0x0f, 0xd7, 0xc7]),
+            ("movq %xmm0,%xmm4", &[0xf3, 0x0f, 0x7e, 0xe0]),
+            ("movq %xmm9,%xmm1", &[0xf3, 0x41, 0x0f, 0x7e, 0xc9]),
+            ("movq %xmm1,%xmm12", &[0xf3, 0x44, 0x0f, 0x7e, 0xe1]),
+        ];
+        for (line, want) in long {
+            assert_eq!(bytes(line), *want, "{line}");
+        }
+        let bytes32 = |line: &str| {
+            let (word, rest) = line.split_once(' ').unwrap();
+            one_in(word, &crate::source::split(rest, ','), Mode::Bits32)
+                .map(|written| written.bytes)
+        };
+        let short: &[(&str, &[u8])] = &[
+            ("pmovmskb %xmm1,%eax", &[0x66, 0x0f, 0xd7, 0xc1]),
+            ("movq %xmm3,%xmm5", &[0xf3, 0x0f, 0x7e, 0xeb]),
+            ("pinsrw $2,(%esi,%ebx,2),%mm2", &[0x0f, 0xc4, 0x14, 0x5e, 0x02]),
+            ("pinsrw $3,(%esi,%ecx,2),%mm2", &[0x0f, 0xc4, 0x14, 0x4e, 0x03]),
+            ("pinsrw $1,%eax,%mm3", &[0x0f, 0xc4, 0xd8, 0x01]),
+        ];
+        for &(line, want) in short {
+            assert_eq!(bytes32(line).as_deref(), Ok(want), "{line}");
+        }
+    }
+
     #[test]
     fn an_exchange_with_the_accumulator_is_the_one_byte_form_gas_picks() {
         let bytes32 = |line: &str| {
