@@ -13714,6 +13714,29 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("call"), "{text}");
     }
 
+    /// `++` and `--` on a complex object step the real half by one and leave the imaginary half.
+    ///
+    /// They are `z += 1` and `z -= 1`, as gcc does them. tamnd/rucc#4264: FreeBSD's msun test
+    /// ctrig_test.c writes `z++` on a `long double complex`, and rucc refused it.
+    #[test]
+    fn a_complex_object_steps_its_real_half_with_increment_and_decrement() {
+        let steps = [("z++", "fadd"), ("++z", "fadd"), ("z--", "fsub"), ("--z", "fsub")];
+        for (op, arithmetic) in steps {
+            let source = format!("_Complex double f(_Complex double z) {{ return {op}; }}\n");
+            let text = body(&source);
+            assert_eq!(text.matches(arithmetic).count(), 1, "{op}: {text}");
+            assert!(!text.contains("call"), "{op}: {text}");
+        }
+
+        // The statement form, the long double one from the test and an integer one.
+        let text = body("void f(long double _Complex *p) { (*p)++; --*p; }\n");
+        assert_eq!(text.matches("fadd").count(), 1, "{text}");
+        assert_eq!(text.matches("fsub").count(), 1, "{text}");
+        let text = body("_Complex int f(_Complex int z) { z++; return z--; }\n");
+        assert_eq!(text.matches(" add").count(), 1, "{text}");
+        assert_eq!(text.matches(" sub").count(), 1, "{text}");
+    }
+
     /// `__builtin_complex` is the two halves written where they go, with no arithmetic between.
     ///
     /// It is what glibc's `complex.h` defines `CMPLX` as, and the reason C11 added the macro is

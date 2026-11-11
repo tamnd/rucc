@@ -6419,6 +6419,38 @@ impl<'u> Body<'_, 'u> {
                 self.complex_compound(target, op, computation, rhs, ty, span);
                 self.copy_bytes(at, target, ty, span);
             }
+            // `z++`, `++z`, `z--` and `--z`, which are `z += 1` and `z -= 1`: the real half steps
+            // by one and the imaginary half stays as it is, as gcc does it. FreeBSD's msun test
+            // ctrig_test.c writes `z++` on a `long double complex`. The value is a copy of the
+            // object, from before the step for a postfix one and from after it for a prefix one.
+            ExprKind::Unary {
+                op: op @ (UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec),
+                operand,
+            } => {
+                let into = self.place(operand);
+                let target = self.address_of(into, span);
+                let post = op.is_postfix();
+                if post {
+                    self.copy_bytes(at, target, ty, span);
+                }
+                let up = matches!(op, UnaryOp::PreInc | UnaryOp::PostInc);
+                let old = self.half(target, false, part, span);
+                let out = self.func[old].ty;
+                let one = if out.lane().is_float() {
+                    let format = repr::float_format_of(self.types(), self.target(), part);
+                    let bits = format.map_or(0, |format| Real::from_signed(1, format).0.to_bits());
+                    self.build(span).fconst(out, bits)
+                } else {
+                    self.build(span).iconst(out, 1)
+                };
+                let step = if up { BinaryOp::Add } else { BinaryOp::Sub };
+                let value = self.arithmetic(step, old, one, part, span);
+                let real = self.half_place(target, false, part, span);
+                self.write(real, value, span);
+                if !post {
+                    self.copy_bytes(at, target, ty, span);
+                }
+            }
             _ => self.unsupported("this complex expression", span),
         }
     }
