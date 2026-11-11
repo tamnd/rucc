@@ -87,6 +87,9 @@ pub struct Parsed {
     /// The unit's kencc `#pragma incomplete` lines, in the order they were written, which the
     /// checker applies at the place of each line.
     pub incomplete_pragmas: Vec<crate::IncompletePragma>,
+    /// The unit's kencc `#pragma varargck` lines, in the order they were written, which the
+    /// checker reads at the place of each line under `-F`.
+    pub varargck_pragmas: Vec<crate::VarargckLine>,
 }
 
 impl Parsed {
@@ -123,6 +126,12 @@ pub struct Parser<'a> {
     pub(crate) extname_pragmas: Vec<crate::ExtnamePragma>,
     /// The kencc `#pragma incomplete` lines read so far, which is in `kencc_pragma.rs`.
     pub(crate) incomplete_pragmas: Vec<crate::IncompletePragma>,
+    /// The kencc `#pragma varargck` lines read so far.
+    pub(crate) varargck_pragmas: Vec<crate::VarargckLine>,
+    /// The token that the pragma line being read stands ahead of.
+    pub(crate) pragma_token: usize,
+    /// For each external declaration, the token after its end.
+    pub(crate) decl_ends: Vec<usize>,
     /// How many `__extension__` keywords are in effect where the cursor is.
     ///
     /// gcc reads the keyword as a promise that what follows uses an extension on purpose, and
@@ -159,6 +168,9 @@ impl<'a> Parser<'a> {
             weak_pragmas: Vec::new(),
             extname_pragmas: Vec::new(),
             incomplete_pragmas: Vec::new(),
+            varargck_pragmas: Vec::new(),
+            pragma_token: 0,
+            decl_ends: Vec::new(),
             extension: 0,
             ints: vec![None; tokens.ints.len()],
         }
@@ -166,7 +178,20 @@ impl<'a> Parser<'a> {
 
     /// The tree and the diagnostics, once the parse is over.
     #[must_use]
-    pub fn finish(self) -> Parsed {
+    pub fn finish(mut self) -> Parsed {
+        // A kencc line holds its token until here, because a line can be read before the
+        // declaration in front of it is in the list.
+        let ends = std::mem::take(&mut self.decl_ends);
+        let count = |token: u32| {
+            let before = ends.partition_point(|&end| end <= token as usize);
+            u32::try_from(before).unwrap_or(u32::MAX)
+        };
+        for line in &mut self.incomplete_pragmas {
+            line.decls = count(line.decls);
+        }
+        for line in &mut self.varargck_pragmas {
+            line.decls = count(line.decls);
+        }
         Parsed {
             ast: self.ast,
             diagnostics: self.errors.finish(),
@@ -175,6 +200,7 @@ impl<'a> Parser<'a> {
             weak_pragmas: self.weak_pragmas,
             extname_pragmas: self.extname_pragmas,
             incomplete_pragmas: self.incomplete_pragmas,
+            varargck_pragmas: self.varargck_pragmas,
         }
     }
 

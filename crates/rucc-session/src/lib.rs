@@ -2689,6 +2689,9 @@ pub struct Options {
     /// `-fkencc-signatures`. The kencc driver sets it for `-T`, and the linker then compares the
     /// signatures of one name across the objects.
     pub kencc_signatures: bool,
+    /// Whether a `-fkencc` unit checks the format of each call that `#pragma varargck` names,
+    /// which is `-fkencc-format`. The kencc driver sets it for `-F`.
+    pub kencc_format: bool,
     /// The 9P server that the sysroot is on, as a dial string, from `--sysroot=9p:<address>`.
     ///
     /// The sysroot is then the text `9p:<address>`, and the driver reads each path under it from
@@ -3273,6 +3276,7 @@ impl Options {
             ansi_preprocessor: false,
             kencc_strict_void: false,
             kencc_signatures: false,
+            kencc_format: false,
             nine_p: None,
             common: None,
             zero_initialized_in_bss: true,

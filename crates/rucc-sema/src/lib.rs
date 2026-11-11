@@ -105,8 +105,8 @@ pub use crate::asm::{
     in_a_register,
 };
 pub use crate::check::{
-    Checked, Checker, Context, IncompleteLine, library_name, open_to_pointer, unbounded_member,
-    unchecked_name, unimplemented_builtin,
+    Checked, Checker, Context, IncompleteLine, VarargckLine, VarargckPragma, VarargckType,
+    library_name, open_to_pointer, unbounded_member, unchecked_name, unimplemented_builtin,
 };
 pub use crate::convert::Conv;
 pub use crate::decl::{
