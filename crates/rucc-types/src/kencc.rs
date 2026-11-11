@@ -458,9 +458,7 @@ impl Tree<'_> {
             }
             let et = self.et(t);
             out.push_str(et.name());
-            if et == Et::Func
-                && let Some(first) = self.params(t)
-            {
+            if let (Et::Func, Some(first)) = (et, self.params(t)) {
                 out.push('(');
                 self.text(first, tag, out);
                 let mut param = self.down(first);

@@ -250,9 +250,8 @@ impl Checker<'_> {
                 }
             }
             VarargckPragma::Flag(rune) => {
-                if let Some(state) = self.varargck.as_mut()
-                    && let Some(bits) = state.flagbits.get_mut(rune as usize)
-                {
+                let state = self.varargck.as_mut();
+                if let Some(bits) = state.and_then(|state| state.flagbits.get_mut(rune as usize)) {
                     *bits = FIGNOR;
                 }
             }
