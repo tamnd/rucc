@@ -1237,8 +1237,12 @@ fn optimize(
     settings.no_builtin.clone_from(&opts.no_builtin);
     // The C library of Plan 9 has less than the standard says. `putchar` is a macro alone, and
     // there is no `floorf`.
+    // It has no integer code in the vector registers either. kencc never puts it there, and the
+    // kernels save those registers for user processes only, so a kernel or a library that it
+    // links must not use them for integer work.
     if target.object_format == rucc_target::ObjectFormat::Plan9 {
         settings.library = rucc_opt::libcall::Library::Plan9;
+        settings.integer_vectors = false;
     }
     settings.kasan = opts.kasan.on;
     // What a function with no `target` attribute is built for, which the inliner compares a
