@@ -137,6 +137,9 @@ pub struct RecordOptions {
     /// built by a compiler that does not use Microsoft's rule writes `gcc_struct` on it, and a
     /// program on x86-64 Linux that reads a structure a Windows program wrote writes `ms_struct`.
     pub bit_fields: Option<BitFieldStyle>,
+    /// Lay the record out as `6c` and `7c` do on a target that is not Plan 9, which is
+    /// `-fkencc-layout`. A Plan 9 target always does, with its own word.
+    pub kencc: bool,
 }
 
 /// How many bytes something is, where the answer is not a number here.
@@ -447,10 +450,14 @@ impl Builder {
         // One byte, not zero: a record with no members at all has an alignment of one, which is
         // what both compilers report for the GNU empty structure. Plan 9 starts from the word,
         // and a pack there replaces the word, which is `packflg` in `align` in `swt.c`.
+        // The word of kencc is `SZ_VLONG`, which is 8 on `6c` and `7c`. A Plan 9 target gives
+        // its own, and another target under `-fkencc-layout` takes the one of `6c`.
+        let plan9 = target.tuple.os() == Os::Plan9;
+        let word = if options.kencc && !plan9 { 8 } else { target.record_align };
         let least = match (options.packed, options.pack) {
             (true, _) => 1,
-            (false, Some(pack)) => target.record_align.min(pack),
-            (false, None) => target.record_align,
+            (false, Some(pack)) => word.min(pack),
+            (false, None) => word,
         };
         Builder {
             kind,
@@ -468,7 +475,7 @@ impl Builder {
             widest: Vec::new(),
             style,
             unnamed_aligns,
-            kencc: (target.tuple.os() == Os::Plan9).then(|| kencc::Bits::new(target.record_align)),
+            kencc: (plan9 || options.kencc).then(|| kencc::Bits::new(word)),
         }
     }
 

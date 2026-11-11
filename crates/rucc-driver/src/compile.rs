@@ -423,6 +423,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 kencc: opts.kencc,
                 kencc_strict_void: opts.kencc_strict_void,
                 kencc_format: opts.kencc_format,
+                kencc_layout: opts.kencc_layout,
                 acid: matches!(opts.emit, EmitKind::Acid | EmitKind::AcidMain),
                 trapping_math: opts.trapping_math,
                 isa: opts.isa,

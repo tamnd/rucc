@@ -159,6 +159,9 @@ pub struct Context<'a> {
     /// Whether a `-fkencc` unit checks the formats of the calls that `#pragma varargck` names,
     /// which is `-fkencc-format` and kencc's `-F`. See `check/varargck.rs`.
     pub kencc_format: bool,
+    /// Whether each record is laid out as `6c` and `7c` lay it out on any target, which is
+    /// `-fkencc-layout`. A Plan 9 target always does. See `rucc-types/src/record/kencc.rs`.
+    pub kencc_layout: bool,
     /// Whether the acid declarations of kencc's `-a` are collected, which is `--emit=acid`. They
     /// come back in [`Checked::acid`].
     pub acid: bool,
@@ -223,6 +226,7 @@ impl<'a> Context<'a> {
             kencc: false,
             kencc_strict_void: false,
             kencc_format: false,
+            kencc_layout: false,
             acid: false,
             trapping_math: true,
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },

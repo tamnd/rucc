@@ -2709,6 +2709,10 @@ pub struct Options {
     /// Whether a `-fkencc` unit checks the format of each call that `#pragma varargck` names,
     /// which is `-fkencc-format`. The kencc driver sets it for `-F`.
     pub kencc_format: bool,
+    /// Whether each record is laid out as `6c` and `7c` lay it out on any target, which is
+    /// `-fkencc-layout`. A Plan 9 target always does. The flag is for tests that run on the
+    /// host and print the offsets of a record.
+    pub kencc_layout: bool,
     /// The 9P server that the sysroot is on, as a dial string, from `--sysroot=9p:<address>`.
     ///
     /// The sysroot is then the text `9p:<address>`, and the driver reads each path under it from
@@ -3298,6 +3302,7 @@ impl Options {
             kencc_strict_void: false,
             kencc_signatures: false,
             kencc_format: false,
+            kencc_layout: false,
             nine_p: None,
             common: None,
             zero_initialized_in_bss: true,
