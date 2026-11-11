@@ -587,6 +587,11 @@ mod tests {
             ("movw (%di),%ax", "8b05"),
             ("addb $1,(%bx)", "800701"),
             ("lcallw *(%bx)", "ff1f"),
+            ("daa", "27"),
+            ("aam", "d40a"),
+            ("aam $16", "d410"),
+            ("aad", "d50a"),
+            ("lldtw %ax", "0f00d0"),
         ] {
             assert_eq!(hex(line, false), bytes, "{line}");
         }

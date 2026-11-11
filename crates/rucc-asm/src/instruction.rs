@@ -1442,6 +1442,16 @@ fn spelled(
             }
         }
     }
+    // A conversion from an integer in memory, where nothing says how wide the integer is. gas
+    // takes it as thirty two bits in either mode, and compiler_rt's i386 `floatdidf.S` writes
+    // `cvtsi2sd 8(%esp), %xmm1`. A register says its own width and was dealt with above.
+    if matches!(word, "cvtsi2sd" | "cvtsi2ss") && matches!(operands.first(), Some(Operand::Mem(..)))
+    {
+        let spelled = format!("{word}l");
+        if let Some(row) = encoding(&spelled, &kinds, imm) {
+            return Ok((spelled, row));
+        }
+    }
     // Said in terms of what the program wrote rather than in terms of the letter or the other
     // spelling this went looking for, because those are this file's business and the line is
     // theirs.
@@ -1503,6 +1513,12 @@ fn aliased(word: &str, mode: Mode) -> Option<String> {
     // one beside it. The kernel's vdso ends its i386 signal return with it.
     if word == "ud2a" {
         return Some("ud2".to_owned());
+    }
+    // The loads of the local table, the task register and the machine status word take a word
+    // and have only that width, so the letter gas lets a file put on them adds no prefix. The
+    // nvmm module of NetBSD writes `lldtw %ax`.
+    if let Some(known) = ["lldtw", "ltrw", "lmsww"].iter().find(|&&known| known == word) {
+        return Some(known[..known.len() - 1].to_owned());
     }
     // The Intel names for the widenings a division needs, which gas takes in AT&T mode too. The
     // Xen entry in `head_64.S` writes `cdq` before a `wrmsr`.
@@ -2655,6 +2671,53 @@ mod tests {
         ];
         for &(line, want) in short {
             assert_eq!(bytes32(line).as_deref(), Ok(want), "{line}");
+        }
+    }
+
+    /// The i386 forms of NetBSD's boot code, nvmm module and compiler_rt that sixty four bit mode
+    /// does not have or that name no width. The bytes are what GNU as writes for each line.
+    #[test]
+    fn the_i386_forms_of_the_netbsd_world_are_what_gas_writes() {
+        let bytes32 = |line: &str| {
+            let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+            let args = if rest.is_empty() { Vec::new() } else { crate::source::split(rest, ',') };
+            one_in(word, &args, Mode::Bits32).map(|written| written.bytes)
+        };
+        let cases: &[(&str, &[u8])] = &[
+            ("pusha", &[0x60]),
+            ("pushal", &[0x60]),
+            ("pushaw", &[0x66, 0x60]),
+            ("popa", &[0x61]),
+            ("popal", &[0x61]),
+            ("popaw", &[0x66, 0x61]),
+            ("daa", &[0x27]),
+            ("das", &[0x2f]),
+            ("aaa", &[0x37]),
+            ("aas", &[0x3f]),
+            ("aam", &[0xd4, 0x0a]),
+            ("aad", &[0xd5, 0x0a]),
+            ("aam $16", &[0xd4, 0x10]),
+            ("aad $16", &[0xd5, 0x10]),
+            ("lldtw %ax", &[0x0f, 0x00, 0xd0]),
+            ("ltrw %ax", &[0x0f, 0x00, 0xd8]),
+            ("lmsww %ax", &[0x0f, 0x01, 0xf0]),
+            ("lldtw 4(%ebx)", &[0x0f, 0x00, 0x53, 0x04]),
+            ("ltrw 4(%ebx)", &[0x0f, 0x00, 0x5b, 0x04]),
+            ("lmsww 4(%ebx)", &[0x0f, 0x01, 0x73, 0x04]),
+            ("cvtsi2sd 4(%ebx),%xmm1", &[0xf2, 0x0f, 0x2a, 0x4b, 0x04]),
+            ("cvtsi2ss 4(%ebx),%xmm1", &[0xf3, 0x0f, 0x2a, 0x4b, 0x04]),
+        ];
+        for &(line, want) in cases {
+            assert_eq!(bytes32(line).as_deref(), Ok(want), "{line}");
+        }
+        // gas takes the word forms and the conversion from memory in long mode as well, and none
+        // of the others, which are not instructions there.
+        assert_eq!(bytes("lldtw %ax"), [0x0f, 0x00, 0xd0]);
+        assert_eq!(bytes("cvtsi2sd 4(%rbx),%xmm1"), [0xf2, 0x0f, 0x2a, 0x4b, 0x04]);
+        assert_eq!(bytes("cvtsi2ss 4(%rbx),%xmm1"), [0xf3, 0x0f, 0x2a, 0x4b, 0x04]);
+        assert_eq!(bytes("cvtsi2sd %rax,%xmm1"), [0xf2, 0x48, 0x0f, 0x2a, 0xc8]);
+        for line in ["pusha", "popa", "daa", "aam", "aad $16"] {
+            assert!(!refused(line).is_empty(), "{line}");
         }
     }
 
