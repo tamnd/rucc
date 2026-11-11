@@ -1498,10 +1498,10 @@ pub fn compile_recording(
     // aligned to its width, so on a machine that keeps the stack pointer on less than a vector
     // register a spilled vector is a frame that is both forced and grown. See `Growing` in
     // [`crate::frame`].
-    if let Some(inst) = stack.grown_at
-        && share.cells().iter().any(|cell| cell.align > machine.conv.stack_align)
-    {
-        return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Spilled });
+    if let Some(inst) = stack.grown_at {
+        if share.cells().iter().any(|cell| cell.align > machine.conv.stack_align) {
+            return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Spilled });
+        }
     }
     let mut layout = Layout { share: Some(&share), ..layout };
     let mut frame = Frame::of(&func, &allocation, &layout);

@@ -16065,6 +16065,53 @@ block2:
         assert!(ran.text().contains("__cpu_model@GOT"), "{}", ran.text());
     }
 
+    /// A constant address is the displacement of the access and nothing else, as gcc writes it.
+    /// The FreeBSD `PCPU_GET` on i386 is `movl %%fs:%1` against `"m"` at the offset of the field,
+    /// and NetBSD's `curcpu()` is the same with `offsetof`. Each came out as a `movl $8` into a
+    /// register and a load through it before.
+    #[test]
+    fn a_constant_address_is_the_displacement_of_the_access() {
+        let source = r#"
+            struct pcpu { void *self; int a, cpuid; };
+            int pcpu(void) {
+              int r;
+              __asm__("movl %%fs:%1,%0" : "=r" (r)
+                      : "m" (*(int *)__builtin_offsetof(struct pcpu, cpuid)));
+              return r;
+            }
+            int seg(void) { return *(__seg_gs int *)16; }
+            int load(void) { return *(volatile int *)0x1000; }
+            void store(int v) { *(volatile int *)0x1004 = v; }
+            int index(int i) { return ((int *)0x2000)[i]; }
+            int apic(void) { return *(volatile int *)0xfee00020u; }
+            int field(void) { return ((__seg_fs struct pcpu *)0)->a; }
+        "#;
+        for (target, wide) in [("i486--netbsdelf", false), ("x86_64-unknown-freebsd", true)] {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = rucc_session::OptLevel::O2;
+            opts.target = target.parse::<Triple>().unwrap();
+            let ran = run(&opts, source);
+            assert_eq!(ran.messages, Vec::<String>::new());
+            let text = ran.text();
+            for (access, why) in [
+                ("%fs:8,", "the field of the per-CPU block"),
+                ("%gs:16,", "the object in __seg_gs"),
+                ("\t4096,", "the volatile load"),
+                (", 4100\n", "the volatile store"),
+                ("8192(,%", "the subscript of the array"),
+            ] {
+                assert!(text.contains(access), "{target}: {why} is not at {access}: {text}");
+            }
+            // The field after a pointer, which is four bytes on i386 and eight on x86-64.
+            let field = if wide { "\t%fs:8, " } else { "\t%fs:4, " };
+            assert!(text.contains(field), "{target}: the field of a struct at zero: {text}");
+            // x86-64 sign extends the four bytes, so an address above them is kept in a
+            // register there, and on i386 it is the four bytes of the field.
+            assert_eq!(text.contains("-18874336"), !wide, "{target}: {text}");
+        }
+    }
+
     /// An `asm` at file scope whose template is directives is the whole of what the incbin
     /// header, an alias table and a hand written jump table each write, and what it says is a
     /// section holding named bytes. So it becomes the globals it names, in the order it names
