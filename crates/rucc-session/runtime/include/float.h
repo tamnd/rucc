@@ -3,13 +3,25 @@
  * The compiler already knows all of this, because it has to fold a constant of each format,
  * and it says so in the `__FLT_`, `__DBL_` and `__LDBL_` macros. This header is those macros
  * under the names the standard gives them, and nothing else. There is no chain to a system
- * header: the format is the target's and the library has no say in it.
+ * header: the format is the target's and the library has no say in it. FreeBSD on amd64 and i386
+ * is the one exception, below.
  *
  * The `_TRUE_MIN` names are C11's and are the smallest subnormal, which is not `_MIN`. The
  * compiler spells that one `DENORM_MIN`, which was the C99 name for it. */
 
 #ifndef __RUCC_FLOAT_H
 #define __RUCC_FLOAT_H
+
+/* FreeBSD's GCC for amd64 and i386 (the devel/freebsd-gcc ports that build the world) has no
+ * float.h of its own. The port deletes it, because it conflicts with sys/x86/include/float.h. So
+ * that GCC reads the float.h of the system, and so does this header when the system has one. The
+ * two differ with -m32: the compiler says that a long double has 53 bits, since FreeBSD sets the
+ * x87 to round to a double, and the system's float.h says 64. The long double functions of the
+ * lib32 msun test LDBL_MANT_DIG for 64 or 113 and stop on anything else. */
+#if defined(__FreeBSD__) && (defined(__i386__) || defined(__x86_64__)) && \
+    __has_include_next(<float.h>)
+#include_next <float.h>
+#else
 
 #undef FLT_RADIX
 #define FLT_RADIX __FLT_RADIX__
@@ -212,6 +224,8 @@
 #define DEC64_SNAN (__builtin_nansd64(""))
 #define DEC128_SNAN (__builtin_nansd128(""))
 #endif
+#endif
+
 #endif
 
 #endif
