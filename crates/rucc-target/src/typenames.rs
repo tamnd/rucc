@@ -148,12 +148,11 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__bf16", TypeName::BFloat16),
 ];
 
-/// The name x86, PowerPC and wasm32 have for quad precision.
+/// The name PowerPC and wasm32 have for quad precision.
 const FLOAT128: &[(&str, TypeName)] = &[("__float128", TypeName::Float128)];
 
-/// x86-64's, which are quad precision's old name and the brain float. gcc has `__bf16` on i386 as
-/// well, and rucc does not yet, as it has no `_Float16` there either.
-const X86_64: &[(&str, TypeName)] =
+/// x86's, which are quad precision's old name and the brain float, at both widths.
+const X86: &[(&str, TypeName)] =
     &[("__float128", TypeName::Float128), ("__bf16", TypeName::BFloat16)];
 
 /// RISC-V's, which is the brain float. gcc has it there from 15 on. The name is here for every
@@ -165,9 +164,9 @@ const RISCV64: &[(&str, TypeName)] = &[("__bf16", TypeName::BFloat16)];
 pub(crate) fn type_names(arch: Arch) -> &'static [(&'static str, TypeName)] {
     match arch {
         Arch::Aarch64 => AARCH64,
-        Arch::X86_64 => X86_64,
+        Arch::X86_64 | Arch::X86 => X86,
         Arch::Riscv64 => RISCV64,
-        Arch::X86 | Arch::PowerPc64 | Arch::Wasm32 => FLOAT128,
+        Arch::PowerPc64 | Arch::Wasm32 => FLOAT128,
         _ => &[],
     }
 }
@@ -208,10 +207,10 @@ mod tests {
     #[test]
     fn the_brain_float_is_a_name_where_gcc_computes_with_it() {
         let has = |arch| type_names(arch).iter().any(|&(name, _)| name == "__bf16");
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
+        for arch in [Arch::X86_64, Arch::X86, Arch::Aarch64, Arch::Riscv64] {
             assert!(has(arch), "{arch:?}");
         }
-        for arch in [Arch::X86, Arch::PowerPc64, Arch::Wasm32, Arch::Arm, Arch::S390x] {
+        for arch in [Arch::PowerPc64, Arch::Wasm32, Arch::Arm, Arch::S390x] {
             assert!(!has(arch), "{arch:?}");
         }
     }

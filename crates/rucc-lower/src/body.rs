@@ -2616,13 +2616,17 @@ impl<'u> Body<'_, 'u> {
     /// bytes of which sixty five bits are the value, aligned to eight on x86-64 where an
     /// `__int128` is aligned to sixteen, and the object form reads that alignment off the type.
     ///
+    /// A `long double` on RISC-V is read the same way, because it travels like that integer: in
+    /// a pair of registers that starts at an even one, or on a boundary of sixteen in the area.
+    ///
     /// wasm32 is the exception. Its `long long` is two pointers wide and is still one scalar in
     /// the list, on a boundary of its own size, and the object form there is the address of a
     /// copy, which is what an aggregate passed by reference is.
     fn va_arg(&mut self, list: ExprId, ty: TypeId, span: Span) -> Option<Value> {
         let result = repr::value_type(self.types(), self.target(), ty)?;
         let size = repr::size_of(self.types(), self.target(), ty);
-        if result.is_int()
+        let quad = result == Type::float(rucc_ir::Float::F128) && self.target().quad_in_integers();
+        if (result.is_int() || quad)
             && size * 8 == 2 * u64::from(self.target().pointer_width)
             && self.target().tuple.arch() != Arch::Wasm32
         {

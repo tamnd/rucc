@@ -69,6 +69,7 @@ use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::{Binding, Scopes};
 use crate::tast::{Const, Tast, Used};
 pub use incomplete::IncompleteLine;
+pub use varargck::{VarargckLine, VarargckPragma, VarargckType};
 
 mod acid;
 mod advice;
@@ -100,6 +101,7 @@ mod string_arg;
 mod switch;
 mod tls;
 mod ty;
+mod varargck;
 mod weak;
 
 pub use crate::check::builtin::{
@@ -154,6 +156,9 @@ pub struct Context<'a> {
     /// `-fkencc-strict-void` and kencc's `-V`. Without it, two declarations of one name agree
     /// when one has a pointer to `void` where the other has any pointer.
     pub kencc_strict_void: bool,
+    /// Whether a `-fkencc` unit checks the formats of the calls that `#pragma varargck` names,
+    /// which is `-fkencc-format` and kencc's `-F`. See `check/varargck.rs`.
+    pub kencc_format: bool,
     /// Whether the acid declarations of kencc's `-a` are collected, which is `--emit=acid`. They
     /// come back in [`Checked::acid`].
     pub acid: bool,
@@ -217,6 +222,7 @@ impl<'a> Context<'a> {
             plan9_extensions: false,
             kencc: false,
             kencc_strict_void: false,
+            kencc_format: false,
             acid: false,
             trapping_math: true,
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
@@ -407,6 +413,9 @@ pub struct Checker<'a> {
     pub(in crate::check) incomplete_lines: Vec<IncompleteLine>,
     /// The records that a `#pragma incomplete` line has marked so far.
     pub(in crate::check) incomplete_records: rucc_base::hash::Set<RecordId>,
+    /// The state of the kencc format check, under `-fkencc-format` only. See
+    /// `check/varargck.rs`.
+    pub(in crate::check) varargck: Option<varargck::Varargck>,
     /// The typedef name that each anonymous member was written with, by the record that holds
     /// it and the type of the member, under `-fplan9-extensions`. gcc takes the name as a member
     /// name, so two anonymous members that reach the same typedef name are duplicates.
@@ -505,6 +514,7 @@ impl<'a> Checker<'a> {
             extern_registers: Vec::new(),
             incomplete_lines: Vec::new(),
             incomplete_records: rucc_base::hash::Set::default(),
+            varargck: None,
             anonymous_spellings: rucc_base::hash::Map::default(),
             typeof_spellings: rucc_base::hash::Map::default(),
             annotations: annotate::Annotations::default(),
@@ -572,14 +582,21 @@ impl<'a> Checker<'a> {
         let ast = self.ast;
         self.refuse_unimplemented_attributes();
         self.check_btf_tags();
-        for &decl in ast.top_level() {
+        for (index, &decl) in ast.top_level().iter().enumerate() {
             // What a body's casts wrote is read by no declaration, and is dropped here rather
             // than carried to the end of the unit.
             self.types.forget_prototypes();
-            self.mark_incomplete_before(ast.decl_span(decl).lo);
+            // The kencc lines before the declaration, and the lines in it. A call in a function
+            // sees the lines before the end of the function, because kencc types the body only
+            // there.
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            self.mark_incomplete_before(index);
+            self.read_varargck_before(index);
             self.check_decl(decl);
         }
-        self.mark_incomplete_before(rucc_diag::BytePos::MAX);
+        self.mark_incomplete_before(u32::MAX);
+        // kencc reads a line after the last declaration too, and says what is wrong with it.
+        self.read_varargck_before(u32::MAX);
         self.check_incomplete_tentative();
         self.check_resolvers();
         self.build_simd_clones();

@@ -188,12 +188,13 @@ const RESERVED_PRIORITY: u16 = 100;
 /// `long double` before it finds `_Float128`. The two `_Float32x` and `_Float64x` names are left
 /// out because no mode names them and reaching one from a mode would be picking the odd spelling
 /// of a format for no reason.
-const FLOATS: [FloatKind; 5] = [
+const FLOATS: [FloatKind; 6] = [
     FloatKind::Float16,
     FloatKind::Float,
     FloatKind::Double,
     FloatKind::LongDouble,
     FloatKind::Float128,
+    FloatKind::BFloat16,
 ];
 
 /// What a machine mode names, which is a class of type and a size rather than a type.
@@ -240,6 +241,7 @@ fn named_mode(name: &str, target: &TargetInfo) -> Option<Mode> {
         "DF" => Mode::Float(Format::Double),
         "XF" => Mode::Float(xf),
         "TF" => Mode::Float(Format::Quad),
+        "BF" => Mode::Float(Format::BFloat16),
         "HC" => Mode::Complex(Format::Half),
         "SC" => Mode::Complex(Format::Single),
         "DC" => Mode::Complex(Format::Double),
@@ -3445,7 +3447,11 @@ impl Checker<'_> {
     /// a machine without an x87, where GCC says the same thing.
     fn float_in(&mut self, format: Format, name: &str, span: Span) -> Option<FloatKind> {
         let target = self.cx.target;
-        let found = FLOATS.into_iter().find(|&kind| float_format(kind, target) == format);
+        // `__bf16` is only where the target names it, which is where gcc has `BFmode` as well.
+        let found = FLOATS.into_iter().find(|&kind| {
+            float_format(kind, target) == format
+                && (kind != FloatKind::BFloat16 || self.has_float_kind(kind))
+        });
         if found.is_none() {
             let what = format!("no data type for mode '{name}'");
             self.report(Diagnostic::error(what, span).with_code("E0698"));

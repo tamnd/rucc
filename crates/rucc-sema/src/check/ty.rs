@@ -2190,10 +2190,10 @@ mod tests {
 
     #[test]
     fn a_target_that_has_one_named_type_and_not_the_other_keeps_the_one_it_has() {
-        // i686 has quad precision in software and no half precision format, because gcc aims at
-        // the baseline and SSE2 is not in i686's. So the two types part company on this row, and
-        // that is the reason they are two target properties rather than one.
-        let mut fixture = Fixture::for_tuple("i686-linux-gnu");
+        // s390x has quad precision and no half precision format, as gcc 13 has it. So the two
+        // types part company on this row, and that is the reason they are two target properties
+        // rather than one. i686 was the row before tamnd/rucc#4324 gave it `_Float16`.
+        let mut fixture = Fixture::for_tuple("s390x-linux-gnu");
         let float16 = fixture.keywords(&[BuiltinSet::FLOAT16]);
         let float128 = fixture.keywords(&[BuiltinSet::FLOAT128]);
         let plain = fixture.declarator(Some("x"), &[]);

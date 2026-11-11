@@ -510,7 +510,13 @@ impl Checker<'_> {
                 return self.poison(span);
             }
         };
-        let size = self.size_type();
+        // kencc gives the size the type `int`, as `tcomo` does for `OSIZE` in `cc/com.c`. A
+        // comparison such as `n < sizeof buf` is then signed, as Plan 9 code expects.
+        let size = if self.cx.kencc && what == Measure::Size {
+            self.types.int(IntKind::Int)
+        } else {
+            self.size_type()
+        };
         self.constant(Const::Int(i128::from(value)), size, span)
     }
 
