@@ -2113,6 +2113,15 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
             return Err(format!("'{front}' has '@{how}' and no name for it to be about"));
         };
         named = Some(Named { name: format!("{name}@{how}"), addend: value });
+    } else if mode == Mode::Bits32
+        && front.contains("_GLOBAL_OFFSET_TABLE_")
+        && apart(front).is_err()
+    {
+        // The table plus how far the instruction is from a label, which gcc's and OpenSSL's i386
+        // code writes as `_GLOBAL_OFFSET_TABLE_+[.-.L000PIC_me_up](%edx)`. That is three names
+        // and brackets of either kind, and [`crate::source`] reads it whole once the file is laid
+        // out, with `.` as where the instruction starts.
+        named = Some(Named { name: front.to_owned(), addend: 0 });
     } else if !front.is_empty() {
         let (value, name, away) = apart(front)?;
         taken = away.is_some();
