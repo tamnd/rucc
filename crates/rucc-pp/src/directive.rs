@@ -642,6 +642,14 @@ impl Preprocessor {
         let name = ident_of(&first);
         let rest = &body[1..];
 
+        if cx.kencc {
+            if let Some(name) = name {
+                if !self.kencc_directive(name, first.span, cx, names) {
+                    return;
+                }
+            }
+        }
+
         // Conditionals are handled whether or not the region is live, because the nesting has
         // to stay balanced through a skipped block.
         if name == Some(names.r#if) {
@@ -739,6 +747,39 @@ impl Preprocessor {
                 Diagnostic::error("invalid preprocessing directive", first.span).with_code("E0332"),
             );
         }
+    }
+
+    /// Checks a directive against the nine that kencc knows, which are the `mactab` of
+    /// `cc/macbody`, and says whether the directive is to be done as C does it.
+    ///
+    /// kencc has no `#if` and no `#elif`, as it leaves those to `/bin/cpp` under `-p`. A live
+    /// directive that kencc does not know gives the kencc error `unknown #: if`. A live `#if`
+    /// still opens a group, so that its `#endif` does not give a second error. While kencc skips
+    /// a group it reads only `#ifdef`, `#ifndef`, `#else` and `#endif`, so there an `#elif` does
+    /// nothing and the group stays skipped up to its `#else` or its `#endif`.
+    fn kencc_directive(&mut self, name: Symbol, at: Span, cx: &Context<'_>, names: &Names) -> bool {
+        let known = [
+            names.ifdef,
+            names.ifndef,
+            names.r#else,
+            names.line,
+            names.define,
+            names.include,
+            names.undef,
+            names.pragma,
+            names.endif,
+        ];
+        if known.contains(&name) {
+            return true;
+        }
+        let elif = name == names.elif || name == names.elifdef || name == names.elifndef;
+        if !self.live() {
+            return !elif;
+        }
+        let text = cx.interner.resolve(name);
+        self.diagnostics
+            .push(Diagnostic::error(format!("unknown #: {text}"), at).with_code("E0332"));
+        name == names.r#if
     }
 
     /// Answers `#pragma push_macro("X")` and `#pragma pop_macro("X")`, or says it is not one.
