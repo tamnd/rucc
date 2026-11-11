@@ -174,7 +174,7 @@ use std::borrow::Cow;
 
 use crate::operand::{Constraint, OperandDesc};
 use crate::regs::{PhysReg, Segment};
-use crate::x86_64::insts::{ALIGN, LITERAL, form, packed};
+use crate::x86_64::insts::{ALIGN, LITERAL, form, packed, unpacked};
 use crate::x86_64::text::{Arg, Shape, Width, gpr_named, machine, written};
 
 /// What one operand of an instruction in a template is filled with.
@@ -442,11 +442,18 @@ pub fn read_in(template: &str, widths: &[Option<Width>], memory: &[bool]) -> Opt
             steps.push(Step::Line(line));
             continue;
         }
+        // A `.byte` straight after another one is more bytes of the same instruction, so it joins
+        // that line rather than starting one. See [`joined`].
         if let Some(line) = literal(text) {
             if carried.is_some() {
                 return None;
             }
-            steps.push(Step::Line(line));
+            match steps.last_mut() {
+                Some(Step::Line(last)) if last.opcode == LITERAL => {
+                    last.imm = Some(joined(last.imm?, line.imm?)?);
+                }
+                _ => steps.push(Step::Line(line)),
+            }
             continue;
         }
         steps.push(Step::Line(instruction(text, carried, widths, memory)?));
@@ -721,6 +728,22 @@ fn literal(text: &str) -> Option<Line> {
     }
     let imm = packed(&bytes)?;
     Some(Line { opcode: LITERAL, operands: Vec::new(), at: None, imm: Some(imm) })
+}
+
+/// The bytes of two [`LITERAL`] lines, one after the other, as one line, or nothing for more of
+/// them than one line carries.
+///
+/// A template may spell one instruction with a directive for each byte, and the bytes of the
+/// instruction are then in several directives with nothing between them. OpenZFS writes `xgetbv`
+/// as `.byte 0x0f; .byte 0x01; .byte 0xd0` in `simd_x86.h`. Read as three instructions, the
+/// allocator may put a copy between them, and the processor then reads the copy as the rest of
+/// the instruction. The FreeBSD kernel of rucc did that in `raidz_will_avx2_work` and took a page
+/// fault on the `kldload` of `zfs.ko`. One line for the run keeps the bytes together, as an
+/// assembler does, and a run longer than one line carries is refused, so the template is kept as
+/// text.
+fn joined(first: i64, second: i64) -> Option<i64> {
+    let bytes: Vec<u8> = unpacked(first).chain(unpacked(second)).collect();
+    packed(&bytes)
 }
 
 /// The largest boundary a template may ask for, which is a page.
@@ -1203,7 +1226,6 @@ fn term(text: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::x86_64::insts::unpacked;
 
     /// Every instruction in a template that has nothing in it but instructions.
     ///
@@ -1861,6 +1883,23 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].opcode, LITERAL);
         assert_eq!(lines[1].opcode, "pause");
+    }
+
+    /// One instruction spelled with a directive for each byte, as OpenZFS spells `xgetbv`. The
+    /// bytes are one line, so nothing can go between them. A run with more bytes than one line
+    /// carries is refused.
+    #[test]
+    fn a_run_of_byte_directives_is_read_as_one_instruction() {
+        for template in [".byte 0x0f; .byte 0x01; .byte 0xd0", ".byte 0x0f, 0x01\n\t.byte 0xd0"] {
+            let lines = plain(template, &[]).expect("a run of bytes");
+            assert_eq!(lines.len(), 1, "{template}");
+            assert_eq!(lines[0].opcode, LITERAL);
+            let bytes: Vec<u8> = unpacked(lines[0].imm.expect("the bytes")).collect();
+            assert_eq!(bytes, [0x0f, 0x01, 0xd0], "{template}");
+        }
+        assert_eq!(plain(".byte 1,2,3,4; .byte 5,6,7,8", &[]), None, "more bytes than fit");
+        let lines = plain(".byte 0x90; pause; .byte 0x90", &[]).expect("bytes on both sides");
+        assert_eq!(lines.len(), 3);
     }
 
     /// A number that is not a byte is refused rather than truncated, because a program that wrote
