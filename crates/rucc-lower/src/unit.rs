@@ -1714,15 +1714,25 @@ impl Unit<'_> {
     /// function there cannot write code, and the address of a function is an index into a table
     /// that the module fixes when it is linked, so there is no trampoline. A nested function whose
     /// address is taken is refused, and one that is only called directly is built.
+    ///
+    /// i386 is the same. gcc puts the chain in `ecx`, which `regparm(3)` and `fastcall` pass an
+    /// argument in, and libgcc makes no heap trampolines there. A nested function that is only
+    /// called directly is called only from this file, so its chain is the last parameter, the same
+    /// as on wasm, and one whose address is taken is refused.
     fn chains(&mut self, escapes: bool, span: Span) -> bool {
         let chain = self.target.call_regs.and_then(|regs| regs.chain);
         let wasm = self.target.tuple.arch() == rucc_tuple::Arch::Wasm32;
+        let i386 = self.target.tuple.arch() == rucc_tuple::Arch::X86;
         let why = match chain {
             None if wasm && escapes => Some(
                 "its address is taken, and a call through the address needs a trampoline, which \
                  wasm cannot make",
             ),
-            None if wasm => None,
+            None if i386 && escapes => Some(
+                "its address is taken, and a call through the address needs a trampoline, which \
+                 libgcc does not make for i386",
+            ),
+            None if wasm || i386 => None,
             None => {
                 Some("the calling convention of this target has no register for the static chain")
             }
