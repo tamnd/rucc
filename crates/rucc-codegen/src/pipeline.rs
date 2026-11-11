@@ -3063,6 +3063,51 @@ mod tests {
         assert!(!text.contains("x64.movaps_mr"), "{text}");
     }
 
+    /// `*out = (*a * *b + *a) >> n` on `_BitInt(200)`, which no register holds, comes out as word
+    /// arithmetic and the libgcc multiplication on both machines that allow a `_BitInt` this wide.
+    #[test]
+    fn a_bit_int_wider_than_two_registers_compiles_on_both_sixty_four_bit_machines() {
+        let wide = Type::int(200);
+        let info = rucc_ir::MemInfo {
+            size: 32,
+            align: 8,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let built = || {
+            let params = [Type::PTR, Type::PTR, Type::PTR, Type::int(32)];
+            let (names, mut source, block, args) = blank(&params);
+            let mut build = Builder::new(&mut source, block);
+            let a = build.load(wide, args[0], info, IrFlags::NONE);
+            let b = build.load(wide, args[1], info, IrFlags::NONE);
+            let product = build.binary(Opcode::Mul, a, b, IrFlags::NONE);
+            let sum = build.binary(Opcode::Add, product, a, IrFlags::NONE);
+            let n = build.unary(Opcode::ZExt, args[3], wide);
+            let shifted = build.binary(Opcode::AShr, sum, n, IrFlags::NONE);
+            build.store(shifted, args[2], info, IrFlags::NONE);
+            build.ret(&[]);
+            (names, source)
+        };
+
+        let (mut names, mut source) = built();
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(text.contains("__mulbitint3"), "{text}");
+
+        let (mut names, mut source) = built();
+        let machine = Machine::aarch64(&aarch64::AAPCS64);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every instruction has a rule");
+        let text = mir::print_func(&out, &names, &aarch64::REGS);
+        assert!(text.contains("__mulbitint3"), "{text}");
+    }
+
     /// Two integer vectors read from memory, added lane by lane, mixed with a bitwise operation and
     /// written back, which is the whole of what an SSE2 loop body is made of.
     ///

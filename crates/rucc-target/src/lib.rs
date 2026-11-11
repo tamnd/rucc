@@ -1813,6 +1813,21 @@ impl TargetInfo {
     pub const fn max_object_size(&self) -> u64 {
         (1u64 << (self.pointer_width - 1)) - 1
     }
+
+    /// The widest `_BitInt` this compiler builds for the target, which is the number
+    /// `__BITINT_MAXWIDTH__` says.
+    ///
+    /// gcc's 65535 on x86-64 and AArch64 outside Windows and Apple. A `_BitInt` wider than 128
+    /// bits is an array of 64 bit limbs there, it is passed and returned the way a structure of
+    /// its size is, and the back end computes on it a limb at a time and calls libgcc for a
+    /// multiply, a divide and a conversion to or from a float (tamnd/rucc#2490). 128 on every other
+    /// target, which is the widest integer the back end holds in registers.
+    #[must_use]
+    pub fn bit_int_max_width(&self) -> u32 {
+        let arch = matches!(self.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::Aarch64);
+        let os = matches!(self.tuple.os(), tuple::Os::Windows | tuple::Os::MacOs | tuple::Os::IOs);
+        if arch && !os { 65535 } else { 128 }
+    }
 }
 
 /// The format `_Float64x` is, where the target has one.

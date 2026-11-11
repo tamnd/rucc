@@ -50,16 +50,6 @@ use crate::scope::{Binding, Tag, TagKind};
 
 mod tag;
 
-/// The widest `_BitInt` there is, which is the width the constant folding can hold.
-///
-/// This is not gcc's number. gcc 16 has `__BITINT_MAXWIDTH__` at sixty five thousand five
-/// hundred and thirty five, which its own arbitrary precision arithmetic can fold and this
-/// compiler's hundred and twenty eight bit constants cannot. Widening it is a change to
-/// [`Const`](crate::Const) rather than to this, and until that happens the limit is reported
-/// where a wider one is written rather than silently truncated. `__BITINT_MAXWIDTH__` in
-/// `rucc-pp` is this same number and has to be changed with it.
-const MAX_BIT_INT_WIDTH: u32 = 128;
-
 /// What the type builder has worked out already and is not going to work out twice.
 #[derive(Debug, Default)]
 pub(crate) struct Built {
@@ -718,14 +708,16 @@ impl Checker<'_> {
             self.report(Diagnostic::error(message, span).with_code("E0529"));
             return self.int();
         }
-        if bits > i128::from(MAX_BIT_INT_WIDTH) {
-            let message = format!(
-                "'_BitInt' argument '{bits}' is larger than 'BITINT_MAXWIDTH' '{MAX_BIT_INT_WIDTH}'"
-            );
+        // The target's widest, which is gcc's 65535 where the back end computes a limb at a time
+        // and 128 where it does not. `__BITINT_MAXWIDTH__` in `rucc-pp` asks the same question.
+        let most = self.cx.target.bit_int_max_width();
+        if bits > i128::from(most) {
+            let message =
+                format!("'_BitInt' argument '{bits}' is larger than 'BITINT_MAXWIDTH' '{most}'");
             self.report(Diagnostic::error(message, span).with_code("E0529"));
             return self.int();
         }
-        let bits = u32::try_from(bits).unwrap_or(MAX_BIT_INT_WIDTH);
+        let bits = u32::try_from(bits).unwrap_or(most);
         self.types.bit_int(signed, bits)
     }
 
@@ -2893,7 +2885,7 @@ mod tests {
     #[test]
     fn a_bit_int_is_as_wide_as_it_says_within_the_range_there_is() {
         let mut fixture = Fixture::new();
-        let widths = [37, 1, 200, 0];
+        let widths = [37, 1, 65536, 0];
         let specs: Vec<_> = widths
             .iter()
             .map(|&width| {
@@ -2914,10 +2906,39 @@ mod tests {
             messages(&checker),
             [
                 "'signed _BitInt' argument must be at least 2",
-                "'_BitInt' argument '200' is larger than 'BITINT_MAXWIDTH' '128'",
+                "'_BitInt' argument '65536' is larger than 'BITINT_MAXWIDTH' '65535'",
                 "'_BitInt' argument '0' is not a positive integer constant expression",
             ]
         );
+    }
+
+    /// gcc's 65535 is the widest on x86-64 and AArch64, where the back end computes a limb at a
+    /// time, and 128 stays the widest on a target whose back end does not.
+    #[test]
+    fn a_bit_int_reaches_gcc_s_widest_where_the_back_end_computes_a_limb_at_a_time() {
+        for (triple, widest, wider) in [
+            ("x86_64-unknown-freebsd15.1", 65535, 65536),
+            ("aarch64-unknown-linux-gnu", 65535, 65536),
+            ("riscv64-unknown-linux-gnu", 128, 129),
+        ] {
+            let mut fixture = Fixture::for_target(triple);
+            let fits = fixture.int(widest);
+            let fits = fixture.specs(bit_int(fits, false), Quals::NONE);
+            let over = fixture.int(wider);
+            let over = fixture.specs(bit_int(over, false), Quals::NONE);
+            let plain = fixture.declarator(None, &[]);
+            let mut checker = fixture.checker();
+            assert_eq!(built(&mut checker, fits, plain), format!("_BitInt({widest})"), "{triple}");
+            assert!(messages(&checker).is_empty(), "{triple}");
+            checker.declared_type(over, plain);
+            assert_eq!(
+                messages(&checker),
+                [format!(
+                    "'_BitInt' argument '{wider}' is larger than 'BITINT_MAXWIDTH' '{widest}'"
+                )],
+                "{triple}"
+            );
+        }
     }
 
     #[test]

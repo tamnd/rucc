@@ -13085,12 +13085,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(run(&opts, "__fp16 h;\n").failed(), "no __fp16 on x86-64");
     }
 
-    /// tamnd/rucc#4088. `__bf16` is a type of its own on x86-64 and AArch64, and the
+    /// tamnd/rucc#4088. `__bf16` is a type of its own on x86-64, AArch64 and RISC-V, and the
     /// arithmetic on it is done at `float` and written in place, with no call for the widening or
     /// for the narrowing. gcc 15 calls nothing for these either. Before this, the name was not a
-    /// type anywhere.
+    /// type anywhere. RISC-V got it with tamnd/rucc#4276.
     #[test]
-    fn a_brain_float_is_computed_at_float_with_no_call_on_two_machines() {
+    fn a_brain_float_is_computed_at_float_with_no_call_on_three_machines() {
         let source = "_Static_assert(sizeof(__bf16) == 2 && _Alignof(__bf16) == 2, \"size\");\n\
                       __bf16 k = 1.5bf16;\n\
                       _Static_assert(_Generic(k, __bf16: 1, default: 0), \"a type\");\n\
@@ -13104,7 +13104,9 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                       int less(__bf16 a, __bf16 b) { return a < b; }\n\
                       __bf16 neg(__bf16 a) { return -a; }\n\
                       void put(__bf16 *p, __bf16 a) { p[1] = a; }\n";
-        for triple in ["x86_64-unknown-freebsd", "aarch64-unknown-freebsd"] {
+        for triple in
+            ["x86_64-unknown-freebsd", "aarch64-unknown-freebsd", "riscv64-unknown-freebsd"]
+        {
             let mut opts = options();
             opts.target = triple.parse::<Triple>().unwrap();
             opts.emit = EmitKind::Asm;
@@ -13122,8 +13124,6 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         let mut opts = options();
         opts.target = "i686-unknown-linux-gnu".parse::<Triple>().unwrap();
         assert!(run(&opts, "__bf16 k;\n").failed(), "no __bf16 on i386 yet");
-        opts.target = "riscv64-unknown-freebsd".parse::<Triple>().unwrap();
-        assert!(run(&opts, "__bf16 k;\n").failed(), "no __bf16 on RISC-V yet");
     }
 
     /// The infinities and nans of the interchange types are constants, as for `double`.

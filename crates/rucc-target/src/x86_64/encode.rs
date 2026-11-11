@@ -921,6 +921,7 @@ static PR: [Kind; 2] = [Kind::Mmx, Kind::Reg];
 static IP: [Kind; 2] = [Kind::Imm, Kind::Mmx];
 static IPP: [Kind; 3] = [Kind::Imm, Kind::Mmx, Kind::Mmx];
 static IMP: [Kind; 3] = [Kind::Imm, Kind::Mem, Kind::Mmx];
+static IRP: [Kind; 3] = [Kind::Imm, Kind::Reg, Kind::Mmx];
 
 /// Every instruction [`crate::x86_64::written`] can name, and the bytes it comes out as.
 ///
@@ -2803,6 +2804,9 @@ static ENCODINGS: &[Encoding] = &[
     // writes memory is `0x3A 0x15` and is SSE4.1, which is above the baseline of this target. A
     // program storing a half therefore writes two instructions, which is what gcc writes as well.
     bytes("pextrw", &IVR, Word, &[0x0F, 0xC5], pair(1, 2), ImmSize::Ib),
+    // The top bit of each byte of a vector register, as sixteen bits of a general purpose register.
+    // The string functions of the FreeBSD libc for amd64 use it to find a byte in sixteen.
+    bytes("pmovmskb", &VR, Word, &[0x0F, 0xD7], pair(0, 1), NO_IMM),
     // Comparing two floats and setting the flags, which is one opcode with the prefix saying which
     // format is read: no prefix for a `float` and `0x66` for a `double`, which is the pairing the
     // moves at the top of this group have and not the one the arithmetic has. The register beside
@@ -2826,6 +2830,9 @@ static ENCODINGS: &[Encoding] = &[
     // beside it.
     bytes("movq", &MV, Single, &[0x0F, 0x7E], pair(0, 1), NO_IMM),
     bytes("movq", &VM, Word, &[0x0F, 0xD6], pair(1, 0), NO_IMM),
+    // The same load from another vector register. It copies the low word and clears the top half.
+    // OpenSSL's ecp_nistz256-x86.S uses it.
+    bytes("movq", &VV, Single, &[0x0F, 0x7E], pair(0, 1), NO_IMM),
     // The whole register moved, aligned and unaligned, which is the pair `movaps` is for floats.
     // `0x6F` towards the register and `0x7F` away from it, with `0x66` for the form that faults on
     // an address that is not a multiple of sixteen and `0xF3` for the form that does not. A library
@@ -2921,6 +2928,8 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movd", &PM, Long, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
     bytes("movntq", &PM, Long, &[0x0F, 0xE7], pair(1, 0), NO_IMM),
     bytes("pmovmskb", &PR, Long, &[0x0F, 0xD7], pair(0, 1), NO_IMM),
+    bytes("pinsrw", &IMP, Long, &[0x0F, 0xC4], pair(1, 2), ImmSize::Ib),
+    bytes("pinsrw", &IRP, Long, &[0x0F, 0xC4], pair(1, 2), ImmSize::Ib),
     bytes("pshufw", &IPP, Long, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
     bytes("pshufw", &IMP, Long, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
     bytes("paddb", &PP, Long, &[0x0F, 0xFC], pair(0, 1), NO_IMM),
