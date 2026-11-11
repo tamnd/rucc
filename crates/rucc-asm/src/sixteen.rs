@@ -293,8 +293,12 @@ fn twin(word: &str, args: &[String], to: Width) -> Option<Written> {
                 Some(rest) => ("*", rest),
                 None => ("", text),
             };
-            // The port of an `in` or an `out` is `%dx` at either width.
-            if rest == "%dx" && (word.starts_with("in") || word.starts_with("out")) {
+            // The port of an `in` or an `out` is `%dx` at either width. Only those words, since
+            // `inc %dx` is a register of sixteen bits like any other. NetBSD's pbr.S has it, and
+            // reading it as a port wrote `66 42`, which is `inc %edx`.
+            let ported =
+                matches!(word, "in" | "inb" | "inw" | "inl" | "out" | "outb" | "outw" | "outl");
+            if rest == "%dx" && ported {
                 return arg.clone();
             }
             rest.strip_prefix('%')
@@ -564,6 +568,13 @@ mod tests {
             ("movzbl %al,%eax", "660fb6c0"),
             ("movzbw %al,%ax", "0fb6c0"),
             ("inc %ax", "40"),
+            ("inc %dx", "42"),
+            ("incw %dx", "42"),
+            ("dec %dx", "4a"),
+            ("inc %edx", "6642"),
+            ("incl %edx", "6642"),
+            ("add %dx,%ax", "01d0"),
+            ("inw %dx,%ax", "ed"),
             ("incl %eax", "6640"),
             ("movsl", "66a5"),
             ("lodsw", "ad"),
