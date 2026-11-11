@@ -251,12 +251,36 @@ impl Conv<'_> {
         // type before anything is evaluated wider, so `0.1 * 3` is the `double` product there.
         let operation =
             operation && (self.excess_constants || !(self.folded(lhs) && self.folded(rhs)));
-        let wide = match self.excess_type(common) {
-            Some(wide) if operation || self.is_excess(lhs) || self.is_excess(rhs) => wide,
+        let met = self.halves_meet(self.tast[lhs].ty, self.tast[rhs].ty);
+        let wide = match (met, self.excess_type(common)) {
+            (Some(wide), _) => wide,
+            (None, Some(wide)) if operation || self.is_excess(lhs) || self.is_excess(rhs) => wide,
             _ => common,
         };
         let (lhs, rhs) = (self.unexcess(lhs), self.unexcess(rhs));
         Some((self.arithmetic(lhs, wide), self.arithmetic(rhs, wide), common))
+    }
+
+    /// The type a `_Float16` and a `__bf16` meet in, and [`None`] for every other pair.
+    ///
+    /// Their common type is `_Float16`, but neither format holds the other, so gcc does not
+    /// convert the `__bf16` to a half first. It computes at `float`, which holds both, and the
+    /// result stands as a `_Float16`. That is `float` under `__FLT_EVAL_METHOD__` 2 as well. It
+    /// is true of an arithmetic operator, a compound assignment and a conditional, and of a
+    /// comparison where an operand has the excess precision. [`Self::compared`] gives the other
+    /// comparisons. gcc 16.2.0 for x86-64 and i386 and gcc 13 for AArch64 give
+    /// `(_Float16)0 * (__bf16)65536` as zero, and `(__bf16)1 + (_Float16)0x1.1p-8` stored back
+    /// to a `__bf16` as the `__bf16` above one (tamnd/rucc#4369).
+    pub fn halves_meet(&mut self, a: TypeId, b: TypeId) -> Option<TypeId> {
+        let kind = |types: &Types, id: TypeId| match types.kind(types.canonical(id)) {
+            TypeKind::Float(kind) => Some(kind),
+            _ => None,
+        };
+        match (kind(self.types, a)?, kind(self.types, b)?) {
+            (FloatKind::Float16, FloatKind::BFloat16)
+            | (FloatKind::BFloat16, FloatKind::Float16) => Some(self.types.float(FloatKind::Float)),
+            _ => None,
+        }
     }
 
     /// Whether `expr` is made of constants and the arithmetic on them only, which is what gcc
@@ -341,6 +365,23 @@ impl Conv<'_> {
             }
             None => self.evaluated(lhs, rhs, false),
         }
+    }
+
+    /// The conversions of a comparison, which are those of [`Self::balanced`] except for a
+    /// `_Float16` and a `__bf16`.
+    ///
+    /// gcc converts the right operand of that pair to the type of the left one and compares
+    /// there, so `(_Float16)0 < (__bf16)0x1p-30` is false, since the `__bf16` is zero as a half,
+    /// and `(__bf16)1 == (_Float16)0x1.004p0` is true, since the half is one as a `__bf16`. An
+    /// operand with the excess precision makes the comparison one at `float`, as in
+    /// [`Self::halves_meet`]. gcc 16.2.0 for x86-64 and i386 and gcc 13 for AArch64 agree.
+    pub fn compared(&mut self, lhs: ExprId, rhs: ExprId) -> Option<(ExprId, ExprId, TypeId)> {
+        let (left, right) = (self.tast[lhs].ty, self.tast[rhs].ty);
+        if self.halves_meet(left, right).is_some() && !self.is_excess(lhs) && !self.is_excess(rhs) {
+            let rhs = self.arithmetic(rhs, left);
+            return Some((lhs, rhs, left));
+        }
+        self.balanced(lhs, rhs)
     }
 
     /// Both operands converted to the type that the table of kencc gives, or [`None`] where the

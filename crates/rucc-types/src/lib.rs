@@ -1655,9 +1655,10 @@ mod tests {
     }
 
     #[test]
-    fn a_brain_float_is_not_promoted_and_does_not_meet_a_float16() {
+    fn a_brain_float_is_not_promoted_and_meets_a_float16_as_a_float16() {
         // gcc 15 for x86_64-unknown-freebsd15.1: `b + b` is a `__bf16`, `b + f` a `float`, `b + 1`
-        // a `__bf16`, and `b + h` for a `_Float16` is refused as invalid operands.
+        // a `__bf16`. gcc 13 to 16 give `b + h` and `h + b` for a `_Float16` the type `_Float16`
+        // (tamnd/rucc#4369).
         let mut types = Types::new();
         let linux = linux();
         let brain = types.float(FloatKind::BFloat16);
@@ -1668,8 +1669,8 @@ mod tests {
         assert_eq!(usual_arithmetic(&mut types, brain, brain, &linux), Some(brain));
         assert_eq!(usual_arithmetic(&mut types, brain, float, &linux), Some(float));
         assert_eq!(usual_arithmetic(&mut types, int, brain, &linux), Some(brain));
-        assert_eq!(usual_arithmetic(&mut types, brain, half, &linux), None);
-        assert_eq!(usual_arithmetic(&mut types, half, brain, &linux), None);
+        assert_eq!(usual_arithmetic(&mut types, brain, half, &linux), Some(half));
+        assert_eq!(usual_arithmetic(&mut types, half, brain, &linux), Some(half));
         assert_eq!(layout(&types, brain, &linux).map(|it| (it.size, it.align)), Ok((2, 2)));
     }
 

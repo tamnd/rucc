@@ -1877,7 +1877,7 @@ impl Checker<'_> {
             return self.lanewise_comparison(op, lhs, rhs, span);
         }
         if is_arithmetic(&self.types, left) && is_arithmetic(&self.types, right) {
-            let Some((left, right, _)) = self.conv().balanced(lhs, rhs) else {
+            let Some((left, right, _)) = self.conv().compared(lhs, rhs) else {
                 return self.mixed_decimal(span);
             };
             (lhs, rhs) = (left, right);
@@ -2093,8 +2093,11 @@ impl Checker<'_> {
                     return None;
                 };
                 // Done in `long double` under `__FLT_EVAL_METHOD__` 2, as the operator is, and
-                // rounded once to the type of the left side when it is stored.
-                let computation = self.conv().excess_type(computation).unwrap_or(computation);
+                // rounded once to the type of the left side when it is stored. A `_Float16` and a
+                // `__bf16` are done at the type they meet in, for the same reason.
+                let met = self.conv().halves_meet(target, source);
+                let computation = met
+                    .unwrap_or_else(|| self.conv().excess_type(computation).unwrap_or(computation));
                 let rhs = self.conv().to_type(rhs, computation);
                 Some((computation, rhs))
             }
