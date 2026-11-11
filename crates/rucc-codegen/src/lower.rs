@@ -2763,7 +2763,7 @@ impl<'a> Lowering<'a> {
                     {
                         return Err(self.unsupported(inst));
                     }
-                    if self.touches_x87(inst) {
+                    if self.touches_x87(inst) || self.asks_for_x87(inst) {
                         self.x87_assembly(inst)?;
                         continue;
                     }
@@ -3502,6 +3502,21 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         data.results().any(|value| self.x87_held(self.source[value].ty))
             || self.source[data.args].iter().any(|&arg| self.x87_held(self.source[arg].ty))
+    }
+
+    /// Whether an `asm` statement puts an operand on the x87 stack with `t` or `u`.
+    ///
+    /// A `float` or a `double` is in an xmm register on x86-64, so [`Self::touches_x87`] does not
+    /// see it, but the template still finds it on the stack. compiler-rt's `i386/fp_mode.c`, which
+    /// FreeBSD builds for amd64 too, raises the inexact exception with `fdivs %1` on a `float`
+    /// written `+t`.
+    fn asks_for_x87(&self, inst: Inst) -> bool {
+        let Extra::Asm(asm) = self.source[inst].extra else { return false };
+        let info = self.source[asm];
+        self.names
+            .resolve(info.constraints)
+            .split(',')
+            .any(|letter| matches!(letter.trim_start_matches(['=', '+', '&']), "t" | "u"))
     }
 
     /// Whether a value of that type is on the x87 stack while it is worked on and in a frame slot
@@ -8823,7 +8838,8 @@ impl<'a> Lowering<'a> {
         let mut depths: Vec<Option<usize>> = Vec::with_capacity(list.len());
         for (operand, letter) in list.iter().zip(&letters) {
             let value = operand.result.or(operand.value).ok_or_else(refused)?;
-            let stacked = !operand.memory && self.x87_held(self.source[value].ty);
+            let ty = self.source[value].ty;
+            let crossed = ty.is_scalar() && ty.is_float() && matches!(ty.bits(), 32 | 64);
             let depth = match operand.tied {
                 Some(output) => *depths.get(output).ok_or_else(refused)?,
                 None => match letter.trim_start_matches(['=', '+', '&']) {
@@ -8832,7 +8848,10 @@ impl<'a> Lowering<'a> {
                     _ => None,
                 },
             };
-            if stacked != depth.is_some() {
+            // A `float` or a `double` that is in an xmm register crosses to the stack and back
+            // through memory when the letter asks for the stack, and stays where it is otherwise.
+            let stacked = !operand.memory && self.x87_held(ty);
+            if stacked != depth.is_some() && !(depth.is_some() && !operand.memory && crossed) {
                 return Err(refused());
             }
             depths.push(depth);
@@ -8970,10 +8989,7 @@ impl<'a> Lowering<'a> {
 
         let span = self.source.span(inst);
         for value in inputs.iter().rev().flatten() {
-            let (fld, _, _) = x87_format(self.source[*value].ty);
-            let from = self.x87_slot(*value);
-            let from = self.through(from);
-            self.x87_at(fld, span, from);
+            self.x87_push(*value, span)?;
         }
         if mixed {
             let mut rest = Vec::with_capacity(count);
@@ -9009,10 +9025,7 @@ impl<'a> Lowering<'a> {
             self.out.build(block, opcode).at(span).symbol(symbol).finish();
         }
         for value in outputs.iter().flatten() {
-            let (_, fstp, _) = x87_format(self.source[*value].ty);
-            let into = self.x87_slot(*value);
-            let into = self.through(into);
-            self.x87_at(fstp, span, into);
+            self.x87_pop(*value, span);
         }
         // musl's `fmodl` leaves the divisor in `st(1)` under the remainder.
         for _ in left.iter().filter(|&&left| left) {
@@ -9022,6 +9035,52 @@ impl<'a> Lowering<'a> {
             self.out.build(block, opcode).at(span).symbol(symbol).finish();
         }
         Ok(())
+    }
+
+    /// An input of an `asm` statement, pushed on the x87 stack.
+    ///
+    /// A value the stack holds comes from its slot. A `float` or a `double` in an xmm register is
+    /// written to the crossing bytes and loaded from there, as [`Self::x87_across`] does.
+    fn x87_push(&mut self, value: Value, span: Span) -> Result<(), Unsupported> {
+        let ty = self.source[value].ty;
+        let (fld, _, _) = x87_format(ty);
+        if self.x87_held(ty) {
+            let from = self.x87_slot(value);
+            let from = self.through(from);
+            self.x87_at(fld, span, from);
+            return Ok(());
+        }
+        let reg = self.reg_of(value)?;
+        let across = self.x87_crossing();
+        let across = self.through(across);
+        let store = self.named(if ty.bits() == 32 { "movss_mr" } else { "movsd_mr" });
+        let sse = self.conv.sse_class;
+        let block = self.at.expect("a block is being filled");
+        self.out.build(block, store).at(span).uses(reg, sse).mem(across).finish();
+        self.x87_at(fld, span, across);
+        Ok(())
+    }
+
+    /// An output of an `asm` statement, popped from the x87 stack. The reverse of
+    /// [`Self::x87_push`]: a `float` or a `double` goes through the crossing bytes to a new xmm
+    /// register, as [`Self::x87_back`] does.
+    fn x87_pop(&mut self, value: Value, span: Span) {
+        let ty = self.source[value].ty;
+        let (_, fstp, _) = x87_format(ty);
+        if self.x87_held(ty) {
+            let into = self.x87_slot(value);
+            let into = self.through(into);
+            self.x87_at(fstp, span, into);
+            return;
+        }
+        let across = self.x87_crossing();
+        let across = self.through(across);
+        self.x87_at(fstp, span, across);
+        let reg = self.new_reg(value);
+        let load = self.named(if ty.bits() == 32 { "movss_rm" } else { "movsd_rm" });
+        let sse = self.conv.sse_class;
+        let block = self.at.expect("a block is being filled");
+        self.out.build(block, load).at(span).def(reg, sse).mem(across).finish();
     }
 
     /// An `asm` statement on AArch64 or RISC-V, which is kept as text whatever is in it.
