@@ -1234,9 +1234,10 @@ pub enum Conversion {
     /// A `float` or `double` value that was computed in `long double`, standing as the type the
     /// expression has.
     ///
-    /// This is how `__FLT_EVAL_METHOD__` 2 is written: the operation underneath is in `long
-    /// double` and this node gives the expression its own type back, so `sizeof`, `_Generic`
-    /// and `typeof` see a `float` where the program wrote one. An operator, a cast, an
+    /// This is how `__FLT_EVAL_METHOD__` 2 is written, and the `float` that gcc evaluates a
+    /// `_Float16` and a `__bf16` in: the operation underneath is in the wider type and this node
+    /// gives the expression its own type back, so `sizeof`, `_Generic` and `typeof` see a
+    /// `float` or a `_Float16` where the program wrote one. An operator, a cast, an
     /// assignment, an argument and a `return` look through it and take the wide value, which is
     /// what keeps the excess precision until one of them rounds it to the type it wants. Read
     /// as a value on its own, it is the arithmetic conversion to its type.

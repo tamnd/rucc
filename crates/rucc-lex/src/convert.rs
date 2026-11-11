@@ -458,6 +458,7 @@ fn zero_float(cx: &Convert<'_>) -> FloatConstant {
         imaginary: false,
         remarks: Remarks::NONE,
         wide: None,
+        single: None,
     }
 }
 

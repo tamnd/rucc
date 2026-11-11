@@ -201,6 +201,10 @@ pub struct Context<'a> {
     /// precision of its own type and only the operations are evaluated wider, which is gcc's
     /// `-fexcess-precision=fast`.
     pub excess_constants: bool,
+    /// Whether an operation on `_Float16` or `__bf16` is evaluated in a wider type, which is
+    /// gcc's default. `-fexcess-precision=16` turns it off, and then each operation is rounded to
+    /// its own type. See [`Conv::excess_type`].
+    pub excess_halves: bool,
 }
 
 impl<'a> Context<'a> {
@@ -235,6 +239,7 @@ impl<'a> Context<'a> {
             landing_pads: false,
             rtd: false,
             excess_constants: false,
+            excess_halves: true,
         }
     }
 
@@ -805,8 +810,8 @@ impl<'a> Checker<'a> {
         // context, so taking it does not borrow the checker the two mutable ones are taken from.
         let target = self.cx.target;
         let names = self.cx.names;
-        let (trapping_math, excess_constants, kencc) =
-            (self.cx.trapping_math, self.cx.excess_constants, self.cx.kencc);
+        let (trapping_math, excess_constants, excess_halves, kencc) =
+            (self.cx.trapping_math, self.cx.excess_constants, self.cx.excess_halves, self.cx.kencc);
         Conv {
             tast: &mut self.tast,
             types: &mut self.types,
@@ -814,6 +819,7 @@ impl<'a> Checker<'a> {
             names,
             trapping_math,
             excess_constants,
+            excess_halves,
             kencc,
         }
     }

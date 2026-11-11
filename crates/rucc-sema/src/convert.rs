@@ -74,6 +74,9 @@ pub struct Conv<'a> {
     /// `float` and `double` in it, which is `-fexcess-precision=standard`. See
     /// [`Conv::evaluated`] for what reads it.
     pub excess_constants: bool,
+    /// Whether an operation on `_Float16` or `__bf16` is evaluated in a wider type, which is off
+    /// only under `-fexcess-precision=16`. See [`Conv::excess_type`].
+    pub excess_halves: bool,
     /// Whether the unit is in the kencc dialect, which is `-fkencc`. The promotions then keep
     /// the sign, and the usual arithmetic conversions are the table of kencc.
     pub kencc: bool,
@@ -249,8 +252,11 @@ impl Conv<'_> {
         )?;
         // Under `-fexcess-precision=fast` gcc folds an operation on two constants in their own
         // type before anything is evaluated wider, so `0.1 * 3` is the `double` product there.
-        let operation =
-            operation && (self.excess_constants || !(self.folded(lhs) && self.folded(rhs)));
+        // A half is the exception, since gcc evaluates it in `float` under `fast` as well.
+        let operation = operation
+            && (self.excess_constants
+                || self.is_half(common)
+                || !(self.folded(lhs) && self.folded(rhs)));
         let met = self.halves_meet(self.tast[lhs].ty, self.tast[rhs].ty);
         let wide = match (met, self.excess_type(common)) {
             (Some(wide), _) => wide,
@@ -264,9 +270,8 @@ impl Conv<'_> {
     /// The type a `_Float16` and a `__bf16` meet in, and [`None`] for every other pair.
     ///
     /// Their common type is `_Float16`, but neither format holds the other, so gcc does not
-    /// convert the `__bf16` to a half first. It computes at `float`, which holds both, and the
-    /// result stands as a `_Float16`. That is `float` under `__FLT_EVAL_METHOD__` 2 as well. It
-    /// is true of an arithmetic operator, a compound assignment and a conditional, and of a
+    /// convert the `__bf16` to a half first. It computes at [`Self::half_type`], which holds
+    /// both, and the result stands as a `_Float16`. It is true of an arithmetic operator, a compound assignment and a conditional, and of a
     /// comparison where an operand has the excess precision. [`Self::compared`] gives the other
     /// comparisons. gcc 16.2.0 for x86-64 and i386 and gcc 13 for AArch64 give
     /// `(_Float16)0 * (__bf16)65536` as zero, and `(__bf16)1 + (_Float16)0x1.1p-8` stored back
@@ -278,9 +283,29 @@ impl Conv<'_> {
         };
         match (kind(self.types, a)?, kind(self.types, b)?) {
             (FloatKind::Float16, FloatKind::BFloat16)
-            | (FloatKind::BFloat16, FloatKind::Float16) => Some(self.types.float(FloatKind::Float)),
+            | (FloatKind::BFloat16, FloatKind::Float16) => Some(self.half_type()),
             _ => None,
         }
+    }
+
+    /// The type gcc evaluates an operation on `_Float16` or `__bf16` in.
+    ///
+    /// That is `float`, which holds every value of both, on every target rucc has: gcc for
+    /// x86-64, i386 and AArch64 writes `x * y + z` on three halves as `(_Float16) ((float) x *
+    /// (float) y + (float) z)`. The exception is `__FLT_EVAL_METHOD__` 2 under
+    /// `-fexcess-precision=standard`, where it is `long double`, as for `float` (gcc 16.2.0 with
+    /// `-m32 -std=c11`).
+    pub fn half_type(&mut self) -> TypeId {
+        let long = self.excess_constants && self.target.excess_precision();
+        self.types.float(if long { FloatKind::LongDouble } else { FloatKind::Float })
+    }
+
+    /// Whether `ty` is `_Float16` or `__bf16`.
+    fn is_half(&self, ty: TypeId) -> bool {
+        matches!(
+            self.types.kind(self.types.canonical(ty)),
+            TypeKind::Float(FloatKind::Float16 | FloatKind::BFloat16)
+        )
     }
 
     /// Whether `expr` is made of constants and the arithmetic on them only, which is what gcc
@@ -302,14 +327,18 @@ impl Conv<'_> {
         }
     }
 
-    /// The type an operation on a value of `ty` is done in under `__FLT_EVAL_METHOD__` 2,
-    /// where that is wider than `ty`.
+    /// The type an operation on a value of `ty` is done in, where that is wider than `ty`.
     ///
-    /// That is `long double` for `float` and `double` and for `_Float32`, `_Float64` and
-    /// `_Float32x`, which TS 18661-3 puts under the same rule, and [`None`] for every other type
-    /// and on every target that does its arithmetic in the type of the operands. A complex type
-    /// is computed in its own type. See [`TargetInfo::excess_precision`].
+    /// Under `__FLT_EVAL_METHOD__` 2 that is `long double` for `float` and `double` and for
+    /// `_Float32`, `_Float64` and `_Float32x`, which TS 18661-3 puts under the same rule. For
+    /// `_Float16` and `__bf16` it is [`Self::half_type`] on every target, unless
+    /// `-fexcess-precision=16` asked for each operation in its own type. It is [`None`] for every
+    /// other type. A complex type is computed in its own type. See
+    /// [`TargetInfo::excess_precision`].
     pub fn excess_type(&mut self, ty: TypeId) -> Option<TypeId> {
+        if self.is_half(ty) {
+            return self.excess_halves.then(|| self.half_type());
+        }
         if !self.target.excess_precision() {
             return None;
         }
@@ -325,13 +354,13 @@ impl Conv<'_> {
         }
     }
 
-    /// Whether an expression is a value computed in `long double` that stands as a narrower
-    /// type. See [`Conversion::Excess`].
+    /// Whether an expression is a value computed in a wider type that stands as a narrower
+    /// type, as [`Self::excess_type`] gives. See [`Conversion::Excess`].
     pub fn is_excess(&self, expr: ExprId) -> bool {
         matches!(self.tast[expr].kind, ExprKind::Convert { kind: Conversion::Excess, .. })
     }
 
-    /// The wide value under a value computed in `long double`, and any other expression as it is.
+    /// The wide value under a value computed in a wider type, and any other expression as it is.
     ///
     /// This is what an operator, a cast, an assignment, an argument and a `return` take, so
     /// that the excess precision lasts until a conversion to a type removes it.
@@ -343,7 +372,7 @@ impl Conv<'_> {
     }
 
     /// An operation's result standing as the type the program gives it, where the operation was
-    /// done in a wider type for `__FLT_EVAL_METHOD__` 2, and the result as it is where not.
+    /// done in a wider type, as [`Self::excess_type`] gives, and the result as it is where not.
     pub fn excess(&mut self, node: ExprId, ty: TypeId) -> ExprId {
         let from = self.tast[node].ty;
         if from == ty || self.types.canonical(from) == self.types.canonical(ty) {
@@ -679,6 +708,7 @@ mod tests {
                 names: &self.names,
                 trapping_math: true,
                 excess_constants: false,
+                excess_halves: true,
                 kencc: false,
             }
         }

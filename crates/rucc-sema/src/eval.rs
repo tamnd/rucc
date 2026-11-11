@@ -2067,6 +2067,7 @@ mod tests {
                 imaginary: false,
                 remarks: Remarks::default(),
                 wide: None,
+                single: None,
             };
             let id = self.ast.add_float(constant);
             self.expr(ast::Expr::Float(id))
@@ -2081,6 +2082,7 @@ mod tests {
                 imaginary: true,
                 remarks: Remarks::default(),
                 wide: None,
+                single: None,
             };
             let id = self.ast.add_float(constant);
             self.expr(ast::Expr::Float(id))

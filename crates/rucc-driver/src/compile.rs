@@ -432,6 +432,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 landing_pads: opts.control.branch(),
                 rtd: opts.rtd,
                 excess_constants: opts.excess_constants.unwrap_or(!opts.gnu_extensions),
+                excess_halves: opts.excess_halves,
             },
         );
         checker.set_incomplete_lines(&incomplete_lines);
@@ -13220,6 +13221,75 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             let wide = body("wide");
             assert!(wide.contains("%6 = fpext.f32 %2"), "{triple}: {wide}");
             assert!(wide.contains("fcmp olt %5, %6"), "{triple}: {wide}");
+        }
+    }
+
+    /// tamnd/rucc#4416. gcc evaluates a chain of `_Float16` or `__bf16` operations in `float`
+    /// and rounds once, where the value is stored, cast or returned. It is `long double` on i386
+    /// under `-fexcess-precision=standard`, and each operation is rounded to its own type under
+    /// `-fexcess-precision=16`. gcc 16.2.0 for x86-64 and i386 (`-m32` and `-m32 -std=c11`, on
+    /// the x87 stack) and
+    /// gcc 14 for AArch64 accept the first source, and gcc 16.2.0 with `-fexcess-precision=16`
+    /// accepts the second. Before, rucc rounded each operation, so the product of the first
+    /// assertion was a half and the sum was zero.
+    #[test]
+    fn a_chain_of_half_operations_is_rounded_once() {
+        let wider = "typedef _Float16 H;\n\
+             _Static_assert((H)((H)0x1.004p0 * (H)0x1.004p0 + (H)-0x1.008p0) == 0x1p-20f16, \"chain\");\n\
+             _Static_assert((H)(1.1f16 * 3.0f16) == 0x1.a68p1f16, \"constant\");\n\
+             _Static_assert(1.1f16 * 3.0f16 != 0x1.a68p1f16, \"kept\");\n\
+             _Static_assert(sizeof(1.1f16 * 3.0f16) == 2, \"size\");\n\
+             _Static_assert(_Generic(1.1f16 * 3.0f16, H: 1, default: 0), \"type\");\n";
+        let own = "typedef _Float16 H;\n\
+             _Static_assert((H)((H)0x1.004p0 * (H)0x1.004p0 + (H)-0x1.008p0) == 0, \"chain\");\n\
+             _Static_assert((H)(1.1f16 * 3.0f16) == 0x1.a64p1f16, \"constant\");\n";
+        let code = "_Float16 fma3(_Float16 x, _Float16 y, _Float16 z) { return x * y + z; }\n\
+             float wide(_Float16 x, _Float16 y) { return x * y; }\n\
+             __bf16 brain(__bf16 x, __bf16 y, __bf16 z) { return x * y + z; }\n";
+        // The triple, the excess precision of `-fexcess-precision=`, and the type of the chain.
+        let cases = [
+            ("x86_64-unknown-freebsd", None, "f32"),
+            ("aarch64-unknown-freebsd", None, "f32"),
+            ("i686-unknown-linux-gnu", None, "f32"),
+            ("i486--netbsdelf", None, "f32"),
+            ("i486--netbsdelf", Some("standard"), "f80"),
+            ("x86_64-unknown-freebsd", Some("16"), "f16"),
+            ("i486--netbsdelf", Some("16"), "f16"),
+        ];
+        for (triple, how, chain) in cases {
+            let mut opts = options();
+            opts.target = triple.parse::<Triple>().unwrap();
+            // The BSD i386 units do `float` arithmetic on the x87 stack, as the driver sets it.
+            opts.x87_floats = triple.starts_with("i486");
+            opts.excess_constants = how.map(|how| how != "fast");
+            opts.excess_halves = how != Some("16");
+            opts.emit = EmitKind::Object;
+            let source = if how == Some("16") { own } else { wider };
+            assert_eq!(run(&opts, source).messages, Vec::<String>::new(), "{triple} {how:?}");
+            opts.emit = EmitKind::Ir;
+            let result = run(&opts, code);
+            assert_eq!(result.messages, Vec::<String>::new(), "{triple} {how:?}");
+            let text = result.text();
+            let body = |name: &str| {
+                let start = text.find(&format!("func @{name}(")).expect(name);
+                let end = text[start..].find("\n}").expect(name);
+                text[start..start + end].to_owned()
+            };
+            let (fma3, wide, brain) = (body("fma3"), body("wide"), body("brain"));
+            // Each operation is on the half itself, which the back end rounds one by one.
+            if chain == "f16" {
+                assert!(!fma3.contains("fpext"), "{triple}: {fma3}");
+                assert!(!brain.contains("fpext"), "{triple}: {brain}");
+                continue;
+            }
+            for (name, f, trunc) in
+                [("fma3", &fma3, "fptrunc.f16"), ("brain", &brain, "fptrunc.bf16")]
+            {
+                assert_eq!(f.matches(trunc).count(), 1, "{triple} {how:?} {name}: {f}");
+                assert!(f.contains(&format!("fpext.{chain}")), "{triple} {how:?} {name}: {f}");
+            }
+            assert!(!wide.contains("fptrunc.f16"), "{triple} {how:?}: {wide}");
+            assert_eq!(fma3.contains("f80"), chain == "f80", "{triple} {how:?}: {fma3}");
         }
     }
 
