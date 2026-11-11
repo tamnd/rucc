@@ -3989,7 +3989,8 @@ impl Reader {
     /// `.type name,@function` and the other spellings of the same thing.
     ///
     /// gas also takes the name and the type with only a space between them, `.type foo STT_FUNC`,
-    /// which is how the kernel's crypto code copied from OpenSSL writes it.
+    /// which is how the kernel's crypto code copied from OpenSSL writes it. It takes `#` before the
+    /// type as well as `@` and `%`, which is how FreeBSD's arm64 `locore.S` writes it.
     fn type_directive(&mut self, args: &[String]) -> Result<(), Trouble> {
         let spaced: Vec<String>;
         let args = match args {
@@ -4000,7 +4001,7 @@ impl Reader {
             _ => args,
         };
         let [name, what] = self.two(args, ".type")?;
-        let what = unquoted(what.trim().trim_start_matches(['@', '%']));
+        let what = unquoted(what.trim().trim_start_matches(['@', '%', '#']));
         let sort = match what.trim_start_matches("STT_").to_ascii_lowercase().as_str() {
             "func" | "function" => Sort::Func,
             "object" | "gnu_unique_object" => Sort::Object,
@@ -6855,7 +6856,7 @@ fn aarch64_dwarf(text: &str) -> Option<u16> {
     let number = number.parse::<u16>().ok().filter(|&number| number < 32)?;
     match first {
         "x" | "w" if number < 31 => Some(number),
-        "v" | "q" | "d" | "s" => Some(64 + number),
+        "v" | "q" | "d" | "s" | "h" | "b" => Some(64 + number),
         _ => None,
     }
 }
@@ -10506,6 +10507,24 @@ nop
         assert_eq!(name(&out, "f").binding, Binding::Local);
         let named = out.parts.iter().flat_map(|part| &part.relocs).filter(|r| r.symbol == "f");
         assert_eq!(named.count(), 4);
+    }
+
+    #[test]
+    fn a_type_after_a_hash_is_read() {
+        let out = aarch64(
+            ".text\n.globl f\n.type f, #function\nf:\n\tret\n.data\n.type d, #object\nd: .quad 0\n",
+        );
+        assert_eq!(name(&out, "f").sort, Sort::Func);
+        assert_eq!(name(&out, "d").sort, Sort::Object);
+    }
+
+    /// A frame rule may name a vector register by any of its views. gas takes `b8` as well as
+    /// `d8`, and OpenZFS's BLAKE3 for arm64 writes it that way.
+    #[test]
+    fn every_view_of_a_vector_register_is_its_dwarf_number() {
+        for view in ["v8", "q8", "d8", "s8", "h8", "b8"] {
+            assert_eq!(aarch64_dwarf(view), Some(72), "{view}");
+        }
     }
 
     #[test]
