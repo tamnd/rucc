@@ -547,6 +547,26 @@ fn riscv_passes_what_is_past_a_dots_in_the_integer_registers() {
 }
 
 #[test]
+fn riscv_starts_two_registers_past_a_dots_at_an_even_one() {
+    let wide = Arg::Scalar(int(16));
+    let quad = Arg::Scalar(float(Format::Quad, 16));
+    let one = Arg::Scalar(int(4));
+    // Named, an `__int128` after an `int` is a1 and a2.
+    let mut call = riscv();
+    assert_eq!(call.argument(&one), Pass::Direct);
+    assert_eq!(call.argument(&wide), Pass::Direct);
+    assert_eq!(call.integer_left(), 5);
+    // Past the `...` it is a2 and a3 and a1 is left empty, and a `long double` is the same and
+    // is the value itself, as a named one is, rather than its bits.
+    for arg in [&wide, &quad] {
+        let mut call = RISCV_LP64D.call().variadic();
+        assert_eq!(call.argument(&one), Pass::Direct);
+        assert_eq!(call.variadic_argument(arg), Pass::Direct);
+        assert_eq!(call.integer_left(), 4);
+    }
+}
+
+#[test]
 fn windows_arm64_passes_a_large_homogeneous_aggregate_by_reference_past_a_dots() {
     let four = pieces(&[float(Format::Double, 8); 4]);
     let hfa = Arg::Aggregate(record(&four));

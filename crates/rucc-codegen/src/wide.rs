@@ -251,8 +251,11 @@ fn halves_at(func: &mut Func, names: &mut Interner, conv: &CallRegs, width: Widt
     {
         return false;
     }
-    let Some(arriving) = plan(func.signature(), conv, width) else { return false };
-    if !func.signatures().all(|signature| plan(signature, conv, width).is_some()) {
+    let Some(arriving) = plan(func.signature(), named(func.signature()), conv, width) else {
+        return false;
+    };
+    if !func.signatures().all(|signature| plan(signature, named(signature), conv, width).is_some())
+    {
         return false;
     }
 
@@ -471,10 +474,11 @@ fn can_split(
     // one run it does, because a float past the `...` goes in both files and one before it does
     // not, and on Apple's AArch64 it does too, because everything past the `...` goes in memory.
     if matches!(data.opcode, Opcode::Call | Opcode::CallIndirect) {
-        let Some((site, variadic)) = site(func, inst) else { return false };
+        let Some((site, variadic, named)) = site(func, inst) else { return false };
         let Some(conv) = conv.under(site.convention) else { return false };
         let in_memory = conv.abi.variadic == Variadic::AlwaysMemory;
-        if variadic && (conv.shared_positions || in_memory || plan(&site, conv, width).is_none()) {
+        let planned = plan(&site, named, conv, width);
+        if variadic && (conv.shared_positions || in_memory || planned.is_none()) {
             return false;
         }
     }
@@ -579,11 +583,16 @@ enum Slot {
 /// which is a sequence of its own with two in it on this convention, and a signature wanting more
 /// than it has is refused by name in [`crate::lower`] already.
 ///
+/// `named` is how many of the parameters are in front of the `...`, which matters on RISC-V. There
+/// a wide value past the `...` starts at an even register as it does on AAPCS64, and leaves a7
+/// empty when that is the one left. A named one starts at the next register, and when that is a7
+/// its low half goes there and its high half in the first word of the argument area.
+///
 /// `conv` is the convention of the function being split, and the signature is laid out under the
 /// convention it names itself, found through it: a function of one convention calls functions of
 /// the other, and each call is laid out the way its callee reads it. A convention the platform
 /// does not have is no layout at all, and the function is left alone.
-fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot>> {
+fn plan(signature: &Signature, named: usize, conv: &CallRegs, width: Width) -> Option<Vec<Slot>> {
     let conv = conv.under(signature.convention)?;
     let word = Param::new(width.half());
     let step = width.half / 8;
@@ -596,27 +605,42 @@ fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot
             continue;
         }
         let scalars = conv.abi.scalars;
+        // AAPCS64 starts the pair at an even register, and RISC-V does for one past the `...`.
+        let even = scalars.wide_integer_starts_even
+            || index >= named && scalars.unnamed_wide_integer_starts_even;
         // i386 `fastcall` has registers for an integer of one word and never a pair of them, so
         // a wide one goes straight to the argument area and spends what was left on the way.
         if !scalars.wide_integer_in_memory {
             let mut ahead = places.clone();
-            // AAPCS64 starts the pair at an even register, and a filler takes the odd one it
-            // skips.
-            let skipped = (scalars.wide_integer_starts_even && ahead.integers() % 2 == 1)
-                .then(|| ahead.integer(step));
-            if let (low @ Where::Reg(_), high @ Where::Reg(_)) =
-                (ahead.integer(step), ahead.integer(step))
-            {
-                places = ahead;
-                if let Some(at) = skipped {
-                    meant.push((Slot::Filler(word.ty), word, at));
+            // A filler takes the odd register an even start skips.
+            let skipped = (even && ahead.integers() % 2 == 1).then(|| ahead.integer(step));
+            match (ahead.integer(step), ahead.integer(step)) {
+                (low @ Where::Reg(_), high @ Where::Reg(_)) => {
+                    places = ahead;
+                    if let Some(at) = skipped {
+                        meant.push((Slot::Filler(word.ty), word, at));
+                    }
+                    meant.push((Slot::Low(index), word, low));
+                    meant.push((Slot::High(index), word, high));
+                    continue;
                 }
-                meant.push((Slot::Low(index), word, low));
-                meant.push((Slot::High(index), word, high));
-                continue;
+                // RISC-V puts the low half in the one register left and the high half in the
+                // first word of the argument area.
+                (low @ Where::Reg(_), high @ Where::Stack(_))
+                    if scalars.wide_integer_splits && skipped.is_none() =>
+                {
+                    places = ahead;
+                    meant.push((Slot::Low(index), word, low));
+                    meant.push((Slot::High(index), word, high));
+                    moved = true;
+                    continue;
+                }
+                _ => {}
             }
         }
-        if scalars.wide_integer_drains || scalars.wide_integer_in_memory {
+        // A pair that starts at an even register and did not fit leaves the odd one it skipped
+        // empty, which on RISC-V is a7.
+        if scalars.wide_integer_drains || scalars.wide_integer_in_memory || even {
             places.drain_integers();
         }
         let Where::Stack(at) = places.scalar(width.bytes()) else { return None };
@@ -694,6 +718,12 @@ fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot
         slots.push(slot);
     }
     Some(slots)
+}
+
+/// How many parameters a signature names, which is all of them, since the ones past the `...` of
+/// a call are added to its list by [`site`] and are not in a signature.
+fn named(signature: &Signature) -> usize {
+    signature.params.len()
 }
 
 /// Whether every slot is in the argument area, each further up it than the one before.
@@ -1942,11 +1972,11 @@ fn call(
     let data = func[inst];
     let Extra::Call(info) = data.extra else { return };
     let info = func[info];
-    let Some((whole, variadic)) = site(func, inst) else { return };
+    let Some((whole, variadic, named)) = site(func, inst) else { return };
     let old = func[data.args].to_vec();
     // An indirect call's first operand is the address it calls, and the arguments come after it.
     let skip = usize::from(data.opcode == Opcode::CallIndirect);
-    let Some(slots) = plan(&whole, conv, width) else { return };
+    let Some(slots) = plan(&whole, named, conv, width) else { return };
     let mut args = spread(&old[..skip], halves);
     for slot in slots.iter().copied() {
         let value = match slot {
@@ -1997,7 +2027,7 @@ fn call(
 /// one thing the callee is told is how many vector registers were used, which is a count over all
 /// of them. The list comes back not variadic so [`plan`] lays it out as a whole, and the flag is
 /// handed back beside it for the signature the call is made against.
-fn site(func: &Func, inst: Inst) -> Option<(Signature, bool)> {
+fn site(func: &Func, inst: Inst) -> Option<(Signature, bool, usize)> {
     let data = func[inst];
     let Extra::Call(info) = data.extra else { return None };
     let info = func[info];
@@ -2015,7 +2045,7 @@ fn site(func: &Func, inst: Inst) -> Option<(Signature, bool)> {
     }
     let variadic = whole.variadic;
     whole.variadic = false;
-    Some((whole, variadic))
+    Some((whole, variadic, named - skip))
 }
 
 /// An assembly statement's constraints and template once each operand written `A` is two.
@@ -3129,6 +3159,63 @@ mod tests {
         assert_eq!(types(made), vec![word; 8], "five words, a filler and the two halves");
         assert!(func[func[info].varargs].is_empty(), "every argument is named now");
         assert_eq!(func[func[call].args].len(), 8, "one argument for each parameter");
+    }
+
+    /// On RISC-V a wide argument past the `...` starts at an even register, so the one after a
+    /// single `int` is a2 and a3, and a filler takes a1. gcc does the same, and a callee's
+    /// `va_arg` reads the value from the even word.
+    #[test]
+    fn on_risc_v_a_wide_argument_past_the_dots_starts_at_an_even_register() {
+        use rucc_target::riscv64::LP64D;
+
+        let mut names = Interner::new();
+        let word = Type::int(HALF);
+        let (mut func, entry, _) = shell(&mut names, &[], &[]);
+        let callee = names.intern("g");
+        let signature = Signature { variadic: true, ..Signature::new().with_params(&[word]) };
+        let signature = func.add_signature(signature);
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(word, 1);
+        let big = build.iconst(wide(), 4);
+        build.call_varargs(callee, signature, &[one, big], &[Abi::Plain]);
+        build.ret(&[]);
+
+        assert!(halves(&mut func, &mut names, &LP64D), "there is a width to split");
+        let call = func.insts(entry).find(|&inst| func[inst].opcode == Opcode::Call);
+        let call = call.expect("the call is still there");
+        let passed = func[func[call].args].to_vec();
+        assert_eq!(passed.len(), 4, "the word, a filler and the two halves");
+        assert_eq!(passed[0], one);
+        let constant = |value: Value| {
+            let Def::Result { inst, .. } = func[value].def else { return None };
+            let Extra::Imm(imm) = func[inst].extra else { return None };
+            Some(func[imm].unsigned())
+        };
+        assert_eq!(constant(passed[1]), Some(0), "a1 is left empty");
+        assert_eq!(constant(passed[2]), Some(4), "the low half is in a2");
+    }
+
+    /// A named one is not aligned, and with only a7 left its low half goes there and its high half
+    /// in the first word of the argument area.
+    #[test]
+    fn on_risc_v_a_wide_parameter_with_one_register_left_is_split() {
+        use rucc_target::riscv64::LP64D;
+
+        let mut names = Interner::new();
+        let word = Type::int(HALF);
+        let mut params = vec![word; 7];
+        params.push(wide());
+        let (mut func, entry, values) = shell(&mut names, &params, &[word]);
+        let mut build = Builder::new(&mut func, entry);
+        let low = build.unary(Opcode::Trunc, values[7], word);
+        build.ret(&[low]);
+
+        assert!(halves(&mut func, &mut names, &LP64D), "there is a width to split");
+        assert_eq!(types(func.signature()), vec![word; 9], "seven, and the two halves");
+        let ret = func.insts(entry).last().expect("the block ends in a return");
+        let read = func[func[ret].args][0];
+        let at = func[entry].params.iter().position(|&value| value == read);
+        assert_eq!(at, Some(7), "the low half is in a7");
     }
 
     /// The same call on a convention that counts both files as one run is left alone, because

@@ -194,6 +194,21 @@ pub struct Scalars {
     /// registers it could not use are not given to the arguments after it. False on SysV AMD64,
     /// where they are.
     pub wide_integer_drains: bool,
+    /// Whether an integer wider than one register that finds one register left puts its low half
+    /// in that register and its high half in the argument area.
+    ///
+    /// True on RISC-V LP64D, so an `__int128` after seven `long`s is in a7 and in the first word of
+    /// the argument area. False everywhere else, where such a value goes in the argument area whole.
+    pub wide_integer_splits: bool,
+    /// Whether an integer wider than one register that is past the `...` starts at an even one.
+    ///
+    /// [`Scalars::wide_integer_starts_even`] asks it of every such integer, and this of the ones a
+    /// variadic call does not name. True on RISC-V LP64D, which puts an unnamed argument aligned
+    /// to twice a register in a pair that starts at an even register, so `f(1, (__int128)x)` to
+    /// `int f(int, ...)` has `x` in a2 and a3 and a1 is left empty. When a7 is the one left, it
+    /// stays empty and the value goes in the argument area. A named one is not aligned and goes
+    /// in a1 and a2.
+    pub unnamed_wide_integer_starts_even: bool,
     /// Whether a scalar of a size no register holds travels as the address of a copy the caller
     /// made, the way an aggregate of that size does.
     ///
