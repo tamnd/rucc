@@ -956,6 +956,20 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         }
         ("sfence.w.inval", []) => out.words.push(0x1800_0073),
         ("sfence.inval.ir", []) => out.words.push(0x1810_0073),
+        // Zicbom and Zicboz: write back, throw away or zero the cache block an address is in.
+        // They take a base with no displacement. FreeBSD's riscv cbo.c writes the first three.
+        (
+            "cbo.inval" | "cbo.clean" | "cbo.flush" | "cbo.zero",
+            [Mem(Addr { base, offset: Offset::Imm(0) })],
+        ) => {
+            let which = match mnemonic {
+                "cbo.inval" => 0,
+                "cbo.clean" => 1,
+                "cbo.flush" => 2,
+                _ => 4,
+            };
+            out.words.push(i(0x0f, 2, ZERO, *base, which));
+        }
         // The hypervisor's loads and stores, which reach memory as the guest sees it. They take
         // a base with no displacement, as an atomic does.
         (_, [Gpr(rd), Mem(Addr { base, offset: Offset::Imm(0) })]) if hlv(mnemonic).is_some() => {
@@ -1396,6 +1410,10 @@ mod tests {
             ("hinval.vvma", &[Gpr(10), Gpr(11)], 0x26b5_0073),
             ("hinval.gvma", &[Gpr(10), Gpr(11)], 0x66b5_0073),
             ("csrrw", &[Gpr(6), Imm(0x600), Gpr(6)], 0x6003_1373),
+            ("cbo.clean", &[at(10, 0)], 0x0015_200f),
+            ("cbo.flush", &[at(11, 0)], 0x0025_a00f),
+            ("cbo.inval", &[at(12, 0)], 0x0006_200f),
+            ("cbo.zero", &[at(13, 0)], 0x0046_a00f),
         ];
         for &(mnemonic, values, word) in words {
             assert_eq!(one(mnemonic, values), word, "{mnemonic} {values:?}");
@@ -1406,6 +1424,7 @@ mod tests {
         assert!(encode("hsv.w", &[Gpr(10), at(11, 4)]).is_err());
         assert!(encode("sinval.vma", &[Gpr(10)]).is_err());
         assert!(encode("hinval.gvma", &[Gpr(10)]).is_err());
+        assert!(encode("cbo.flush", &[at(10, 8)]).is_err());
     }
 
     /// Zba, Zbb, Zbs and Zacas, `move`, and a register instruction written with a constant, with
