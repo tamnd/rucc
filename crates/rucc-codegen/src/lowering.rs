@@ -189,6 +189,13 @@ pub enum Step {
     /// every operation up here ends at a call because this machine has no instruction at the format
     /// at all. Running first means the step below never sees a quad.
     Quads,
+    /// What is left at the quad float format, as the pair of integers it travels in, on a machine
+    /// whose float registers are narrower than it.
+    ///
+    /// Below the quads, because what it is written about is a value that is only moved, and every
+    /// operation that computes with one is a call by then. The calls are among the moves, so the
+    /// routines take their operands in integer registers too.
+    Pairs,
     /// A float constant, a negation and the conversions, as the integer work spec 10.2 asks for.
     Floats,
     /// A `memcpy`, a `memset` or a `memmove`, as the moves it is or as the call it is too big for.
@@ -228,6 +235,7 @@ impl Step {
         Self::Halves,
         Self::Maths,
         Self::Quads,
+        Self::Pairs,
         Self::Floats,
         Self::Bulk,
         Self::Rounds,
@@ -256,6 +264,7 @@ impl Step {
             Self::Counts => "counts",
             Self::Maths => "maths",
             Self::Quads => "quads",
+            Self::Pairs => "pairs",
             Self::Floats => "floats",
             Self::Bulk => "bulk",
             Self::Rounds => "rounds",
@@ -285,6 +294,7 @@ impl Step {
             Self::Counts => "a bit count",
             Self::Maths => "a float remainder or a fused multiply add",
             Self::Quads => "the quad float format",
+            Self::Pairs => "a quad float that travels in integer registers",
             Self::Floats => "a float constant, a negation or a conversion",
             Self::Bulk => "a bulk copy or fill",
             Self::Rounds => "a stack allocation whose size is not a multiple of the alignment",
@@ -331,7 +341,7 @@ impl Step {
             Self::Bytes => &[Opcode::Bswap, Opcode::Bitreverse],
             Self::Counts => &[Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop],
             Self::Maths => &[Opcode::FRem, Opcode::Fma],
-            Self::Quads => &[],
+            Self::Quads | Self::Pairs => &[],
             Self::Floats => &[
                 Opcode::FConst,
                 Opcode::FNeg,
@@ -348,23 +358,23 @@ impl Step {
 
     /// Whether this step works on the whole function at once and says whether it rewrote it.
     ///
-    /// Three of them do. Each retypes every value of a width, so either the whole function can be
+    /// Four of them do. Each retypes every value of a width, so either the whole function can be
     /// rewritten or none of it can, and they answer with a boolean for that reason. A `false` from
     /// one covers two different things, a function with nothing at that width in it and a function
     /// holding something the step did not understand, and neither is an error: the second leaves
     /// the selector to refuse by naming the construct it had no rule for.
     ///
     /// Everything else here works instruction by instruction and has nothing to say at that scale,
-    /// which is why [`Did::untouched`] is only ever true for these three.
+    /// which is why [`Did::untouched`] is only ever true for these four.
     #[must_use]
     pub const fn whole_function(self) -> bool {
-        matches!(self, Self::Limbs | Self::Halves | Self::Widths)
+        matches!(self, Self::Limbs | Self::Halves | Self::Pairs | Self::Widths)
     }
 
     /// Runs this one step, answering whether it rewrote the function.
     ///
-    /// Only the three that [`Step::whole_function`] names ever answer `false`, because they are the
-    /// only three that know. The rest work instruction by instruction and are not asked.
+    /// Only the four that [`Step::whole_function`] names ever answer `false`, because they are the
+    /// only four that know. The rest work instruction by instruction and are not asked.
     ///
     /// `switching` is the level's goal, the shape `-Zswitch=` forced, whether a jump table may
     /// be written at all and whether the machine has a conditional move, `counts` is the bit
@@ -410,6 +420,7 @@ impl Step {
             Self::Counts => expand::counts(func, counts),
             Self::Maths => maths::calls(func, names, conv.abi, built.fused),
             Self::Quads => quad::calls(func, names, conv.abi, conv.word),
+            Self::Pairs => return quad::pairs(func, names, conv),
             Self::Floats => expand::floats(func, conv.word),
             Self::Bulk => {
                 expand::bulk(func, names, conv.word, conv.unaligned, goal, conv.copies_by_moving)
@@ -436,7 +447,7 @@ pub struct Did {
     pub before: usize,
     /// How many it had after.
     pub after: usize,
-    /// Whether it said it left the function exactly as it was, which only the three that
+    /// Whether it said it left the function exactly as it was, which only the four that
     /// [`Step::whole_function`] names ever say.
     pub untouched: bool,
 }
@@ -747,6 +758,8 @@ mod tests {
                 // an operation the quad step has no libgcc routine for.
                 "maths",
                 "quads",
+                // Below the quads, so every quad it sees is moved and none is computed with.
+                "pairs",
                 "floats",
                 "bulk",
                 "rounds",
@@ -1089,12 +1102,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_three_steps_that_retype_a_whole_function_ever_say_they_touched_nothing() {
+    fn only_the_four_steps_that_retype_a_whole_function_ever_say_they_touched_nothing() {
         // The rest work instruction by instruction and are never asked, so a `true` from one of
         // them is not evidence of anything and the dump does not print it.
         assert_eq!(
             Step::GROUP.iter().filter(|step| step.whole_function()).copied().collect::<Vec<_>>(),
-            [Step::Limbs, Step::Widths, Step::Halves]
+            [Step::Limbs, Step::Widths, Step::Halves, Step::Pairs]
         );
         for step in Step::GROUP {
             if step.whole_function() {

@@ -61,6 +61,13 @@ impl TargetInfo {
         abis::for_target(self.tuple).map(AbiDescription::call)
     }
 
+    /// Whether a quad float travels in a pair of integer registers, which on RISC-V is also what
+    /// makes `va_arg` read it as a pair of words. See [`AbiDescription::quad_in_integers`].
+    #[must_use]
+    pub fn quad_in_integers(&self) -> bool {
+        !self.simd128 && abis::for_target(self.tuple).is_some_and(AbiDescription::quad_in_integers)
+    }
+
     /// The same for a function of that convention, which is [`TargetInfo::call`] for the target's
     /// own and [`None`] for one this target does not have.
     ///

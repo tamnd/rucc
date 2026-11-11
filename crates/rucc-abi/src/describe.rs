@@ -95,6 +95,23 @@ impl AbiDescription {
         self.scalars.wide_is_by_reference && !matches!(size, 1 | 2 | 4 | 8)
     }
 
+    /// Whether a float wider than a floating point register travels in general purpose registers,
+    /// the way an integer of its size does.
+    ///
+    /// True on RISC-V LP64D, where a floating point register is eight bytes and a `long double` is
+    /// sixteen. Such a value goes in a pair of integer registers, or in one register and the
+    /// argument area when one register is left, and comes back in `a0` and `a1`. That is the
+    /// classifier's own rule for a float of that size, and this is the same rule asked with a width
+    /// and no C type, by a back end pass. False where a vector register holds sixteen bytes, on
+    /// i386, whose word is four bytes, and where the two banks are one run of positions.
+    #[must_use]
+    pub const fn quad_in_integers(&self) -> bool {
+        self.banks.float > 0
+            && !self.banks.shared
+            && self.banks.integer_width == 8
+            && self.banks.float_width < 16
+    }
+
     /// Whether a scalar of this size comes back through the address the caller passes.
     ///
     /// Everything [`AbiDescription::scalar_is_by_reference`] says yes to, and on i386 a sixteen
@@ -567,7 +584,9 @@ pub enum Short {
 
 #[cfg(test)]
 mod tests {
-    use crate::abis::{AAPCS64, I386_MINGW, I386_MSVC, I386_SYSV, SYSV_AMD64, WIN64};
+    use crate::abis::{
+        AAPCS64, DESCRIBED, I386_MINGW, I386_MSVC, I386_SYSV, RISCV_LP64D, SYSV_AMD64, WIN64,
+    };
     use crate::shape::Format;
 
     /// The two questions about a wide scalar are asked separately because the one ABI that says
@@ -607,6 +626,15 @@ mod tests {
             assert!(!abi.scalar_is_by_reference(16), "{}", abi.name);
             assert!(!abi.scalar_returns_by_reference(16), "{}", abi.name);
             assert_eq!(abi.wide_integer_returns_in(16), None, "{}", abi.name);
+        }
+    }
+
+    /// A `long double` goes in integer registers on RISC-V LP64D and nowhere else described.
+    #[test]
+    fn only_risc_v_passes_a_quad_in_integer_registers() {
+        for abi in DESCRIBED {
+            let expected = std::ptr::eq(*abi, &RISCV_LP64D);
+            assert_eq!(abi.quad_in_integers(), expected, "{}", abi.name);
         }
     }
 }
