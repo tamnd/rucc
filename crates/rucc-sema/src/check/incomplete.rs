@@ -98,9 +98,12 @@ impl Checker<'_> {
         kencc_signature(&self.types, ty, self.cx.target, &|id| marked.contains(&id))
     }
 
-    /// The signature of each name with external linkage, as `sign` in `6c/swt.c` gives it: the
-    /// signature of the type, or `SIGNINTERN` where that is zero. When a name is declared again,
-    /// the last declaration gives the type, as `s->type` does in kencc.
+    /// The signature of each name with external linkage, as `sign` in `6c/swt.c` gives it at the
+    /// end of the file: the signature of the type, or `SIGNINTERN` where that is zero. The type
+    /// is the one of the declaration at file scope. A name with no declaration at file scope has
+    /// no type at the end of the file in kencc, because the type of a declaration in a block goes
+    /// at the end of the block, and its signature is zero. `mk/run.c` has `extern int runerrs`
+    /// only in a function, and `6c -T` gives `runerrs` the signature zero.
     pub(in crate::check) fn kencc_signatures(&self) -> Map<String, u32> {
         let mut out = Map::default();
         for index in 0..self.tast.counts().decls {
@@ -109,9 +112,14 @@ impl Checker<'_> {
             if decl.linkage != Linkage::External {
                 continue;
             }
-            let value = match self.kencc_signature(decl.ty) {
-                0 => KENCC_SIGN_INTERN,
-                value => value,
+            let value = match self.scopes.lookup(name) {
+                Some(Binding::Decl(at_file_scope)) => {
+                    match self.kencc_signature(self.tast[at_file_scope].ty) {
+                        0 => KENCC_SIGN_INTERN,
+                        value => value,
+                    }
+                }
+                _ => 0,
             };
             out.insert(self.text(name).to_owned(), value);
         }

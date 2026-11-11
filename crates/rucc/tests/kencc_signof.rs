@@ -167,6 +167,12 @@ fn t_puts_the_signatures_in_the_object() {
     assert!(signature(&bytes, "use").is_some());
     assert!(signature(&bytes, "f").is_some());
     assert_eq!(signature(&bytes, "hidden"), None, "a static name has a signature");
+    // A name declared only in a block has no type at the end of the file in kencc.
+    let block = "int f(void) { extern int runerrs; extern void main(int, char**); main(0, 0); \
+                 return runerrs; }\n";
+    let bytes = object("t-block", &["-fkencc-signatures"], block);
+    assert_eq!(signature(&bytes, "runerrs"), Some(0));
+    assert_eq!(signature(&bytes, "main"), Some(0));
     let bytes = object("no-t", &[], source);
     assert_eq!(signature(&bytes, "x"), None, "an object with no -T has a signature");
 }
