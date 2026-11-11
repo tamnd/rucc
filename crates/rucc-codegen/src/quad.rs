@@ -57,11 +57,12 @@
 //! so by the time this pass looks there is nothing at that width left to refuse.
 
 use rucc_base::Interner;
+use rucc_base::hash::Map;
 use rucc_ir::{
     Abi, CallInfo, Extra, Flags, Float, FloatPred, Func, Imm, Inst, InstData, IntPred, MemInfo,
     MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
 };
-use rucc_target::AbiDescription;
+use rucc_target::{AbiDescription, CallRegs};
 
 use crate::capability;
 
@@ -110,6 +111,136 @@ pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription
             Opcode::FPToSI | Opcode::FPToUI => to_integer(func, names, abi, inst),
             _ => {}
         }
+    }
+}
+
+/// Every value of the format as the integer of its width, on a machine that passes one in integer
+/// registers, and then split the way that integer is.
+///
+/// RISC-V LP64D is such a machine. Its floating point registers are eight bytes, so a `long double`
+/// travels the way an `__int128` does: in a pair of general purpose registers, or in the last one
+/// and the argument area, and it comes back in `a0` and `a1`. After [`calls`] the only things left
+/// at this format are a value moved from one place to another, which is a load, a store, a branch
+/// argument, a `select`, a call's argument or result and a return, and the bits of the value are
+/// what each of those moves. So the value is given the integer type of its width and
+/// [`crate::wide`] splits it into the two words that are where the convention puts it. The calls
+/// [`calls`] wrote are among those calls, so `__addtf3` takes its operands in `a0` to `a3` and
+/// gives back its answer in `a0` and `a1`, which is the shape libgcc has.
+///
+/// A reading of the bits as an integer of the same width, or of an integer as one, is the value
+/// itself once the two types are the same.
+///
+/// Gives back whether it changed anything. The function is left exactly as it was on every other
+/// machine, when there is nothing at this format, when something at this format is an instruction
+/// other than a move, and when [`crate::wide`] turns the split down. Each of those leaves the
+/// refusal to the selector, as before this pass was written.
+pub fn pairs(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
+    if !conv.abi.quad_in_integers() || !func.values().any(|value| quad(func[value].ty)) {
+        return false;
+    }
+    let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    if !insts.iter().all(|&inst| moved(func, inst)) {
+        return false;
+    }
+    let before = func.clone();
+    let integer = Type::int(BITS);
+    for value in func.values().collect::<Vec<_>>() {
+        if quad(func[value].ty) {
+            func.retype(value, integer);
+        }
+    }
+    let mut same: Map<Value, Value> = Map::default();
+    for &inst in &insts {
+        if func[inst].opcode != Opcode::Bitcast {
+            continue;
+        }
+        let (Some(result), Some(&arg)) = (func[inst].first_result, func[func[inst].args].first())
+        else {
+            continue;
+        };
+        if func[result].ty == func[arg].ty {
+            same.insert(result, arg);
+            func.remove_inst(inst);
+        }
+    }
+    // A cast of a cast reads a value the map has already replaced, so each one is followed to the
+    // end of its chain.
+    let with = |mut value: Value| {
+        while let Some(&next) = same.get(&value) {
+            value = next;
+        }
+        value
+    };
+    if !same.is_empty() {
+        func.rewrite_all(with);
+    }
+    // A call gets a signature of its own rather than having the one it names changed, since a
+    // signature may be named by more than one call and the function's own is the first of them.
+    let own = as_integers(func.signature());
+    func.set_signature(own);
+    for inst in insts {
+        let Extra::Call(info) = func[inst].extra else { continue };
+        let call = func[info];
+        if !crosses(&func[call.signature]) {
+            continue;
+        }
+        let signature = func.add_signature(as_integers(&func[call.signature]));
+        func[inst].extra = Extra::Call(func.add_call(CallInfo { signature, ..call }));
+    }
+    if crate::wide::halves(func, names, conv) {
+        return true;
+    }
+    *func = before;
+    false
+}
+
+/// Whether an instruction only moves a value of the format, or does not touch one.
+///
+/// What it reads along its edges is asked about too, since a branch hands a value to a block.
+fn moved(func: &Func, inst: Inst) -> bool {
+    let data = func[inst];
+    let mut values = func[data.args].to_vec();
+    for edge in func.successors(inst) {
+        values.extend_from_slice(&func[edge.args]);
+    }
+    values.extend(data.results());
+    if !values.iter().any(|&value| quad(func[value].ty)) {
+        return true;
+    }
+    match data.opcode {
+        Opcode::Load
+        | Opcode::Store
+        | Opcode::Call
+        | Opcode::CallIndirect
+        | Opcode::Return
+        | Opcode::Jump
+        | Opcode::BrIf
+        | Opcode::Select => true,
+        // The bits of the value as an integer of its width, or the other way round, and nothing
+        // that changes how many bits there are.
+        Opcode::Bitcast => values.iter().all(|&value| {
+            let ty = func[value].ty;
+            quad(ty) || ty.is_int() && ty.is_scalar() && ty.bits() == BITS
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a signature takes or gives back a value of the format.
+fn crosses(signature: &Signature) -> bool {
+    signature.params.iter().chain(&signature.returns).any(|param| quad(param.ty))
+}
+
+/// The same signature with every value of the format as the integer of its width.
+fn as_integers(signature: &Signature) -> Signature {
+    let integer = |param: &Param| match quad(param.ty) {
+        true => Param { ty: Type::int(BITS), ..*param },
+        false => *param,
+    };
+    Signature {
+        params: signature.params.iter().map(integer).collect(),
+        returns: signature.returns.iter().map(integer).collect(),
+        ..signature.clone()
     }
 }
 
@@ -640,9 +771,9 @@ pub(crate) fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, extra: Extra,
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Builder, Module, Signature};
-    use rucc_target::{AbiDescription, Arch, Env, Os, TargetInfo, Triple, x86, x86_64};
+    use rucc_target::{AbiDescription, Arch, Env, Os, TargetInfo, Triple, riscv64, x86, x86_64};
 
-    use super::{BITS, Flags, Float, FloatPred, Func, Opcode, Type, Value, calls};
+    use super::{BITS, Flags, Float, FloatPred, Func, Opcode, Type, Value, calls, pairs};
 
     /// The convention nearly every test here runs under, which is the one that passes and returns
     /// a value of this format in a vector register.
@@ -1027,5 +1158,68 @@ mod tests {
         assert!(!text.contains("alloca"), "nothing goes through the frame: {text}");
         assert!(!text.contains("store"), "nothing is copied: {text}");
         assert_eq!(text.matches(" = call").count(), 1, "the call is the value: {text}");
+    }
+
+    /// A sum of two quads on RISC-V, as the routine over four words giving back two, with no value
+    /// of the format left anywhere in the function.
+    #[test]
+    fn on_risc_v_a_quad_is_two_words_at_both_ends_and_at_the_call() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad(), quad()], &[quad()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.binary(Opcode::FAdd, params[0], params[1], Flags::NONE);
+        build.ret(&[answer]);
+        calls(&mut func, &mut names, riscv64::LP64D.abi, 8);
+        assert!(pairs(&mut func, &mut names, &riscv64::LP64D));
+        let text = printed(&func, &mut names);
+        assert!(text.contains("@__addtf3"), "{text}");
+        assert!(!text.contains("f128"), "nothing at the format is left: {text}");
+        let word = Type::int(64);
+        assert_eq!(
+            func.signature().params.iter().map(|param| param.ty).collect::<Vec<_>>(),
+            [word, word, word, word]
+        );
+        assert_eq!(
+            func.signature().returns.iter().map(|param| param.ty).collect::<Vec<_>>(),
+            [word, word]
+        );
+    }
+
+    /// The bits of a quad read as an integer of its width are the value itself once both are one.
+    #[test]
+    fn on_risc_v_the_bits_of_a_quad_are_the_quad() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad()], &[Type::int(BITS)]);
+        let mut build = Builder::new(&mut func, entry);
+        let bits = build.unary(Opcode::Bitcast, params[0], Type::int(BITS));
+        build.ret(&[bits]);
+        assert!(pairs(&mut func, &mut names, &riscv64::LP64D));
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("bitcast"), "{text}");
+        assert_eq!(func.signature().params.len(), 2, "{text}");
+    }
+
+    /// A machine whose vector registers hold the format keeps it whole.
+    #[test]
+    fn where_a_register_holds_one_the_quad_is_left_whole() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad()], &[quad()]);
+        Builder::new(&mut func, entry).ret(&[params[0]]);
+        assert!(!pairs(&mut func, &mut names, &x86_64::SYSV));
+        assert!(printed(&func, &mut names).contains("f128"));
+    }
+
+    /// A quad something computes with is not this pass's to split, and the function is left as it
+    /// was for the selector to refuse by name.
+    #[test]
+    fn a_quad_that_is_computed_with_is_left_alone() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[quad(), quad()], &[quad()]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.binary(Opcode::FAdd, params[0], params[1], Flags::NONE);
+        build.ret(&[answer]);
+        let before = printed(&func, &mut names);
+        assert!(!pairs(&mut func, &mut names, &riscv64::LP64D));
+        assert_eq!(printed(&func, &mut names), before);
     }
 }

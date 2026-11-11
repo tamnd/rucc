@@ -7,9 +7,9 @@
 //! their own sign. The rules promise nothing about their high bits, so a value that arrives like
 //! that is read the same as one that does not. A half travels in the low sixteen bits of a float
 //! register, as GCC passes one without the half extension, and is read and written in its slot as
-//! the word it is the low half of. `long double` and `__int128` have no rules on this machine yet,
-//! so they have no names here either, and a function that passes one is refused at the argument
-//! rather than halfway through.
+//! the word it is the low half of. `long double` and `__int128` have no rules on this machine, so
+//! they have no names here either. [`crate::wide`] passes an `__int128` as the two words it is, and
+//! [`crate::quad::pairs`] makes a `long double` such an integer first, so neither reaches here.
 
 use rucc_ir::{Abi, Type};
 

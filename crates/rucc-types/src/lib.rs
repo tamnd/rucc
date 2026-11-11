@@ -106,7 +106,7 @@ pub use crate::convert::{
     usual_arithmetic, vectors_convertible,
 };
 pub use crate::granule::{GRANULE, Keying, Tally, measure, measure_all, report as granule_report};
-pub use crate::kencc::{KENCC_SIGN_INTERN, kencc_signature};
+pub use crate::kencc::{KENCC_SIGN_INTERN, kencc_same_type, kencc_signature, kencc_type_text};
 pub use crate::kind::{
     ArrayLen, EnumId, FloatKind, FunctionId, FunctionType, IntKind, Qualifiers, RecordId,
     RecordKind, Sme, SmeMode, SmeShare, Type, TypeKind, VlaId,

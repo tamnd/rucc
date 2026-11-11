@@ -1074,7 +1074,8 @@
 
 
 ;; Floats, at the two formats the D extension has registers for. A `long double` is a quad here,
-;; which the convention passes in a pair of integer registers, and there is no rule for one yet.
+;; which the convention passes in a pair of integer registers, and it needs no rule: the pairs step
+;; makes one the integer of its width before selection, and the splitting makes that two words.
 
 (rule (lower (fadd.f32 (value.f32 x) (value.f32 y)))
       (rv.fadd_f32 x y)

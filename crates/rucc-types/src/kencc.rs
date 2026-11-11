@@ -21,9 +21,12 @@
 //! together with the member or the parameter it is, because in kencc each member and each
 //! parameter is a node of its own, and the next one is found from it.
 
+use rucc_base::Symbol;
 use rucc_target::TargetInfo;
 
-use crate::{FloatKind, FunctionId, IntKind, RecordId, RecordKind, TypeId, TypeKind, Types};
+use crate::{
+    FloatKind, FunctionId, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types,
+};
 
 /// The multiplier before the kind of each node, `thash1` in `cc/sub.c`.
 const THASH1: u32 = 0x2eda_b8c9;
@@ -63,6 +66,33 @@ enum Et {
 }
 
 impl Et {
+    /// `tnames[etype]` in `cc/sub.c`, which `%T` prints.
+    fn name(self) -> &'static str {
+        match self {
+            Et::Xxx => "TXXX",
+            Et::Char => "CHAR",
+            Et::UChar => "UCHAR",
+            Et::Short => "SHORT",
+            Et::UShort => "USHORT",
+            Et::Int => "INT",
+            Et::UInt => "UINT",
+            Et::Long => "LONG",
+            Et::ULong => "ULONG",
+            Et::VLong => "VLONG",
+            Et::UVLong => "UVLONG",
+            Et::Float => "FLOAT",
+            Et::Double => "DOUBLE",
+            Et::Ind => "IND",
+            Et::Func => "FUNC",
+            Et::Array => "ARRAY",
+            Et::Void => "VOID",
+            Et::Struct => "STRUCT",
+            Et::Union => "UNION",
+            Et::Old => "OLD",
+            Et::Dot => "DOT",
+        }
+    }
+
     /// `thash[etype]`.
     fn hash(self) -> u32 {
         match self {
@@ -128,6 +158,8 @@ impl Node {
 struct Tree<'a> {
     types: &'a Types,
     target: &'a TargetInfo,
+    /// `debug['V']`, which is `-V`.
+    strict_void: bool,
     incomplete: &'a dyn Fn(RecordId) -> bool,
 }
 
@@ -323,12 +355,15 @@ impl Tree<'_> {
 
     /// `sametype` in `cc/dcl.c`.
     fn sametype(&self, t1: Node, t2: Node) -> bool {
-        t1 == t2 || self.rsametype(Some(t1), Some(t2), 5)
+        t1 == t2 || self.rsametype(Some(t1), Some(t2), 5, true)
     }
 
-    /// `rsametype` in `cc/dcl.c`, with `debug['V']` off. A node in rucc is the same node only
-    /// where kencc's would be the same too or would compare the same.
-    fn rsametype(&self, mut t1: Option<Node>, mut t2: Option<Node>, n: i32) -> bool {
+    /// `rsametype` in `cc/dcl.c`. A node in rucc is the same node only where kencc's would be
+    /// the same too or would compare the same.
+    ///
+    /// `top` is kencc's `f`, which is set only in the first call. A pointer to `void` is the same
+    /// as every pointer there, and below it only without `-V`.
+    fn rsametype(&self, mut t1: Option<Node>, mut t2: Option<Node>, n: i32, top: bool) -> bool {
         let n = n - 1;
         loop {
             if t1 == t2 {
@@ -343,7 +378,7 @@ impl Tree<'_> {
                 return false;
             }
             if et == Et::Func {
-                if !self.rsametype(self.link(a), self.link(b), n) {
+                if !self.rsametype(self.link(a), self.link(b), n, false) {
                     return false;
                 }
                 let (mut p1, mut p2) = (self.params(a), self.params(b));
@@ -357,7 +392,7 @@ impl Tree<'_> {
                         continue;
                     }
                     while p1.is_some() || p2.is_some() {
-                        if !self.rsametype(p1, p2, n) {
+                        if !self.rsametype(p1, p2, n, false) {
                             return false;
                         }
                         p1 = p1.and_then(|p| self.down(p));
@@ -389,7 +424,7 @@ impl Tree<'_> {
                     if m1 == m2 {
                         return true;
                     }
-                    if !self.rsametype(m1, m2, n) {
+                    if !self.rsametype(m1, m2, n, false) {
                         return false;
                     }
                     m1 = m1.and_then(|m| self.down(m));
@@ -398,17 +433,64 @@ impl Tree<'_> {
             }
             t1 = self.link(a);
             t2 = self.link(b);
-            if et == Et::Ind
+            if (top || !self.strict_void)
+                && et == Et::Ind
                 && [t1, t2].iter().flatten().any(|&pointee| self.et(pointee) == Et::Void)
             {
                 return true;
             }
         }
     }
+
+    /// `Tconv` in `cc/lex.c`, which prints a type in the messages of kencc as the kinds of the
+    /// nodes, such as `IND CONST CHAR`.
+    fn text(&self, mut t: Node, tag: &dyn Fn(Symbol) -> String, out: &mut String) {
+        loop {
+            if let What::Type(ty) = t.what {
+                let quals = self.types.quals(self.types.canonical(ty));
+                let garb = (quals.has(Qualifiers::CONST), quals.has(Qualifiers::VOLATILE));
+                out.push_str(match garb {
+                    (true, true) => "CONST-VOLATILE ",
+                    (true, false) => "CONST ",
+                    (false, true) => "VOLATILE ",
+                    (false, false) => "",
+                });
+            }
+            let et = self.et(t);
+            out.push_str(et.name());
+            if let (Et::Func, Some(first)) = (et, self.params(t)) {
+                out.push('(');
+                self.text(first, tag, out);
+                let mut param = self.down(first);
+                while let Some(p) = param {
+                    out.push_str(", ");
+                    self.text(p, tag, out);
+                    param = self.down(p);
+                }
+                out.push(')');
+            }
+            if et == Et::Array {
+                let elem = self.link(t).map_or(0, |elem| self.width(elem));
+                let width = self.width(t);
+                let n = width.checked_div(elem).unwrap_or(width);
+                out.push_str(&format!("[{n}]"));
+            }
+            if matches!(et, Et::Struct | Et::Union) {
+                let name = self.record(t).and_then(|id| self.types.record_info(id).tag);
+                out.push(' ');
+                out.push_str(&name.map_or_else(|| "{}".to_owned(), tag));
+                return;
+            }
+            let Some(next) = self.link(t) else { return };
+            out.push(' ');
+            t = next;
+        }
+    }
 }
 
 /// The signature of a type, as `signof` and `signature` in `cc/dcl.c` give it.
 ///
+/// `strict_void` is kencc's `-V`, which `sametype` reads when two structures are compared.
 /// `incomplete` says whether `#pragma incomplete` named a structure or a union. Array lengths
 /// in `sametype` come from the layout of the type on `target`.
 #[must_use]
@@ -416,10 +498,39 @@ pub fn kencc_signature(
     types: &Types,
     ty: TypeId,
     target: &TargetInfo,
+    strict_void: bool,
     incomplete: &dyn Fn(RecordId) -> bool,
 ) -> u32 {
-    let tree = Tree { types, target, incomplete };
+    let tree = Tree { types, target, strict_void, incomplete };
     tree.signat(Some(Node::of(ty)), &mut Vec::new())
+}
+
+/// Whether kencc's `sametype` in `cc/dcl.c` calls two types the same. `strict_void` is `-V`.
+#[must_use]
+pub fn kencc_same_type(
+    types: &Types,
+    target: &TargetInfo,
+    strict_void: bool,
+    t1: TypeId,
+    t2: TypeId,
+) -> bool {
+    let tree = Tree { types, target, strict_void, incomplete: &|_| false };
+    tree.sametype(Node::of(t1), Node::of(t2))
+}
+
+/// A type as kencc's `%T` prints it, such as `IND CONST CHAR` or `STRUCT Point`. `tag` gives
+/// the text of a tag.
+#[must_use]
+pub fn kencc_type_text(
+    types: &Types,
+    target: &TargetInfo,
+    ty: TypeId,
+    tag: &dyn Fn(Symbol) -> String,
+) -> String {
+    let tree = Tree { types, target, strict_void: false, incomplete: &|_| false };
+    let mut out = String::new();
+    tree.text(Node::of(ty), tag, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -492,7 +603,7 @@ mod tests {
         }
 
         fn sign(&self, ty: TypeId) -> u32 {
-            kencc_signature(&self.types, ty, &self.target, &|_| false)
+            kencc_signature(&self.types, ty, &self.target, false, &|_| false)
         }
     }
 
@@ -635,7 +746,7 @@ mod tests {
         let id = f.declare(RecordKind::Struct, "Inc");
         let inc = f.complete(id, &[int]);
         let inc_ptr = f.types.pointer(inc);
-        let marked = kencc_signature(&f.types, inc_ptr, &f.target, &|record| record == id);
+        let marked = kencc_signature(&f.types, inc_ptr, &f.target, false, &|record| record == id);
         assert_eq!(marked, 0x11a0_eb0e);
         assert_ne!(f.sign(inc_ptr), marked);
     }
@@ -643,5 +754,46 @@ mod tests {
     #[test]
     fn the_intern_value_is_the_one_kencc_writes() {
         assert_eq!(KENCC_SIGN_INTERN, 971_568_325);
+    }
+
+    #[test]
+    fn strict_void_keeps_a_pointer_to_void_apart_only_below_the_top() {
+        let mut f = Fixture::new();
+        let (void, char) = (f.types.void(), f.int(IntKind::Char));
+        let (pv, pc) = (f.types.pointer(void), f.types.pointer(char));
+        let a = f.structure("A", &[pv]);
+        let b = f.structure("B", &[pc]);
+        for strict in [false, true] {
+            assert!(kencc_same_type(&f.types, &f.target, strict, pv, pc));
+        }
+        assert!(kencc_same_type(&f.types, &f.target, false, a, b));
+        assert!(!kencc_same_type(&f.types, &f.target, true, a, b));
+        // The table of `sigind` finds `B` as `A` only without `-V`.
+        let (pa, pb) = (f.types.pointer(a), f.types.pointer(b));
+        let ab = f.structure("AB", &[pa, pb]);
+        let loose = kencc_signature(&f.types, ab, &f.target, false, &|_| false);
+        let strict = kencc_signature(&f.types, ab, &f.target, true, &|_| false);
+        assert_ne!(loose, strict);
+    }
+
+    #[test]
+    fn a_type_prints_as_the_kinds_of_its_nodes() {
+        let mut f = Fixture::new();
+        let char = f.int(IntKind::Char);
+        let konst = f.types.qualified(char, Qualifiers::CONST);
+        let string = f.types.pointer(konst);
+        let int = f.int(IntKind::Int);
+        let point = f.structure("Point", &[int]);
+        let list = f.types.array(int, ArrayLen::Fixed(4));
+        let void = f.types.void();
+        let func = f.function(void, &[int, string], true, true);
+        let point_ptr = f.types.pointer(point);
+        let names = &f.names;
+        let tag = |name| names.resolve(name).to_owned();
+        let text = |ty| kencc_type_text(&f.types, &f.target, ty, &tag);
+        assert_eq!(text(string), "IND CONST CHAR");
+        assert_eq!(text(point_ptr), "IND STRUCT Point");
+        assert_eq!(text(list), "ARRAY[4] INT");
+        assert_eq!(text(func), "FUNC(INT, IND CONST CHAR, DOT) VOID");
     }
 }
