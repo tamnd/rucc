@@ -279,14 +279,15 @@ pub fn back_on_x87(returns: &[Type], conv: &CallRegs) -> bool {
 }
 
 /// Whether a `float` or a `double` a function gives back is left on the x87 stack, which is what a
-/// convention with no vector register to return one in says. That is i386, where the psABI puts it
-/// in `st(0)` the way it does a `long double`.
+/// thirty two bit convention with an x87 stack says. That is i386, where the psABI puts it in
+/// `st(0)` the way it does a `long double`. i386 has a vector register to return a value in, which
+/// is `xmm0` for a half, so the test is the width of a word and not an empty list of those.
 ///
 /// This is the crossing from a vector register, so it is false under `-mfpmath=387`, where the
 /// value is never in one and [`back_on_x87`] covers it.
 #[must_use]
 pub fn float_on_x87(returns: &[Type], conv: &CallRegs) -> bool {
-    conv.sse_returns.is_empty()
+    conv.word == 4
         && !conv.x87_returns.is_empty()
         && !conv.x87_floats
         && matches!(returns, [ty] if ty.is_float() && ty.is_scalar() && matches!(ty.bits(), 32 | 64))

@@ -2262,26 +2262,27 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // have to agree or the header asks for something the compiler will refuse.
     // `_Float16` came to gcc on AArch64 first, then to x86 in gcc 12 and to RISC-V in gcc 13, so
     // a persona that claims an older gcc leaves the family out there.
-    // gcc 12 has it on x86 only with SSE2, and gcc 13 has it without.
+    // gcc 12 and 13 have it on x86 only with SSE2, and gcc 14 has it without, at both widths.
+    // That is the cross compilers of gcc 13 and 14 for i686 and `-mno-sse2` on x86-64.
     let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);
     let sse2 = Feature::named("sse2").is_some_and(|it| opts.isa.has(it));
-    let half_since = match target.tuple.arch() {
+    let without_sse2 = |since: u32| if x86 && !sse2 { since.max(14) } else { since };
+    let half_since = without_sse2(match target.tuple.arch() {
         tuple::Arch::X86_64 | tuple::Arch::X86 => 12,
         tuple::Arch::Riscv64 | tuple::Arch::Riscv32 => 13,
         _ => 0,
-    };
-    let half_since = if x86 && !sse2 { half_since.max(13) } else { half_since };
+    });
     if target.has_float16 && gnuc >= half_since {
         family(d, gnuc, "FLT16", &HALF, |value| format!("{value}F16"));
     }
     // `__bf16` became an arithmetic type in gcc 13 on x86 and AArch64, and the family came with it.
-    // RISC-V got the type and the family in gcc 15. It is written where the type is a name rucc
-    // knows.
+    // RISC-V got the type and the family in gcc 15. On x86 without SSE2 it waits for gcc 14, as
+    // the half does. It is written where the type is a name rucc knows.
     let brain = target.type_names().iter().any(|&(name, _)| name == "__bf16");
-    let brain_since = match target.tuple.arch() {
+    let brain_since = without_sse2(match target.tuple.arch() {
         tuple::Arch::Riscv64 | tuple::Arch::Riscv32 => 15,
         _ => 13,
-    };
+    });
     if brain && gnuc >= brain_since {
         family(d, gnuc, "BFLT16", &BFLOAT16, |value| format!("{value}BF16"));
     }
@@ -2784,7 +2785,15 @@ mod tests {
             assert!(has(&text, &format!("#define {line}")), "{line}");
         }
         assert!(has(&text, "#define __FLT16_MANT_DIG__ 11"), "{text}");
-        assert!(!built_in(&x86, &kernel(12)).contains("__FLT16_MANT_DIG__"));
+        assert!(has(&text, "#define __BFLT16_MANT_DIG__ 8"), "{text}");
+        // gcc 12 and 13 have neither family without SSE2, and gcc 14 has both.
+        for major in [12, 13] {
+            let text = built_in(&x86, &kernel(major));
+            assert!(!text.contains("__FLT16_") && !text.contains("__BFLT16_"), "gcc {major}");
+        }
+        let text = built_in(&x86, &kernel(14));
+        assert!(has(&text, "#define __FLT16_MANT_DIG__ 11"), "{text}");
+        assert!(has(&text, "#define __BFLT16_MANT_DIG__ 8"), "{text}");
         // The x87 alone, or SSE alone, is a float unit.
         let x87 = built_in(&x86, &Predef { x87: true, ..kernel(15) });
         assert!(has(&x87, "#define __GCC_IEC_559 2") && !x87.contains("_SOFT_FLOAT"));
@@ -3525,7 +3534,7 @@ mod tests {
     #[test]
     fn the_family_for_a_named_type_is_written_where_the_type_is_and_nowhere_else() {
         // gcc 13's rows, measured with the cross compilers: the half is on x86-64, AArch64 and
-        // RISC-V, and the quad is on every one of the seven but armv7. A program asks the macro
+        // RISC-V, and on i686 with SSE2, and the quad is on every one of the seven but armv7. A program asks the macro
         // to find out whether it may write the type, so a row where the two disagree is a header
         // that asks for a type the compiler then refuses.
         let has_family = |target: &str, prefix: &str| {
@@ -3534,7 +3543,7 @@ mod tests {
         assert!(has_family("x86_64-linux-gnu", "FLT16"));
         assert!(has_family("aarch64-linux-gnu", "FLT16"));
         assert!(has_family("riscv64-linux-gnu", "FLT16"));
-        assert!(!has_family("i686-linux-gnu", "FLT16"));
+        assert!(has_family("i686-linux-gnu", "FLT16"));
         assert!(!has_family("s390x-linux-gnu", "FLT16"));
         assert!(!has_family("armv7-linux-gnueabihf", "FLT16"));
 
@@ -3682,6 +3691,9 @@ mod tests {
             ("aarch64-unknown-freebsd", 13),
             ("aarch64-unknown-netbsd", 13),
             ("riscv64-unknown-freebsd", 15),
+            ("i386-unknown-freebsd", 13),
+            ("i386-unknown-netbsd", 13),
+            ("i686-unknown-linux-gnu", 13),
         ] {
             assert!(!set_claiming(triple, since - 1).contains("__BFLT16_"), "{triple}");
             let text = set_claiming(triple, since);
@@ -3702,10 +3714,8 @@ mod tests {
                 assert!(has(&text, &format!("#define {line}")), "{triple}: {line}");
             }
         }
-        // Not on i386, where rucc has no `__bf16` yet, and not where gcc has no type.
-        for triple in ["i686-unknown-linux-gnu", "wasm32-unknown-unknown"] {
-            assert!(!set_claiming(triple, 15).contains("__BFLT16_"), "{triple}");
-        }
+        // Not where gcc has no type.
+        assert!(!set_claiming("wasm32-unknown-unknown", 15).contains("__BFLT16_"));
     }
 
     /// tamnd/rucc#4088. Some of those names depend on the machine too. AArch64 had `_Float16`

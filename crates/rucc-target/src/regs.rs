@@ -474,7 +474,8 @@ pub struct CallRegs {
     pub copies_by_moving: bool,
     /// The general purpose registers an integer return value comes back in.
     pub int_returns: &'static [PhysReg],
-    /// The vector registers a floating point return value comes back in.
+    /// The vector registers a floating point return value comes back in. On i386 that is only a
+    /// `_Float16` or a `__bf16`, since a `float` and a `double` come back on the x87 stack there.
     pub sse_returns: &'static [PhysReg],
     /// The x87 registers a `long double` comes back in, which is empty on a target whose
     /// `long double` is a `double`.
