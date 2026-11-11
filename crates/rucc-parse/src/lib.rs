@@ -87,7 +87,7 @@ mod weak;
 pub use crate::comment::Comment;
 pub use crate::cursor::{Cursor, MAX_LOOKAHEAD, Mark};
 pub use crate::extname::ExtnamePragma;
-pub use crate::kencc_pragma::IncompletePragma;
+pub use crate::kencc_pragma::{IncompletePragma, Varargck, VarargckLine, VarargckType};
 pub use crate::parser::{Context, MAX_NESTING, Parsed, Parser};
 pub use crate::recover::{Poison, push_about, skip_past_declaration, skip_to_statement_end};
 pub use crate::scope::{IdentKind, Scopes, TagKind};

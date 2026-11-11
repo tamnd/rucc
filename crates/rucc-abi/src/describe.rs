@@ -95,6 +95,23 @@ impl AbiDescription {
         self.scalars.wide_is_by_reference && !matches!(size, 1 | 2 | 4 | 8)
     }
 
+    /// Whether a float wider than a floating point register travels in general purpose registers,
+    /// the way an integer of its size does.
+    ///
+    /// True on RISC-V LP64D, where a floating point register is eight bytes and a `long double` is
+    /// sixteen. Such a value goes in a pair of integer registers, or in one register and the
+    /// argument area when one register is left, and comes back in `a0` and `a1`. That is the
+    /// classifier's own rule for a float of that size, and this is the same rule asked with a width
+    /// and no C type, by a back end pass. False where a vector register holds sixteen bytes, on
+    /// i386, whose word is four bytes, and where the two banks are one run of positions.
+    #[must_use]
+    pub const fn quad_in_integers(&self) -> bool {
+        self.banks.float > 0
+            && !self.banks.shared
+            && self.banks.integer_width == 8
+            && self.banks.float_width < 16
+    }
+
     /// Whether a scalar of this size comes back through the address the caller passes.
     ///
     /// Everything [`AbiDescription::scalar_is_by_reference`] says yes to, and on i386 a sixteen
@@ -177,6 +194,21 @@ pub struct Scalars {
     /// registers it could not use are not given to the arguments after it. False on SysV AMD64,
     /// where they are.
     pub wide_integer_drains: bool,
+    /// Whether an integer wider than one register that finds one register left puts its low half
+    /// in that register and its high half in the argument area.
+    ///
+    /// True on RISC-V LP64D, so an `__int128` after seven `long`s is in a7 and in the first word of
+    /// the argument area. False everywhere else, where such a value goes in the argument area whole.
+    pub wide_integer_splits: bool,
+    /// Whether an integer wider than one register that is past the `...` starts at an even one.
+    ///
+    /// [`Scalars::wide_integer_starts_even`] asks it of every such integer, and this of the ones a
+    /// variadic call does not name. True on RISC-V LP64D, which puts an unnamed argument aligned
+    /// to twice a register in a pair that starts at an even register, so `f(1, (__int128)x)` to
+    /// `int f(int, ...)` has `x` in a2 and a3 and a1 is left empty. When a7 is the one left, it
+    /// stays empty and the value goes in the argument area. A named one is not aligned and goes
+    /// in a1 and a2.
+    pub unnamed_wide_integer_starts_even: bool,
     /// Whether a scalar of a size no register holds travels as the address of a copy the caller
     /// made, the way an aggregate of that size does.
     ///
@@ -567,7 +599,9 @@ pub enum Short {
 
 #[cfg(test)]
 mod tests {
-    use crate::abis::{AAPCS64, I386_MINGW, I386_MSVC, I386_SYSV, SYSV_AMD64, WIN64};
+    use crate::abis::{
+        AAPCS64, DESCRIBED, I386_MINGW, I386_MSVC, I386_SYSV, RISCV_LP64D, SYSV_AMD64, WIN64,
+    };
     use crate::shape::Format;
 
     /// The two questions about a wide scalar are asked separately because the one ABI that says
@@ -607,6 +641,15 @@ mod tests {
             assert!(!abi.scalar_is_by_reference(16), "{}", abi.name);
             assert!(!abi.scalar_returns_by_reference(16), "{}", abi.name);
             assert_eq!(abi.wide_integer_returns_in(16), None, "{}", abi.name);
+        }
+    }
+
+    /// A `long double` goes in integer registers on RISC-V LP64D and nowhere else described.
+    #[test]
+    fn only_risc_v_passes_a_quad_in_integer_registers() {
+        for abi in DESCRIBED {
+            let expected = std::ptr::eq(*abi, &RISCV_LP64D);
+            assert_eq!(abi.quad_in_integers(), expected, "{}", abi.name);
         }
     }
 }

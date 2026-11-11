@@ -39,6 +39,7 @@ impl Parser<'_> {
             let before = self.cursor.index();
             let decl = self.external_declaration();
             self.ast.add_top_level(decl);
+            self.decl_ends.push(self.cursor.index());
             if self.cursor.index() == before {
                 // The token starts nothing at all and the error is already reported, so this is
                 // what keeps the loop from meeting it again.

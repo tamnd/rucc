@@ -14,7 +14,10 @@
 //!   `pragincomplete` does. The line goes to the checker, which marks the record at the place of
 //!   the line. The forms `_off_` and `_on_` change `-T` for the rest of the file in kencc, and no
 //!   file of 9front has them, so they are ignored.
-//! - `varargck` gives format checking. It acts only under `-F`, and it is read with that work.
+//! - `varargck` gives format checking under `-F`. The line goes to the checker, which reads it
+//!   at the place of the line, as `pragvararg` does. A line that kencc cannot read is kept as
+//!   bad, and the checker gives the kencc error only under `-F`, because kencc reads the line
+//!   only then.
 //! - `profile` and `fpround` change nothing that rucc writes yet.
 //!
 //! `#pragma once` never gets here, because the preprocessor reads it. kencc ignores it, so a
@@ -24,7 +27,7 @@
 use rucc_ast::RecordKind;
 use rucc_base::Symbol;
 use rucc_diag::Span;
-use rucc_lex::{Keyword, Token};
+use rucc_lex::{Keyword, Punct, Token};
 
 use crate::comment::Comment;
 use crate::parser::Parser;
@@ -37,6 +40,11 @@ impl Parser<'_> {
             "pack" => self.kencc_pack(&line[1..]),
             "lib" => self.kencc_lib(&line[1..], span),
             "incomplete" => self.kencc_incomplete(&line[1..], span),
+            "varargck" => {
+                let pragma = self.kencc_varargck(&line[1..]);
+                let decls = self.pragma_place();
+                self.varargck_pragmas.push(VarargckLine { pragma, span, decls });
+            }
             _ => {}
         }
     }
@@ -90,8 +98,114 @@ impl Parser<'_> {
         if kind.is_none() && matches!(self.cx.interner.resolve(name), "_off_" | "_on_") {
             return;
         }
-        self.incomplete_pragmas.push(IncompletePragma { kind, name, span });
+        let decls = self.pragma_place();
+        self.incomplete_pragmas.push(IncompletePragma { kind, name, span, decls });
     }
+}
+
+impl Parser<'_> {
+    /// The token that the line being read stands ahead of. [`Parser::finish`] makes it a count
+    /// of declarations.
+    fn pragma_place(&self) -> u32 {
+        u32::try_from(self.pragma_token).unwrap_or(u32::MAX)
+    }
+
+    /// `#pragma varargck`, as `pragvararg` in `cc/dpchk.c` reads it.
+    fn kencc_varargck(&self, rest: &[Token]) -> Varargck {
+        let word = rest.first().and_then(|token| token.ident());
+        match word.map(|word| self.cx.interner.resolve(word)) {
+            // `#pragma varargck argpos warn 2`
+            Some("argpos") => {
+                let Some(name) = rest.get(1).and_then(|token| token.ident()) else {
+                    return Varargck::Bad;
+                };
+                let param = rest.get(2).and_then(|&token| self.tokens.int(token));
+                match param.and_then(|int| u32::try_from(int.value).ok()) {
+                    Some(param) => Varargck::Argpos { name, param },
+                    None => Varargck::Bad,
+                }
+            }
+            // `#pragma varargck flag 'c'`
+            Some("flag") => {
+                let flag = rest.get(1).and_then(|&token| self.tokens.character(token));
+                match flag.and_then(|flag| u32::try_from(flag.value & 0xffff_ffff).ok()) {
+                    Some(flag) if flag != u32::from(b'\n') => Varargck::Flag(flag),
+                    _ => Varargck::Bad,
+                }
+            }
+            // `#pragma varargck type "O" int`, with a `*` for each level of pointer.
+            Some("type") => {
+                let Some(format) = rest.get(1).and_then(|&token| self.tokens.string(token)) else {
+                    return Varargck::Bad;
+                };
+                let format: Vec<u8> =
+                    format.elements.iter().map(|&element| element as u8).collect();
+                // `fmtbuf` holds 99 bytes, and a blank ends the line in kencc.
+                if format.len() >= 100 || format.iter().any(|&byte| matches!(byte, b' ' | b'\n')) {
+                    return Varargck::Bad;
+                }
+                let Some(&token) = rest.get(2) else { return Varargck::Bad };
+                let ty = match (token.ident(), token.keyword()) {
+                    (Some(name), _) => VarargckType::Name(name),
+                    (None, Some(keyword)) => VarargckType::Keyword(keyword),
+                    (None, None) => return Varargck::Bad,
+                };
+                let stars =
+                    rest[3..].iter().take_while(|token| token.punct() == Some(Punct::Star)).count();
+                Varargck::Type { format, ty, stars: u32::try_from(stars).unwrap_or(u32::MAX) }
+            }
+            _ => Varargck::Bad,
+        }
+    }
+}
+
+/// One `#pragma varargck` line and its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarargckLine {
+    /// What the line says.
+    pub pragma: Varargck,
+    /// Where the line is, for the messages.
+    pub span: Span,
+    /// How many external declarations of the unit end before the line. The checker reads the line
+    /// just before it checks the next declaration. A line in a function body is read before the
+    /// function. The place is kept as a count because the spans of a header and of the file that
+    /// includes it are not in the order of the text.
+    pub decls: u32,
+}
+
+/// What a `#pragma varargck` line says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Varargck {
+    /// `argpos NAME N`: the argument `N` of a call of `NAME` is a format, counted from one.
+    Argpos {
+        /// The function.
+        name: Symbol,
+        /// The place of the format.
+        param: u32,
+    },
+    /// `type "FMT" TYPE`: the verb `FMT`, with its flags, takes an argument of the type.
+    Type {
+        /// The verb and its flags, such as `lld`, as bytes.
+        format: Vec<u8>,
+        /// The name of the type.
+        ty: VarargckType,
+        /// The number of `*` after the name.
+        stars: u32,
+    },
+    /// `flag 'c'`: the character is a flag that the verbs ignore.
+    Flag(u32),
+    /// A line that kencc cannot read, which gives `syntax in #pragma varargck` under `-F`.
+    Bad,
+}
+
+/// The name of a type in `#pragma varargck type`, which is a typedef name or one of the
+/// keywords that name a type in kencc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarargckType {
+    /// A typedef name, or any other ordinary name.
+    Name(Symbol),
+    /// A keyword, such as `int` or `void`.
+    Keyword(Keyword),
 }
 
 /// What one `#pragma incomplete` line names.
@@ -102,6 +216,11 @@ pub struct IncompletePragma {
     pub kind: Option<RecordKind>,
     /// The name.
     pub name: Symbol,
-    /// Where the line is. The checker marks the record when it reaches this place.
+    /// Where the line is, for the messages.
     pub span: Span,
+    /// How many external declarations of the unit end before the line. The checker reads the line
+    /// just before it checks the next declaration. A line in a function body is read before the
+    /// function. The place is kept as a count because the spans of a header and of the file that
+    /// includes it are not in the order of the text.
+    pub decls: u32,
 }

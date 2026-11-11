@@ -85,7 +85,6 @@ fn a_target_with_nowhere_to_put_the_chain_refuses_with_a_reason() {
     for (target, flags) in [
         ("aarch64-apple-darwin", &[][..]),
         ("x86_64-pc-windows-msvc", &[][..]),
-        ("i686-unknown-linux-gnu", &[][..]),
         ("aarch64-unknown-linux-gnu", &["-ffixed-x18"][..]),
     ] {
         let (ok, _, err) = run("refused", target, flags, NESTED);
@@ -120,6 +119,26 @@ int outer(int n) {
     assert!(!ok, "wasm built a nested function whose address is taken");
     assert!(err.contains("a nested function cannot be built for this target"), "{err}");
     assert!(err.contains("needs a trampoline, which wasm cannot make"), "{err}");
+}
+
+/// i386 passes the chain as the last parameter too, since `ecx`, where gcc puts it, carries an
+/// argument under `regparm(3)` and `fastcall`. libquadmath's `printf_fp.c` calls its `hack_digit`
+/// by name only, and one whose address is taken is refused, since libgcc makes no trampoline for
+/// i386.
+#[test]
+fn i386_passes_the_chain_as_a_parameter_and_refuses_a_trampoline() {
+    for level in ["-O0", "-O2"] {
+        let (ok, text, err) =
+            run(&format!("i386{level}"), "i686-unknown-linux-gnu", &[level], AHEAD);
+        assert!(ok, "{level}: the compiler refused the fixture:\n{err}");
+        assert!(err.is_empty(), "{level}: {err}");
+        assert!(!text.contains("__gcc_nested_func_ptr"), "{level}: a trampoline:\n{text}");
+    }
+
+    let (ok, _, err) = run("i386-escapes", "i686-unknown-linux-gnu", &[], NESTED);
+    assert!(!ok, "i386 built a nested function whose address is taken");
+    assert!(err.contains("a nested function cannot be built for this target"), "{err}");
+    assert!(err.contains("which libgcc does not make for i386"), "{err}");
 }
 
 /// A function with no nested function in it is built the way it always was, with no block and no

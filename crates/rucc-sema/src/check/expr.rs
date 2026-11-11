@@ -798,6 +798,8 @@ impl Checker<'_> {
         // read from them once they are promoted, since the promoted type is the one the callee
         // reads. In `check/format.rs`, `check/advice.rs` and `check/nonnull.rs`.
         self.heed_format(callee, &signature.params, &args, span);
+        // kencc's `-F`, from `#pragma varargck`. In `check/varargck.rs`.
+        self.heed_varargck(callee, &signature.params, signature.prototyped, &args, span);
         self.heed_sentinel(callee, &signature, &args, span);
         self.heed_nonnull(callee, &args, span);
         // The two hint builtins, whose value is the first argument they were handed and whose
