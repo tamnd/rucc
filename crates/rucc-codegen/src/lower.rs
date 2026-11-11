@@ -4576,6 +4576,7 @@ impl<'a> Lowering<'a> {
         let text = self.names.intern(&text.replace("{}", &name));
         let opcode = self.named(x86_64::TEMPLATE);
         let returned = conv.int_returns[0];
+        let got = self.table_base();
         let reg = self.new_reg(result);
         let mut build = self
             .out
@@ -4592,6 +4593,12 @@ impl<'a> Lowering<'a> {
             if !conv.preserves_sse(at) {
                 build = build.operand(mir::Operand::write(mir::Reg::physical(at), conv.sse_class));
             }
+        }
+        // On i386 the call goes through the procedure linkage table, and the sequence reads the
+        // table's address in `%ebx` as well.
+        if let Some(got) = got {
+            build =
+                build.operand(mir::Operand::read(got, gpr).with(Constraint::Fixed(x86_64::RBX)));
         }
         build.finish();
         self.stack.call(0);
