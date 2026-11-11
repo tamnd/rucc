@@ -415,7 +415,7 @@ pub static LIBCALLS: &[(Opcode, &str, &str)] = &[
     // a `float` exactly, so every operation is the `float` one with a widening in front of it and
     // a narrowing behind it, and only the widening and the narrowings are calls.
     //
-    // The three narrowings are three rows and not one, and that is the part worth reading twice.
+    // The four narrowings are four rows and not one, and that is the part worth reading twice.
     // Each of them rounds once, and rounding twice is a different answer: a `double` that sits
     // just above the halfway point between two halves rounds down to that halfway point in a
     // `float` and then to even from there, which is the wrong neighbour. libgcc has a routine per
@@ -425,6 +425,7 @@ pub static LIBCALLS: &[(Opcode, &str, &str)] = &[
     (Opcode::FPTrunc, "f32.f16", "__truncsfhf2"),
     (Opcode::FPTrunc, "f64.f16", "__truncdfhf2"),
     (Opcode::FPTrunc, "f128.f16", "__trunctfhf2"),
+    (Opcode::FPTrunc, "f80.f16", "__truncxfhf2"),
     // An integer wider than a register. `crate::wide` splits what it can into halves and calls for
     // what it cannot, which is the four that need the whole value at once and the conversions.
     (Opcode::UDiv, "i128", "__udivti3"),

@@ -43,21 +43,20 @@
 //! there is no value of any integer width where the intermediate rounding to `double` can change
 //! the answer. That is why this needs no `__floatsihf` family and libgcc has none.
 //!
+//! The eighty bit format has its own routine too, `__truncxfhf2`, and it is the one an i386
+//! program reaches most: there a `float` sum is worked on in the x87 registers, so assigning it to
+//! a half narrows a `long double`, which is libgcc's `__divhc3` on NetBSD (tamnd/rucc-bsd#3). The
+//! call takes the value the way a call to any function taking a `long double` does, the same as
+//! [`crate::quad`]'s `__trunctfxf2` and `__extendxftf2`.
+//!
 //! # What is left alone
 //!
-//! A conversion against the eighty bit format, which is the one thing here with a libgcc routine
-//! that this pass does not call. `__truncxfhf2` exists and would be the right answer, and what
-//! stands in the way is that an eighty bit value travels in the argument area as bytes rather than
-//! in a register, so a call taking one is a different shape from every other call written here. It
-//! is refused by name instead, which is the position [`crate::quad`] takes on the same pair, and it
-//! is `tamnd/rucc#1064`'s row rather than this pass's work today.
-//!
-//! A constant of the format and a negation of one are left alone as well, and those two are not
-//! refusals. [`crate::expand::floats`] already writes a float constant as the integer spelling its
-//! bits and a reinterpretation, and a negation as an exclusive or with the sign bit in a general
-//! purpose register, and both of those are written for every float of sixty four bits or narrower
-//! rather than for the two the machine computes in. So a half reaches them and comes out as the
-//! bits and a `bitcast`, which is what the rule set now has an instruction for.
+//! A constant of the format and a negation of one are left alone, and those two are not refusals.
+//! [`crate::expand::floats`] already writes a float constant as the integer spelling its bits and a
+//! reinterpretation, and a negation as an exclusive or with the sign bit in a general purpose
+//! register, and both of those are written for every float of sixty four bits or narrower rather
+//! than for the two the machine computes in. So a half reaches them and comes out as the bits and a
+//! `bitcast`, which is what the rule set now has an instruction for.
 //!
 //! A load is left alone too, because the machine has one. `pinsrw` reads sixteen bits straight into
 //! the low lane of a vector register and a rule writes it. A store is not the mirror of that: the
@@ -218,9 +217,9 @@ fn widen(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
 
 /// A wider float becoming a half, which is a routine per source width because each of them rounds.
 ///
-/// The eighty bit format is not one of them, for the reason the module's last section gives. A
-/// machine that converts a half keeps the narrowing from `float` and from `double` as it is, since
-/// each is one instruction that rounds once there.
+/// The eighty bit format is one of them, `__truncxfhf2`. A machine that converts a half keeps the
+/// narrowing from `float` and from `double` as it is, since each is one instruction that rounds
+/// once there.
 fn narrow(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
     let Some(ty) = produced(func, inst) else { return };
     let Some(&arg) = func[func[inst].args].first() else { return };
@@ -233,6 +232,7 @@ fn narrow(func: &mut Func, names: &mut Interner, pass: Pass, inst: Inst) {
     let mode = match func[arg].ty.format() {
         Some(Float::F32) => "f32.f16",
         Some(Float::F64) => "f64.f16",
+        Some(Float::F80) => "f80.f16",
         Some(Float::F128) => "f128.f16",
         _ => return,
     };
