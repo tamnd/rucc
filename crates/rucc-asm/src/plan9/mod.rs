@@ -1195,6 +1195,12 @@ impl Out<'_> {
                     self.push(op, Addr6::of(a6::D_AX), Addr6::of(a6::D_AX));
                     return Ok(());
                 }
+                "cbtw" | "cbw" => {
+                    // 6l has no CBW, and MOVBWSX from AL to AX is the same sign extension.
+                    let op = self.op("MOVBWSX", line)?;
+                    self.push(op, Addr6::of(a6::D_AL), Addr6::of(a6::D_AX));
+                    return Ok(());
+                }
                 "cwtl" | "cwde" => {
                     let op = self.op("MOVWLSX", line)?;
                     self.push(op, Addr6::of(a6::D_AX), Addr6::of(a6::D_AX));
@@ -1623,6 +1629,13 @@ mod tests {
             (a6::D_INDIR + a6::D_AX, a6::D_DI, 8, 8)
         );
         assert_eq!(p[12].to.ty, a6::D_R8);
+    }
+
+    #[test]
+    fn a_byte_divide_extends_al_with_a_move() {
+        let p = progs("f:\n\tcbtw\n\tidivb\t%cl\n\tret\n");
+        assert_eq!(names(&p), ["ATEXT", "AMOVBWSX", "AIDIVB", "ARET", "AEND"]);
+        assert_eq!((p[1].from.ty, p[1].to.ty), (a6::D_AL, a6::D_AX));
     }
 
     #[test]
