@@ -4046,6 +4046,10 @@ static ENCODINGS: &[Encoding] = &[
     vexed("kmovd", &KR, Double, &[0x93], pair(0, 1)),
     vexed("kmovw", &RK, Long, &[0x92], pair(0, 1)),
     vexed("kmovw", &KR, Long, &[0x93], pair(0, 1)),
+    // The byte form has the `0x66` prefix and still a 32-bit register, as gas writes it. The rsaz
+    // AVX-512 files of OpenSSL move `k1` to `r14d` and back with it.
+    vexed("kmovb", &RK, Word, &[0x92], pair(0, 1)),
+    vexed("kmovb", &KR, Word, &[0x93], pair(0, 1)),
     // A mask loaded from memory, stored to it and moved between two mask registers. The opcodes
     // are the same for every width, and the width is the wide bit and the mandatory prefix, as for
     // the moves above. aes-gcm-avx512.S loads `k1` from a table with `kmovq` and `kmovw`.
