@@ -11,8 +11,8 @@ use std::process::Command;
 
 /// Whether the compiler took `body` for the target, under `-fkencc`, and what it said.
 fn check(what: &str, target: &str, body: &str) -> (bool, String) {
-    let dir =
-        std::env::temp_dir().join(format!("rucc-kencc-integer-types-{}-{what}", std::process::id()));
+    let dir = std::env::temp_dir()
+        .join(format!("rucc-kencc-integer-types-{}-{what}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, body).expect("the fixture can be written");
@@ -52,7 +52,8 @@ fn a_constant_has_the_type_that_kencc_gives_it_on_each_row() {
 
 #[test]
 fn without_kencc_the_constants_have_the_types_of_c() {
-    let dir = std::env::temp_dir().join(format!("rucc-kencc-integer-types-{}-c", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("rucc-kencc-integer-types-{}-c", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, holds(0, "sizeof(2147483648L) == 8"))

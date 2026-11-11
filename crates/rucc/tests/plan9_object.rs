@@ -134,3 +134,22 @@ fn position_independent_code_is_not_the_default() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(!text.contains("__PIE__") && !text.contains("__PIC__"), "{text}");
 }
+
+#[test]
+fn an_array_with_no_size_and_no_initializer_is_a_reference() {
+    // kencc writes no `GLOBL` for it, so the linker defines `end`. APE's brk.c depends on it.
+    let source = "char end[];\nstatic char *bloc = { end };\nint tent;\nchar sized[];\nchar sized[8];\nchar *f(void) { return bloc; }\n";
+    for level in ["-O0", "-O2"] {
+        let text = assembly(source, &[level]);
+        let defines = |name: &str| {
+            text.lines().any(|l| {
+                l.starts_with(&format!("\t.comm\t{name},"))
+                    || l.starts_with(&format!("\t.lcomm\t{name},"))
+                    || l == format!("{name}:")
+            })
+        };
+        assert!(!defines("end"), "{level}: {text}");
+        assert!(defines("tent"), "{level}: {text}");
+        assert!(defines("sized"), "{level}: {text}");
+    }
+}
