@@ -2063,6 +2063,8 @@ impl Checker<'_> {
             // kencc defines the function with the type that the definition writes, so a
             // definition with `()` takes no parameters whatever the prototype said. games/mandel.c
             // has `void threadmain()` where thread.h declares `void threadmain(int, char *[])`.
+            // The signature of the name is still the one of the prototype.
+            self.kencc_prototypes.insert(declared.name, node.ty);
             declared.ty
         } else {
             composite(&mut self.types, node.ty, declared.ty).unwrap_or(declared.ty)

@@ -407,6 +407,10 @@ pub struct Checker<'a> {
     pub(in crate::check) incomplete_lines: Vec<IncompleteLine>,
     /// The records that a `#pragma incomplete` line has marked so far.
     pub(in crate::check) incomplete_records: rucc_base::hash::Set<RecordId>,
+    /// The prototype of each name that a kencc definition with `()` defines. kencc's `tmerge`
+    /// gives the type of such a definition the parameters of the prototype, so the signature of
+    /// the name under `-T` is the one of the prototype.
+    pub(in crate::check) kencc_prototypes: rucc_base::hash::Map<Symbol, TypeId>,
     /// The typedef name that each anonymous member was written with, by the record that holds
     /// it and the type of the member, under `-fplan9-extensions`. gcc takes the name as a member
     /// name, so two anonymous members that reach the same typedef name are duplicates.
@@ -505,6 +509,7 @@ impl<'a> Checker<'a> {
             extern_registers: Vec::new(),
             incomplete_lines: Vec::new(),
             incomplete_records: rucc_base::hash::Set::default(),
+            kencc_prototypes: rucc_base::hash::Map::default(),
             anonymous_spellings: rucc_base::hash::Map::default(),
             typeof_spellings: rucc_base::hash::Map::default(),
             annotations: annotate::Annotations::default(),

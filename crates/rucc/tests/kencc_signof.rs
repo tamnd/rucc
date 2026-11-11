@@ -176,3 +176,16 @@ fn t_puts_the_signatures_in_the_object() {
     let bytes = object("no-t", &[], source);
     assert_eq!(signature(&bytes, "x"), None, "an object with no -T has a signature");
 }
+
+#[test]
+fn a_definition_with_no_parameters_has_the_signature_of_the_prototype() {
+    // games/mandel.c defines `void threadmain()` where thread.h declares the prototype. kencc's
+    // `tmerge` gives the definition the parameters of the prototype, and 6l refuses the link
+    // with libthread when the two signatures are not the same.
+    let empty = "void threadmain(int argc, char *argv[]);\nvoid threadmain() { }\n";
+    let full = "void threadmain(int argc, char *argv[]) { }\n";
+    let a = signature(&object("tmerge-empty", &["-fkencc-signatures"], empty), "threadmain");
+    let b = signature(&object("tmerge-full", &["-fkencc-signatures"], full), "threadmain");
+    assert!(a.is_some());
+    assert_eq!(a, b);
+}
