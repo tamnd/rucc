@@ -70,18 +70,53 @@ impl Body<'_, '_> {
         }
         let Some(kind) = self.int_kind(lhs.ty) else { return };
         match op {
-            BinaryOp::Div | BinaryOp::Rem if self.sanitize.divide.is_on() => {
-                let check = self.sanitize.divide;
-                let zero = {
-                    let ty = self.func[rhs.value].ty;
-                    let mut build = self.build(span);
-                    let zero = build.iconst(ty, 0);
-                    build.icmp(IntPred::Eq, rhs.value, zero)
+            BinaryOp::Div | BinaryOp::Rem => {
+                // gcc makes one record for the two checks. The divisor zero is tested first, and
+                // the quotient of the most negative value and minus one after it, each with what
+                // its own check does when it fires. The second is made under `-fwrapv` as well.
+                let divide = self.sanitize.divide;
+                let overflow = if kind.is_signed(self.target().char_is_signed) {
+                    self.sanitize.signed_overflow
+                } else {
+                    Check::Off
                 };
+                if !divide.is_on() && !overflow.is_on() {
+                    return;
+                }
                 let at = self.operator(written, span);
                 let ty = self.unit.int_type(kind);
                 let data = self.unit.ubsan_data(at, &[ty]);
-                self.fire(zero, check, "__ubsan_handle_divrem_overflow", data, &[lhs, rhs], span);
+                let routine = "__ubsan_handle_divrem_overflow";
+                let wide = self.func[rhs.value].ty;
+                if divide.is_on() {
+                    let zero = {
+                        let mut build = self.build(span);
+                        let zero = build.iconst(wide, 0);
+                        build.icmp(IntPred::Eq, rhs.value, zero)
+                    };
+                    self.fire(zero, divide, routine, data, &[lhs, rhs], span);
+                }
+                if overflow.is_on() {
+                    let fires = {
+                        let mut build = self.build(span);
+                        let least = build.iconst(wide, least(wide));
+                        let minus = build.iconst(wide, -1);
+                        let low = build.icmp(IntPred::Eq, lhs.value, least);
+                        let by = build.icmp(IntPred::Eq, rhs.value, minus);
+                        build.binary(Opcode::And, low, by, Flags::NONE)
+                    };
+                    self.fire(fires, overflow, routine, data, &[lhs, rhs], span);
+                }
+            }
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+                let check = self.overflow_check(kind);
+                if !check.is_on() {
+                    return;
+                }
+                // The other operand has the type of the operation too, whatever it was written as.
+                let rhs = Operand { ty: lhs.ty, ..rhs };
+                let at = self.operator(written, span);
+                self.check_overflow(op, lhs, rhs, kind, at, span);
             }
             BinaryOp::Shl | BinaryOp::Shr => {
                 let Some(count) = self.int_kind(rhs.ty) else { return };
@@ -136,6 +171,113 @@ impl Body<'_, '_> {
                 );
             }
             _ => {}
+        }
+    }
+
+    /// The check of `-fsanitize=signed-integer-overflow` for an operation in `kind`, which is off
+    /// for an unsigned type and under `-fwrapv`, where gcc makes none.
+    fn overflow_check(&self, kind: IntKind) -> Check {
+        if kind.is_signed(self.target().char_is_signed) && !self.unit.wrapping.signed {
+            self.sanitize.signed_overflow
+        } else {
+            Check::Off
+        }
+    }
+
+    /// The check of `lhs op rhs` in `kind` for an answer that `kind` cannot hold, said to be at
+    /// `at`. gcc calls `__ubsan_handle_add_overflow`, `_sub_overflow` or `_mul_overflow` with a
+    /// record of where and the type, and the two operands.
+    fn check_overflow(
+        &mut self,
+        op: BinaryOp,
+        lhs: Operand,
+        rhs: Operand,
+        kind: IntKind,
+        at: BytePos,
+        span: Span,
+    ) {
+        let check = self.overflow_check(kind);
+        let (opcode, routine) = match op {
+            BinaryOp::Add => (Opcode::SAddOverflow, "__ubsan_handle_add_overflow"),
+            BinaryOp::Sub => (Opcode::SSubOverflow, "__ubsan_handle_sub_overflow"),
+            _ => (Opcode::SMulOverflow, "__ubsan_handle_mul_overflow"),
+        };
+        let (_, fires) = self.build(span).checked(opcode, lhs.value, rhs.value);
+        let ty = self.unit.int_type(kind);
+        let data = self.unit.ubsan_data(at, &[ty]);
+        self.fire(fires, check, routine, data, &[lhs, rhs], span);
+    }
+
+    /// `-value` in `ty` with the check of `-fsanitize=signed-integer-overflow` in front of it,
+    /// which fires for the most negative value and calls `__ubsan_handle_negate_overflow` with
+    /// the record and the value. gcc says the check is at the `-`, which is where `span` starts.
+    pub(super) fn check_negate(&mut self, value: Value, ty: TypeId, span: Span) {
+        if self.at.is_none() {
+            return;
+        }
+        let Some(kind) = self.int_kind(ty) else { return };
+        let check = self.overflow_check(kind);
+        if !check.is_on() {
+            return;
+        }
+        let fires = {
+            let wide = self.func[value].ty;
+            let mut build = self.build(span);
+            let least = build.iconst(wide, least(wide));
+            build.icmp(IntPred::Eq, value, least)
+        };
+        let data = {
+            let ty = self.unit.int_type(kind);
+            self.unit.ubsan_data(span.lo, &[ty])
+        };
+        let operand = Operand { value, ty };
+        self.fire(fires, check, "__ubsan_handle_negate_overflow", data, &[operand], span);
+    }
+
+    /// The check of `++` or `--` on an object of type `ty` that held `old`, which is `old + 1` or
+    /// `old - 1` and is checked as that.
+    ///
+    /// gcc does the step of a type narrower than `int`, and of a bit-field, in the unsigned type,
+    /// so there is no check for it. `operand` is the object, and the check is said to be at the
+    /// operator, which is after the object for a postfix one.
+    pub(super) fn check_step(
+        &mut self,
+        old: Value,
+        one: Value,
+        (up, postfix): (bool, bool),
+        (operand, bits): (ExprId, bool),
+        span: Span,
+    ) {
+        if self.at.is_none() || bits {
+            return;
+        }
+        let ty = self.tast()[operand].ty;
+        let Some(kind) = self.int_kind(ty) else { return };
+        if kind.rank() < IntKind::Int.rank() || !self.overflow_check(kind).is_on() {
+            return;
+        }
+        let at = if postfix { self.after(operand, span) } else { span.lo };
+        let op = if up { BinaryOp::Add } else { BinaryOp::Sub };
+        let lhs = Operand { value: old, ty };
+        let rhs = Operand { value: one, ty };
+        self.check_overflow(op, lhs, rhs, kind, at, span);
+    }
+
+    /// Where the operator after `operand` is, which is the first byte after it that is not a space
+    /// or a closing parenthesis, and where `span` starts when that is in another file.
+    fn after(&self, operand: ExprId, span: Span) -> BytePos {
+        let sources = self.unit.sources;
+        let from = sources.real(self.tast().expr_span(operand).hi);
+        let Some(id) = sources.lookup_file(from) else { return span.lo };
+        let file = sources.file(id);
+        let bytes = file.bytes();
+        let start = (from - file.start) as usize;
+        let found = bytes.get(start..).and_then(|after| {
+            after.iter().position(|&byte| !byte.is_ascii_whitespace() && byte != b')')
+        });
+        match found {
+            Some(at) if matches!(bytes[start + at], b'+' | b'-') => from + at as u32,
+            _ => span.lo,
         }
     }
 
@@ -704,6 +846,12 @@ impl Unit<'_> {
         self.checked_types.insert(name, symbol);
         symbol
     }
+}
+
+/// The most negative value of a signed integer of the width of `ty`.
+fn least(ty: Type) -> i128 {
+    let bits = ty.bits().min(128);
+    if bits == 128 { i128::MIN } else { -(1i128 << (bits - 1)) }
 }
 
 /// What a descriptor says about an integer type: how wide it is, as the power of two, and

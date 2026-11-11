@@ -73,7 +73,7 @@ fn asking_for_a_sanitizer_is_refused_by_name_and_writes_no_object() {
         "thread",
         "leak",
         "undefined",
-        "signed-integer-overflow",
+        "vla-bound",
         "bounds",
         "null",
         "memory",

@@ -1,5 +1,5 @@
-//! `-fsanitize=integer-divide-by-zero`, `-fsanitize=shift`, `-fsanitize=bool`, `-fsanitize=enum`
-//! and `-fsanitize=bounds-strict`, which the kernel's `CONFIG_UBSAN` puts on every unit that does
+//! `-fsanitize=integer-divide-by-zero`, `-fsanitize=shift`, `-fsanitize=bool`, `-fsanitize=enum`,
+//! `-fsanitize=bounds-strict` and `-fsanitize=signed-integer-overflow`, which the kernel's `CONFIG_UBSAN` puts on every unit that does
 //! not opt out. The calls carry gcc's names, the record each one is
 //! handed is laid out the way gcc lays it out, and a function marked `no_sanitize` makes none.
 
@@ -351,4 +351,163 @@ fn a_counter_in_an_anonymous_member_bounds_the_index() {
     let text = String::from_utf8(out.stdout).expect("a listing is text");
     assert_eq!(text.matches("call\t__ubsan_handle_out_of_bounds").count(), 1, "{text}");
     assert!(text.contains("\tmovl\t4(%r"), "the counter is not read:\n{text}");
+}
+
+/// Signed arithmetic that can leave its type, each operator on a line and in a column the program
+/// below checks, and after `uadd` the operations gcc makes no check for.
+const OVERFLOW: &str = r#"struct loc { const char *file; unsigned line, column; };
+struct type { unsigned short kind, info; char name[]; };
+struct data { struct loc loc; struct type *type; };
+void _exit(int);
+__attribute__((noinline)) int add(int a, int b) { return a + b; }
+__attribute__((noinline)) long sub(long a, long b) { return a - b; }
+__attribute__((noinline)) int mul(int a, int b) { a *= b; return a; }
+__attribute__((noinline)) int neg(int a) { return -a; }
+__attribute__((noinline)) int quot(int a, int b) { return a % b; }
+__attribute__((noinline)) int post(int a) { a ++; return a; }
+__attribute__((noinline)) int pre(int a) { --a; return a; }
+__attribute__((noinline)) unsigned uadd(unsigned a, unsigned b) { return a + b; }
+__attribute__((noinline)) short step(short s) { s++; return s; }
+__attribute__((noinline, no_sanitize("signed-integer-overflow"))) int quiet(int a, int b) {
+    return a + b;
+}
+"#;
+
+/// The runtime for [`OVERFLOW`], which exits with a status that says whether it was told the right
+/// place, type and operands, and a `main` that picks the case from how many arguments it has.
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
+const OVERFLOWS: &str = r#"
+static int same(const char *a, const char *b) {
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+static int count, fired;
+static int at(struct data *d, unsigned line, unsigned column, unsigned info, const char *name) {
+    return d->loc.line == line && d->loc.column == column && d->type->kind == 0
+        && d->type->info == info && same(d->type->name, name);
+}
+static int is_int(struct data *d, unsigned line, unsigned column) {
+    return at(d, line, column, 11, "'int'");
+}
+#define LEAST (-2147483647L - 1)
+void __ubsan_handle_add_overflow_abort(struct data *d, long l, long r) {
+    if (count == 1)
+        _exit(is_int(d, 5, 60) && l == 2147483647 && r == 1 ? 0 : 11);
+    _exit(is_int(d, 10, 47) && l == 2147483647 && r == 1 ? 0 : 16);
+}
+void __ubsan_handle_sub_overflow_abort(struct data *d, long l, long r) {
+    if (count == 2) {
+        unsigned info = sizeof(long) == 8 ? 13 : 11;
+        _exit(at(d, 6, 63, info, "'long int'") && l == -9223372036854775807L - 1 && r == 1
+            ? 0 : 12);
+    }
+    _exit(is_int(d, 11, 44) && l == LEAST && r == 1 ? 0 : 17);
+}
+void __ubsan_handle_mul_overflow_abort(struct data *d, long l, long r) {
+    _exit(is_int(d, 7, 53) && l == 65536 && r == 65536 ? 0 : 13);
+}
+void __ubsan_handle_negate_overflow_abort(struct data *d, long v) {
+    _exit(is_int(d, 8, 51) && v == LEAST ? 0 : 14);
+}
+void __ubsan_handle_divrem_overflow_abort(struct data *d, long l, long r) {
+    _exit(is_int(d, 9, 61) && l == LEAST && r == -1 ? 0 : 15);
+}
+void __ubsan_handle_add_overflow(struct data *d, long l, long r) { fired++; }
+void __ubsan_handle_sub_overflow(struct data *d, long l, long r) { _exit(21); }
+void __ubsan_handle_mul_overflow(struct data *d, long l, long r) { _exit(22); }
+void __ubsan_handle_negate_overflow(struct data *d, long v) { _exit(23); }
+void __ubsan_handle_divrem_overflow(struct data *d, long l, long r) { _exit(24); }
+int main(int argc, char **argv) {
+    volatile int most = 2147483647, least = -2147483647 - 1;
+    count = argc;
+    switch (argc) {
+    case 1: return add(most, 1) + 90;
+    case 2: return (int)sub(sizeof(long) == 8 ? -9223372036854775807L - 1 : least, 1) + 90;
+    case 3: return mul(65536, 65536) + 90;
+    case 4: return neg(least) + 90;
+    case 5: return quot(least, -1) + 90;
+    case 6: return post(most) + 90;
+    case 7: return pre(least) + 90;
+    }
+    if (uadd(4294967295u, 1) != 0 || step(32767) != -32768 || quiet(most, 1) != least)
+        return 31;
+    if (add(3, 4) != 7 || sub(3, 4) != -1 || mul(-3, 4) != -12 || neg(5) != -5)
+        return 32;
+    if (quot(7, -2) != 1 || post(5) != 6 || pre(5) != 4 || fired != 0)
+        return 33;
+    add(most, 1);
+    return fired == 1 ? 0 : 34;
+}
+"#;
+
+fn overflow(target: &str, args: &[&str]) -> String {
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir = std::env::temp_dir()
+        .join(format!("rucc-ubsan-overflow-{}{target}{tag}", std::process::id()));
+    let target = format!("--target={target}");
+    let mut all = vec![target.as_str(), "-fsanitize=signed-integer-overflow", "-S", "-o", "-"];
+    all.extend(args);
+    let out = compile(&dir, OVERFLOW, &all);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).expect("a listing is text")
+}
+
+#[test]
+fn signed_arithmetic_that_leaves_its_type_calls_the_runtime() {
+    let targets =
+        ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "i686-unknown-linux-gnu"];
+    let names = ["add", "sub", "mul", "negate", "divrem"];
+    for target in targets {
+        for level in ["-O0", "-O2"] {
+            let text = overflow(target, &[level]);
+            for name in names {
+                let wanted = format!("__ubsan_handle_{name}_overflow");
+                assert!(text.contains(&wanted), "{target} {level} has no {wanted}:\n{text}");
+            }
+            let start = text.find("\nuadd:").expect("uadd is defined");
+            assert!(!text[start..].contains("__ubsan_handle"), "{target} {level}:\n{text}");
+        }
+    }
+    // `-fwrapv` defines the overflow, but gcc still checks the quotient of the least value and
+    // minus one.
+    let text = overflow("x86_64-unknown-linux-gnu", &["-O2", "-fwrapv"]);
+    assert!(text.contains("__ubsan_handle_divrem_overflow"), "{text}");
+    for name in ["add", "sub", "mul", "negate"] {
+        assert!(!text.contains(&format!("__ubsan_handle_{name}")), "{text}");
+    }
+    let text = overflow("x86_64-unknown-linux-gnu", &["-O2", "-fsanitize-trap=all"]);
+    assert!(!text.contains("__ubsan_handle"), "{text}");
+    assert!(text.contains("ud2"), "{text}");
+}
+
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
+#[test]
+fn the_runtime_is_told_which_operation_left_its_type() {
+    for level in ["-O0", "-O2"] {
+        for (recover, cases) in
+            [("-fno-sanitize-recover=all", 1..8), ("-fsanitize-recover=all", 8..9)]
+        {
+            let dir = std::env::temp_dir().join(format!(
+                "rucc-ubsan-overflow-run-{}{level}{}",
+                std::process::id(),
+                cases.start
+            ));
+            let program = dir.join("one");
+            let program_text = program.to_str().expect("a temporary path is text");
+            let source = format!("{OVERFLOW}{OVERFLOWS}");
+            let args = [level, "-fsanitize=signed-integer-overflow", recover, "-o", program_text];
+            let out = compile(&dir, &source, &args);
+            assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+            for case in cases {
+                let status = Command::new(&program)
+                    .args(std::iter::repeat_n("x", case - 1))
+                    .status()
+                    .expect("the program runs");
+                assert_eq!(status.code(), Some(0), "{level} {recover} case {case}");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }

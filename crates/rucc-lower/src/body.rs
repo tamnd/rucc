@@ -392,6 +392,9 @@ fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
     if flags.contains(DeclFlags::NO_UBSAN_UNREACHABLE) {
         sanitize.unreachable = Check::Off;
     }
+    if flags.contains(DeclFlags::NO_UBSAN_SIGNED_OVERFLOW) {
+        sanitize.signed_overflow = Check::Off;
+    }
     if flags.contains(DeclFlags::NO_ASAN) || flags.contains(DeclFlags::NAKED) {
         sanitize.address = false;
     }
@@ -8508,6 +8511,7 @@ impl<'u> Body<'_, 'u> {
                 if out.lane().is_float() {
                     return Some(self.build(span).unary(Opcode::FNeg, value, out));
                 }
+                self.check_negate(value, ty, span);
                 let signed = repr::is_signed(self.types(), self.target(), ty);
                 Some(self.signed_negate(value, signed, span))
             }
@@ -8645,6 +8649,8 @@ impl<'u> Body<'_, 'u> {
             let signed = repr::is_signed(self.types(), self.target(), ty);
             let opcode = if up { Opcode::Add } else { Opcode::Sub };
             let one = self.build(span).iconst(out, 1);
+            let bits = matches!(place.at, Where::Bits(..));
+            self.check_step(old, one, (up, op.is_postfix()), (operand, bits), span);
             match self.checked_binary(opcode, old, one, signed, span) {
                 Some(value) => value,
                 None => {

@@ -566,6 +566,9 @@ impl DeclFlags {
     /// The same for `unreachable`.
     pub const NO_UBSAN_UNREACHABLE: Self = Self(1 << 50);
 
+    /// The same for `signed-integer-overflow`.
+    pub const NO_UBSAN_SIGNED_OVERFLOW: Self = Self(1 << 52);
+
     /// `no_sanitize_address`, `no_address_safety_analysis`, or `no_sanitize` naming `address` or
     /// `kernel-address`, was written on a declaration of this function, so its accesses are not
     /// checked against the shadow. The kernel's `noinstr` says it. Merged the way
