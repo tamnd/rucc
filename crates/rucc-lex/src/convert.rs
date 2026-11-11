@@ -222,6 +222,9 @@ pub struct Convert<'a> {
     /// Whether `-pedantic` is on, which is the difference between a remark that is a warning
     /// and one that is nothing at all.
     pub pedantic: bool,
+    /// Whether the unit is in the kencc dialect, which is `-fkencc`. An integer constant then
+    /// has the type that `lex.c` of kencc gives it. See [`crate::kencc_integer`].
+    pub kencc: bool,
 }
 
 /// Converts a stream of preprocessing tokens into tokens.
@@ -396,7 +399,8 @@ fn number(
     let text = spelling(token, cx);
     // Which of the two it is, is the integer path's answer rather than a guess made here: the
     // grammars overlap at the front and only one of them can tell where the number stops.
-    match crate::number::integer(text, cx.std, cx.target) {
+    let integer = if cx.kencc { crate::number::kencc_integer } else { crate::number::integer };
+    match integer(text, cx.std, cx.target) {
         Ok(value) => {
             report(value.remarks, None, token.span, token.flags, cx, diagnostics);
             ints.push(value);
@@ -652,6 +656,7 @@ mod tests {
                 std: self.std,
                 gnu: self.gnu,
                 pedantic: self.pedantic,
+                kencc: false,
             };
             let (tokens, diagnostics) = convert(&pp, &cx);
             (tokens, diagnostics.iter().map(|d| d.message.clone()).collect())
@@ -919,6 +924,7 @@ mod tests {
                 std: fixture.std,
                 gnu: false,
                 pedantic: false,
+                kencc: false,
             },
         );
         assert_eq!(tokens.tokens.len(), 1);

@@ -27,7 +27,7 @@
 //! let source = b"int main(void) { return 0; }";
 //! let (pp, _) = tokenize(source, 0, Options::new(), &mut interner);
 //! let cx = Convert { keywords: &keywords, interner: &interner, target: &target,
-//!                    std, gnu: false, pedantic: false };
+//!                    std, gnu: false, pedantic: false, kencc: false };
 //! let (tokens, _) = convert(&pp, &cx);
 //!
 //! let parsed = parse(&tokens, Context::new(&interner, std));

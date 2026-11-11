@@ -98,7 +98,7 @@ pub use crate::literal::{
 };
 pub use crate::number::{
     FloatConstant, FloatConstantType, FloatError, IntConstant, IntConstantType, IntError, floating,
-    integer,
+    integer, kencc_integer,
 };
 pub use crate::remarks::Remarks;
 pub use crate::token::{PpToken, PpTokenKind, Punct, TokenFlags};

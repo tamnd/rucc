@@ -47,6 +47,7 @@ impl Fixture {
             std: self.std,
             gnu: false,
             pedantic: false,
+            kencc: false,
         };
         let (tokens, diagnostics) = convert(&pp, &cx);
         assert!(diagnostics.is_empty(), "phase 7 disliked this:\n{src}");

@@ -343,6 +343,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         std: opts.std,
         gnu: opts.gnu_extensions,
         pedantic: opts.pedantic,
+        kencc: opts.kencc,
     };
     let (tokens, complaints) = convert(&expanded, &cx);
     drop(expanded);

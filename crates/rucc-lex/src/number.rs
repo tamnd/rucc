@@ -383,6 +383,26 @@ impl FloatError {
 /// [`IntError`], one case of which is that the spelling is a floating constant rather than a
 /// malformed integer one.
 pub fn integer(text: &str, std: Std, target: &TargetInfo) -> Result<IntConstant, IntError> {
+    integer_in(text, std, target, false)
+}
+
+/// Converts the spelling of a preprocessing number into an integer constant, with the type
+/// that `lex.c` of kencc gives it rather than the type of the standard list.
+///
+/// # Errors
+///
+/// [`IntError`], as for [`integer`].
+pub fn kencc_integer(text: &str, std: Std, target: &TargetInfo) -> Result<IntConstant, IntError> {
+    integer_in(text, std, target, true)
+}
+
+/// The body of [`integer`] and [`kencc_integer`].
+fn integer_in(
+    text: &str,
+    std: Std,
+    target: &TargetInfo,
+    kencc: bool,
+) -> Result<IntConstant, IntError> {
     let bytes = text.as_bytes();
     let (base, start) = base_of(bytes);
     if is_floating(bytes, base) {
@@ -443,6 +463,16 @@ pub fn integer(text: &str, std: Std, target: &TargetInfo) -> Result<IntConstant,
         }
         let ty = bit_int(value, suffix.unsigned);
         return Ok(IntConstant { value, ty, imaginary: false, remarks });
+    }
+
+    if kencc {
+        let (kind, value) = kencc_type(value, base, suffix, target).ok_or(IntError::TooLarge)?;
+        return Ok(IntConstant {
+            value,
+            ty: IntConstantType::Standard(kind),
+            imaginary: suffix.imaginary,
+            remarks,
+        });
     }
 
     let candidates = candidates(base, suffix, std);
@@ -596,6 +626,58 @@ fn fits(value: u128, kind: IntKind, target: &TargetInfo) -> bool {
     // `unsigned __int128` holds every value the accumulator can, and shifting a `u128` by all
     // of its bits is not a shift, so the widest type is answered without one.
     bits >= 128 || value >> bits == 0
+}
+
+/// The type of a constant as `lex.c` of kencc gives it, and the value that the constant keeps.
+///
+/// A decimal constant with no `u` stays `int` below 2^31. Any other constant with no `l` is
+/// `int` or `unsigned int` below 2^32. Above that, and with `ll`, the constant is `vlong`, or
+/// `uvlong` when it has `u` or does not fit `vlong`. So `9223372036854775808` is `uvlong`, where
+/// gcc makes it `__int128`. One `l` gives `long` whatever the value: kencc cuts the value to
+/// the width of `long`, and the type is `ulong` when the constant has `u` or when the cut value
+/// has its sign bit set. So `2147483648L` is `ulong` and `4294967296L` is a `long` zero, where
+/// gcc makes both `long long`.
+fn kencc_type(
+    value: u128,
+    base: u32,
+    suffix: Suffix,
+    target: &TargetInfo,
+) -> Option<(IntKind, u128)> {
+    use IntKind::{Int, Long, LongLong, UInt, ULong, ULongLong};
+
+    let value = u64::try_from(value).ok()?;
+    let below = if base == 10 && !suffix.unsigned { 31 } else { 32 };
+    let kind = match suffix.length {
+        Some(Length::Long) => {
+            let bits = int_width(Long, target);
+            let cut = if bits >= 64 { value } else { value & ((1 << bits) - 1) };
+            let kind = if suffix.unsigned || cut >> (bits - 1) != 0 { ULong } else { Long };
+            return Some((kind, u128::from(cut)));
+        }
+        Some(Length::LongLong) => {
+            if suffix.unsigned || value >> 63 != 0 {
+                ULongLong
+            } else {
+                LongLong
+            }
+        }
+        None if value >> below != 0 => {
+            if suffix.unsigned || value >> 63 != 0 {
+                ULongLong
+            } else {
+                LongLong
+            }
+        }
+        None => {
+            if suffix.unsigned || value >> 31 != 0 {
+                UInt
+            } else {
+                Int
+            }
+        }
+        Some(Length::BitInt) => return None,
+    };
+    Some((kind, u128::from(value)))
 }
 
 /// The candidate list for a base and a suffix, in the order the standard walks it.
@@ -947,6 +1029,43 @@ mod tests {
             IntConstantType::Standard(kind) => kind,
             IntConstantType::BitInt { .. } => panic!("{text} is a _BitInt constant"),
         }
+    }
+
+    fn plan9() -> TargetInfo {
+        TargetInfo::new("aarch64-unknown-plan9".parse::<Triple>().expect("a known triple"))
+    }
+
+    fn kencc(text: &str) -> (IntKind, u128) {
+        let constant = kencc_integer(text, Std::C99, &plan9()).expect("a constant");
+        let IntConstantType::Standard(kind) = constant.ty else { panic!("{text} is a _BitInt") };
+        (kind, constant.value)
+    }
+
+    #[test]
+    fn kencc_gives_a_constant_the_type_that_lex_c_gives_it() {
+        use IntKind::{Int, LongLong, UInt, ULongLong};
+        assert_eq!(kencc("2147483647"), (Int, 2_147_483_647));
+        assert_eq!(kencc("2147483648"), (LongLong, 2_147_483_648));
+        assert_eq!(kencc("0x80000000"), (UInt, 0x8000_0000));
+        assert_eq!(kencc("037777777777"), (UInt, 0xffff_ffff));
+        assert_eq!(kencc("0x100000000"), (LongLong, 0x1_0000_0000));
+        assert_eq!(kencc("4294967296u"), (ULongLong, 0x1_0000_0000));
+        assert_eq!(kencc("9223372036854775807"), (LongLong, 0x7fff_ffff_ffff_ffff));
+        assert_eq!(kencc("9223372036854775808"), (ULongLong, 0x8000_0000_0000_0000));
+        assert_eq!(kencc("1ll"), (LongLong, 1));
+        assert_eq!(kencc("1ull"), (ULongLong, 1));
+        assert_eq!(kencc("1u"), (UInt, 1));
+    }
+
+    #[test]
+    fn kencc_cuts_a_long_constant_to_the_width_of_long() {
+        use IntKind::{Long, ULong};
+        assert_eq!(kencc("1L"), (Long, 1));
+        assert_eq!(kencc("2147483648L"), (ULong, 0x8000_0000));
+        assert_eq!(kencc("4294967296L"), (Long, 0));
+        assert_eq!(kencc("0x180000000L"), (ULong, 0x8000_0000));
+        assert_eq!(kencc("1UL"), (ULong, 1));
+        assert!(kencc_integer("18446744073709551616", Std::C99, &plan9()).is_err());
     }
 
     #[test]
