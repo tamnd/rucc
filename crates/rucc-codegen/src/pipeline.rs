@@ -2916,6 +2916,27 @@ mod tests {
         assert!(!text.contains("x64.ret_val_f"), "a float is not back in xmm0: {text}");
     }
 
+    /// tamnd/rucc-bsd#3. A `long double` narrowed to a half is libgcc's `__truncxfhf2`, as gcc
+    /// writes it, on i386 and on x86-64. NetBSD's i386 `__divhc3` assigns a `float` quotient that
+    /// is still in an x87 register to a half, which is this narrowing.
+    #[test]
+    fn a_long_double_narrowed_to_a_half_is_truncxfhf2() {
+        for name in ["i686-unknown-netbsd", "x86_64-unknown-netbsd"] {
+            let triple = name.parse::<rucc_target::Triple>().expect("a triple");
+            let info = TargetInfo::new(triple);
+            let machine = Machine::for_target(&info).expect("x86 has a back end");
+            let (mut names, mut source, block, args) = blank(&[Type::float(rucc_ir::Float::F80)]);
+            let mut build = Builder::new(&mut source, block);
+            let half = build.unary(Opcode::FPTrunc, args[0], Type::float(rucc_ir::Float::F16));
+            build.ret(&[half]);
+            let out =
+                compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                    .expect("a long double narrows to a half");
+            let text = mir::print_func(&out, &names, &x86::REGS);
+            assert_eq!(text.matches("__truncxfhf2").count(), 1, "{name}: {text}");
+        }
+    }
+
     /// `double f(int n, double x) { char a[n]; g(a); return x; }` on i386 with the stack kept on
     /// four bytes, which is `-mpreferred-stack-boundary=2`. The `double` goes back on the x87
     /// stack through eight bytes of the frame, and those bytes are aligned to no more than the
