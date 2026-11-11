@@ -50,7 +50,16 @@ pub static SELECTOR: super::Selector = super::Selector {
             add: "lea_32",
         }),
         teb: None,
-        dynamic: None,
+        // What gcc writes in i386 position independent code. `___tls_get_addr` takes its one
+        // argument in `%eax`, and the call through the procedure linkage table wants the table's
+        // address in `%ebx`. The link rewrites both sequences in an executable, and it only knows
+        // them in these exact forms.
+        dynamic: Some(super::Dynamic {
+            general: "leal\t{}@tlsgd(,%ebx,1), %eax\ncall\t___tls_get_addr@PLT",
+            local: "leal\t{}@tlsldm(%ebx), %eax\ncall\t___tls_get_addr@PLT\n\
+                    leal\t{}@dtpoff(%eax), %eax",
+            descriptor: None,
+        }),
     },
     jumps: &super::Jumps {
         near: "lea_32",
