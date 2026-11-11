@@ -13088,7 +13088,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         }
         let mut opts = options();
         opts.target = "i686-unknown-linux-gnu".parse::<Triple>().unwrap();
-        assert!(run(&opts, "__bf16 k;\n").failed(), "no __bf16 on i386 yet");
+        assert_eq!(run(&opts, "__bf16 k;\n").messages, Vec::<String>::new(), "i386 (#4324)");
     }
 
     /// The infinities and nans of the interchange types are constants, as for `double`.
