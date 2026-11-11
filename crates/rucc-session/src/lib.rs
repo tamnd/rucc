@@ -1529,6 +1529,15 @@ pub enum EmitKind {
     /// type plane fits inside Tier D's memory budget, and it needs nothing past the type
     /// checker because it is a question about layouts rather than about code.
     TypeGranules,
+    /// The acid declarations of kencc's `-a`, `--emit=acid`.
+    ///
+    /// Not an intermediate form. The acid debugger reads them to print the structures of a
+    /// program, and the Plan 9 mkfiles make them with `$CC -a`. Nothing past the type checker
+    /// runs, as in kencc, which does not compile a file under `-a`.
+    Acid,
+    /// The same as [`EmitKind::Acid`] for the main file only, `--emit=acid-main`, which is
+    /// kencc's `-aa`. What the headers declare is left out.
+    AcidMain,
     /// Nothing at all, `-fsyntax-only`.
     ///
     /// The front end runs through the type checker and the diagnostics come out, and then the
@@ -1553,6 +1562,8 @@ impl EmitKind {
             EmitKind::WasmTree => "wasm-tree",
             EmitKind::SafetySummary => "safety-summary",
             EmitKind::TypeGranules => "type-granules",
+            EmitKind::Acid => "acid",
+            EmitKind::AcidMain => "acid-main",
             EmitKind::SyntaxOnly => "syntax-only",
         }
     }
@@ -1574,6 +1585,8 @@ impl FromStr for EmitKind {
             "wasm-tree" => EmitKind::WasmTree,
             "safety-summary" => EmitKind::SafetySummary,
             "type-granules" => EmitKind::TypeGranules,
+            "acid" => EmitKind::Acid,
+            "acid-main" => EmitKind::AcidMain,
             "syntax-only" => EmitKind::SyntaxOnly,
             _ => return Err(()),
         })

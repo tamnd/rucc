@@ -198,6 +198,14 @@ pub fn object_name(file: &str, machine: Machine) -> String {
     format!("{stem}.{}", machine.letter())
 }
 
+/// The name of the acid file for `file` under `-a -n`, which kencc makes as it makes the name
+/// of an object, with `acid` in place of the character of the machine.
+#[must_use]
+pub fn acid_name(file: &str) -> String {
+    let object = object_name(file, Machine::Amd64);
+    format!("{}acid", &object[..object.len() - 1])
+}
+
 /// Read the kencc options in `args`, and return them with the files after them.
 fn read_options(args: &[String]) -> (Options, Vec<String>) {
     let mut o = Options::default();
@@ -277,9 +285,14 @@ pub fn plan(
     if files.is_empty() && o.out.is_none() {
         return Err(Error(format!("usage: {name} [-options] files")));
     }
-    if o.has(b'a') || o.has(b'Z') {
+    if o.has(b'Z') {
         return Err(Error(format!(
-            "{name} -a and -Z write acid and pickle declarations, which rucc does not write yet"
+            "{name} -Z writes pickle declarations, which rucc does not write yet"
+        )));
+    }
+    if o.has(b'a') && o.has(b's') {
+        return Err(Error(format!(
+            "{name} -a with -s writes assembler offsets, which rucc does not write yet"
         )));
     }
     let mut notes = Vec::new();
@@ -342,6 +355,28 @@ pub fn plan(
     let sources: Vec<Option<String>> =
         if files.is_empty() { vec![None] } else { files.into_iter().map(Some).collect() };
     let mut jobs = Vec::new();
+    // `-a` writes the acid declarations and does not compile. They go to the standard output,
+    // or with `-n` to the file that `-o` names or to the stem of the source with `.acid`.
+    if o.has(b'a') {
+        let emit = if o.count[usize::from(b'a')] > 1 { "acid-main" } else { "acid" };
+        for file in &sources {
+            let out = match (o.has(b'n'), &o.out, file) {
+                (true, Some(out), _) => out.clone(),
+                (true, None, Some(file)) => acid_name(file),
+                _ => "-".to_owned(),
+            };
+            let mut args = common.clone();
+            args.retain(|a| a != "-c");
+            args.push(format!("--emit={emit}"));
+            if file.is_none() {
+                args.extend(["-x".to_owned(), "c".to_owned()]);
+            }
+            let input = file.clone().unwrap_or_else(|| "-".to_owned());
+            args.extend(["-o".to_owned(), out, input]);
+            jobs.push(Job { file: file.clone(), args });
+        }
+        return Ok(Plan { jobs, announce: sources.len() > 1, notes });
+    }
     for file in &sources {
         let out = match (&o.out, file) {
             (Some(out), _) => out.clone(),
@@ -620,10 +655,40 @@ mod tests {
     #[test]
     fn options_that_rucc_cannot_honour_are_refused_or_noted() {
         assert_eq!(plan_with("6c", &["-l", "x.c"], &[]).unwrap_err().0, "can only use -l with vc");
-        assert!(plan_with("6c", &["-aa", "x.c"], &[]).unwrap_err().0.contains("acid"));
-        assert!(plan_with("7c", &["-an", "x.c"], &[]).is_err());
+        assert!(plan_with("6c", &["-Z", "x.c"], &[]).unwrap_err().0.contains("pickle"));
+        assert!(plan_with("6c", &["-as", "x.c"], &[]).unwrap_err().0.contains("-s"));
         let p = plan_with("6c", &["-dw", "x.c"], &[]).unwrap();
         assert_eq!(p.notes, ["6c: -d (print declarations) does nothing in rucc"]);
         assert!(plan_with("6c", &["-FTVBpcmsw", "x.c"], &[]).unwrap().notes.is_empty());
+    }
+
+    #[test]
+    fn acid_goes_to_the_standard_output_or_with_n_to_a_file() {
+        let a = one("6c", &["-a", "-w", "x.c"]);
+        assert!(!a.contains(&"-c".to_owned()), "{a:?}");
+        assert!(
+            a.ends_with(&["--emit=acid".into(), "-o".into(), "-".into(), "x.c".into()]),
+            "{a:?}"
+        );
+        let aa = one("6c", &["-aa", "dir/x.c"]);
+        assert!(aa.ends_with(&[
+            "--emit=acid-main".into(),
+            "-o".into(),
+            "-".into(),
+            "dir/x.c".into()
+        ]));
+        let an = one("7c", &["-an", "../port/proc.c"]);
+        assert!(
+            an.ends_with(&["-o".into(), "proc.acid".into(), "../port/proc.c".into()]),
+            "{an:?}"
+        );
+        let ano = one("6c", &["-a", "-n", "-o", "y", "x.c"]);
+        assert!(ano.ends_with(&["-o".into(), "y".into(), "x.c".into()]), "{ano:?}");
+        // Without -n, -o names nothing, as in kencc.
+        let ao = one("6c", &["-a", "-o", "y", "x.c"]);
+        assert!(ao.ends_with(&["-o".into(), "-".into(), "x.c".into()]), "{ao:?}");
+        let p = plan_with("6c", &["-a", "-S", "x.c", "y.c"], &[]).unwrap();
+        assert_eq!(p.jobs.len(), 2);
+        assert!(p.announce);
     }
 }

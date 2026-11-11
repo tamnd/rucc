@@ -443,6 +443,8 @@ pub fn last_phase(emit: EmitKind) -> Phase {
         | EmitKind::WasmTree
         | EmitKind::SafetySummary
         | EmitKind::TypeGranules
+        | EmitKind::Acid
+        | EmitKind::AcidMain
         | EmitKind::SyntaxOnly => Phase::Compile,
         EmitKind::Object => Phase::Assemble,
         EmitKind::Archive => Phase::Archive,
@@ -580,6 +582,8 @@ fn suffix_for(phase: Phase, opts: &Options) -> &'static str {
             // Two extensions for the same reason, and text rather than JSON because this one
             // is read by a person once and not by a build every time.
             EmitKind::TypeGranules => "granules.txt",
+            // The name that kencc gives the file under `-a -n`.
+            EmitKind::Acid | EmitKind::AcidMain => "acid",
             _ => "s",
         },
         // MSVC-targeted builds expect `.obj`, and build systems written for that target look
@@ -1286,6 +1290,8 @@ mod tests {
             EmitKind::WasmTree,
             EmitKind::SafetySummary,
             EmitKind::TypeGranules,
+            EmitKind::Acid,
+            EmitKind::AcidMain,
         ] {
             assert_eq!(last_phase(emit), Phase::Compile, "{emit:?}");
         }
@@ -1303,6 +1309,8 @@ mod tests {
             (EmitKind::WasmTree, "a.wasm-tree"),
             (EmitKind::SafetySummary, "a.safety.json"),
             (EmitKind::TypeGranules, "a.granules.txt"),
+            (EmitKind::Acid, "a.acid"),
+            (EmitKind::AcidMain, "a.acid"),
         ] {
             let mut o = linux();
             o.emit = emit;
