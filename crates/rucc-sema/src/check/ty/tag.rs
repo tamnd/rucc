@@ -372,6 +372,7 @@ impl Checker<'_> {
             align: packing.align.map(u64::from),
             pack: pragmas.pack.map(u64::from),
             bit_fields,
+            kencc: self.cx.kencc_layout,
         };
         let laid_out = match layout_record(&self.types, kind, &decls, &options, self.cx.target) {
             Ok(laid_out) => Some(laid_out),

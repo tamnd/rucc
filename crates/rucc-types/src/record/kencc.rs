@@ -367,6 +367,42 @@ mod tests {
     }
 
     #[test]
+    fn the_flag_gives_another_target_the_layout_of_plan9() {
+        let (mut n, mut types) = setup();
+        let char_type = types.int(IntKind::Char);
+        let short = types.int(IntKind::Short);
+        let int = types.int(IntKind::Int);
+        let inner = record(&mut types, RecordKind::Struct, &[n.field("d", char_type)]);
+        let fields = [
+            n.field("c", char_type),
+            n.bits("a", int, 3),
+            n.bits("b", short, 4),
+            n.field("t", inner),
+            n.field("s", short),
+        ];
+        let linux = TargetInfo::new(
+            "x86_64-linux-gnu".parse::<Triple>().expect("a triple the compiler supports"),
+        );
+        let kencc = RecordOptions { kencc: true, ..RecordOptions::default() };
+        let plan9_layout = lay_out(&types, RecordKind::Struct, &fields);
+        let flagged = layout_record(&types, RecordKind::Struct, &fields, &kencc, &linux)
+            .expect("a record kencc takes");
+        assert_eq!(offsets(&flagged), offsets(&plan9_layout));
+        assert_eq!(flagged.layout, plan9_layout.layout);
+        assert_eq!(offsets(&flagged), [0, 32, 35, 64, 128]);
+        assert_eq!(flagged.layout.size, 24);
+        let host = layout_record(
+            &types,
+            RecordKind::Struct,
+            &[n.field("c", char_type)],
+            &RecordOptions::default(),
+            &linux,
+        )
+        .expect("a record the host takes");
+        assert_eq!(host.layout.size, 1, "without the flag the host keeps its own layout");
+    }
+
+    #[test]
     fn a_field_in_its_unit_has_the_alignment_of_its_byte() {
         assert_eq!(alignment_at(0, 4), 4);
         assert_eq!(alignment_at(8, 4), 4);
