@@ -29,6 +29,10 @@ use rucc_object::plan9::{Addr6, History, Machine, NSNAME, Object, Prog6, Progs, 
 use crate::Trouble;
 
 mod arm64;
+mod optab;
+// `r9 optab` writes the table, with each class and a `pub` that the check does not use.
+#[allow(dead_code, unreachable_pub)]
+mod optab6;
 
 pub use arm64::arm64;
 
@@ -956,7 +960,22 @@ impl Out<'_> {
                     if skip.contains(&at) {
                         continue;
                     }
+                    let first = self.progs.len();
                     self.insn(prefix, mnemonic, operands, l.number, &body[at + 1..])?;
+                    for p in &self.progs[first..] {
+                        if let Some((from, to, why)) = optab::CHECKER.check(p) {
+                            let name = a6::NAMES[usize::from(p.op)];
+                            return Err(trouble(
+                                l.number,
+                                format!(
+                                    "6l cannot encode {} with the operand classes {} and {}: {why}",
+                                    name.strip_prefix('A').unwrap_or(name),
+                                    optab::Checker::name(from),
+                                    optab::Checker::name(to),
+                                ),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1682,5 +1701,18 @@ mod tests {
         ] {
             assert!(amd64(listing, "a.c", None).is_err(), "{listing}");
         }
+    }
+
+    #[test]
+    fn an_instruction_that_6l_cannot_encode_is_refused_at_its_line() {
+        let listing = "f:\n\tmovq\t$1, (%rax)\n\tmovq\t$1099511627776, (%rax)\n\tret\n";
+        let trouble =
+            amd64(listing, "a.c", None).expect_err("6l has no store of a 64-bit constant");
+        assert_eq!(trouble.line, 3);
+        assert_eq!(
+            trouble.why,
+            "6l cannot encode MOVQ with the operand classes Yi64 and Ym: no pair of its ytab or of \
+             ymovtab covers the classes of its operands"
+        );
     }
 }
