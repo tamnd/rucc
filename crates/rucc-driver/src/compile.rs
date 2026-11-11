@@ -423,6 +423,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 kencc: opts.kencc,
                 kencc_strict_void: opts.kencc_strict_void,
                 kencc_format: opts.kencc_format,
+                acid: matches!(opts.emit, EmitKind::Acid | EmitKind::AcidMain),
                 trapping_math: opts.trapping_math,
                 isa: opts.isa,
                 x87: opts.x87,
@@ -465,6 +466,18 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         &sess.interner,
                         &sess.target,
                     ));
+                }
+                // kencc's `-aa` keeps what the main file declares and drops what the headers do.
+                EmitKind::Acid | EmitKind::AcidMain => {
+                    let main = opts.emit == EmitKind::AcidMain;
+                    let mut text = String::new();
+                    for (span, piece) in &checked.acid {
+                        let pos = sess.sources.real(span.lo);
+                        if !main || sess.sources.lookup_file(pos) == Some(file) {
+                            text.push_str(piece);
+                        }
+                    }
+                    artifact = Artifact::Text(text);
                 }
                 // A wasm unit is lowered and optimized like any other. The wasm back end of
                 // #2864 writes an object and its `-S` text, and an archive and a link take the

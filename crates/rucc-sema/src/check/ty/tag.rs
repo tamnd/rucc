@@ -288,6 +288,9 @@ impl Checker<'_> {
             };
             let mark = self.types.prototypes_mark();
             let Some((decl, at)) = self.member_decl(field) else { continue };
+            if let Some(name) = decl.name {
+                self.acid_member(name, at);
+            }
             let prototypes = self.types.take_prototypes(mark);
             let spelled = self.spelled_with(field.specs);
             // An anonymous member's names are reached as if they were written here, so they clash
@@ -386,6 +389,7 @@ impl Checker<'_> {
             variable: None,
         });
         self.types.complete_record(id, laid_out);
+        self.acid_record(id, span);
         if let Some(at) = self.transparent_union(attrs) {
             self.make_transparent(id, at);
         }
@@ -1209,6 +1213,7 @@ impl Checker<'_> {
             self.report(Diagnostic::error(message, span).with_code("E0563"));
         }
         self.scopes.declare(name, Binding::Enumerator { value, ty, enumeration: None });
+        self.acid_enumerator(name, value, span);
     }
 
     /// The type the enumerators are represented in, where the program did not say.

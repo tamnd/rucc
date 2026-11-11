@@ -317,7 +317,7 @@ options:
   -save-temps[=cwd|obj], -fstack-usage, -time   keep the .i and .s, write a .su, time each step
   --target=<triple>      generate code for <triple>, as the names <triple>-rucc and <triple>-gcc do
   --emit=<kind>          exe, obj, archive, asm, preprocessed, tast, ir, mir-final,
-                         wasm-tree, safety-summary, type-granules
+                         wasm-tree, safety-summary, type-granules, acid, acid-main
   --print-config, --print-pipeline, --print-params   print the setup, the passes or the thresholds
   --param <name>=<value> set one of the optimizer's thresholds for this compilation
   -h, --help, --version  print this message or the version, and exit

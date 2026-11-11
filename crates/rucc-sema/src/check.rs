@@ -71,6 +71,7 @@ use crate::tast::{Const, Tast, Used};
 pub use incomplete::IncompleteLine;
 pub use varargck::{VarargckLine, VarargckPragma, VarargckType};
 
+mod acid;
 mod advice;
 mod aggregate_return;
 mod annotate;
@@ -158,6 +159,9 @@ pub struct Context<'a> {
     /// Whether a `-fkencc` unit checks the formats of the calls that `#pragma varargck` names,
     /// which is `-fkencc-format` and kencc's `-F`. See `check/varargck.rs`.
     pub kencc_format: bool,
+    /// Whether the acid declarations of kencc's `-a` are collected, which is `--emit=acid`. They
+    /// come back in [`Checked::acid`].
+    pub acid: bool,
     /// Whether an operation may raise an exception the program then looks at, which is
     /// `-ftrapping-math` and is on by default.
     ///
@@ -219,6 +223,7 @@ impl<'a> Context<'a> {
             kencc: false,
             kencc_strict_void: false,
             kencc_format: false,
+            acid: false,
             trapping_math: true,
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
             x87: true,
@@ -320,6 +325,9 @@ pub struct Checked {
     /// The kencc type signature of each name with external linkage, which `-T` puts in the
     /// object. It is empty when the unit is not in the kencc dialect.
     pub kencc_signatures: rucc_base::hash::Map<String, u32>,
+    /// The acid text of `-a`, in pieces, with the place in the source that caused each piece.
+    /// Empty unless [`Context::acid`] was set.
+    pub acid: Vec<(Span, String)>,
 }
 
 impl Checked {
@@ -471,6 +479,8 @@ pub struct Checker<'a> {
     /// tamnd/rucc#3052. It is by the number of the name rather than a map, since hashing the name
     /// each time was still most of what asking cost on a duktape source file's headers.
     pub(in crate::check) gnu_names: std::cell::RefCell<attr::AttrNames>,
+    /// The acid writer, present when [`Context::acid`] is set.
+    pub(in crate::check) acid: Option<Box<acid::Acid>>,
 }
 
 impl<'a> Checker<'a> {
@@ -516,6 +526,7 @@ impl<'a> Checker<'a> {
             registers: rucc_base::hash::Set::default(),
             refused_pragmas: rucc_base::hash::Set::default(),
             gnu_names: std::cell::RefCell::default(),
+            acid: cx.acid.then(Box::default),
         };
         checker.declare_type_names();
         checker
@@ -668,11 +679,13 @@ impl<'a> Checker<'a> {
         self.tast.record_gnuc(self.cx.gnuc);
         let kencc_signatures =
             if self.cx.kencc { self.kencc_signatures() } else { rucc_base::hash::Map::default() };
+        let acid = self.acid.map(|acid| acid.out).unwrap_or_default();
         Checked {
             tast: self.tast,
             types: self.types,
             diagnostics: self.errors.finish(),
             kencc_signatures,
+            acid,
         }
     }
 
