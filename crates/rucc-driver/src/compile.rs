@@ -3932,6 +3932,37 @@ mod tests {
         assert_eq!(run(&opts, source).messages, Vec::<String>::new());
     }
 
+    /// FreeBSD's `float.h` says `LDBL_MAX` is `1.1897314953572317650E+4932L` on i386, where a
+    /// `long double` has fifty three bits, so the constant becomes an infinity. gcc says so under
+    /// `-Woverflow`, and libm is built with `-Werror -Wno-error=overflow`, so the build goes on.
+    /// rucc gave the warning with no option, `-Werror` made it an error, and e_powl.c failed.
+    #[test]
+    fn a_floating_constant_out_of_range_answers_to_woverflow() {
+        let source = "int f(long double y) { return y >= 1.1897314953572317650E+4932L; }\n\
+                      double g(void) { return 1e-400; }\n";
+        let mut opts = Options::new("i386-unknown-freebsd".parse::<Triple>().unwrap());
+        opts.emit = EmitKind::Asm;
+        let result = run(&opts, source);
+        let said = result.messages.join("\n");
+        assert_eq!(result.errors, 0, "{said}");
+        assert_eq!(
+            result.messages,
+            [
+                "/main.c:1:36: warning: floating constant exceeds range of 'long double' [E0524]",
+                "/main.c:2:25: warning: floating constant truncated to zero [E0524]",
+            ],
+            "{said}"
+        );
+
+        opts.warnings_are_errors = true;
+        assert_eq!(run(&opts, source).errors, 2);
+        opts.named_warnings.flag("no-error=overflow");
+        let result = run(&opts, source);
+        assert_eq!((result.errors, result.messages.len()), (0, 2), "{:?}", result.messages);
+        opts.named_warnings.flag("no-overflow");
+        assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
+
     /// gcc's bounded class: an `alloca` of a constant size outside a loop, and a variable length
     /// array of a constant size whose scope gives the stack back every time round, take at most
     /// their bytes, and the report says "might be". An `alloca` in a loop takes more every time

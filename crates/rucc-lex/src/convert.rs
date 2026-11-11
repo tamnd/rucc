@@ -561,13 +561,17 @@ fn report(
             diagnostics.push(Diagnostic::warning(message, span));
         }
     }
+    // gcc gives these two under `-Woverflow`, which is E0524, so `-Wno-overflow` and
+    // `-Wno-error=overflow` reach them. FreeBSD builds libm with `-Werror -Wno-error=overflow`,
+    // and on i386 its `LDBL_MAX` is too large for a `long double` of fifty three bits.
     if remarks.has(Remarks::OUT_OF_RANGE) {
         let ty = type_name.unwrap_or("double");
-        diagnostics
-            .push(Diagnostic::warning(format!("floating constant exceeds range of '{ty}'"), span));
+        let message = format!("floating constant exceeds range of '{ty}'");
+        diagnostics.push(Diagnostic::warning(message, span).with_code("E0524"));
     }
     if remarks.has(Remarks::TRUNCATED) {
-        diagnostics.push(Diagnostic::warning("floating constant truncated to zero", span));
+        let message = "floating constant truncated to zero";
+        diagnostics.push(Diagnostic::warning(message, span).with_code("E0524"));
     }
 
     if !cx.pedantic {
