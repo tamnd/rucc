@@ -25,11 +25,12 @@ use rucc_target::{PhysReg, Reads, RegClass, x86};
 /// that also reads `ecx` for a shift or `eax` and `edx` for a division.
 const LENDERS: [PhysReg; 4] = [x86::EBX, x86::EDX, x86::ECX, x86::EAX];
 
-/// The two registers that have no low byte and that an instruction may still be handed.
-const BYTELESS: [PhysReg; 2] = [x86::ESI, x86::EDI];
+/// The registers that have no low byte and that an instruction may still be handed. `ebp` is one
+/// in a function that keeps no frame pointer, see [`crate::pipeline::Machine::x86`].
+const BYTELESS: [PhysReg; 3] = [x86::ESI, x86::EDI, x86::EBP];
 
-/// Keeps every value an instruction names the low byte of out of `esi` and `edi`, ahead of the
-/// allocator.
+/// Keeps every value an instruction names the low byte of out of `esi`, `edi` and `ebp`, ahead of
+/// the allocator.
 ///
 /// Only the backtracking allocator hears of it, and it is what lets [`crate::pipeline`] hand the
 /// two scratch registers out at all: given one, a value read with `cmpb` or written with `sete`
