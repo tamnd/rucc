@@ -456,6 +456,11 @@ fn function_alignment(text: &str) -> Option<Option<u32>> {
     Some(Some(u32::try_from(bytes).ok()?))
 }
 
+/// The C++ standards gcc 16 names after `-std=c++` and `-std=gnu++`, with the names of each
+/// draft. A C or assembly unit takes them and does nothing with them, as gcc does.
+const CXX_YEARS: [&str; 14] =
+    ["98", "03", "0x", "11", "1y", "14", "1z", "17", "2a", "20", "2b", "23", "2c", "26"];
+
 /// Every name that may follow `-fsanitize=`, which is gcc 16's list and three of this compiler's
 /// own.
 ///
@@ -1009,6 +1014,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut jobs = Jobs::default();
     let mut nostdinc = false;
     let mut sysroot: Option<PathBuf> = None;
+    // The flags that change only C++, which this compiler takes and does nothing with, as gcc
+    // does. Kept to say so once the inputs are known, since gcc warns for a C unit and is silent
+    // for an assembly one.
+    let mut cxx_only: Vec<String> = Vec::new();
     // What the command line is worth warning about, filled in after the loop rather than during it,
     // because every question of this kind is about two flags and the last word on both of them is
     // the end of the loop.
@@ -1753,6 +1762,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-I") => {
                 let dir = joined_or_next(arg, 2, args, &mut i)?;
                 opts.search.push_bracket(dir);
+            }
+            // A C++ library's build hands its C++ flags to its assembly sources as well, and gcc
+            // takes them there. NetBSD's libasan compiles asan_interceptors_vfork.S with
+            // `-fno-rtti -std=gnu++14`, and FreeBSD's libc++ passes `-nostdinc++` to C units.
+            "-frtti" | "-fno-rtti" | "-nostdinc++" => cxx_only.push(arg.to_owned()),
+            _ if arg
+                .strip_prefix("-std=c++")
+                .or_else(|| arg.strip_prefix("-std=gnu++"))
+                .is_some_and(|year| CXX_YEARS.contains(&year)) =>
+            {
+                cxx_only.push(arg.to_owned());
             }
             _ if arg.starts_with("-std=") => {
                 let name = &arg["-std=".len()..];
@@ -3679,6 +3699,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
         if threads && !wasip3 {
             notes.push(format!("-pthread has no effect on {row}: the row has one thread"));
+        }
+    }
+
+    let c = inputs.iter().any(|input| {
+        matches!(input.kind(), Ok(InputKind::C | InputKind::CHeader | InputKind::PreprocessedC))
+    });
+    if c {
+        for flag in &cxx_only {
+            notes.push(format!("command-line option '{flag}' is valid for C++ but not for C"));
         }
     }
 
@@ -8387,6 +8416,25 @@ mod tests {
         let (opts, _) = compile(&["-Ii", "-nostdinc", "a.c"]);
         let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
         assert_eq!(dirs, ["i"]);
+    }
+
+    /// The flags that change only C++ are taken on a C or assembly unit and change nothing, as
+    /// gcc 16 does. gcc warns for a C unit and says nothing for an assembly one.
+    #[test]
+    fn a_flag_for_cxx_alone_is_taken_and_changes_nothing() {
+        let line = ["-c", "-fno-rtti", "-frtti", "-nostdinc++", "-std=gnu++14", "-std=c++17"];
+        assert!(notes(&[&line[..], &["a.S"]].concat()).is_empty());
+        let (opts, _) = compile(&["-std=c11", "-std=gnu++14", "-c", "a.S"]);
+        assert_eq!(opts.std, Std::C11);
+        assert!(!opts.gnu_extensions);
+        assert_eq!(
+            notes(&["-c", "-fno-rtti", "-std=c++2c", "a.c"]),
+            [
+                "command-line option '-fno-rtti' is valid for C++ but not for C",
+                "command-line option '-std=c++2c' is valid for C++ but not for C",
+            ]
+        );
+        assert!(refused(&["-std=c++15", "-c", "a.S"]).contains("unknown dialect"));
     }
 
     #[test]
