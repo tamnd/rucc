@@ -4736,6 +4736,13 @@ static ENCODINGS: &[Encoding] = &[
     avx("vmovq", &VV, Single, Map::Escape, &[0x7E], None, pair(0, 1)),
     avx("vmovq", &MV, Single, Map::Escape, &[0x7E], None, pair(0, 1)),
     avx("vmovq", &VM, Word, Map::Escape, &[0xD6], None, pair(1, 0)),
+    // The EVEX forms, which gas writes when a register is numbered sixteen or above. Its load and
+    // store are the opcodes of the move from and to a general register with an address in place
+    // of the register, not the opcodes of the VEX rows above. OpenSSL's poly1305-x86_64.S writes
+    // `vmovq 24(%rdi), %xmm16`.
+    evex("vmovq", &VV, Single, &[0x7E], pair(0, 1), Evex::new(Map::Escape, true)),
+    evex("vmovq", &MV, Word, &[0x6E], pair(0, 1), Evex::new(Map::Escape, true).fixed(8)),
+    evex("vmovq", &VM, Word, &[0x7E], pair(1, 0), Evex::new(Map::Escape, true).fixed(8)),
     avx("vmovdqu", &VV, Single, Map::Escape, &[0x6F], None, pair(0, 1)),
     avx("vmovdqu", &MV, Single, Map::Escape, &[0x6F], None, pair(0, 1)),
     avx("vmovdqu", &VM, Single, Map::Escape, &[0x7F], None, pair(1, 0)),
@@ -8001,6 +8008,18 @@ mod tests {
         assert_eq!(hex("vpshufd", &[Value::Imm(0x4e), x(16), x(17)]), "62 a1 7d 08 70 c8 4e");
         assert_eq!(hex("vmovq", &[x(31), quad(R11)]), "62 41 fd 08 7e fb");
         assert_eq!(hex("vmovq", &[quad(RAX), x(16)]), "62 e1 fd 08 6e c0");
+        // Each move of eight bytes with a register numbered sixteen or above, as gas writes it,
+        // and the same moves with low registers, which stay VEX.
+        assert_eq!(hex("vmovq", &[at(RDI, 24), x(16)]), "62 e1 fd 08 6e 47 03");
+        assert_eq!(hex("vmovq", &[at(RDI, 1024), x(16)]), "62 e1 fd 08 6e 87 00 04 00 00");
+        assert_eq!(hex("vmovq", &[at(R12, 8), x(31)]), "62 41 fd 08 6e 7c 24 01");
+        assert_eq!(hex("vmovq", &[x(17), at(RDI, 8)]), "62 e1 fd 08 7e 4f 01");
+        assert_eq!(hex("vmovq", &[x(17), x(18)]), "62 a1 fe 08 7e d1");
+        assert_eq!(hex("vmovq", &[x(1), x(18)]), "62 e1 fe 08 7e d1");
+        assert_eq!(hex("vmovq", &[x(17), x(2)]), "62 b1 fe 08 7e d1");
+        assert_eq!(hex("vmovq", &[at(RDI, 8), x(1)]), "c5 fa 7e 4f 08");
+        assert_eq!(hex("vmovq", &[x(1), at(RDI, 8)]), "c5 f9 d6 4f 08");
+        assert_eq!(hex("vmovq", &[x(1), x(2)]), "c5 fa 7e d1");
     }
 
     #[test]
