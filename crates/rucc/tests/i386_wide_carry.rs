@@ -219,7 +219,9 @@ fn a_long_long_shift_by_a_register_fills_a_word_from_the_other() {
 fn a_long_long_bit_row_keeps_its_zeros_out_of_the_stack() {
     for level in ["-O1", "-O2", "-Os"] {
         let text = assembly("bits", "i686-unknown-linux-gnu", BITS, level);
-        assert_eq!(text.matches("\ttestl\t$").count(), 8, "{level}\n{text}");
+        // `testb` where the bit is in the low byte, which sets the flags the same way.
+        let tests = text.matches("\ttestl\t$").count() + text.matches("\ttestb\t$").count();
+        assert_eq!(tests, 8, "{level}\n{text}");
         assert_eq!(text.matches("\tcmovnel\t").count(), 8, "{level}\n{text}");
         assert!(
             !text.contains("xorl\t$0,"),

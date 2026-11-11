@@ -40,11 +40,15 @@ int both(void) { return put(table, buf); }
 ";
 
 fn listing(name: &str, extra: &[&str]) -> String {
+    listing_of(SOURCE, name, extra)
+}
+
+fn listing_of(source: &str, name: &str, extra: &[&str]) -> String {
     let dir =
         std::env::temp_dir().join(format!("rucc-i386-boot-code-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
-    std::fs::write(&path, SOURCE).expect("the fixture can be written");
+    std::fs::write(&path, source).expect("the fixture can be written");
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .args(["--target=i386-unknown-freebsd15.1", "-ffreestanding"])
         .args(BOOT)
@@ -105,4 +109,70 @@ fn position_independent_code_keeps_the_address_from_the_table() {
     let text = listing("pic", &["-fPIC"]);
     assert!(text.contains("@GOTOFF"), "{text}");
     assert!(!text.contains("$buf") && !text.contains("$table"), "{text}");
+}
+
+/// A `long long` shift by a register, as `fsread` has four of, and the test of a UFS1 or UFS2
+/// magic number it makes with `||` and `&&`.
+const BRANCHES: &str = "\
+long long shift(long long x, int n) { return x << n; }
+struct fs { int magic; long long loc; int bsize; } fs;
+int try[4];
+int find(int n) {
+  if ((fs.magic == 0x11954 || (fs.magic == 0x19540119 && fs.loc == try[n]))
+      && fs.bsize <= 65536 && fs.bsize >= 1376)
+    return 1;
+  return 0;
+}
+";
+
+#[test]
+fn a_shift_of_a_long_long_by_a_register_is_one_branch() {
+    let text = listing_of(BRANCHES, "shift", &[]);
+    let shift = body(&text, "shift");
+    let branches =
+        shift.iter().filter(|line| line.starts_with('j') && !line.starts_with("jmp")).count();
+    assert_eq!(branches, 1, "one branch for both halves\n{text}");
+    assert!(!shift.iter().any(|line| line.starts_with("set")), "no truth value is kept\n{text}");
+    // The count is tested in its low byte, which is three bytes shorter.
+    assert!(shift.iter().any(|line| line.starts_with("testb\t$32, %")), "{text}");
+    assert!(!shift.iter().any(|line| line.starts_with("testl\t$32")), "{text}");
+}
+
+#[test]
+fn a_condition_known_on_an_edge_is_not_kept_as_a_byte() {
+    let text = listing_of(BRANCHES, "find", &[]);
+    let find = body(&text, "find");
+    assert!(!find.iter().any(|line| line.starts_with("movb\t$0")), "{text}");
+    assert!(!find.iter().any(|line| line.starts_with("testb\t%")), "{text}");
+}
+
+/// A call that is not expected to happen, which the traces above `-O1` put after the return.
+const UNLIKELY: &str = "\
+void a(void);
+void b(void);
+void h(int x) {
+  if (__builtin_expect(x, 0))
+    a();
+  b();
+}
+";
+
+#[test]
+fn a_block_not_expected_to_run_stays_in_place_at_os() {
+    let text = listing_of(UNLIKELY, "unlikely", &[]);
+    let h = body(&text, "h");
+    let a = h.iter().position(|line| line.starts_with("call\ta")).expect("a is called");
+    let b = h.iter().position(|line| line.ends_with("\tb")).expect("b is called");
+    assert!(a < b, "the call of a is jumped over and not jumped to\n{text}");
+    let jumps = h.iter().filter(|line| line.starts_with('j') && !line.ends_with("\tb")).count();
+    assert_eq!(jumps, 1, "one branch over the call\n{text}");
+}
+
+#[test]
+fn a_block_not_expected_to_run_goes_after_the_return_at_o2() {
+    let text = listing_of(UNLIKELY, "unlikely-o2", &["-O2"]);
+    let h = body(&text, "h");
+    let a = h.iter().position(|line| line.starts_with("call\ta")).expect("a is called");
+    let b = h.iter().position(|line| line.ends_with("\tb")).expect("b is called");
+    assert!(b < a, "the traces put the call of a at the end\n{text}");
 }

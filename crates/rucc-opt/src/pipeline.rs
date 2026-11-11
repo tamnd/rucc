@@ -653,6 +653,15 @@ const O3: &[&str] = &[
 /// it, and the edge that hands it a constant has to go past that block before the chain is one
 /// block for each link. At `-O1` `thread-copy` does that. This level has no `thread-copy`, but
 /// that edge needs no copy, so `thread` is enough and the code only gets smaller.
+///
+/// `thread` runs once more straight after that `simplify-cfg`. `(a || (b && c)) && d` leaves the
+/// value of the inner `&&` as a block parameter that the `||` hands on through a block with only a
+/// jump in it, and the branch on it is in the block after that. `thread` looks at one edge, and the
+/// edge that carries the constant 0 goes into the block with the jump, which decides nothing. When
+/// `simplify-cfg` has taken that block away, the edge goes into the branch, and it decides it. In
+/// FreeBSD's `boot2`, which must fit in 7680 bytes, `fsread` tests the magic number of a UFS1 or a
+/// UFS2 super block in this form. gcc branches to the next try at once, and before this change
+/// rucc set a byte to 0, tested it and then branched.
 const OS: &[&str] = &[
     "expect",
     "fold",
@@ -676,6 +685,7 @@ const OS: &[&str] = &[
     "canon",
     "thread",
     "simplify-cfg",
+    "thread",
     "rangetest",
     "number",
     "load-forward",
