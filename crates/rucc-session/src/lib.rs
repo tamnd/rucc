@@ -355,11 +355,19 @@ pub struct Sanitize {
     /// `unreachable`: control that reaches a `__builtin_unreachable()`. gcc has no routine that
     /// comes back for this one, so a report and an abort are the same call.
     pub unreachable: Check,
+    /// `signed-integer-overflow`: a `+`, `-`, `*`, negation, `++` or `--` in a signed type whose
+    /// answer the type cannot hold, and the quotient of the most negative value and minus one.
+    pub signed_overflow: Check,
+    /// `return`: control that reaches the end of a function that returns a value. gcc makes this
+    /// check in C++ only, so it is kept here as `enum` is, only to be taken.
+    pub returns: Check,
+    /// `vptr`: the dynamic type of a C++ object. C++ only, and kept here as `enum` is.
+    pub vptr: Check,
 }
 
 impl Sanitize {
     /// The names `-fsanitize=` takes that this compiler generates, in gcc's spelling.
-    pub const NAMES: [&'static str; 7] = [
+    pub const NAMES: [&'static str; 10] = [
         "integer-divide-by-zero",
         "shift-exponent",
         "shift-base",
@@ -367,6 +375,9 @@ impl Sanitize {
         "enum",
         "bounds-strict",
         "unreachable",
+        "signed-integer-overflow",
+        "return",
+        "vptr",
     ];
 
     /// Whether any of the checks is on.
@@ -379,6 +390,9 @@ impl Sanitize {
             self.enumeration,
             self.bounds_strict,
             self.unreachable,
+            self.signed_overflow,
+            self.returns,
+            self.vptr,
         ]
         .iter()
         .any(|check| *check != Check::Off)
@@ -394,6 +408,9 @@ impl Sanitize {
             "enum" => Some(&mut self.enumeration),
             "bounds-strict" => Some(&mut self.bounds_strict),
             "unreachable" => Some(&mut self.unreachable),
+            "signed-integer-overflow" => Some(&mut self.signed_overflow),
+            "return" => Some(&mut self.returns),
+            "vptr" => Some(&mut self.vptr),
             _ => None,
         }
     }

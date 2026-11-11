@@ -179,6 +179,8 @@ pub struct Sanitize {
     pub bounds: Check,
     /// `-fsanitize=unreachable`.
     pub unreachable: Check,
+    /// `-fsanitize=signed-integer-overflow`.
+    pub signed_overflow: Check,
     /// `-fsanitize=kernel-address`, whose checks a pass over the IR puts in. The walk only says
     /// which functions are left out of them.
     pub address: bool,

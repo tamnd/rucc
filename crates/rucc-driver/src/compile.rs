@@ -578,6 +578,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 boolean: lower_check(opts.sanitize.boolean),
                                 bounds: lower_check(opts.sanitize.bounds_strict),
                                 unreachable: lower_check(opts.sanitize.unreachable),
+                                signed_overflow: lower_check(opts.sanitize.signed_overflow),
                                 address: opts.kasan.on,
                             },
                             sources: &sess.sources,
