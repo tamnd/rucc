@@ -3517,7 +3517,7 @@ impl<'a> Lowering<'a> {
             || self.source[data.args].iter().any(|&arg| self.x87_held(self.source[arg].ty))
     }
 
-    /// Whether an `asm` statement puts an operand on the x87 stack with `t` or `u`.
+    /// Whether an `asm` statement puts an operand on the x87 stack with `t`, `u` or `f`.
     ///
     /// A `float` or a `double` is in an xmm register on x86-64, so [`Self::touches_x87`] does not
     /// see it, but the template still finds it on the stack. compiler-rt's `i386/fp_mode.c`, which
@@ -3529,7 +3529,7 @@ impl<'a> Lowering<'a> {
         self.names
             .resolve(info.constraints)
             .split(',')
-            .any(|letter| matches!(letter.trim_start_matches(['=', '+', '&']), "t" | "u"))
+            .any(|letter| matches!(letter.trim_start_matches(['=', '+', '&']), "t" | "u" | "f"))
     }
 
     /// Whether a value of that type is on the x87 stack while it is worked on and in a frame slot
@@ -8820,7 +8820,11 @@ impl<'a> Lowering<'a> {
     /// `t` is the top of the stack and `u` is the register under it, and those two letters, or a
     /// number tying an input to an output in one of them, are the only places on the stack taken
     /// here. That is what glibc's old `<bits/mathinline.h>` writes, `fpatan` with `=t`, `0` and
-    /// `u` and `st(1)` in the clobber list, and it is gcc-torture `execute/990413-2.c`.
+    /// `u` and `st(1)` in the clobber list, and it is gcc-torture `execute/990413-2.c`. `f` is any
+    /// register of the stack, and it takes the nearest of the two that no `t` or `u` operand on
+    /// the same side has. libgcc's i386 `sfp-exceptions.c` and libgfortran's `fpu-387.h` raise an
+    /// exception with `asm ("" : "+t" (x))` and then `asm volatile ("" : : "f" (x / y))`
+    /// (tamnd/rucc-bsd#3).
     ///
     /// The group is the shape every other one in [`Self::x87`] has. The inputs are pushed from the
     /// deepest up, so the `t` one is pushed last and ends up on top, then the template runs, then
@@ -8854,7 +8858,25 @@ impl<'a> Lowering<'a> {
 
         // Where on the stack each operand is, as a depth from the top, or nothing for one that is
         // not on the stack.
-        let letters: Vec<&str> = constraints.split(',').collect();
+        let letters: Vec<&str> = constraints
+            .split(',')
+            .map(|letter| letter.trim_start_matches(['=', '+', '&']))
+            .collect();
+        // The depths `t` and `u` ask for, as an input and as an output, so that an operand written
+        // `f`, which is any register of the stack, takes the nearest depth none of them has.
+        let fixed = |letter: &str| match letter {
+            "t" => Some(0),
+            "u" => Some(1),
+            _ => None,
+        };
+        let mut taken = [[false; 2]; 2];
+        for (operand, letter) in list.iter().zip(&letters) {
+            let tied = operand.tied.and_then(|output| letters.get(output).copied());
+            if let Some(depth) = fixed(letter).or_else(|| tied.and_then(fixed)) {
+                taken[0][depth] |= operand.value.is_some();
+                taken[1][depth] |= operand.result.is_some();
+            }
+        }
         let mut depths: Vec<Option<usize>> = Vec::with_capacity(list.len());
         for (operand, letter) in list.iter().zip(&letters) {
             let value = operand.result.or(operand.value).ok_or_else(refused)?;
@@ -8862,11 +8884,16 @@ impl<'a> Lowering<'a> {
             let crossed = ty.is_scalar() && ty.is_float() && matches!(ty.bits(), 32 | 64);
             let depth = match operand.tied {
                 Some(output) => *depths.get(output).ok_or_else(refused)?,
-                None => match letter.trim_start_matches(['=', '+', '&']) {
-                    "t" => Some(0),
-                    "u" => Some(1),
-                    _ => None,
-                },
+                None if *letter == "f" => {
+                    let (input, output) = (operand.value.is_some(), operand.result.is_some());
+                    let free = (0..2)
+                        .find(|&depth| !(input && taken[0][depth]) && !(output && taken[1][depth]))
+                        .ok_or_else(refused)?;
+                    taken[0][free] |= input;
+                    taken[1][free] |= output;
+                    Some(free)
+                }
+                None => fixed(letter),
             };
             // A `float` or a `double` that is in an xmm register crosses to the stack and back
             // through memory when the letter asks for the stack, and stays where it is otherwise.
