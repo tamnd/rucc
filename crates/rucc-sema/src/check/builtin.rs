@@ -471,7 +471,7 @@ impl Checker<'_> {
     /// Whether the target has a floating type. gcc declares a builtin written over a type only
     /// where the type is, so `__builtin_inff128` on a target with no `_Float128` is a name that
     /// nothing declared.
-    fn has_float_kind(&self, kind: FloatKind) -> bool {
+    pub(in crate::check) fn has_float_kind(&self, kind: FloatKind) -> bool {
         let target = self.cx.target;
         match kind {
             FloatKind::Float16 => target.has_float16,
