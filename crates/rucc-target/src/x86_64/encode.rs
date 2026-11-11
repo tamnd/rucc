@@ -5373,6 +5373,24 @@ static ONLY32: &[Encoding] = &[
     bytes("into", &NO_ARGS, Long, &[0xCE], NO_MODRM, NO_IMM),
     bytes("boundw", &RM, Word, &[0x62], pair(1, 0), NO_IMM),
     bytes("boundl", &RM, Long, &[0x62], pair(1, 0), NO_IMM),
+    // Every general register pushed or popped at once, and the steps of decimal arithmetic on
+    // `al`, all of which sixty four bit mode gave up. NetBSD's i386 boot code keeps its registers
+    // across a BIOS call with `pusha` and prints a number with `daa` and `aam`. The two that
+    // divide or multiply by ten take another base as a byte, and ten is the one without it.
+    bytes("pusha", &NO_ARGS, Long, &[0x60], NO_MODRM, NO_IMM),
+    bytes("pushal", &NO_ARGS, Long, &[0x60], NO_MODRM, NO_IMM),
+    bytes("pushaw", &NO_ARGS, Word, &[0x60], NO_MODRM, NO_IMM),
+    bytes("popa", &NO_ARGS, Long, &[0x61], NO_MODRM, NO_IMM),
+    bytes("popal", &NO_ARGS, Long, &[0x61], NO_MODRM, NO_IMM),
+    bytes("popaw", &NO_ARGS, Word, &[0x61], NO_MODRM, NO_IMM),
+    bytes("daa", &NO_ARGS, Long, &[0x27], NO_MODRM, NO_IMM),
+    bytes("das", &NO_ARGS, Long, &[0x2F], NO_MODRM, NO_IMM),
+    bytes("aaa", &NO_ARGS, Long, &[0x37], NO_MODRM, NO_IMM),
+    bytes("aas", &NO_ARGS, Long, &[0x3F], NO_MODRM, NO_IMM),
+    bytes("aam", &NO_ARGS, Long, &[0xD4, 0x0A], NO_MODRM, NO_IMM),
+    takes("aam", &I, Fits::Byte, Long, &[0xD4], NO_MODRM, ImmSize::Ib),
+    bytes("aad", &NO_ARGS, Long, &[0xD5, 0x0A], NO_MODRM, NO_IMM),
+    takes("aad", &I, Fits::Byte, Long, &[0xD5], NO_MODRM, ImmSize::Ib),
     // The descriptor table loads and stores with the suffix that says six bytes, which is what
     // they move in this mode. The EFI mixed mode entry in the kernel saves the firmware's table
     // with `sgdtl`.
