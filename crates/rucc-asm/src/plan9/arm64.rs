@@ -542,6 +542,7 @@ impl Out<'_> {
                         continue;
                     }
                     let number = l.number;
+                    let first = self.progs.len();
                     match (mnemonic, released) {
                         ("ret", _) => {
                             if frame.size.is_some() && !released {
@@ -590,6 +591,7 @@ impl Out<'_> {
                             self.insn(mnemonic, &ops, number, frame)?;
                         }
                     }
+                    self.check(first, number)?;
                 }
             }
         }
@@ -601,6 +603,27 @@ impl Out<'_> {
                 self.emit(Self::op("MOV", 0)?, oreg(RSP, size), reg(FP));
             }
             self.emit(Self::ret(), Addr7::default(), Addr7::default());
+        }
+        Ok(())
+    }
+
+    /// Check each record from `first` against the table of `7l`, as the records of the listing
+    /// line `line`.
+    fn check(&self, first: usize, line: usize) -> Result<(), Trouble> {
+        for p in &self.progs[first..] {
+            if let Some((a1, a2, a3, why)) = super::oplook7::CHECKER.check(p) {
+                let name = super::oplook7::Checker::name;
+                return Err(trouble(
+                    line,
+                    format!(
+                        "7l cannot encode {} with the operand classes {}, {} and {}: {why}",
+                        a7::NAMES[usize::from(p.op)].strip_prefix('A').unwrap_or_default(),
+                        name(a1),
+                        name(a2),
+                        name(a3),
+                    ),
+                ));
+            }
         }
         Ok(())
     }
