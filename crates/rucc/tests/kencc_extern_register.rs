@@ -113,9 +113,50 @@ fn a_third_one_and_one_in_a_function_are_refused() {
 }
 
 #[test]
-fn a_target_that_is_not_plan9_has_no_register_for_one() {
+fn another_machine_has_no_register_for_one() {
     let source = "extern register int *a;\nint f(void) { return *a; }\n";
-    let (ok, _, err) = compile("x86_64-linux-gnu", "linux", source);
-    assert!(!ok, "an extern register variable was taken on Linux");
+    let (ok, _, err) = compile("riscv64-linux-gnu", "riscv", source);
+    assert!(!ok, "an extern register variable was taken on riscv64");
     assert!(err.contains("no register for the 'extern register' 'a'"), "{err}");
+}
+
+/// A function that writes the registers, and one with more live values than the allocator has
+/// registers for.
+const HOST: &str = "extern register int *a;\n\
+                    extern register int b;\n\
+                    void set(int *p) { a = p; b = 7; }\n\
+                    extern void g(void);\n\
+                    int busy(int n) {\n\
+                        int c = n, d = n * 2, e = n * 3, f = n * 5, h = n * 7, i = n * 11;\n\
+                        int j = n * 13, k = n * 17, l = n * 19, m = n * 23, o = n * 29;\n\
+                        int p = n * 31, q = n * 37, r = n * 41, s = n * 43, t = n * 47;\n\
+                        g();\n\
+                        return c + d + e + f + h + i + j + k + l + m + o + p + q + r + s + t;\n\
+                    }\n";
+
+#[test]
+fn linux_and_macos_keep_the_registers_of_plan9_for_one() {
+    for (target, first, second) in [
+        ("x86_64-linux-gnu", "%r15", "%r14"),
+        ("aarch64-linux-gnu", "x27", "x26"),
+        ("aarch64-apple-darwin", "x27", "x26"),
+    ] {
+        let (ok, asm, err) = compile(target, "host", HOST);
+        assert!(ok, "{target}: {err}");
+        let label = if target.contains("apple") { "_set" } else { "set" };
+        let set = body(&asm, label);
+        for reg in [first, second] {
+            assert!(set.iter().any(|line| line.contains(reg)), "{target}: {set:?}");
+        }
+        // A prologue that saved the register would put the old value back at the return.
+        let saves = |line: &&&str| {
+            line.starts_with("push") || line.starts_with("stp") || line.starts_with("str")
+        };
+        assert!(!set.iter().filter(saves).any(|line| line.contains(first)), "{target}: {set:?}");
+        let label = if target.contains("apple") { "_busy" } else { "busy" };
+        let busy = body(&asm, label);
+        for reg in [first, second] {
+            assert!(!busy.iter().any(|line| line.contains(reg)), "{target}: {busy:?}");
+        }
+    }
 }

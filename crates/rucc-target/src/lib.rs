@@ -1352,6 +1352,9 @@ pub struct TargetInfo {
     /// Whether the unit is built for wasm with `simd128`, which changes how a vector is passed.
     /// See [`TargetInfo::with_simd128`].
     pub simd128: bool,
+    /// Whether the unit is built with `-fkencc` for x86-64 or AArch64 on an OS that is not Plan 9.
+    /// See [`TargetInfo::with_kencc_registers`].
+    pub kencc_registers: bool,
 }
 
 /// The type a target's `__builtin_va_list` is.
@@ -1517,13 +1520,25 @@ impl TargetInfo {
     /// `6c` starts at `R15` and `7c` at `R27`, and each goes down one register for each variable
     /// in the unit. `6l` and `7l` never use them, and the kernel keeps `m` and `up` in the first
     /// two. The code generator never gives these to a value on a Plan 9 target, so a program may
-    /// read and write them. Empty for every other target.
+    /// read and write them. A target with [`TargetInfo::with_kencc_registers`] has them too. Empty
+    /// for every other target.
     #[must_use]
     pub fn extern_registers(&self) -> &'static [&'static str] {
-        match (self.tuple.arch(), self.tuple.os()) {
-            (tuple::Arch::X86_64, tuple::Os::Plan9) => &["r15", "r14"],
-            (tuple::Arch::Aarch64, tuple::Os::Plan9) => &["x27", "x26"],
+        let kencc = self.tuple.os() == tuple::Os::Plan9 || self.kencc_registers;
+        match (self.tuple.arch(), kencc) {
+            (tuple::Arch::X86_64, true) => &["r15", "r14"],
+            (tuple::Arch::Aarch64, true) => &["x27", "x26"],
             _ => &[],
+        }
+    }
+
+    /// The numbers of [`TargetInfo::extern_registers`], with bit `n` set for register `n`.
+    #[must_use]
+    pub fn extern_register_numbers(&self) -> u64 {
+        match self.tuple.arch() {
+            tuple::Arch::X86_64 if !self.extern_registers().is_empty() => (1 << 14) | (1 << 15),
+            tuple::Arch::Aarch64 if !self.extern_registers().is_empty() => (1 << 26) | (1 << 27),
+            _ => 0,
         }
     }
 
@@ -1738,6 +1753,7 @@ impl TargetInfo {
             selects_any: matches!(target.arch(), tuple::Arch::Wasm32),
             loop_hint: matches!(target.arch(), tuple::Arch::Wasm32),
             simd128: false,
+            kencc_registers: false,
         }
     }
 
@@ -1763,6 +1779,19 @@ impl TargetInfo {
     #[must_use]
     pub fn with_simd128(mut self, on: bool) -> Self {
         self.simd128 = on && self.tuple.arch() == tuple::Arch::Wasm32;
+        self
+    }
+
+    /// The same target with the registers of kencc for `extern register`, which `-fkencc` asks for.
+    ///
+    /// Only x86-64 and AArch64 on an OS that is not Plan 9 change, because Plan 9 has the registers already.
+    /// Then [`TargetInfo::extern_registers`] gives the registers of `6c` and `7c`, and the allocator does not use them.
+    /// The registers are saved by the callee on these targets, so a value in one stays there across a call into a library that another compiler built.
+    /// Thus a program with an `extern register` runs on the host as on Plan 9, which lets the corpus check it there.
+    #[must_use]
+    pub fn with_kencc_registers(mut self, on: bool) -> Self {
+        let machine = matches!(self.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::Aarch64);
+        self.kencc_registers = on && machine && self.tuple.os() != tuple::Os::Plan9;
         self
     }
 

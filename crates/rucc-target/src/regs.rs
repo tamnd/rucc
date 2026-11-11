@@ -907,6 +907,25 @@ impl CallRegs {
         made(CallRegs { unaligned: false, ..*self })
     }
 
+    /// The same convention with some general purpose registers kept for the program, which is what
+    /// an `extern register` of kencc asks for on a target that is not Plan 9. `numbers` has bit `n`
+    /// set for register `n`.
+    ///
+    /// The allocator does not use the registers, and a prologue does not save them. A write to one
+    /// must stay after the function returns, as it does on Plan 9, where no register is saved.
+    ///
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see `made`.
+    #[must_use]
+    pub fn without_int_regs(&'static self, numbers: u64) -> &'static CallRegs {
+        let kept = |reg: &PhysReg| reg.number() >= 64 || numbers & (1 << reg.number()) == 0;
+        if self.int_order.iter().all(kept) && self.int_saved.iter().all(kept) {
+            return self;
+        }
+        let order: Vec<PhysReg> = self.int_order.iter().copied().filter(kept).collect();
+        let saved: Vec<PhysReg> = self.int_saved.iter().copied().filter(kept).collect();
+        made(CallRegs { int_order: order_made(order), int_saved: order_made(saved), ..*self })
+    }
+
     /// The same convention with some vector registers kept out of the allocator, which is what
     /// `-ffixed-q16` and its kind ask for on AArch64. The kernel's AEGIS code loads its S-box into
     /// `v16` to `v31` with `asm` and reads it from there in later statements, so nothing compiled
