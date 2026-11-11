@@ -393,6 +393,8 @@ static S390X_ELF: AbiDescription = AbiDescription {
         wide_integer_is_all_or_nothing: false,
         wide_integer_starts_even: false,
         wide_integer_drains: false,
+        wide_integer_splits: false,
+        unnamed_wide_integer_starts_even: false,
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,

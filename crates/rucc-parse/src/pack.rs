@@ -140,6 +140,7 @@ impl Parser<'_> {
             // Cloned because applying the line reports through the parser, which is the same
             // borrow the line is being read out of.
             let (line, span) = (pragma.tokens.clone(), pragma.span);
+            self.pragma_token = pragma.before as usize;
             self.pack_line(&line, span);
         }
     }

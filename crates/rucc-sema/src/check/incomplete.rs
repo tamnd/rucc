@@ -31,6 +31,8 @@ pub struct IncompleteLine {
     pub name: Symbol,
     /// Where the line is.
     pub span: Span,
+    /// How many external declarations end before the line.
+    pub decls: u32,
 }
 
 impl Checker<'_> {
@@ -41,8 +43,8 @@ impl Checker<'_> {
     }
 
     /// Marks the records of each line that comes before `place`.
-    pub(in crate::check) fn mark_incomplete_before(&mut self, place: u32) {
-        while self.incomplete_lines.last().is_some_and(|line| line.span.lo < place) {
+    pub(in crate::check) fn mark_incomplete_before(&mut self, decl: u32) {
+        while self.incomplete_lines.last().is_some_and(|line| line.decls <= decl) {
             if let Some(line) = self.incomplete_lines.pop() {
                 self.mark_incomplete(line);
             }
@@ -95,7 +97,9 @@ impl Checker<'_> {
     /// The kencc signature of a type with the marks set so far, which `signof` gives.
     pub(in crate::check) fn kencc_signature(&self, ty: rucc_types::TypeId) -> u32 {
         let marked = &self.incomplete_records;
-        kencc_signature(&self.types, ty, self.cx.target, &|id| marked.contains(&id))
+        kencc_signature(&self.types, ty, self.cx.target, self.cx.kencc_strict_void, &|id| {
+            marked.contains(&id)
+        })
     }
 
     /// The signature of each name with external linkage, as `sign` in `6c/swt.c` gives it at the

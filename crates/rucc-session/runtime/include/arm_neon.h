@@ -10118,6 +10118,26 @@ static __inline__ poly128_t vmull_high_p64(poly64x2_t __a, poly64x2_t __b) {
   __asm__("pmull2 %0.1q, %1.2d, %2.2d" : "=w"(__r) : "w"(__x), "w"(__y));
   __Poly128_t __p; __builtin_memcpy(&__p, &__r, sizeof __p); return __p;
 }
+/* The AES rounds of the cryptographic extension, which FreeBSD's armv8_crypto_wrap.c is written
+ * with. Each is one instruction, as in gcc. */
+static __inline__ uint8x16_t vaeseq_u8(uint8x16_t __d, uint8x16_t __k) {
+  __asm__("aese %0.16b, %1.16b" : "+w"(__d) : "w"(__k));
+  return __d;
+}
+static __inline__ uint8x16_t vaesdq_u8(uint8x16_t __d, uint8x16_t __k) {
+  __asm__("aesd %0.16b, %1.16b" : "+w"(__d) : "w"(__k));
+  return __d;
+}
+static __inline__ uint8x16_t vaesmcq_u8(uint8x16_t __d) {
+  uint8x16_t __r;
+  __asm__("aesmc %0.16b, %1.16b" : "=w"(__r) : "w"(__d));
+  return __r;
+}
+static __inline__ uint8x16_t vaesimcq_u8(uint8x16_t __d) {
+  uint8x16_t __r;
+  __asm__("aesimc %0.16b, %1.16b" : "=w"(__r) : "w"(__d));
+  return __r;
+}
 static __inline__ int8x16_t vreinterpretq_s8_p128(poly128_t __v) {
   int8x16_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
