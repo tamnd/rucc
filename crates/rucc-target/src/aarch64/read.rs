@@ -336,8 +336,101 @@ fn split(text: &str) -> Vec<&str> {
 ///
 /// GNU as takes either, and gcc leaves it off: `stp x29, x30, [sp, -16]!` and `mov w0, 0` are what
 /// its listings say. Nothing but a number reads as one, since a name never starts with a digit.
+/// An expression of numbers is the number GNU as works out, such as the `8 * 0` that NetBSD's
+/// `vmt` writes in an address of an `asm` statement.
 fn immediate(piece: &str) -> Option<i64> {
-    number(piece.strip_prefix('#').unwrap_or(piece))
+    let text = piece.strip_prefix('#').unwrap_or(piece);
+    number(text).or_else(|| folded(text))
+}
+
+/// An expression of whole numbers, with GNU as's operators and its order of them: `*`, `/`, `%`,
+/// `<<` and `>>` first, then `|`, `&` and `^`, then `+` and `-`. [`None`] for anything with a name
+/// in it, which is a symbol and not a number.
+fn folded(text: &str) -> Option<i64> {
+    let mut tokens = Vec::new();
+    let mut rest = text.trim();
+    while !rest.is_empty() {
+        let token = if let Some(op) = ["<<", ">>"].into_iter().find(|op| rest.starts_with(op)) {
+            op
+        } else if rest.starts_with(|c: char| "+-*/%|&^~()".contains(c)) {
+            &rest[..1]
+        } else {
+            let end = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
+            if end == 0 {
+                return None;
+            }
+            &rest[..end]
+        };
+        tokens.push(token);
+        rest = rest[token.len()..].trim_start();
+    }
+    let mut at = 0;
+    let value = sum(&tokens, &mut at)?;
+    (at == tokens.len()).then_some(value)
+}
+
+/// Operands joined by `+` and `-`, the loosest of [`folded`]'s operators.
+fn sum(tokens: &[&str], at: &mut usize) -> Option<i64> {
+    let mut value = bits(tokens, at)?;
+    while let Some(&op) = tokens.get(*at).filter(|&&op| op == "+" || op == "-") {
+        *at += 1;
+        let right = bits(tokens, at)?;
+        value = if op == "+" { value.wrapping_add(right) } else { value.wrapping_sub(right) };
+    }
+    Some(value)
+}
+
+/// Operands joined by `|`, `&` and `^`.
+fn bits(tokens: &[&str], at: &mut usize) -> Option<i64> {
+    let mut value = product(tokens, at)?;
+    while let Some(&op) = tokens.get(*at).filter(|&&op| matches!(op, "|" | "&" | "^")) {
+        *at += 1;
+        let right = product(tokens, at)?;
+        value = match op {
+            "|" => value | right,
+            "&" => value & right,
+            _ => value ^ right,
+        };
+    }
+    Some(value)
+}
+
+/// Operands joined by `*`, `/`, `%`, `<<` and `>>`, the tightest of the binary operators.
+fn product(tokens: &[&str], at: &mut usize) -> Option<i64> {
+    let mut value = unary(tokens, at)?;
+    while let Some(&op) = tokens.get(*at).filter(|&&op| matches!(op, "*" | "/" | "%" | "<<" | ">>"))
+    {
+        *at += 1;
+        let right = unary(tokens, at)?;
+        value = match op {
+            "*" => value.wrapping_mul(right),
+            "/" => value.checked_div(right)?,
+            "%" => value.checked_rem(right)?,
+            "<<" => value.wrapping_shl(u32::try_from(right).ok()?),
+            _ => value.wrapping_shr(u32::try_from(right).ok()?),
+        };
+    }
+    Some(value)
+}
+
+/// A number, an expression in brackets, or either after `-`, `+` or `~`.
+fn unary(tokens: &[&str], at: &mut usize) -> Option<i64> {
+    let token = *tokens.get(*at)?;
+    *at += 1;
+    match token {
+        "-" => unary(tokens, at).map(i64::wrapping_neg),
+        "+" => unary(tokens, at),
+        "~" => unary(tokens, at).map(|value| !value),
+        "(" => {
+            let value = sum(tokens, at)?;
+            if tokens.get(*at) != Some(&")") {
+                return None;
+            }
+            *at += 1;
+            Some(value)
+        }
+        _ => number(token),
+    }
 }
 
 /// One operand that is not an address.
@@ -773,6 +866,25 @@ mod tests {
             line.values[1],
             Value::Mem(Addr { base: 31, offset: Offset::Imm(-16), mode: Mode::Pre })
         );
+    }
+
+    #[test]
+    fn an_offset_may_be_an_expression_of_numbers() {
+        let line = read("ldp x0, x1, [x8, 8 * 2]").unwrap();
+        assert_eq!(
+            line.values[2],
+            Value::Mem(Addr { base: 8, offset: Offset::Imm(16), mode: Mode::Offset })
+        );
+        let line = read("ldr x2, [x8, #(1 << 4) + 8 * 0]").unwrap();
+        assert_eq!(
+            line.values[1],
+            Value::Mem(Addr { base: 8, offset: Offset::Imm(16), mode: Mode::Offset })
+        );
+        assert_eq!(folded("2 + 3 * 4"), Some(14));
+        assert_eq!(folded("1 | 2 + 4"), Some(7));
+        assert_eq!(folded("-(8) * 2"), Some(-16));
+        assert_eq!(folded("8 * name"), None);
+        assert_eq!(folded("4 / 0"), None);
     }
 
     #[test]
