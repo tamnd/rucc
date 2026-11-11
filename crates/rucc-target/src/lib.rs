@@ -1164,11 +1164,11 @@ pub struct TargetInfo {
     /// compilers. The `__FLT16_*__` macros and the `f16` suffix are defined on exactly the rows
     /// where the type is, so all three ask this one field.
     ///
-    /// i686 is the row worth explaining. gcc aims at the baseline of the target rather than at
-    /// whatever chip is under it, and half precision on x86 needs SSE2, which is in the baseline
-    /// of x86-64 and not in the baseline of i686. So the two x86 rows disagree, and a `-msse2`
-    /// on the command line would move the 32-bit one, which is a thing this compiler has no
-    /// place to say yet.
+    /// i686 is the row worth explaining. gcc 12 and 13 have the type there only with SSE2, which
+    /// is not in the baseline of i686, and gcc 14 has it with or without. The macros follow the
+    /// gcc release and the SSE2 of the unit, which `rucc_pp` decides, so this field is true on
+    /// i686 and the type is there for a persona of gcc 14 or later, and for an older one with
+    /// `-msse2`. The cross compilers of gcc 13 and 14 for i686 were measured.
     pub has_float16: bool,
     /// Whether the target has `_Float128`.
     ///
@@ -1879,16 +1879,15 @@ fn has_float16(target: TargetTuple) -> bool {
     match target.arch() {
         // Half precision is in the baseline of these: SSE2 on x86-64, the FP16 storage format
         // every ARMv8 has, and RISC-V, where gcc gives the type whether or not the hardware has
-        // the instructions to go with it.
+        // the instructions to go with it. i686 is here for the reason the field gives.
         tuple::Arch::X86_64
+        | tuple::Arch::X86
         | tuple::Arch::Aarch64
         | tuple::Arch::Arm64Ec
         | tuple::Arch::Riscv64
         | tuple::Arch::Riscv32 => true,
-        // i686 for the reason the field gives, which is the baseline and not the chip, and the
-        // rest are machines gcc 13 has not written the type for.
-        tuple::Arch::X86
-        | tuple::Arch::Arm
+        // These are machines gcc 13 has not written the type for.
+        tuple::Arch::Arm
         | tuple::Arch::LoongArch64
         | tuple::Arch::PowerPc64
         | tuple::Arch::S390x
@@ -2590,7 +2589,7 @@ mod tests {
         let of = |tuple: &str| TargetInfo::for_tuple(tuple.parse().expect("a row in the table"));
         let rows = [
             ("x86_64-linux-gnu", true, true),
-            ("i686-linux-gnu", false, true),
+            ("i686-linux-gnu", true, true),
             ("aarch64-linux-gnu", true, true),
             ("armv7-linux-gnueabihf", false, false),
             ("powerpc64le-linux-gnu", false, true),

@@ -140,8 +140,9 @@ static SYSV_SSE_ARGS: [PhysReg; 0] = [];
 // A 64-bit integer comes back in `edx:eax`, low half first.
 static SYSV_INT_RETURNS: [PhysReg; 2] = [EAX, EDX];
 // A `float`, a `double` and a `long double` all come back in `st0`, which is the difference from
-// x86-64 most worth knowing: no scalar comes back in a vector register.
-static SYSV_SSE_RETURNS: [PhysReg; 0] = [];
+// x86-64 most worth knowing. The one scalar that comes back in a vector register is a `_Float16`
+// or a `__bf16`, in `xmm0`, as gcc returns it and as libgcc's `__truncsfhf2` returns it.
+static SYSV_SSE_RETURNS: [PhysReg; 1] = [xmm(0)];
 static SYSV_X87_RETURNS: [PhysReg; 1] = [st(0)];
 static SYSV_INT_SAVED: [PhysReg; 4] = [EBX, ESI, EDI, EBP];
 static SYSV_SSE_SAVED: [PhysReg; 0] = [];
@@ -861,10 +862,10 @@ mod tests {
     }
 
     #[test]
-    fn cdecl_passes_nothing_in_registers_and_returns_in_three_places() {
+    fn cdecl_passes_nothing_in_registers_and_returns_in_four_places() {
         assert!(SYSV.int_args.is_empty() && SYSV.sse_args.is_empty());
         assert_eq!(SYSV.int_returns, &[EAX, EDX]);
-        assert!(SYSV.sse_returns.is_empty(), "a double comes back on the x87 stack");
+        assert_eq!(SYSV.sse_returns, &[xmm(0)], "a half comes back in a vector register");
         assert_eq!(SYSV.x87_returns, &[st(0)]);
         assert_eq!((SYSV.word, SYSV.push, SYSV.return_address), (4, 4, 4));
         assert_eq!((SYSV.red_zone, SYSV.shadow, SYSV.vector_count), (0, 0, None));

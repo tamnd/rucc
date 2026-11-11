@@ -2889,6 +2889,33 @@ mod tests {
         }
     }
 
+    /// tamnd/rucc#4324. A sum of two halves on i386 is the sum of two `float`s between libgcc's
+    /// widening and narrowing, as gcc writes it, and it comes back in `xmm0`, where gcc and
+    /// `__truncsfhf2` leave a half. A `float` still comes back on the x87 stack.
+    #[test]
+    fn an_i386_half_is_worked_on_as_a_float_and_comes_back_in_a_vector_register() {
+        let triple = "i686-unknown-linux-gnu".parse::<rucc_target::Triple>().expect("a triple");
+        let info = TargetInfo::new(triple);
+        let machine = Machine::for_target(&info).expect("i386 has a back end");
+        let built = |format: rucc_ir::Float| {
+            let ty = Type::float(format);
+            let (mut names, mut source, block, args) = blank(&[ty, ty]);
+            let mut build = Builder::new(&mut source, block);
+            let sum = build.binary(Opcode::FAdd, args[0], args[1], IrFlags::NONE);
+            build.ret(&[sum]);
+            let out =
+                compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                    .expect("a sum of two floats of either width compiles on i386");
+            mir::print_func(&out, &names, &x86::REGS)
+        };
+        let text = built(rucc_ir::Float::F16);
+        assert_eq!(text.matches("__extendhfsf2").count(), 2, "each half widened: {text}");
+        assert_eq!(text.matches("__truncsfhf2").count(), 1, "the sum narrowed: {text}");
+        assert!(text.contains("x64.ret_val_f16"), "back in xmm0: {text}");
+        let text = built(rucc_ir::Float::F32);
+        assert!(!text.contains("x64.ret_val_f"), "a float is not back in xmm0: {text}");
+    }
+
     /// `double f(int n, double x) { char a[n]; g(a); return x; }` on i386 with the stack kept on
     /// four bytes, which is `-mpreferred-stack-boundary=2`. The `double` goes back on the x87
     /// stack through eight bytes of the frame, and those bytes are aligned to no more than the
