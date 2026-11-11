@@ -307,8 +307,9 @@ pub fn kencc_promote(types: &mut Types, id: TypeId, target: &TargetInfo) -> Opti
 /// `unsigned long long`.
 ///
 /// `promote` is the flag `f` of `arith`. The arithmetic operators set it, and the result is
-/// then at least an `int`. A comparison, a conditional and a compound assignment do not set
-/// it, so `char` with `unsigned char` is `unsigned char` there.
+/// then at least an `int`. A comparison and a conditional do not set it, so `char` with
+/// `unsigned char` is `unsigned char` there. A compound assignment does not use the table, see
+/// [`kencc_assignment`].
 ///
 /// [`None`] where either operand is not a kencc integer type. A floating operand is one of
 /// them, and the C rules give its answer.
@@ -326,6 +327,17 @@ pub fn kencc_arithmetic(
     let ((ra, ua), (rb, ub)) = (kencc_rank(a, target), kencc_rank(b, target));
     let rank = if promote { ra.max(rb).max(2) } else { ra.max(rb) };
     Some(types.int(kencc_kind(rank, ua || ub)))
+}
+
+/// The type that kencc computes `a op= b` in, for two integer operands. This is the type of
+/// `a`. `tcom` in `com.c` casts the right side to the type of the left side, so `x /= b` with
+/// an `int x` and an `unsigned int b` is a signed divide, where `x / b` is unsigned.
+///
+/// [`None`] where either operand is not a kencc integer type.
+pub fn kencc_assignment(types: &mut Types, left: TypeId, right: TypeId) -> Option<TypeId> {
+    kencc_int(types, right)?;
+    let kind = kencc_int(types, left)?;
+    Some(types.int(kind))
 }
 
 /// The type of a value of type `id`, which is `id` without the parts an lvalue conversion

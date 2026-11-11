@@ -5,8 +5,10 @@
 //! kencc takes the type of a binary operation from the table `tab` in `sub.c`. The rank is the
 //! larger of the two, and the type is unsigned when either operand is unsigned. The arithmetic
 //! operators then promote the type to at least `int` and keep the sign, so `unsigned char` with
-//! `int` is `unsigned int`. A comparison, a conditional and a compound assignment do not
-//! promote, so `char` with `unsigned char` is `unsigned char` there.
+//! `int` is `unsigned int`. A comparison and a conditional do not promote, so `char` with
+//! `unsigned char` is `unsigned char` there. A compound assignment casts the right side to the
+//! type of the left side and computes in that type, so `x /= b` with an `int x` and an
+//! `unsigned int b` is a signed divide.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -73,4 +75,31 @@ fn c_promotes_to_int() {
     ] {
         assert!(err.contains(what), "{what}: {err}");
     }
+}
+
+/// The assembly of `int f(int x, unsigned b) { x /= b; return x; }`.
+fn divide(what: &str, flags: &[&str]) -> String {
+    let dir = std::env::temp_dir().join(format!("rucc-kencc-asop-{}-{what}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, "int f(int x, unsigned b) { x /= b; return x; }\n")
+        .expect("the fixture can be written");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=x86_64-unknown-linux-gnu", "-S", "-O1", "-o", "-"])
+        .args(flags)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn a_compound_assignment_computes_in_the_type_of_the_left_side() {
+    let asm = divide("kencc", &["-fkencc"]);
+    assert!(asm.contains("idivl"), "{asm}");
+    let asm = divide("c", &[]);
+    assert!(asm.contains("\tdivl"), "{asm}");
+    assert!(!asm.contains("idivl"), "{asm}");
 }

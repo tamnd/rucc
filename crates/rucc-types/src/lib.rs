@@ -102,8 +102,8 @@ pub use crate::compat::{
     composite,
 };
 pub use crate::convert::{
-    kencc_arithmetic, kencc_promote, mask_of, promote, promote_bit_field, usual_arithmetic,
-    vectors_convertible,
+    kencc_arithmetic, kencc_assignment, kencc_promote, mask_of, promote, promote_bit_field,
+    usual_arithmetic, vectors_convertible,
 };
 pub use crate::granule::{GRANULE, Keying, Tally, measure, measure_all, report as granule_report};
 pub use crate::kencc::{KENCC_SIGN_INTERN, kencc_same_type, kencc_signature, kencc_type_text};
