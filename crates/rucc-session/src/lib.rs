@@ -2777,6 +2777,10 @@ pub struct Options {
     /// given, and then it is on for an ISO dialect and off for a GNU dialect, which is gcc's
     /// default. It changes nothing on a target that evaluates each operation in its own type.
     pub excess_constants: Option<bool>,
+    /// Whether an operation on `_Float16` or `__bf16` is evaluated in a wider type, which is
+    /// `float` but for `__FLT_EVAL_METHOD__` 2 under `standard`. It is on but for
+    /// `-fexcess-precision=16`, where each such operation is rounded to its own type, as in gcc.
+    pub excess_halves: bool,
     /// Which of the four string operations `-finline-stringops` asks to be written inline every
     /// time, so the object never calls the library for one. See [`Stringops`].
     pub inline_stringops: Stringops,
@@ -3311,6 +3315,7 @@ impl Options {
             trapping_math: true,
             rounding_math: false,
             excess_constants: None,
+            excess_halves: true,
             inline_stringops: Stringops::default(),
             math: Math::default(),
             exceptions: false,

@@ -196,8 +196,16 @@ pub struct FloatConstant {
     ///
     /// The number that was written is rounded once into this format, and not from `value`, so
     /// `0.1f` is the `long double` nearest to a tenth. gcc does the same under
-    /// `-fexcess-precision=standard`, and the front end reads this only then.
+    /// `-fexcess-precision=standard`, and the front end reads this only then. A `_Float16` and a
+    /// `__bf16` constant have it too on such a target, since gcc evaluates them in `long double`
+    /// there under `-fexcess-precision=standard`.
     pub wide: Option<Float>,
+    /// The value correctly rounded into the format of `float`, for a `_Float16` and a `__bf16`
+    /// constant. [`None`] for every other type.
+    ///
+    /// gcc evaluates an operation on the two in `float` and a constant of them too, so `x *
+    /// 1.1f16` is `x` times the `float` nearest to 1.1 and not times the half nearest to it.
+    pub single: Option<Float>,
 }
 
 /// The type of a floating constant.
@@ -821,21 +829,26 @@ pub fn floating(text: &str, std: Std, target: &TargetInfo) -> Result<FloatConsta
     if status.has(Status::UNDERFLOW) && value.is_zero() {
         remarks = remarks.with(Remarks::TRUNCATED);
     }
-    let excess = matches!(
-        suffix.ty,
-        FloatConstantType::Float
-            | FloatConstantType::Double
-            | FloatConstantType::Float32
-            | FloatConstantType::Float64
-            | FloatConstantType::Float32x
-    );
+    let half = matches!(suffix.ty, FloatConstantType::Float16 | FloatConstantType::BFloat16);
+    let excess = half
+        || matches!(
+            suffix.ty,
+            FloatConstantType::Float
+                | FloatConstantType::Double
+                | FloatConstantType::Float32
+                | FloatConstantType::Float64
+                | FloatConstantType::Float32x
+        );
+    let reread = |ty: FloatConstantType| {
+        Float::parse(&text[..index], ty.format(target)).ok().map(|(wide, _)| wide)
+    };
     let wide = if excess && target.excess_precision() {
-        let format = FloatConstantType::LongDouble.format(target);
-        Float::parse(&text[..index], format).ok().map(|(wide, _)| wide)
+        reread(FloatConstantType::LongDouble)
     } else {
         None
     };
-    Ok(FloatConstant { value, ty: suffix.ty, imaginary: suffix.imaginary, remarks, wide })
+    let single = if half { reread(FloatConstantType::Float) } else { None };
+    Ok(FloatConstant { value, ty: suffix.ty, imaginary: suffix.imaginary, remarks, wide, single })
 }
 
 /// Whether the byte after `index` is a digit in `base`, which is what makes a separator one.
@@ -1360,6 +1373,25 @@ mod tests {
             TargetInfo::new("x86_64-pc-windows-msvc".parse::<Triple>().expect("a known triple"));
         let on_windows = floating("1.0l", Std::C23, &windows).expect("a constant");
         assert_eq!(on_windows.value.to_bits(), 0x3ff0_0000_0000_0000);
+    }
+
+    #[test]
+    fn a_half_constant_is_read_again_as_a_float() {
+        // gcc evaluates `1.1f16` as the `float` nearest to 1.1, which is not the half nearest
+        // to it made wider (tamnd/rucc#4416). The half is 0x3c66, the `float` is 0x3f8c_cccd.
+        let half = floating("1.1f16", Std::C23, &linux()).expect("a constant");
+        assert_eq!(half.value.to_bits(), 0x3c66);
+        assert_eq!(half.single.map(|single| single.to_bits()), Some(0x3f8c_cccd));
+        assert_eq!(half.wide, None);
+        let brain = floating("1.1bf16", Std::C23, &linux()).expect("a constant");
+        assert_eq!(brain.single.map(|single| single.to_bits()), Some(0x3f8c_cccd));
+        assert_eq!(floating("1.1f", Std::C23, &linux()).expect("a constant").single, None);
+        // Where `float` is evaluated on the x87 stack, a half has the `long double` value too,
+        // for `-fexcess-precision=standard`.
+        let mut i386 = TargetInfo::new("i486--netbsdelf".parse::<Triple>().expect("a triple"));
+        i386.call_regs = i386.call_regs.map(|regs| regs.on_x87());
+        let half = floating("1.1f16", Std::C23, &i386).expect("a constant");
+        assert_eq!(half.wide.map(|wide| wide.to_bits()), Some(0x3fff_8ccc_cccc_cccc_cccd));
     }
 
     #[test]

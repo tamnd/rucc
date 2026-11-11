@@ -2342,6 +2342,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ if arg.starts_with("-fexcess-precision=") => {
                 let how = &arg["-fexcess-precision=".len()..];
+                opts.excess_halves = how != "16";
                 opts.excess_constants = match how {
                     "16" | "standard" => Some(true),
                     "fast" => Some(false),
