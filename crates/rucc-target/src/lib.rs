@@ -1817,14 +1817,18 @@ impl TargetInfo {
     /// The widest `_BitInt` this compiler builds for the target, which is the number
     /// `__BITINT_MAXWIDTH__` says.
     ///
-    /// gcc's 65535 on x86-64 and AArch64 outside Windows and Apple. A `_BitInt` wider than 128
-    /// bits is an array of 64 bit limbs there, it is passed and returned the way a structure of
-    /// its size is, and the back end computes on it a limb at a time and calls libgcc for a
-    /// multiply, a divide and a conversion to or from a float (tamnd/rucc#2490). 128 on every other
-    /// target, which is the widest integer the back end holds in registers.
+    /// gcc's 65535 on x86-64, AArch64 and i386 outside Windows and Apple. A `_BitInt` wider than
+    /// 128 bits is an array of limbs there, 64 bits each on the first two and 32 bits on i386. It
+    /// is passed and returned the way a structure of its size is, and the back end computes on it a
+    /// register at a time and calls libgcc for a multiply, a divide and a conversion to or from a
+    /// float (tamnd/rucc#2490, tamnd/rucc#4333). 128 on every other target, which is the widest
+    /// integer the back end holds in registers.
     #[must_use]
     pub fn bit_int_max_width(&self) -> u32 {
-        let arch = matches!(self.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::Aarch64);
+        let arch = matches!(
+            self.tuple.arch(),
+            tuple::Arch::X86_64 | tuple::Arch::Aarch64 | tuple::Arch::X86
+        );
         let os = matches!(self.tuple.os(), tuple::Os::Windows | tuple::Os::MacOs | tuple::Os::IOs);
         if arch && !os { 65535 } else { 128 }
     }

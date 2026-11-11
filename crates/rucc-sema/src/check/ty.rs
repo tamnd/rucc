@@ -2912,13 +2912,14 @@ mod tests {
         );
     }
 
-    /// gcc's 65535 is the widest on x86-64 and AArch64, where the back end computes a limb at a
-    /// time, and 128 stays the widest on a target whose back end does not.
+    /// gcc's 65535 is the widest on x86-64, AArch64 and i386, where the back end computes a limb
+    /// at a time, and 128 stays the widest on a target whose back end does not.
     #[test]
     fn a_bit_int_reaches_gcc_s_widest_where_the_back_end_computes_a_limb_at_a_time() {
         for (triple, widest, wider) in [
             ("x86_64-unknown-freebsd15.1", 65535, 65536),
             ("aarch64-unknown-linux-gnu", 65535, 65536),
+            ("i386-unknown-freebsd15.1", 65535, 65536),
             ("riscv64-unknown-linux-gnu", 128, 129),
         ] {
             let mut fixture = Fixture::for_target(triple);

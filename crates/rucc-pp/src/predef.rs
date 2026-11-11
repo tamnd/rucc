@@ -1785,11 +1785,11 @@ fn integers(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     d.set("__SIG_ATOMIC_MAX__", if sig_atomic == "int" { "0x7fffffff" } else { "0x7fffffffL" });
     d.set("__SIG_ATOMIC_MIN__", "(-__SIG_ATOMIC_MAX__ - 1)");
     // The widest `_BitInt` this compiler builds, which `TargetInfo::bit_int_max_width` says and
-    // `rucc-sema` checks a width against. It is gcc's 65535 on x86-64 and AArch64, where the back
-    // end computes a wider one a limb at a time (tamnd/rucc#2490), and 128 on a target whose back
-    // end does not. A program that reads this macro to decide what to write gets an answer it can
-    // rely on, which is the point of saying a smaller number than gcc's there rather than saying
-    // gcc's and refusing what it asked for.
+    // `rucc-sema` checks a width against. It is gcc's 65535 on x86-64, AArch64 and i386, where the
+    // back end computes a wider one a limb at a time (tamnd/rucc#2490, tamnd/rucc#4333), and 128
+    // on a target whose back end does not. A program that reads this macro to decide what to
+    // write gets an answer it can rely on, which is the point of saying a smaller number than
+    // gcc's there rather than saying gcc's and refusing what it asked for.
     // gcc 14 is the first release with `_BitInt`, and gcc 14 and 15 have it on x86 and AArch64
     // alone, which is where the `__LIBGCC_BITINT_*` macros below are too. So a persona that
     // claims an older gcc, or a RISC-V gcc 15, does not say the macro, and a header that tests
@@ -3788,15 +3788,18 @@ mod tests {
         assert!(has(&built_in(&target, &opts), "#define __BITINT_MAXWIDTH__ 65535"));
     }
 
-    /// tamnd/rucc#2490. gcc's 65535 where the back end computes a `_BitInt` wider than 128 bits a
-    /// limb at a time, which is x86-64 and AArch64, and 128 where it does not yet.
+    /// tamnd/rucc#2490 and tamnd/rucc#4333. gcc's 65535 where the back end computes a `_BitInt`
+    /// wider than 128 bits a limb at a time, which is x86-64, AArch64 and i386, and 128 where it
+    /// does not yet.
     #[test]
     fn the_widest_bit_int_is_gcc_s_where_the_back_end_computes_a_limb_at_a_time() {
         for (triple, widest) in [
             ("x86_64-unknown-freebsd", "65535"),
             ("aarch64-unknown-freebsd", "65535"),
             ("aarch64-unknown-netbsd", "65535"),
-            ("i686-unknown-linux-gnu", "128"),
+            ("i386-unknown-freebsd", "65535"),
+            ("i386-unknown-netbsd", "65535"),
+            ("i686-unknown-linux-gnu", "65535"),
             ("riscv64-unknown-linux-gnu", "128"),
         ] {
             let text = set_claiming(triple, 16);
