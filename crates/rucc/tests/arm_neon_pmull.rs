@@ -85,3 +85,27 @@ fn the_carry_less_product_is_what_pmull_gives() {
         assert_eq!(String::from_utf8_lossy(&ran.stdout), EXPECTED, "{level}");
     }
 }
+
+/// The AES rounds, which FreeBSD's sys/crypto/armv8/armv8_crypto_wrap.c is written with, are one
+/// instruction each.
+#[test]
+fn the_aes_rounds_are_one_instruction_each() {
+    let dir = std::env::temp_dir().join(format!("rucc-arm-neon-aes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let source = "#include <arm_neon.h>\n\
+                  uint8x16_t enc(uint8x16_t s, uint8x16_t k) { return vaesmcq_u8(vaeseq_u8(s, k)); }\n\
+                  uint8x16_t dec(uint8x16_t s, uint8x16_t k) { return vaesimcq_u8(vaesdq_u8(s, k)); }\n";
+    std::fs::write(dir.join("a.c"), source).expect("the fixture can be written");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=aarch64-unknown-freebsd15.1", "-O2", "-S", "-o", "-", "a.c"])
+        .current_dir(&dir)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    for round in ["aese v", "aesmc v", "aesd v", "aesimc v"] {
+        assert_eq!(text.matches(round).count(), 1, "{round}:\n{text}");
+    }
+}
