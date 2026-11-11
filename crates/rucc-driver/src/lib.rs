@@ -1987,6 +1987,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // build has it off.
             "-fms-extensions" => opts.ms_extensions = Some(true),
             "-fno-ms-extensions" => opts.ms_extensions = Some(false),
+            // gcc's leave to assign a vector to a vector of the same size whose lanes differ, in
+            // an assignment, an initializer, an argument and a return. Two vectors of integers
+            // convert with any count of lanes, and two vectors of floating lanes convert when the
+            // counts are the same. That is the rule this compiler always reads, see
+            // `rucc_types::vectors_convertible`, so both spellings are taken and change nothing.
+            // NetBSD builds its NEON AES and ChaCha code with the flag.
+            "-flax-vector-conversions" | "-fno-lax-vector-conversions" => {}
             // The Plan 9 reading of an anonymous member, and the whole kencc dialect, which
             // includes it.
             "-fplan9-extensions" => opts.plan9_extensions = true,
@@ -9407,6 +9414,16 @@ mod tests {
 
         let (opts, _) = compile(&["-c", "-fno-short-enums", "-fshort-enums", "a.c"]);
         assert!(opts.short_enums);
+    }
+
+    /// gcc's flag for the looser conversion of one vector to another, which is the rule that is
+    /// always read here, so both spellings are taken.
+    #[test]
+    fn the_lax_vector_conversions_flag_is_taken() {
+        for flag in ["-flax-vector-conversions", "-fno-lax-vector-conversions"] {
+            let (_, plan) = compile(&["-c", flag, "a.c"]);
+            assert_eq!(plan.jobs.len(), 1, "{flag}");
+        }
     }
 
     /// And Microsoft's reading of an anonymous member, which the target answers where the command
