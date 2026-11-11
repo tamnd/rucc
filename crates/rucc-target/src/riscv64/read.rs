@@ -78,6 +78,12 @@ pub fn read(text: &str) -> Result<Line, Error> {
         };
         let value = match value {
             Some(value) => value,
+            // Where only a place can be, a name is a symbol even when a register has that name,
+            // as GNU as reads it: FreeBSD's riscv_console.c has a variable called `tp`, and gcc
+            // and rucc write its address as `lla a0, tp`.
+            None if last && placed(&line.mnemonic) && register(operand).is_some() => {
+                line.symbol(operand).ok_or_else(|| error(operand))??
+            }
             None => line.operand(operand).ok_or_else(|| error(operand))??,
         };
         line.values.push(value);
@@ -177,6 +183,39 @@ impl Line {
         self.addend = addend;
         Some(Ok(Value::Symbol(operator)))
     }
+}
+
+/// Whether the last operand of the instruction is a place, a symbol or a distance, and never a
+/// register: the address loads, the calls, the jumps and the branches.
+fn placed(mnemonic: &str) -> bool {
+    matches!(
+        mnemonic,
+        "lla"
+            | "la"
+            | "lga"
+            | "la.tls.ie"
+            | "la.tls.gd"
+            | "call"
+            | "tail"
+            | "j"
+            | "jal"
+            | "beq"
+            | "bne"
+            | "blt"
+            | "bge"
+            | "bltu"
+            | "bgeu"
+            | "bgt"
+            | "ble"
+            | "bgtu"
+            | "bleu"
+            | "beqz"
+            | "bnez"
+            | "blez"
+            | "bgez"
+            | "bltz"
+            | "bgtz"
+    )
 }
 
 /// The number of a CSR GNU as knows by name, for the ones a kernel or a program reads: the float
@@ -408,6 +447,17 @@ mod tests {
         assert_eq!(read_ok("lui a0, %hi(0x7ff)").values[1], Imm(0));
         assert!(read("add a0, a1, %tprel_add(t), %lo(u)").is_err());
         assert!(read("addi a0, a0, %pcrel_lo(x)").is_err());
+    }
+
+    #[test]
+    fn a_symbol_with_the_name_of_a_register_is_a_symbol_where_only_a_place_can_be() {
+        for (text, name) in [("lla a0, tp", "tp"), ("call ra", "ra"), ("bnez a0, s0", "s0")] {
+            let line = read_ok(text);
+            assert_eq!(line.values.last(), Some(&Symbol(Operator::Plain)), "{text}");
+            assert_eq!(line.symbol.as_deref(), Some(name), "{text}");
+        }
+        assert_eq!(read_ok("mv a0, tp").values, [Gpr(10), Gpr(4)]);
+        assert_eq!(read_ok("jalr tp").values, [Gpr(4)]);
     }
 
     #[test]
