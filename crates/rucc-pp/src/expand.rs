@@ -375,6 +375,11 @@ impl<'a> Run<'a> {
                 continue;
             }
             if self.hides.contains(tok.hides, name) {
+                if self.kencc && self.kencc_recursion(name, pending.last()) {
+                    let d = Diagnostic::error("macro/io expansion too deep", tok.span);
+                    let d = self.in_expansions(d, tok.trace, tok.span);
+                    self.diagnostics.push(d);
+                }
                 out.push(tok);
                 continue;
             }
@@ -419,6 +424,22 @@ impl<'a> Run<'a> {
         }
     }
 
+    /// Whether kencc would expand `name` again here, where C does not.
+    ///
+    /// kencc expands a macro as text and reads the text again with no hide set, so a macro that
+    /// names itself, as `#define x (x+1)`, expands until the input stack of `cc/lex.c` is full,
+    /// and kencc stops with `macro/io expansion too deep`. That is a name that a macro of its
+    /// own expansion hides, which is a macro with a body, and which has its parenthesis when it
+    /// takes arguments. `next` is the token after the name.
+    fn kencc_recursion(&self, name: Symbol, next: Option<&Tok>) -> bool {
+        match self.macros.lookup(name) {
+            Some(def) if def.builtin.is_none() => {
+                !def.function_like || next.is_some_and(|t| t.is(Punct::LParen))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether [`Run::expand_into`] would give back `toks` as they are, which it does when no
     /// name in them is a macro it would expand. Counts the steps the loop would have counted, so
     /// the bound on a runaway expansion is reached at the same token either way, and says no
@@ -442,6 +463,9 @@ impl<'a> Run<'a> {
                 return false;
             }
             if self.hides.contains(tok.hides, name) {
+                if self.kencc && self.kencc_recursion(name, toks.get(at + 1)) {
+                    return false;
+                }
                 continue;
             }
             match self.macros.lookup(name) {

@@ -127,3 +127,45 @@ fn kencc_p_has_the_operators_of_ansi_c() {
     let (_, out, _) = run("nostamps", &["-fkencc"], stamps);
     assert_eq!(out, stamps.trim_end());
 }
+
+#[test]
+fn kencc_knows_nine_directives() {
+    for name in ["if 1", "elif 1", "error no", "warning no", "ident \"v\"", "include_next <u.h>"] {
+        let (ok, _, err) = run("unknown", &["-fkencc"], &format!("#{name}\n#endif\nx\n"));
+        let word = name.split(' ').next().unwrap_or_default();
+        assert!(!ok, "#{name} was taken");
+        assert!(err.contains(&format!("unknown #: {word}")), "#{name}: {err}");
+    }
+    let (ok, _, err) =
+        run("ansi-if", &["-fkencc", "-fno-kencc-preprocessor"], "#if 1\nx\n#endif\n");
+    assert!(ok, "{err}");
+}
+
+#[test]
+fn kencc_reads_no_elif_in_a_skipped_group() {
+    let source = "#ifdef NO\na\n#elif 1\nb\n#else\nc\n#endif\n#ifdef NO\n#error no\n#endif\n";
+    let (ok, out, err) = run("skipped", &["-fkencc"], source);
+    assert!(ok, "{err}");
+    assert_eq!(out, "c");
+    let (ok, out, err) = run("skipped-c", &[], source);
+    assert!(ok, "{err}");
+    assert_eq!(out, "b");
+}
+
+#[test]
+fn kencc_expands_a_macro_that_names_itself_until_it_stops() {
+    let (ok, _, err) = run("self", &["-fkencc"], "#define x (x+1)\nx\n");
+    assert!(!ok);
+    assert!(err.contains("macro/io expansion too deep"), "{err}");
+    let (ok, _, err) = run("pair", &["-fkencc"], "#define a b\n#define b a\na\n");
+    assert!(!ok);
+    assert!(err.contains("macro/io expansion too deep"), "{err}");
+    // A name that is not read again, and a function-like name with no parenthesis, end.
+    let source = "#define f(a) 1\n#define x f(x)\n#define h(a) h\nx h(2)\n";
+    let (ok, out, err) = run("ends", &["-fkencc"], source);
+    assert!(ok, "{err}");
+    assert_eq!(out, "1 h");
+    let (ok, out, err) = run("self-c", &[], "#define x (x+1)\nx\n");
+    assert!(ok, "{err}");
+    assert_eq!(out, "(x+1)");
+}
