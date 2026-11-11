@@ -521,7 +521,15 @@ fn far(word: &str, args: &[String], mode: Mode) -> Option<Result<Written, String
 
 /// Whether the operand is an address whose registers are thirty two bits wide.
 fn narrow(arg: &str) -> bool {
-    addressed(arg, Width::Long)
+    addressed(arg, Width::Long) || from_eip(arg)
+}
+
+/// Whether the operand is an address counted from `%eip`, which in sixty four bit code is the
+/// address from the instruction with the top half thrown away. NetBSD's `t_ptrace_x86_wait.h`
+/// writes `leal 24(%eip), %eax` to find the code it jumps to in thirty two bit mode.
+fn from_eip(arg: &str) -> bool {
+    let text = arg.trim();
+    grouped(text).is_some_and(|cut| text[cut + 1..text.len() - 1].trim() == "%eip")
 }
 
 /// Whether the operand is an address whose registers are sixty four bits wide.
@@ -2105,19 +2113,20 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
         return Err(format!("'{text}' adds registers of two widths"));
     }
     if let Some(base) = parts.first().filter(|base| !base.is_empty()) {
-        if *base == "%rip" && mode == Mode::Bits32 {
+        let from_instruction = matches!(*base, "%rip" | "%eip");
+        if from_instruction && mode == Mode::Bits32 {
             return Err(format!(
                 "'{text}' is counted from the instruction, which i386 has no way to address"
             ));
         }
-        if *base == "%rip" && taken {
+        if from_instruction && taken {
             // The instruction pointer is already the place the distance is counted from, and a
             // second place to count it from is not something one relocation says.
             return Err(format!(
                 "'{text}' is counted from the instruction and takes a name away as well"
             ));
         }
-        if *base == "%rip" {
+        if from_instruction {
             addr.rip = true;
         } else {
             addr.base = Some(whole(base)?);
@@ -3280,6 +3289,21 @@ mod tests {
         assert_eq!(bytes("leal (%eax,%eax,2), %eax"), [0x67, 0x8d, 0x04, 0x40]);
         assert_eq!(bytes("movq (%eax), %rbx"), [0x67, 0x48, 0x8b, 0x18]);
         assert_eq!(bytes("movl %gs:(%edx), %eax"), [0x65, 0x67, 0x8b, 0x02]);
+    }
+
+    /// An address counted from `%eip`, which NetBSD's `t_ptrace_x86_wait.h` writes, is the one
+    /// counted from `%rip` behind the address size prefix, with the bytes and the relocation gas
+    /// gives it. i386 has no address counted from the instruction.
+    #[test]
+    fn an_address_from_eip_is_the_one_from_rip_behind_the_prefix() {
+        assert_eq!(bytes("leal 24(%eip), %eax"), [0x67, 0x8d, 0x05, 0x18, 0, 0, 0]);
+        assert_eq!(bytes("leaq 8(%eip), %rdx"), [0x67, 0x48, 0x8d, 0x15, 8, 0, 0, 0]);
+        let with = written("movl x(%eip), %eax");
+        assert_eq!(with.bytes, [0x67, 0x8b, 0x05, 0, 0, 0, 0]);
+        assert_eq!((with.holes[0].name.as_str(), with.holes[0].at), ("x", 3));
+        assert_eq!(with.holes[0].addend, written("movl x(%rip), %eax").holes[0].addend);
+        let args = ["24(%eip)".to_owned(), "%eax".to_owned()];
+        assert!(one_in("leal", &args, Mode::Bits32).is_err());
     }
 
     #[test]
