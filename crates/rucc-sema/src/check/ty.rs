@@ -111,7 +111,7 @@ struct Subject {
 
 /// What one mention of a tag turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TagUse {
+pub(in crate::check) enum TagUse {
     /// The tag names a type already, which is that type.
     Known(TypeId),
     /// The tag names nothing yet, so this mention is what declares it.
@@ -882,7 +882,12 @@ impl Checker<'_> {
     /// declarators, which is a fact about the declaration and not about the type. So this asks
     /// the whole stack, and the declaration checking that knows the difference will ask
     /// [`Scopes::tag_here`](crate::Scopes::tag_here) before it gets here.
-    fn tag_use(&mut self, tag: Option<Symbol>, kind: TagKind, span: Span) -> TagUse {
+    pub(in crate::check) fn tag_use(
+        &mut self,
+        tag: Option<Symbol>,
+        kind: TagKind,
+        span: Span,
+    ) -> TagUse {
         // No tag is nothing to look up and nothing to bind: the type is reachable only through
         // the declarators of the one declaration that wrote it.
         let Some(name) = tag else { return TagUse::Anonymous };
@@ -901,7 +906,13 @@ impl Checker<'_> {
     }
 
     /// Binds a tag to the type just built for it, where this mention is what declares it.
-    fn bind_tag(&mut self, found: TagUse, tag: Option<Symbol>, kind: TagKind, ty: TypeId) {
+    pub(in crate::check) fn bind_tag(
+        &mut self,
+        found: TagUse,
+        tag: Option<Symbol>,
+        kind: TagKind,
+        ty: TypeId,
+    ) {
         // A tag that already means something else keeps meaning it. Rebinding would turn one
         // diagnostic into one per use, and the uses that follow were written against the
         // declaration that is already there.

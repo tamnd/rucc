@@ -68,6 +68,7 @@ use crate::eval::{Eval, NotConstant};
 use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::{Binding, Scopes};
 use crate::tast::{Const, Tast, Used};
+pub use incomplete::IncompleteLine;
 
 mod advice;
 mod aggregate_return;
@@ -83,6 +84,7 @@ mod extern_access;
 mod extname;
 mod format;
 mod hardbool;
+mod incomplete;
 mod init;
 mod musttail;
 mod noinit;
@@ -309,6 +311,9 @@ pub struct Checked {
     pub types: Types,
     /// What went wrong, in the order it was found.
     pub diagnostics: Vec<Diagnostic>,
+    /// The kencc type signature of each name with external linkage, which `-T` puts in the
+    /// object. It is empty when the unit is not in the kencc dialect.
+    pub kencc_signatures: rucc_base::hash::Map<String, u32>,
 }
 
 impl Checked {
@@ -389,6 +394,11 @@ pub struct Checker<'a> {
     /// The register each kencc `extern register` variable of the unit has, by its name, in the
     /// order of declaration. See `TargetInfo::extern_registers`.
     pub(in crate::check) extern_registers: Vec<(Symbol, crate::StrId)>,
+    /// The kencc `#pragma incomplete` lines that the checking has not reached yet, last first.
+    /// See `check/incomplete.rs`.
+    pub(in crate::check) incomplete_lines: Vec<IncompleteLine>,
+    /// The records that a `#pragma incomplete` line has marked so far.
+    pub(in crate::check) incomplete_records: rucc_base::hash::Set<RecordId>,
     /// The typedef name that each anonymous member was written with, by the record that holds
     /// it and the type of the member, under `-fplan9-extensions`. gcc takes the name as a member
     /// name, so two anonymous members that reach the same typedef name are duplicates.
@@ -483,6 +493,8 @@ impl<'a> Checker<'a> {
             incomplete_tentative: Vec::new(),
             first_spellings: rucc_base::hash::Map::default(),
             extern_registers: Vec::new(),
+            incomplete_lines: Vec::new(),
+            incomplete_records: rucc_base::hash::Set::default(),
             anonymous_spellings: rucc_base::hash::Map::default(),
             typeof_spellings: rucc_base::hash::Map::default(),
             annotations: annotate::Annotations::default(),
@@ -553,8 +565,10 @@ impl<'a> Checker<'a> {
             // What a body's casts wrote is read by no declaration, and is dropped here rather
             // than carried to the end of the unit.
             self.types.forget_prototypes();
+            self.mark_incomplete_before(ast.decl_span(decl).lo);
             self.check_decl(decl);
         }
+        self.mark_incomplete_before(rucc_diag::BytePos::MAX);
         self.check_incomplete_tentative();
         self.check_resolvers();
         self.build_simd_clones();
@@ -635,7 +649,14 @@ impl<'a> Checker<'a> {
     pub fn finish(mut self) -> Checked {
         self.tast.record_strict_flex_arrays(self.cx.strict_flex_arrays);
         self.tast.record_gnuc(self.cx.gnuc);
-        Checked { tast: self.tast, types: self.types, diagnostics: self.errors.finish() }
+        let kencc_signatures =
+            if self.cx.kencc { self.kencc_signatures() } else { rucc_base::hash::Map::default() };
+        Checked {
+            tast: self.tast,
+            types: self.types,
+            diagnostics: self.errors.finish(),
+            kencc_signatures,
+        }
     }
 
     /// Declares an object in the current scope without a declaration to read it from.
