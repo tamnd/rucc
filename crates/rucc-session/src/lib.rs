@@ -3496,6 +3496,7 @@ impl Session {
             target.tuple = target.tuple.with_abi(rucc_tuple::Abi::SoftFloat);
         }
         target = target.with_simd128(opts.wasm.has(wasm::Feature::Simd128));
+        target = target.with_kencc_registers(opts.kencc);
         if let Some(signed) = opts.char_signed {
             target.char_is_signed = signed;
         }
@@ -3513,6 +3514,9 @@ impl Session {
             let regs = if opts.x87_floats { regs.on_x87() } else { regs };
             let regs = if opts.strict_align { regs.strictly_aligned() } else { regs };
             let regs = regs.without_vector_regs(opts.fixed_vectors);
+            // The registers of a kencc `extern register`, on a target that is not Plan 9.
+            let kept = if target.kencc_registers { target.extern_register_numbers() } else { 0 };
+            let regs = regs.without_int_regs(kept);
             target.call_regs = Some(opts.guard.map_or(regs, |guard| regs.guarded_by(guard)));
         }
         Self {
