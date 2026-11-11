@@ -13126,6 +13126,66 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(run(&opts, "__bf16 k;\n").messages, Vec::<String>::new(), "i386 (#4324)");
     }
 
+    /// tamnd/rucc#4369. A `_Float16` and a `__bf16` meet as a `_Float16` in either order and in
+    /// a conditional, as with gcc 13 to 16 on x86-64, i386 and AArch64. Before, rucc refused the
+    /// pair with a message about decimal floating types. gcc 16.2.0 computes the pair at
+    /// `float` and compares it in the type of the left operand, which `-fdump-tree-original`
+    /// shows on all three.
+    #[test]
+    fn a_float16_and_a_brain_float_meet_as_a_float16() {
+        let source = "_Float16 x; __bf16 y;\n\
+                      _Static_assert(_Generic(x * y, _Float16: 1, default: 0), \"x * y\");\n\
+                      _Static_assert(_Generic(y + x, _Float16: 1, default: 0), \"y + x\");\n\
+                      _Static_assert(_Generic(1 ? x : y, _Float16: 1, default: 0), \"x : y\");\n\
+                      _Static_assert(_Generic(1 ? y : x, _Float16: 1, default: 0), \"y : x\");\n\
+                      _Float16 quotient(__bf16 a, _Float16 b) { return a / b; }\n\
+                      int less(_Float16 a, __bf16 b) { return a < b; }\n\
+                      __bf16 scale(__bf16 a, _Float16 b) { a *= b; return a; }\n";
+        for triple in
+            ["x86_64-unknown-freebsd", "aarch64-unknown-freebsd", "i686-unknown-linux-gnu"]
+        {
+            let mut opts = options();
+            opts.target = triple.parse::<Triple>().unwrap();
+            opts.emit = EmitKind::Object;
+            assert_eq!(run(&opts, source).messages, Vec::<String>::new(), "{triple}");
+        }
+        // The product is at `float`, and the `__bf16` is not made a half on the way, which would
+        // turn 65536 into an infinity. That is `float` on i386 too, not `long double`. A
+        // comparison brings the right operand to the type of the left one, unless an operand
+        // has the excess precision.
+        let source = "_Float16 product(_Float16 a, __bf16 b) { return a * b; }\n\
+                      int less(_Float16 a, __bf16 b) { return a < b; }\n\
+                      int more(__bf16 a, _Float16 b) { return a > b; }\n\
+                      int wide(_Float16 a, __bf16 b, __bf16 c) { return a * b < c; }\n";
+        for triple in ["x86_64-unknown-freebsd", "i686-unknown-linux-gnu"] {
+            let mut opts = options();
+            opts.target = triple.parse::<Triple>().unwrap();
+            opts.emit = EmitKind::Ir;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "{triple}");
+            let text = result.text();
+            let body = |name: &str| {
+                let start = text.find(&format!("func @{name}(")).expect(name);
+                let end = text[start..].find("\n}").expect(name);
+                text[start..start + end].to_owned()
+            };
+            let product = body("product");
+            assert!(product.contains("fpext.f32 %1"), "{triple}: {product}");
+            assert!(product.contains("fmul %2, %3"), "{triple}: {product}");
+            assert_eq!(product.matches("fptrunc.f16").count(), 1, "{triple}: {product}");
+            assert!(!product.contains("f80"), "{triple}: {product}");
+            let less = body("less");
+            assert!(less.contains("%2 = fpext.f16 %1"), "{triple}: {less}");
+            assert!(less.contains("fcmp olt %0, %2"), "{triple}: {less}");
+            let more = body("more");
+            assert!(more.contains("%2 = fptrunc.bf16 %1"), "{triple}: {more}");
+            assert!(more.contains("fcmp ogt %0, %2"), "{triple}: {more}");
+            let wide = body("wide");
+            assert!(wide.contains("%6 = fpext.f32 %2"), "{triple}: {wide}");
+            assert!(wide.contains("fcmp olt %5, %6"), "{triple}: {wide}");
+        }
+    }
+
     /// The infinities and nans of the interchange types are constants, as for `double`.
     ///
     /// glibc's `math.h` writes `HUGE_VAL_F128` as `__builtin_huge_valf128 ()` once `__GNUC__` is

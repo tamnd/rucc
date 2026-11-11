@@ -369,6 +369,11 @@ fn promoted_int(types: &mut Types, kind: IntKind, width: u32, target: &TargetInf
 /// The answer is the one with the higher rank, or the floating one when the other side is an
 /// integer. The complexity was taken off both operands before this and is put back on by
 /// [`usual_arithmetic`], which is why `_Complex float + double` is `_Complex double`.
+///
+/// A `_Float16` and a `__bf16` are a pair where neither format holds the other, so ISO C gives
+/// them no common type. gcc 13, 14, 15 and 16 give `_Float16` in either order, on x86-64, i386
+/// and AArch64, and the rank gives the same, because a half has the greater precision
+/// (tamnd/rucc#4369).
 fn floating(types: &mut Types, left: TypeId, right: TypeId, target: &TargetInfo) -> Option<TypeId> {
     let left = float_part(types, left);
     let right = float_part(types, right);
@@ -386,9 +391,6 @@ fn floating(types: &mut Types, left: TypeId, right: TypeId, target: &TargetInfo)
             let rank = |kind: FloatKind| (float_width(kind, target), kind.tie_break());
             if rank(a) >= rank(b) { a } else { b }
         }
-        // Neither format holds the other, and gcc says the operands are invalid.
-        (Some(FloatKind::BFloat16), Some(FloatKind::Float16))
-        | (Some(FloatKind::Float16), Some(FloatKind::BFloat16)) => return None,
         (Some(a), Some(b)) => {
             if float_rank(a, target) >= float_rank(b, target) {
                 a
