@@ -4648,7 +4648,30 @@ impl Reader {
                 visibility: Visibility::Default,
             });
         }
+        // gas leaves out an undefined weak name that nothing uses, whatever else the file said of
+        // it, and keeps an undefined global one. FreeBSD's linker_set.h writes `.weak
+        // __start_set_x` in every file that puts something in a set, and an object with one of
+        // these for each set the file does not reach had a symbol table gas does not make.
+        let used: Set<&str> = parts
+            .iter()
+            .flat_map(|part| part.relocs.iter().map(|reloc| reloc.symbol.as_str()))
+            .chain(self.equated.values().map(|(name, _)| name.as_str()))
+            .collect();
+        let unused: Set<usize> = self
+            .syms
+            .iter()
+            .enumerate()
+            .filter(|(_, sym)| {
+                elf && sym.at == Held::Undefined
+                    && sym.binding == Binding::Weak
+                    && !used.contains(sym.name.as_str())
+            })
+            .map(|(index, _)| index)
+            .collect();
         for (index, sym) in self.syms.into_iter().enumerate() {
+            if unused.contains(&index) {
+                continue;
+            }
             // A numbered local label is a place and not a name. Everything that went to one has been
             // resolved to a number in the bytes by now, and gas writes no symbol for one either, so
             // an object this assembles has the same table as an object gas assembles from the same
@@ -9542,6 +9565,24 @@ _tls$tlv$init:
     /// gas keeps a name weak when a `.globl` or a `.local` comes after the `.weak`, in either
     /// order. A `.weak` in an `asm` at file scope goes into the listing ahead of the `.globl` the
     /// compiler writes for the C definition, so this order is the one a C file makes.
+    /// gas writes no symbol for an undefined weak name that nothing uses, even one the file gave a
+    /// type, a size or a visibility. It keeps an undefined global one, and a weak one a relocation
+    /// names.
+    #[test]
+    fn an_undefined_weak_name_nothing_uses_is_left_out() {
+        let out = assembled(
+            "\t.weak lone\n\t.weak typed\n\t.type typed,@function\n\t.weak inside\n\t.hidden \
+             inside\n\t.weak sized\n\t.size sized,4\n\t.globl other\n\t.weak used\n\t.data\n\t\
+             .quad used\n",
+        );
+        for gone in ["lone", "typed", "inside", "sized"] {
+            assert!(!out.names.iter().any(|name| name.name == gone), "{gone}");
+        }
+        assert_eq!(name(&out, "other").binding, Binding::Global);
+        assert_eq!(name(&out, "used").binding, Binding::Weak);
+        assert_eq!(name(&out, "used").at, Held::Undefined);
+    }
+
     #[test]
     fn a_weak_name_stays_weak_whatever_is_said_of_it_after() {
         let out = assembled(

@@ -755,8 +755,9 @@ pub fn write(
     // section rather than against the name. A record for anything else is refused below, so a name
     // added here for one would be a name nothing goes on to use.
     // The names a declaration wrote `weak` on, which the link is allowed to leave undefined and
-    // whose references then read a zero address. The listing writes a `.weak` for each of the same
-    // names, so the two paths put the same entries in whether or not anything refers to one.
+    // whose references then read a zero address. In ELF one that nothing here refers to gets no
+    // entry, because gas writes none for the `.weak` the listing has for it, and the two paths have
+    // to put the same entries in.
     let weak: Set<&str> = data.weak.iter().map(String::as_str).collect();
     let relocs = || text.relocs.iter().chain(data.objects.iter().flat_map(|o| &o.relocs));
     // The names something here reaches through the thread pointer, which is the one thing about an
@@ -767,9 +768,8 @@ pub fn write(
         .filter(|reloc| reloc.kind == Reference::Thread)
         .map(|reloc| reloc.symbol.as_str())
         .collect();
-    let wanted: Vec<&String> =
-        relocs().map(|reloc| &reloc.symbol).chain(data.weak.iter()).collect();
-    for name in wanted {
+    let unused = if flavour == Flavour::Elf { &[][..] } else { &data.weak[..] };
+    for name in relocs().map(|reloc| &reloc.symbol).chain(unused) {
         if symbols.contains_key(name) || tables.contains_key(name) || places.contains_key(name) {
             continue;
         }
@@ -2911,11 +2911,9 @@ mod tests {
         assert!(hook.is_undefined(), "nothing here defines it");
         assert!(hook.is_weak(), "so the link may leave it alone rather than fail");
 
-        // And one nothing refers to is still written down, because the listing writes a directive
-        // for it and the two paths have to put the same entries in. A linker has nothing to do
-        // about an undefined weak symbol no relocation names.
-        let quiet = file.symbols().find(|s| s.name() == Ok("never_called")).expect("the other");
-        assert!(quiet.is_undefined() && quiet.is_weak(), "{:?}", quiet.flags());
+        // And one nothing refers to is left out, as gas leaves out the one the listing has a
+        // `.weak` for, because the two paths have to put the same entries in.
+        assert!(file.symbols().all(|s| s.name() != Ok("never_called")), "the one never called");
     }
 
     /// A name this file reads through the thread pointer is undefined and is still known to be
