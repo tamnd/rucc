@@ -1978,6 +1978,13 @@ static ENCODINGS: &[Encoding] = &[
     // compiler has no use for because a pointer here is sixty four bits wide and which hand written
     // code uses as an addition that does not touch the flags.
     bytes("leal", &MR, Long, &[0x8D], pair(0, 1), NO_IMM),
+    // And the low sixteen bits, which real mode code writes as `lea 0x10(%bp), %sp`. FreeBSD's
+    // boot1.S, btx.S and cdboot.S do.
+    bytes("leaw", &MR, Word, &[0x8D], pair(0, 1), NO_IMM),
+    // A byte of a table at `bx` plus `al`, into `al`. FreeBSD's cdboot.S turns a name into upper
+    // case with it.
+    bytes("xlat", &NO_ARGS, Long, &[0xD7], NO_MODRM, NO_IMM),
+    bytes("xlatb", &NO_ARGS, Long, &[0xD7], NO_MODRM, NO_IMM),
     // A far pointer loaded from memory, the offset into the register and the two bytes behind it
     // into the segment register the mnemonic names. The i386 kernel's `CHECK_AND_APPLY_ESPFIX`
     // moves to the espfix stack with `lss`.
@@ -5404,6 +5411,12 @@ static ONLY32: &[Encoding] = &[
     bytes("vmreadl", &RM, Long, &[0x0F, 0x78], pair(1, 0), NO_IMM),
     bytes("vmwritel", &RR, Long, &[0x0F, 0x79], pair(0, 1), NO_IMM),
     bytes("vmwritel", &MR, Long, &[0x0F, 0x79], pair(0, 1), NO_IMM),
+    // A far pointer loaded into `es` or `ds`, which sixty four bit mode gave the opcodes of to
+    // VEX. FreeBSD's boot1.S reads a transfer buffer with `les` and btx.S a pointer with `ldsl`.
+    bytes("lesw", &MR, Word, &[0xC4], pair(0, 1), NO_IMM),
+    bytes("lesl", &MR, Long, &[0xC4], pair(0, 1), NO_IMM),
+    bytes("ldsw", &MR, Word, &[0xC5], pair(0, 1), NO_IMM),
+    bytes("ldsl", &MR, Long, &[0xC5], pair(0, 1), NO_IMM),
 ];
 
 /// The mnemonics of the shared table that move eight bytes in sixty four bit mode without a size
