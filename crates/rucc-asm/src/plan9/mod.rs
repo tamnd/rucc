@@ -922,6 +922,7 @@ impl Out<'_> {
         text.scale = 0;
         let line = body.first().map_or(0, |l| l.number);
         self.frame = frame.unwrap_or(0);
+        let first = self.progs.len();
         self.push(a6::ATEXT, text, Addr6::constant(self.frame));
         let mut skip: Set<usize> = Set::default();
         if let Some(size) = frame {
@@ -969,7 +970,48 @@ impl Out<'_> {
         if self.progs.last().is_none_or(|p| p.op != a6::ARET && p.op != jmp) {
             self.push(a6::ARET, Addr6::default(), Addr6::default());
         }
+        self.far_stores(first);
         Ok(())
+    }
+
+    /// Write each store at `FAR` or more above `SP` in the function at `first` as `D_AUTO`.
+    ///
+    /// `6l` keeps the largest offset of a destination `n(SP)` of a function in a `short`, as the
+    /// space that the function uses for the arguments of its calls. At a call through a register
+    /// it adds the difference between that space and the largest `RET $n` of the program to the
+    /// frame, when the difference is more than zero. With no `RET $n` the difference is the
+    /// negative of the space, so a space of 32768 or more, which the `short` makes negative, makes
+    /// the frame larger at each such call, and every `n(SP)` then points at the wrong place. `6l`
+    /// adds the frame and each `PUSH` to the offset of a `D_AUTO`, and does not count it as that
+    /// space. Thus the store gets the same bytes, and the frame stays as it is.
+    fn far_stores(&mut self, first: usize) {
+        const FAR: i64 = 1 << 15;
+        let sp = a6::D_INDIR + a6::D_SP;
+        let opcode = |name: &str| Machine::Amd64.opcode(name).unwrap_or(u16::MAX);
+        let moves = [
+            (opcode("APUSHQ"), 8),
+            (opcode("APUSHFQ"), 8),
+            (opcode("APUSHL"), 4),
+            (opcode("APUSHFL"), 4),
+            (opcode("APUSHW"), 2),
+            (opcode("APUSHFW"), 2),
+            (opcode("APOPQ"), -8),
+            (opcode("APOPFQ"), -8),
+            (opcode("APOPL"), -4),
+            (opcode("APOPFL"), -4),
+            (opcode("APOPW"), -2),
+            (opcode("APOPFW"), -2),
+        ];
+        let mut delta = self.frame;
+        for p in &mut self.progs[first + 1..] {
+            if p.to.ty == sp && p.to.offset >= FAR {
+                p.to.ty = a6::D_AUTO;
+                p.to.offset -= delta;
+            }
+            if let Some((_, n)) = moves.iter().find(|(op, _)| *op == p.op) {
+                delta += n;
+            }
+        }
     }
 
     /// A jump through a register or through memory. 6l sends each branch on through a chain of
@@ -1464,6 +1506,24 @@ mod tests {
 
     fn names(progs: &[Prog6]) -> Vec<&'static str> {
         progs.iter().map(|p| Machine::Amd64.opcode_name(p.op).unwrap_or("?")).collect()
+    }
+
+    #[test]
+    fn a_store_far_above_sp_is_an_auto() {
+        let p = progs(
+            "\t.text\n\t.globl\tf\nf:\n\tsubq\t$40000, %rsp\n\tmovq\t%rbp, 32800(%rsp)\n\tmovq\t%rax, 8(%rsp)\n\tpushq\t%rax\n\tmovq\t%rax, 32800(%rsp)\n\tpopq\t%rax\n\tmovq\t32800(%rsp), %rax\n\tcall\t*%rax\n\taddq\t$40000, %rsp\n\tret\n",
+        );
+        assert_eq!(
+            names(&p),
+            [
+                "ATEXT", "AMOVQ", "AMOVQ", "APUSHQ", "AMOVQ", "APOPQ", "AMOVQ", "ACALL", "ARET",
+                "AEND"
+            ]
+        );
+        assert_eq!((p[1].to.ty, p[1].to.offset), (a6::D_AUTO, 32800 - 40000));
+        assert_eq!((p[2].to.ty, p[2].to.offset), (a6::D_INDIR + a6::D_SP, 8));
+        assert_eq!((p[4].to.ty, p[4].to.offset), (a6::D_AUTO, 32800 - 40008));
+        assert_eq!((p[6].from.ty, p[6].from.offset), (a6::D_INDIR + a6::D_SP, 32800));
     }
 
     #[test]
