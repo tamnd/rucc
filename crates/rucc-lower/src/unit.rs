@@ -1172,6 +1172,25 @@ impl Unit<'_> {
         } else {
             state
         };
+        // kencc writes a `GLOBL` only for a symbol whose type has a size, which is `gclean` in
+        // 6c/txt.c, so `char end[];` at file scope with no initializer is a reference and not
+        // the one element GNU C gives it. Plan 9 relies on that: the linker defines `end`,
+        // `etext` and `edata`, and does not replace a symbol an object already defined. APE's
+        // brk.c says `char end[];`, and an `end` of one byte in the data makes the first `sbrk`
+        // shrink the segment over the rest of the bss.
+        let no_size = matches!(
+            self.types.kind(self.types.canonical(ty)),
+            TypeKind::Array { len: ArrayLen::Unknown, .. }
+        );
+        let state = if state == Definition::Tentative
+            && init.is_none()
+            && no_size
+            && self.target.object_format == ObjectFormat::Plan9
+        {
+            Definition::Declared
+        } else {
+            state
+        };
         let symbol = self.symbol_of(decl);
         if node.flags.contains(DeclFlags::NO_REORDER) {
             self.unreordered.insert(symbol);
