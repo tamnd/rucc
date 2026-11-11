@@ -614,14 +614,17 @@ fn floating_mode(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
 /// and the walk then splits the value into its words on the way out and joins them on the way
 /// in, which it already does for a scalar that travels in pieces.
 ///
-/// Only on x86-64 outside Windows. Windows passes anything over eight bytes as the address of a
-/// copy whatever it is, and the other machines have rules of their own that tamnd/rucc#425 has
-/// not been taught yet.
+/// On x86-64 outside Windows, and on AArch64 for one wider than 128 bits. Windows passes anything
+/// over eight bytes as the address of a copy whatever it is. AAPCS64 says a `_BitInt(N)` wider
+/// than 128 bits is passed as a composite of its size, and a composite of more than sixteen bytes
+/// goes as the address of a copy and comes back through the address in `x8`, which the structure
+/// of words is asked into (tamnd/rucc#2490). gcc 16.2.0 does both. A narrower one there, and the
+/// other machines, have rules of their own that tamnd/rucc#425 has not been taught yet.
 fn chunks(types: &Types, target: &TargetInfo, id: TypeId) -> Option<Shaped> {
-    if !matches!(types.kind(id), TypeKind::BitInt { .. })
-        || target.tuple.arch() != Arch::X86_64
-        || target.tuple.os() == Os::Windows
-    {
+    let TypeKind::BitInt { width, .. } = types.kind(id) else { return None };
+    let x86 = target.tuple.arch() == Arch::X86_64 && target.tuple.os() != Os::Windows;
+    let arm = target.tuple.arch() == Arch::Aarch64 && width > 128;
+    if !x86 && !arm {
         return None;
     }
     let size = repr::size_of(types, target, id);
@@ -964,6 +967,27 @@ mod tests {
         let planned =
             plan(&types, &arm, Convention::Target, b65, &[b65], &[], false).expect("a plan");
         assert_eq!(planned.args[0].types, vec![Type::int(65)]);
+    }
+
+    /// tamnd/rucc#2490. A `_BitInt` wider than 128 bits is a composite of its size to AAPCS64,
+    /// so it goes as the address of a copy and comes back through the address in `x8`, where it
+    /// used to be a scalar the back end has no register for. On x86-64 it is a structure of more
+    /// than sixteen bytes and goes in the argument area.
+    #[test]
+    fn a_bit_int_wider_than_128_bits_travels_as_a_large_structure() {
+        let mut types = Types::new();
+        let b200 = types.bit_int(true, 200);
+        let arm = target("aarch64-unknown-freebsd15.1");
+        let planned =
+            plan(&types, &arm, Convention::Target, b200, &[b200], &[], false).expect("a plan");
+        assert!(planned.returns_through_memory());
+        assert!(matches!(planned.args[0].pass, Pass::Reference), "{:?}", planned.args[0].pass);
+        let x86 = target("x86_64-unknown-freebsd15.1");
+        let planned =
+            plan(&types, &x86, Convention::Target, b200, &[b200], &[], false).expect("a plan");
+        assert!(planned.returns_through_memory());
+        assert!(matches!(planned.args[0].pass, Pass::Memory), "{:?}", planned.args[0].pass);
+        assert_eq!(planned.args[0].align, 8);
     }
 
     #[test]

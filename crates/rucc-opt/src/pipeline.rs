@@ -1169,6 +1169,26 @@ impl Report {
     }
 }
 
+/// Holds every function that computes on an integer wider than 128 bits to `-O0`, as
+/// `optimize ("O0")` would.
+///
+/// That integer is a `_BitInt` of up to 65535 bits, which the back end computes a limb at a time
+/// (tamnd/rucc#2490). The folds and the rewrites here read an integer as an `i128` at most, so a
+/// wider one is a value they would get wrong rather than one they would leave alone, and a
+/// function with one is compiled the way `-O0` compiles it until they are taught the width. One
+/// that is `always_inline` is left as it is, since the two attributes cannot both be set and the
+/// inlining is a promise.
+fn hold_wide(module: &mut Module) {
+    for id in module.funcs().collect::<Vec<FuncId>>() {
+        let func = &module[id];
+        let wide =
+            func.values().any(|value| func[value].ty.is_int() && func[value].ty.bits() > 128);
+        if wide && !func.attrs.set.contains(AttrSet::ALWAYS_INLINE) {
+            module[id].attrs.set = func.attrs.set.union(AttrSet::OPTNONE);
+        }
+    }
+}
+
 /// Runs the pipeline over the module.
 ///
 /// Every pass sees every function with a body, one at a time, and a pass runs over the whole
@@ -1218,6 +1238,9 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         .iter()
         .rfind(|(it, _)| it == inline::SMALL)
         .map_or(matches!(opts.level, OptLevel::O2 | OptLevel::O3), |&(_, on)| on);
+    // Before the inliner, which runs passes of its own over a body, and again after it, which can
+    // have put a wide callee's body into a caller. See [`hold_wide`].
+    hold_wide(module);
     let started = Instant::now();
     let growth = inline::Growth::new(opts.conserve_stack);
     // gcc's second inliner, which weighs what the first found too large with its hints, comes
@@ -1241,6 +1264,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         second,
     );
     report.took(inline::NAME, inline::PHASE, started.elapsed(), Duration::ZERO);
+    hold_wide(module);
     for (id, stats) in inlined {
         if opts.verify {
             if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
