@@ -115,7 +115,7 @@ fn sized(word: &str, args: &[String], gcc: bool, addr32: bool) -> Result<Written
     // The four that load or store a table's place are always thirty two bits with the letter on,
     // and the four that widen into a register of thirty two bits say so with the last letter, which
     // the other width of the same line does not show, since there is no `movzww`.
-    // `lea` is the same, for the other reason that the encoder has no sixteen bit row for it.
+    // `lea` into a thirty two bit register gets the prefix the same way.
     let into_long = args
         .last()
         .and_then(|arg| arg.trim().strip_prefix('%').and_then(gpr_named))
@@ -225,6 +225,11 @@ fn branch(word: &str, args: &[String], gcc: bool, addr32: bool) -> Result<Option
     let plain = match word {
         "calll" | "callw" => "call",
         "jmpl" | "jmpw" => "jmp",
+        // The jump on `cx` being zero is the plain opcode here and the one on `ecx` has the
+        // address size prefix, the other way round from thirty two bit code. FreeBSD's boot1.S
+        // and cdboot.S write `jcxz`.
+        "jcxz" => "jecxz",
+        "jecxz" => "jcxz",
         _ => word,
     };
     if !(plain == "call" || plain.starts_with('j') || plain.starts_with("loop")) {
@@ -442,7 +447,13 @@ fn registers16(word: &str, args: &[String], which: usize, gcc: bool) -> Result<W
         }
         _ => ("", front),
     };
-    let value = if disp.is_empty() { Some(0) } else { number(disp).ok() };
+    // A displacement may be a sum of numbers, as `33-1` is once a name set to 33 is put in its
+    // place. FreeBSD's cdboot.S writes `DIR_NAME-1(%bx,%si)`, which gas writes in one byte.
+    let value = if disp.is_empty() {
+        Some(0)
+    } else {
+        number(disp).ok().or_else(|| crate::source::constant(disp))
+    };
     let with = |place: &str| -> Vec<String> {
         let mut list = args.to_vec();
         list[which] = format!("{star}{segment}{place}");
@@ -594,6 +605,34 @@ mod tests {
             ("lldtw %ax", "0f00d0"),
         ] {
             assert_eq!(hex(line, false), bytes, "{line}");
+        }
+    }
+
+    /// The real mode lines of FreeBSD's boot1.S, btx.S, btxldr.S and cdboot.S, with the bytes
+    /// GNU as 2.42 writes for them.
+    #[test]
+    fn the_freebsd_boot_forms_are_what_gas_writes() {
+        for (line, bytes) in [
+            ("lea 0x10(%bp),%sp", "8d6610"),
+            ("lea 0x8(%di),%di", "8d7d08"),
+            ("leaw 4(%bx,%si),%ax", "8d4004"),
+            ("lea 4(%bx),%eax", "668d4704"),
+            ("les 0x4(%bp),%bx", "c45e04"),
+            ("lds (%si),%si", "c534"),
+            ("lesl 4(%bx),%eax", "66c44704"),
+            ("divb %dl,%al", "f6f2"),
+            ("divw %cx,%ax", "f7f1"),
+            ("xlat", "d7"),
+            ("setneb %al", "0f95c0"),
+            ("cmpb $0x30,33-1(%bx,%si)", "80782030"),
+            ("movb %cl,(1<<5)(%bx)", "884f20"),
+        ] {
+            assert_eq!(hex(line, false), bytes, "{line}");
+        }
+        // The jump on `cx` is `e3` with no prefix, and the one on `ecx` has `67`.
+        for (word, bytes) in [("jcxz", [0xE3].as_slice()), ("jecxz", &[0x67, 0xE3])] {
+            let written = one_in16(word, &["a".to_owned()], false).unwrap();
+            assert_eq!(written.bytes[..bytes.len()], *bytes, "{word}");
         }
     }
 

@@ -291,6 +291,24 @@ pub(crate) fn one_in(word: &str, args: &[String], mode: Mode) -> Result<Written,
             return one_in(word, &[number.clone(), register.clone(), register.clone()], mode);
         }
     }
+    // A division with the accumulator written out after the operand is the instruction without
+    // it, as gas reads it. FreeBSD's `btxldr.S` writes `divb %dl, %al`. gas takes no such form of
+    // `mul`, and an accumulator of another width than the letter is refused.
+    if let [operand, accumulator] = args {
+        let letter = match accumulator.trim() {
+            "%al" => "b",
+            "%ax" => "w",
+            "%eax" => "l",
+            "%rax" => "q",
+            _ => "",
+        };
+        let stem = ["div", "idiv"].into_iter().find(|stem| {
+            word.strip_prefix(stem).is_some_and(|rest| rest.is_empty() || rest == letter)
+        });
+        if let (Some(stem), false) = (stem, letter.is_empty()) {
+            return one_in(&format!("{stem}{letter}"), std::slice::from_ref(operand), mode);
+        }
+    }
     // The jump on a register being zero takes its width from the size of an address, so `jecxz`
     // is the plain opcode in thirty two bit mode, where `jrcxz` is not an instruction, and the
     // same opcode behind the address size prefix in sixty four. `hibernate_asm_32.S` copies pages
@@ -1560,11 +1578,23 @@ fn aliased(word: &str, mode: Mode) -> Option<String> {
     if rest.len() > 1 && matches!(&rest[rest.len() - 1..], "b" | "w" | "l" | "q") {
         tails.push((&rest[..rest.len() - 1], &rest[rest.len() - 1..]));
     }
+    // A `set` writes one byte and has no other width, so gas takes the letter `b` behind it and
+    // the encoder knows it without. msun's i387 `s_finite.S` writes `setneb %al`.
+    let byte = prefix == "set";
     tails.into_iter().find_map(|(condition, tail)| {
-        let (_, known) = CONDITIONS.iter().find(|(written, _)| *written == condition)?;
+        let known = match CONDITIONS.iter().find(|(written, _)| *written == condition) {
+            Some((_, known)) => *known,
+            None if byte && tail == "b" && PLAIN.contains(&condition) => condition,
+            None => return None,
+        };
+        let tail = if byte && tail == "b" { "" } else { tail };
         Some(format!("{prefix}{known}{tail}"))
     })
 }
+
+/// The names of the conditions the encoder knows, which [`CONDITIONS`] spells others as.
+const PLAIN: [&str; 16] =
+    ["o", "no", "b", "ae", "e", "ne", "be", "a", "s", "ns", "p", "np", "l", "ge", "le", "g"];
 
 /// The instructions whose first operand is a count and says nothing about how wide they are.
 ///
@@ -2719,6 +2749,50 @@ mod tests {
         for line in ["pusha", "popa", "daa", "aam", "aad $16"] {
             assert!(!refused(line).is_empty(), "{line}");
         }
+    }
+
+    /// The forms of FreeBSD's msun and boot code that gas takes: the letter `b` on a `set`, a
+    /// division with the accumulator written out, `lea` into a sixteen bit register, `xlat`, and
+    /// the far pointer loads into `es` and `ds`. The bytes are what GNU as 2.42 writes.
+    #[test]
+    fn the_freebsd_forms_of_msun_and_the_boot_code_are_what_gas_writes() {
+        let bytes32 = |line: &str| {
+            let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+            let args = if rest.is_empty() { Vec::new() } else { crate::source::split(rest, ',') };
+            one_in(word, &args, Mode::Bits32).map(|written| written.bytes)
+        };
+        let cases: &[(&str, &[u8])] = &[
+            ("setneb %al", &[0x0f, 0x95, 0xc0]),
+            ("setzb %al", &[0x0f, 0x94, 0xc0]),
+            ("setnzb (%ebx)", &[0x0f, 0x95, 0x03]),
+            ("setgeb %cl", &[0x0f, 0x9d, 0xc1]),
+            ("divb %dl,%al", &[0xf6, 0xf2]),
+            ("div %dl,%al", &[0xf6, 0xf2]),
+            ("divl %ecx,%eax", &[0xf7, 0xf1]),
+            ("idivw %cx,%ax", &[0x66, 0xf7, 0xf9]),
+            ("ldsl (%esi),%esi", &[0xc5, 0x36]),
+            ("lds (%esi),%esi", &[0xc5, 0x36]),
+            ("lesl 4(%ebx),%eax", &[0xc4, 0x43, 0x04]),
+            ("lesw 4(%ebx),%ax", &[0x66, 0xc4, 0x43, 0x04]),
+            ("les 4(%ebx),%eax", &[0xc4, 0x43, 0x04]),
+            ("leaw 4(%ebx),%ax", &[0x66, 0x8d, 0x43, 0x04]),
+            ("lea 4(%ebx),%ax", &[0x66, 0x8d, 0x43, 0x04]),
+            ("xlat", &[0xd7]),
+            ("xlatb", &[0xd7]),
+        ];
+        for &(line, want) in cases {
+            assert_eq!(bytes32(line).as_deref(), Ok(want), "{line}");
+        }
+        for line in ["mulb 4(%ebx),%al", "mul %ecx,%eax", "divb %dl,%ax"] {
+            assert!(bytes32(line).is_err(), "{line}");
+        }
+        assert_eq!(bytes("setneb %al"), [0x0f, 0x95, 0xc0]);
+        assert_eq!(bytes("divq %rcx,%rax"), [0x48, 0xf7, 0xf1]);
+        assert_eq!(bytes("div %rcx,%rax"), [0x48, 0xf7, 0xf1]);
+        assert_eq!(bytes("xlat"), [0xd7]);
+        assert_eq!(bytes("leaw 4(%rbx),%ax"), [0x66, 0x8d, 0x43, 0x04]);
+        assert_eq!(bytes("lea 4(%rbx),%ax"), [0x66, 0x8d, 0x43, 0x04]);
+        assert!(!refused("les 4(%rbx),%eax").is_empty());
     }
 
     #[test]
