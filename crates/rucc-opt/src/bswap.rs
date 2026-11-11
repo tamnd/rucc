@@ -33,8 +33,10 @@
 //!
 //! The wider load reads only bytes a load in the tree read already, so it reads nothing the
 //! program did not. It goes where the root is, and so the pass asks that nothing between the
-//! first of the loads and the root may write memory, and that no load in the tree is volatile or
-//! atomic. The rewrite is done only when it makes no more instructions than it removes.
+//! first of the loads and the root may write memory, and that no load in the tree is volatile,
+//! atomic or in a segment. The new load is a plain one, so a load through `%fs` or `%gs` stays as
+//! it is, as [`Flags::KEEP`] asks. The rewrite is done only when it makes no more instructions than
+//! it removes.
 
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
@@ -295,7 +297,7 @@ impl Walk<'_> {
             (Opcode::Load, &[address]) => {
                 let little = self.little?;
                 let Extra::Mem(mem) = data.extra else { return None };
-                if func[mem].order != MemOrder::NotAtomic || data.flags.contains(Flags::VOLATILE) {
+                if func[mem].order != MemOrder::NotAtomic || data.flags.intersects(Flags::KEEP) {
                     return None;
                 }
                 let (base, offset) = split(func, address)?;
@@ -616,6 +618,28 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
         let out = run(&text);
         assert_eq!(count(&out, " = load.i8"), 4, "{out}");
         assert_eq!(count(&out, " = load.i32 "), 0, "{out}");
+    }
+
+    /// `(short)PCPU_GET(cpuid)`, the FreeBSD per-CPU read through `__seg_gs`. A plain `load.i16`
+    /// reads the flat address 0x3c and not the field of this CPU's `struct pcpu`.
+    #[test]
+    fn a_load_in_a_segment_keeps_the_tree() {
+        for seg in ["seg_gs", "seg_fs"] {
+            let out = run(&wrap(
+                "(ptr) -> i16",
+                &format!(
+                    "block0(%0: ptr):
+    %1 = iconst.i64 60
+    %2 = ptr_add %0, %1
+    %3 = load.i32.{seg} %2, align 4
+    %4 = trunc.i16 %3
+    return %4
+"
+                ),
+            ));
+            assert_eq!(count(&out, &format!(" = load.i32.{seg} ")), 1, "{out}");
+            assert_eq!(count(&out, " = load.i16"), 0, "{out}");
+        }
     }
 
     #[test]

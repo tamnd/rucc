@@ -83,6 +83,22 @@ fn a_read_through_a_segment_is_not_merged_with_another() {
 
 /// A memory operand of an `asm` is spelled with its segment, which is what the kernel's percpu
 /// templates count on once they stop writing `%%gs:` themselves.
+/// A read cut down to a narrower type still goes through the segment. FreeBSD writes
+/// `vp->v_dbatchcpu = curcpu` with a `short` field and a `u_int` per-CPU field, and a 16-bit load
+/// from the flat address 0x3c panicked the kernel in `vdropl`.
+#[test]
+fn a_narrowed_read_keeps_its_segment() {
+    let out = listing(
+        "narrow",
+        "struct pcpu { void *curthread; char pad[0x34]; unsigned int cpuid; };\n\
+         struct vnode { char pad[0x10]; short cpu; };\n\
+         #define GET(f) __extension__ ({ static struct pcpu __seg_gs *pc = 0; pc->f; })\n\
+         void set(struct vnode *vp) { vp->cpu = GET(cpuid); }\n\
+         int same(struct vnode *vp) { return vp->cpu == (short)GET(cpuid); }\n",
+    );
+    assert_eq!(out.matches("%gs:60(").count(), 2, "both reads go through %gs:\n{out}");
+}
+
 #[test]
 fn an_asm_memory_operand_carries_its_segment() {
     let out = listing(
