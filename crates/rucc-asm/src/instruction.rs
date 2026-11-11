@@ -2139,8 +2139,17 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
             // An i386 address wraps in its four bytes, so a number up to four gigabytes either
             // way is one. `-__PAGE_OFFSET(%edi)` is how head_32.S reaches the physical address of
             // something it has the virtual one of.
+            // So does one made of thirty two bit registers on sixty four bits, which has the
+            // address size prefix. FreeBSD's sha1block.S writes `lea 0x8f1bbcdc(%eax,%r10d,1)`.
             (None, None) => {
-                let wraps = mode == Mode::Bits32 && (-(1i64 << 32)..1i64 << 32).contains(&value);
+                let short = inside.is_some_and(|inside| {
+                    inside
+                        .split(',')
+                        .filter_map(|part| part.trim().strip_prefix('%').and_then(gpr_named))
+                        .any(|(_, width)| width == Width::Long)
+                });
+                let four = mode == Mode::Bits32 || short;
+                let wraps = four && (-(1i64 << 32)..1i64 << 32).contains(&value);
                 addr.disp = if wraps {
                     value as i32
                 } else {
@@ -2152,9 +2161,19 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
         }
     }
 
-    let parts: Vec<&str> = inside.map_or_else(Vec::new, |inside| {
+    let mut parts: Vec<&str> = inside.map_or_else(Vec::new, |inside| {
         if inside.is_empty() { Vec::new() } else { inside.split(',').map(str::trim).collect() }
     });
+    // A base and a scale with no index, which gas reads as the base alone. FreeBSD's btxv86.S
+    // writes `xchgl %ebp,0x4(%esp,1)`.
+    if let [_, scale] = parts[..] {
+        if !scale.is_empty() && !scale.starts_with('%') {
+            if !matches!(number(scale)?, 1 | 2 | 4 | 8) {
+                return Err(format!("{scale} is not a scale this machine has"));
+            }
+            parts.truncate(1);
+        }
+    }
     if parts.len() > 3 {
         return Err(format!("'{text}' has more than a base, an index and a scale in it"));
     }
@@ -2758,6 +2777,28 @@ mod tests {
         for line in ["pusha", "popa", "daa", "aam", "aad $16"] {
             assert!(!refused(line).is_empty(), "{line}");
         }
+    }
+
+    /// A base and a scale with no index is the base alone, and an address of thirty two bit
+    /// registers on sixty four bits takes a displacement up to four gigabytes, which wraps. The
+    /// bytes are what GNU as 2.44 writes for FreeBSD's btxv86.S and sha1block.S.
+    #[test]
+    fn a_scale_with_no_index_and_a_wide_displacement_on_short_registers_are_what_gas_writes() {
+        let bytes32 = |line: &str| {
+            let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+            let args = crate::source::split(rest, ',');
+            one_in(word, &args, Mode::Bits32).map(|written| written.bytes)
+        };
+        assert_eq!(bytes32("xchgl %ebp,0x4(%esp,1)").as_deref(), Ok(&[0x87, 0x6c, 0x24, 0x04][..]));
+        assert_eq!(bytes32("movl 8(%eax,1),%ecx").as_deref(), Ok(&[0x8b, 0x48, 0x08][..]));
+        assert_eq!(bytes32("movl (%ebx,1),%ecx").as_deref(), Ok(&[0x8b, 0x0b][..]));
+        assert!(bytes32("movl (%ebx,3),%ecx").is_err());
+        assert_eq!(
+            bytes("lea 0x8f1bbcdc(%eax,%r10d,1),%eax"),
+            [0x67, 0x42, 0x8d, 0x84, 0x10, 0xdc, 0xbc, 0x1b, 0x8f]
+        );
+        assert_eq!(bytes("lea 0x8f1bbcdc(%eax),%eax"), [0x67, 0x8d, 0x80, 0xdc, 0xbc, 0x1b, 0x8f]);
+        assert_eq!(bytes("movl 0x80000000(%ecx),%edx"), [0x67, 0x8b, 0x91, 0x00, 0x00, 0x00, 0x80]);
     }
 
     /// The forms of FreeBSD's msun and boot code that gas takes: the letter `b` on a `set`, a
