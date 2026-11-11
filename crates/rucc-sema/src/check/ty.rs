@@ -46,7 +46,7 @@ use rucc_types::{
 
 use crate::check::{Checker, Promoted};
 use crate::decl::{DeclId, DeclKind};
-use crate::scope::{Binding, Tag, TagKind};
+use crate::scope::{Binding, ScopeTypes, Tag, TagKind};
 
 mod tag;
 
@@ -76,6 +76,14 @@ pub(crate) struct Built {
     /// of indices is not something a map can be keyed by, and a prototype always has at least one
     /// parameter in it: `(void)` and `()` are parameter lists of other kinds.
     params: Map<Idx<ast::Param>, Vec<DeclId>>,
+    /// The enumerators and the tags that each prototype declared, by the first parameter of the
+    /// list.
+    ///
+    /// C 6.2.1p4 puts them in the block scope of a function definition's body, with the
+    /// parameters. gcc warns that such a type is not visible outside the function, and it lets
+    /// the body use it. 9front's `devvmx.c` has `enum { TRAPRD = 1, TRAPWR = 2 } state` as a
+    /// parameter and tests `state & TRAPRD` in the body.
+    param_types: Map<Idx<ast::Param>, ScopeTypes>,
     /// The target's `__builtin_va_list`, once something has asked for it.
     ///
     /// Every mention of the keyword names one type, so this is not only a cache. On the targets
@@ -1490,9 +1498,13 @@ impl Checker<'_> {
             as_written.push(Written { ty: object, spelled: named });
             declared.push(decl);
         }
+        let carried = self.scopes.innermost_types();
         self.scopes.pop();
         if let Some(first) = params.iter().next() {
             self.built.params.insert(first, declared);
+            if !carried.0.is_empty() || !carried.1.is_empty() {
+                self.built.param_types.insert(first, carried);
+            }
         }
         types
     }
@@ -1693,6 +1705,17 @@ impl Checker<'_> {
     /// The parameters a prototype declared, for the definition that binds them again.
     ///
     /// Empty for a list this has not seen, which is every list that is not a prototype.
+    /// The enumerators and the tags that the prototype `params` declared, which a function
+    /// definition declares again in the scope of its body.
+    pub(in crate::check) fn prototype_types(&self, params: ast::ParamList) -> ScopeTypes {
+        params
+            .iter()
+            .next()
+            .and_then(|first| self.built.param_types.get(&first))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub(in crate::check) fn prototype_params(&self, params: ast::ParamList) -> Vec<DeclId> {
         params
             .iter()
