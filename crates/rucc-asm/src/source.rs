@@ -1580,7 +1580,16 @@ impl Reader {
                 // these bytes to the table, which gas counts from the start of the instruction. So
                 // `addl $_GLOBAL_OFFSET_TABLE_, %ebx` has the two bytes in front of the number
                 // added, and the `+[.-.L1]` gcc used to write moves the start back to the label.
-                if self.i386 && sum.terms.iter().any(|term| term.what.is(TABLE)) {
+                // gas does not add them when a label is taken away from the table itself, as in
+                // `_GLOBAL_OFFSET_TABLE_-1b(%edx)`. That is already the distance from the label.
+                let table = self.i386 && sum.terms.iter().any(|term| term.what.is(TABLE));
+                let rest: i64 = sum
+                    .terms
+                    .iter()
+                    .filter(|term| !term.what.is(TABLE))
+                    .map(|term| term.coeff)
+                    .sum();
+                if table && rest == 0 {
                     sum.constant += hole.at as i64;
                 }
                 sum
@@ -5717,8 +5726,11 @@ impl Reader {
                         self.syms[sym].binding == Binding::Local
                             && matches!(self.syms[sym].at, Held::In { .. })
                     });
+                    // The table less a label is a distance and not somewhere to go, in an address
+                    // as much as in a directive. NetBSD's i386 rtld_start.S writes
+                    // `subl _GLOBAL_OFFSET_TABLE_-1b(%edx),%ebx` after it pops the address of 1b.
                     let table = self.i386 && name == TABLE;
-                    if table && fixup.reach != Reach::Near {
+                    if table && matches!(fixup.reach, Reach::Branch | Reach::Plain) {
                         return Err(bad(format!(
                             "a branch to '{TABLE}', which is a table and not somewhere to go"
                         )));
@@ -10949,6 +10961,37 @@ nop
                 (77, "sv", Reference::GotOffset, 8),
                 (82, "foo", Reference::SlotKept, 0),
                 (88, "foo", Reference::Slot, 0),
+            ]
+        );
+    }
+
+    /// The table less a label in an address is the distance from the label to the table, and
+    /// the table plus `.` less a label is that distance from the start of the instruction. Both
+    /// are `R_386_GOTPC`. The addends are the ones gas 2.44 writes.
+    #[test]
+    fn the_global_offset_table_less_a_label_is_a_distance_in_an_address() {
+        let read = i386(concat!(
+            "\tnop\n",
+            "\tcall 1f\n",
+            "1:\tpopl %edx\n",
+            "\tnop\n",
+            "\tsubl _GLOBAL_OFFSET_TABLE_-1b(%edx),%ebx\n",
+            "\tleal _GLOBAL_OFFSET_TABLE_+(.-1b)(%edx),%edx\n",
+            "\taddl $_GLOBAL_OFFSET_TABLE_+(.-1b),%ebx\n",
+            "\tmovl _GLOBAL_OFFSET_TABLE_-1b+4(%edx),%eax\n",
+            "\tleal _GLOBAL_OFFSET_TABLE_+[.-1b](%edx),%edx\n",
+        ));
+        let text = bytes(&read, ".text");
+        let ops: Vec<[u8; 2]> = [8, 14, 20, 26, 32].map(|at| [text[at], text[at + 1]]).to_vec();
+        assert_eq!(ops, [[0x2b, 0x9a], [0x8d, 0x92], [0x81, 0xc3], [0x8b, 0x82], [0x8d, 0x92]]);
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (10, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 4),
+                (16, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 10),
+                (22, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 16),
+                (28, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 26),
+                (34, "_GLOBAL_OFFSET_TABLE_", Reference::GotFront, 28),
             ]
         );
     }
