@@ -620,6 +620,25 @@ unsigned long long f(unsigned int n) {
     );
 }
 
+/// The same instruction with a directive for each byte, which is how OpenZFS writes `xgetbv` in
+/// `simd_x86.h`. The three bytes are one instruction, so they reach the listing as one line with
+/// nothing between them. rucc once put register copies between them, and the FreeBSD kernel took a
+/// page fault in `raidz_will_avx2_work` on the `kldload` of `zfs.ko`.
+#[test]
+fn a_run_of_byte_directives_in_a_template_stays_one_instruction() {
+    let source = "\
+unsigned long long f(unsigned int n) {
+  unsigned int lo, hi;
+  __asm__ volatile (\".byte 0x0f; .byte 0x01; .byte 0xd0\" : \"=a\"(lo), \"=d\"(hi) : \"c\"(n));
+  return ((unsigned long long)hi << 32) | lo;
+}
+";
+    let text = asm("byte-run", source);
+    let body = body(&text, "f");
+    assert!(body.contains(".byte\t0x0f, 0x01, 0xd0"), "the bytes were split:\n{body}");
+    assert_eq!(body.matches(".byte").count(), 1, "{body}");
+}
+
 /// A number that is not a byte is not read into an instruction, and the template is kept as the
 /// text it was. What becomes of the number is then the assembler's answer, which is the same
 /// answer gas gives: the low eight bits.
