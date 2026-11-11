@@ -2016,6 +2016,10 @@ impl Reader {
         }
         self.registers.remove(name);
         let sum = self.expression(what)?;
+        // A distance between two places already put down in one piece of this section is a number
+        // too, the same as gas knows it on this line. NetBSD's realprot.S sets `bootcodeseg = . -
+        // gdt` and then writes `movw %ax, gdt+bootcodeseg+2`, which is one name and a number.
+        let known = sum.flat().or_else(|| self.fixed_now(&format!("${what}")));
         let held = match self.current.get(name) {
             Some(_) => format!("{name}\u{1}={}", self.syms.len()),
             None => name.to_owned(),
@@ -2026,7 +2030,7 @@ impl Reader {
             return Err(self.bad(&what));
         }
         self.current.insert(name.to_owned(), held);
-        match sum.flat() {
+        match known {
             Some(value) => self.values.insert(name.to_owned(), value),
             None => self.values.remove(name),
         };
@@ -11049,6 +11053,20 @@ nop
             0x0e, 0x83, 0xe1, 0x10, 0xc3,
         ];
         assert_eq!(bytes(&read, ".text"), gas);
+    }
+
+    /// A name set to the distance from a label to here, in the same piece of the section, is a
+    /// number at once, as gas reads it. NetBSD's realprot.S adds it to the label in a direct
+    /// address, `movw %ax, gdt+bootcodeseg+2`. gas 2.42 writes the same instruction, with one
+    /// relocation against the label and ten added.
+    #[test]
+    fn a_distance_set_to_a_name_is_a_number_in_an_address() {
+        let read = i386(concat!(
+            "\t.data\ngdt:\t.space 8\nbootcodeseg = . - gdt\n\t.space 56\n",
+            "\t.text\n\tmovw %ax, gdt+bootcodeseg+2\n\tmovl $bootcodeseg, %eax\n",
+        ));
+        assert_eq!(bytes(&read, ".text"), [0x66, 0xa3, 0, 0, 0, 0, 0xb8, 0x08, 0, 0, 0]);
+        assert_eq!(relocs(&read, ".text"), [(2, "gdt", Reference::Signed, 10)]);
     }
 
     /// The i386 thread-local suffixes, in either case, in an address, a number and a data
