@@ -848,6 +848,12 @@ impl Out<'_> {
             },
             "br" => {
                 let [n] = ops else { return Err(bad()) };
+                // 7l sends each branch on through a chain of `B`s, and a `B` through a register
+                // has no target that it knows. Thus a branch to it gets no target. When a label
+                // is at it, a `NOP` goes first, which 7l takes out after it finds the targets.
+                if self.labels.values().any(|&pc| pc == self.pc) {
+                    self.emit(Self::op("NOP", line)?, Addr7::default(), Addr7::default());
+                }
                 self.emit(Self::op("B", line)?, Addr7::default(), oreg(r(n)?, 0));
             }
             "bl" => {
@@ -1378,6 +1384,16 @@ mod tests {
         assert_eq!((p[2].from.reg, p[2].from.offset, p[2].to.reg), (RSP, 0, LR));
         assert_eq!((p[3].from.offset, p[3].reg, p[3].to.reg), (32, RSP, RSP));
         assert_eq!(p[4].to.sym.as_deref(), Some("h"));
+    }
+
+    #[test]
+    fn a_branch_to_a_jump_through_a_register_goes_to_a_nop() {
+        let listing = "\t.text\n\t.globl f\nf:\n\tcbz w0, .Lf_2\n\tret\n.Lf_2:\n\tbr x1\n";
+        let p = progs(listing);
+        assert_eq!(ops(listing), ["ATEXT", "ACBZW", "ARETURN", "ANOP", "AB", "AEND"]);
+        assert_eq!((p[1].to.ty, p[1].to.offset), (a7::D_BRANCH, 3));
+        let listing = "\t.text\n\t.globl f\nf:\n\tbr x1\n";
+        assert_eq!(ops(listing), ["ATEXT", "AB", "AEND"]);
     }
 
     #[test]

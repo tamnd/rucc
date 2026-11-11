@@ -972,6 +972,21 @@ impl Out<'_> {
         Ok(())
     }
 
+    /// A jump through a register or through memory. 6l sends each branch on through a chain of
+    /// `JMP`s to the end of the chain, and an indirect `JMP` has no target that it knows. Thus a
+    /// branch to an indirect `JMP` gets no target, and 6l makes it a branch to itself. 6c never
+    /// writes such a branch. When a label is at the jump, a `NOP` goes first and the label is at
+    /// the `NOP`. 6l keeps the `NOP` as a branch target and writes no byte for it.
+    fn indirect_jump(&mut self, to: Addr6, line: usize) -> Result<(), Trouble> {
+        if self.labels.values().any(|&pc| pc == self.pc) {
+            let nop = self.op("NOP", line)?;
+            self.push(nop, Addr6::default(), Addr6::default());
+        }
+        let op = self.op("JMP", line)?;
+        self.push(op, Addr6::default(), to);
+        Ok(())
+    }
+
     fn branch(&mut self, op: u16, label: &str, line: usize) {
         let mut to = Addr6::of(a6::D_BRANCH);
         to.offset = 0;
@@ -1030,15 +1045,11 @@ impl Out<'_> {
                         if !self.cells.iter().any(|(name, _)| *name == cell) {
                             self.cells.push((cell.clone(), e.clone()));
                         }
-                        let op = self.op("JMP", line)?;
-                        self.push(op, Addr6::default(), Addr6::symbol(a6::D_STATIC, &cell, 0));
-                        Ok(())
+                        self.indirect_jump(Addr6::symbol(a6::D_STATIC, &cell, 0), line)
                     }
                     [Operand::Star(inner)] => {
                         let to = self.addr(inner, line)?;
-                        let op = self.op("JMP", line)?;
-                        self.push(op, none(), to);
-                        Ok(())
+                        self.indirect_jump(to, line)
                     }
                     _ => Err(trouble(line, format!("a jump to {text}"))),
                 };
@@ -1513,6 +1524,44 @@ mod tests {
             (p[4].to.ty, p[4].to.index, p[4].to.sym.as_deref()),
             (a6::D_ADDR, a6::D_EXTERN, Some("g"))
         );
+    }
+
+    /// 6l gives no target to a branch to an indirect jump, so a `NOP` is the target. This is
+    /// `run` in /sys/src/cmd/mk/run.c, where `mk -n` looped on a `JLT` to itself.
+    #[test]
+    fn a_branch_to_an_indirect_jump_goes_to_a_nop() {
+        let p = progs(
+            "f:
+	cmpl	$1, %eax
+	jl	.L1
+	ret
+.L1:
+	jmp	g
+",
+        );
+        assert_eq!(
+            names(&p),
+            ["ATEXT", "ACMPL", "AJLT", "ARET", "ANOP", "AJMP", "ADATA", "AGLOBL", "AEND"]
+        );
+        assert_eq!(p[2].to.offset, 4);
+        let p = progs(
+            "f:
+	testl	%eax, %eax
+	je	.L1
+	ret
+.L1:
+	jmp	*%rcx
+",
+        );
+        assert_eq!(names(&p), ["ATEXT", "ATESTL", "AJEQ", "ARET", "ANOP", "AJMP", "AEND"]);
+        assert_eq!(p[2].to.offset, 4);
+        // With no label at the jump, there is no NOP.
+        let p = progs(
+            "f:
+	jmp	*%rcx
+",
+        );
+        assert_eq!(names(&p), ["ATEXT", "AJMP", "AEND"]);
     }
 
     #[test]
