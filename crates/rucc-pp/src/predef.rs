@@ -2275,9 +2275,14 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
         family(d, gnuc, "FLT16", &HALF, |value| format!("{value}F16"));
     }
     // `__bf16` became an arithmetic type in gcc 13 on x86 and AArch64, and the family came with it.
-    // It is written where the type is a name rucc knows.
+    // RISC-V got the type and the family in gcc 15. It is written where the type is a name rucc
+    // knows.
     let brain = target.type_names().iter().any(|&(name, _)| name == "__bf16");
-    if brain && gnuc >= 13 {
+    let brain_since = match target.tuple.arch() {
+        tuple::Arch::Riscv64 | tuple::Arch::Riscv32 => 15,
+        _ => 13,
+    };
+    if brain && gnuc >= brain_since {
         family(d, gnuc, "BFLT16", &BFLOAT16, |value| format!("{value}BF16"));
     }
     family(d, gnuc, "FLT32", &SINGLE, |value| format!("{value}F32"));
@@ -3668,13 +3673,15 @@ mod tests {
     }
 
     /// tamnd/rucc#4088. The brain float's family is there where `__bf16` is a type, which is from
-    /// gcc 13 on x86-64 and AArch64. The values are the reference rows'.
+    /// gcc 13 on x86-64 and AArch64 and from gcc 15 on RISC-V (tamnd/rucc#4276). The values are
+    /// the reference rows'.
     #[test]
     fn the_brain_float_family_is_where_gcc_has_the_type() {
         for (triple, since) in [
             ("x86_64-unknown-freebsd", 13),
             ("aarch64-unknown-freebsd", 13),
             ("aarch64-unknown-netbsd", 13),
+            ("riscv64-unknown-freebsd", 15),
         ] {
             assert!(!set_claiming(triple, since - 1).contains("__BFLT16_"), "{triple}");
             let text = set_claiming(triple, since);
@@ -3695,11 +3702,8 @@ mod tests {
                 assert!(has(&text, &format!("#define {line}")), "{triple}: {line}");
             }
         }
-        // Not on i386 and RISC-V (tamnd/rucc#4276), where rucc has no `__bf16` yet, and not where
-        // gcc has no type.
-        for triple in
-            ["i686-unknown-linux-gnu", "riscv64-unknown-freebsd", "wasm32-unknown-unknown"]
-        {
+        // Not on i386, where rucc has no `__bf16` yet, and not where gcc has no type.
+        for triple in ["i686-unknown-linux-gnu", "wasm32-unknown-unknown"] {
             assert!(!set_claiming(triple, 15).contains("__BFLT16_"), "{triple}");
         }
     }

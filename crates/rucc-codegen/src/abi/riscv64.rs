@@ -5,9 +5,11 @@
 //! promises about one too, so an `int` arrives and goes back as the 32 bit pseudo and nothing has
 //! to be done to it on either side. A byte and a short travel the same way, extended to 32 bits by
 //! their own sign. The rules promise nothing about their high bits, so a value that arrives like
-//! that is read the same as one that does not. `_Float16`, `long double` and `__int128` have no
-//! rules on this machine yet, so they have no names here either, and a function that passes one is
-//! refused at the argument rather than halfway through.
+//! that is read the same as one that does not. A half travels in the low sixteen bits of a float
+//! register, as GCC passes one without the half extension, and is read and written in its slot as
+//! the word it is the low half of. `long double` and `__int128` have no rules on this machine yet,
+//! so they have no names here either, and a function that passes one is refused at the argument
+//! rather than halfway through.
 
 use rucc_ir::{Abi, Type};
 
@@ -46,13 +48,16 @@ fn extend_of(ty: Type, abi: Abi) -> Option<&'static str> {
 
 /// Whether the type is one this machine has no rules for yet.
 fn untaught(ty: Type) -> bool {
-    crate::term::is_quad(ty) || crate::term::is_half(ty)
+    crate::term::is_quad(ty)
 }
 
 /// What the pseudo for an argument of that type is called.
 fn head_of(ty: Type) -> Option<&'static str> {
     if untaught(ty) {
         return None;
+    }
+    if crate::term::is_half(ty) {
+        return Some("rv.arg_val_f16");
     }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["rv.arg_val_f32", "rv.arg_val_f64"][at]);
@@ -64,10 +69,15 @@ fn head_of(ty: Type) -> Option<&'static str> {
 /// What the instruction that reads an argument of that type out of memory is called.
 ///
 /// A narrow one is read at its own width, for the reason [`super::load_of`] gives. A word is read
-/// with `lw`, which sign extends it, so it is kept the way the rules want it.
+/// with `lw`, which sign extends it, so it is kept the way the rules want it. A half is read as the
+/// word it is the low half of, since there is no float load of two bytes without the half
+/// extension. The slot is eight bytes, and the two bytes above the half mean nothing.
 fn load_of(ty: Type) -> Option<&'static str> {
     if untaught(ty) {
         return None;
+    }
+    if crate::term::is_half(ty) {
+        return Some("rv.ld_f16_word");
     }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["rv.ld_f32", "rv.ld_f64"][at]);
@@ -77,9 +87,14 @@ fn load_of(ty: Type) -> Option<&'static str> {
 }
 
 /// What the instruction that writes an argument of that type into memory is called.
+///
+/// A half is written as a word, for the reason [`load_of`] gives.
 fn store_of(ty: Type) -> Option<&'static str> {
     if untaught(ty) {
         return None;
+    }
+    if crate::term::is_half(ty) {
+        return Some("rv.st_f16_word");
     }
     if let Some(at) = crate::term::float_slot(ty) {
         return Some(["rv.st_f32", "rv.st_f64"][at]);
@@ -96,6 +111,9 @@ fn store_of(ty: Type) -> Option<&'static str> {
 fn ret_of(ty: Type, at: usize) -> Option<&'static str> {
     if untaught(ty) {
         return None;
+    }
+    if crate::term::is_half(ty) {
+        return Some(*["rv.ret_val_f16", "rv.ret_val2_f16"].get(at)?);
     }
     if let Some(width) = crate::term::float_slot(ty) {
         let names = [["rv.ret_val_f32", "rv.ret_val_f64"], ["rv.ret_val2_f32", "rv.ret_val2_f64"]];
@@ -170,9 +188,18 @@ mod tests {
     }
 
     #[test]
+    fn a_half_travels_in_a_float_register_and_is_kept_as_a_word() {
+        let half = Type::float(Float::F16);
+        assert_eq!(head_of(half), Some("rv.arg_val_f16"));
+        assert_eq!(load_of(half), Some("rv.ld_f16_word"));
+        assert_eq!(store_of(half), Some("rv.st_f16_word"));
+        assert_eq!(ret_of(half, 1), Some("rv.ret_val2_f16"));
+        assert_eq!(ret_of(half, 2), None);
+    }
+
+    #[test]
     fn what_has_no_rules_is_not_passed_yet() {
         assert_eq!(head_of(Type::float(Float::F128)), None);
-        assert_eq!(head_of(Type::float(Float::F16)), None);
         assert_eq!(head_of(Type::int(128)), None);
     }
 }

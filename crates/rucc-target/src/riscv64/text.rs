@@ -353,6 +353,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("ld_f64", &[spell("fld", &[Fp(0), Mem])]),
     ("st_f32", &[spell("fsw", &[Fp(0), Mem])]),
     ("st_f64", &[spell("fsd", &[Fp(0), Mem])]),
+    // A half is the low sixteen bits of the word, so the word moves it whole. The slot is eight
+    // bytes, so the two bytes above the half are inside it.
+    ("ld_f16_word", &[spell("flw", &[Fp(0), Mem])]),
+    ("st_f16_word", &[spell("fsw", &[Fp(0), Mem])]),
     // Floating point arithmetic.
     ("fadd_f32", &[spell("fadd.s", FFF)]),
     ("fadd_f64", &[spell("fadd.d", FFF)]),
@@ -395,8 +399,12 @@ static TEXT: &[(&str, &[Written])] = &[
     ("fcvtzu_f32_64", &[spell("fcvt.lu.s", &[Reg(0, X), Fp(1), Arg::Round(Round::Rtz)])]),
     ("fcvtzu_f64_32", &[spell("fcvt.wu.d", &[Reg(0, W), Fp(1), Arg::Round(Round::Rtz)])]),
     ("fcvtzu_f64_64", &[spell("fcvt.lu.d", &[Reg(0, X), Fp(1), Arg::Round(Round::Rtz)])]),
+    // Without the half extension, a half is the low sixteen bits of a word in a float register,
+    // and the word moves it, as GCC does without `Zfh`.
+    ("fmov_to_f16", &[spell("fmv.w.x", &[Fp(0), Reg(1, W)])]),
     ("fmov_to_f32", &[spell("fmv.w.x", &[Fp(0), Reg(1, W)])]),
     ("fmov_to_f64", &[spell("fmv.d.x", &[Fp(0), Reg(1, X)])]),
+    ("fmov_from_f16", &[spell("fmv.x.w", &[Reg(0, H), Fp(1)])]),
     ("fmov_from_f32", &[spell("fmv.x.w", &[Reg(0, W), Fp(1)])]),
     ("fmov_from_f64", &[spell("fmv.x.d", &[Reg(0, X), Fp(1)])]),
     // Floating point comparisons. Greater is less the other way round, and each unordered one is
@@ -424,14 +432,17 @@ static TEXT: &[(&str, &[Written])] = &[
     // Values arriving and leaving, which are written as nothing.
     ("ret_val_32", &[]),
     ("ret_val_64", &[]),
+    ("ret_val_f16", &[]),
     ("ret_val_f32", &[]),
     ("ret_val_f64", &[]),
     ("ret_val2_32", &[]),
     ("ret_val2_64", &[]),
+    ("ret_val2_f16", &[]),
     ("ret_val2_f32", &[]),
     ("ret_val2_f64", &[]),
     ("arg_val_32", &[]),
     ("arg_val_64", &[]),
+    ("arg_val_f16", &[]),
     ("arg_val_f32", &[]),
     ("arg_val_f64", &[]),
     ("br_cond_32", &[]),
