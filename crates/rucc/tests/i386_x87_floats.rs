@@ -138,3 +138,33 @@ fn y_names_the_top_of_the_x87_stack_with_its_depth() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// tamnd/rucc-bsd#3. `f` is any register of the x87 stack. libgcc's i386 `sfp-exceptions.c`
+/// raises an exception with `"+t"` and then an input written `f`, which goes on the top of the
+/// stack, and an `f` next to a `t` input goes under it.
+#[test]
+fn f_takes_the_free_register_of_the_x87_stack() {
+    let source = "void raise_invalid(void) { float f = 0.0f; __asm__ (\"\" : \"+t\" (f)); \
+        __asm__ __volatile__ (\"# any %0\" : : \"f\" (f / f)); }\n\
+        void two(long double a, long double b) { \
+        __asm__ __volatile__ (\"# pair %0 %1\" : : \"t\" (a), \"f\" (b)); }\n";
+    let dir = std::env::temp_dir().join(format!("rucc-i386-x87-f-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, source).expect("the fixture can be written");
+    for target in ["--target=i486--netbsdelf", "--target=x86_64-unknown-netbsd"] {
+        for level in ["-O0", "-O2"] {
+            let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+                .args([target, "-S", "-o", "-", level])
+                .arg(&path)
+                .output()
+                .expect("the compiler is built before its own tests run");
+            let text = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{target} {level}: {stderr}");
+            assert!(text.contains("# any %st\n"), "{target} {level}:\n{text}");
+            assert!(text.contains("# pair %st %st(1)\n"), "{target} {level}:\n{text}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
