@@ -228,6 +228,13 @@ impl Call {
             return Pass::Direct;
         }
         let want = registers(scalar.size, integer_width);
+        // RISC-V puts a scalar of two registers past the `...` in a pair that starts at an even
+        // one, an `__int128` and a `long double` alike, and leaves the odd one it skips empty.
+        let used = self.abi.banks.integer - self.integer;
+        if want == 2 && self.past_dots && scalars.unnamed_wide_integer_starts_even && used % 2 == 1
+        {
+            self.integer = self.integer.saturating_sub(1);
+        }
         // An integer too wide for one register on `fastcall`, which goes in the argument area and
         // leaves no register for anything after it.
         if scalars.wide_integer_in_memory && matches!(scalar.kind, Kind::Integer) && want > 1 {
@@ -235,8 +242,10 @@ impl Call {
             return Pass::Direct;
         }
         // A floating point argument of a variadic function where only one bank is read, which is
-        // its bits in general purpose registers, a register's worth at a time.
-        if self.integers_only && scalar.is_float() {
+        // its bits in general purpose registers, a register's worth at a time. One wider than a
+        // floating point register travels in general purpose registers named or not, which is a
+        // `long double` on RISC-V, and is the value itself in both, as below.
+        if self.integers_only && scalar.is_float() && scalar.size <= float_width {
             self.integer = self.integer.saturating_sub(want);
             return Pass::Pieces(integer_slots(scalar.size, integer_width));
         }
