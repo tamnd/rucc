@@ -618,21 +618,26 @@ fn floating_mode(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
 /// over eight bytes as the address of a copy whatever it is. AAPCS64 says a `_BitInt(N)` wider
 /// than 128 bits is passed as a composite of its size, and a composite of more than sixteen bytes
 /// goes as the address of a copy and comes back through the address in `x8`, which the structure
-/// of words is asked into (tamnd/rucc#2490). gcc 16.2.0 does both. A narrower one there, and the
-/// other machines, have rules of their own that tamnd/rucc#425 has not been taught yet.
+/// of words is asked into (tamnd/rucc#2490). gcc 16.2.0 does both. On i386 outside Windows one
+/// wider than 64 bits is a structure of its 32 bit limbs, which goes in the argument area and
+/// comes back through the hidden address, and gcc 16.2.0 `-m32` does that too (tamnd/rucc#4333).
+/// A narrower one on AArch64, and the other machines, have rules of their own that
+/// tamnd/rucc#425 has not been taught yet.
 fn chunks(types: &Types, target: &TargetInfo, id: TypeId) -> Option<Shaped> {
     let TypeKind::BitInt { width, .. } = types.kind(id) else { return None };
-    let x86 = target.tuple.arch() == Arch::X86_64 && target.tuple.os() != Os::Windows;
-    let arm = target.tuple.arch() == Arch::Aarch64 && width > 128;
-    if !x86 && !arm {
-        return None;
-    }
+    let windows = target.tuple.os() == Os::Windows;
+    let limb = match target.tuple.arch() {
+        Arch::X86_64 if !windows => 8,
+        Arch::Aarch64 if width > 128 => 8,
+        Arch::X86 if width > 64 && !windows => 4,
+        _ => return None,
+    };
     let size = repr::size_of(types, target, id);
     if size <= 8 {
         return None;
     }
-    let word = Scalar { kind: Kind::Integer, size: 8, align: 8 };
-    let pieces = (0..size / 8).map(|at| Piece { offset: at * 8, scalar: word }).collect();
+    let word = Scalar { kind: Kind::Integer, size: limb, align: limb };
+    let pieces = (0..size / limb).map(|at| Piece { offset: at * limb, scalar: word }).collect();
     let align = u64::from(repr::align_of(types, target, id));
     Some(Shaped::Aggregate { size, align, pieces, complex: false, floating: false, vector: false })
 }
@@ -988,6 +993,30 @@ mod tests {
         assert!(planned.returns_through_memory());
         assert!(matches!(planned.args[0].pass, Pass::Memory), "{:?}", planned.args[0].pass);
         assert_eq!(planned.args[0].align, 8);
+    }
+
+    /// tamnd/rucc#4333. gcc 16.2.0 `-m32` copies a `_BitInt(200)` argument into the argument
+    /// area as twenty eight bytes and returns one through the hidden address, which the callee
+    /// pops with `ret $4`. Both are what a structure of seven `int`s has.
+    #[test]
+    fn an_i386_bit_int_wider_than_64_bits_travels_as_a_structure_of_its_limbs() {
+        let mut types = Types::new();
+        let i386 = target("i686-unknown-linux-gnu");
+        for (width, size, limbs) in [(65, 12, 3), (128, 16, 4), (200, 28, 7)] {
+            let id = types.bit_int(true, width);
+            let planned =
+                plan(&types, &i386, Convention::Target, id, &[id], &[], false).expect("a plan");
+            assert!(planned.returns_through_memory(), "{width}");
+            assert!(matches!(planned.args[0].pass, Pass::Memory), "{:?}", planned.args[0].pass);
+            assert_eq!((planned.args[0].size, planned.args[0].align), (size, 4), "{width}");
+            let Some(Shaped::Aggregate { pieces, .. }) = shape(&types, &i386, id) else {
+                panic!("a structure of limbs");
+            };
+            assert_eq!(pieces.len(), limbs, "{width}");
+            assert!(pieces.iter().all(|piece| piece.scalar.size == 4));
+        }
+        let b64 = types.bit_int(true, 64);
+        assert!(matches!(shape(&types, &i386, b64), Some(Shaped::Scalar(_))));
     }
 
     #[test]

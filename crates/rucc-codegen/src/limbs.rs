@@ -1,10 +1,10 @@
 //! The integer that is wider than two registers, as the words it is kept in memory as.
 //!
-//! A `_BitInt` may be up to 65535 bits wide on x86-64 and on AArch64, which is what gcc allows on
-//! both, and nothing below this pass has a value that wide. [`crate::wide`] splits one of a hundred
-//! and twenty eight bits into two registers. That does not scale: a value of a thousand words in a
-//! thousand registers is a value the allocator spills anyway, and a shift by an amount only known
-//! when the program runs has to pick a word by that amount, which a register cannot be.
+//! A `_BitInt` may be up to 65535 bits wide on x86-64, AArch64 and i386, which is what gcc allows
+//! on all three, and nothing below this pass has a value that wide. [`crate::wide`] splits one of a
+//! hundred and twenty eight bits into registers. That does not scale: a value of a thousand words
+//! in a thousand registers is a value the allocator spills anyway, and a shift by an amount only
+//! known when the program runs has to pick a word by that amount, which a register cannot be.
 //!
 //! So this pass does what gcc's `_BitInt` lowering does at the same widths. Every value wider than
 //! a hundred and twenty eight bits gets a slot in the frame, and the value is the words in that
@@ -14,14 +14,17 @@
 //!
 //! # The form of a value in its slot
 //!
-//! `ceil(N / 64)` words of sixty four bits, the least significant first, which is the order the
-//! psABI and the AAPCS64 both give a `_BitInt` in memory. The top word is always sign extended from
-//! bit `N - 1`. The IR does not say whether a value is signed, and a value kept this way compares
-//! correctly both ways: the extension maps the unsigned values of `N` bits onto the words in the
-//! same order, and the signed ones onto the signed words. So every instruction that writes a top
-//! word writes it extended, and nothing has to ask which kind it has. The ones that read a value as
-//! unsigned, a logical shift, a zero extension, an unsigned division and the unsigned conversions,
-//! clear the bits above `N` on the copy they read.
+//! `ceil(N / W)` words of `W` bits, the least significant first, where `W` is the width of a
+//! register: sixty four on x86-64 and AArch64 and thirty two on i386. That is the order every
+//! psABI here gives a `_BitInt` in memory, and on x86-64 and i386 the word is the limb, so a value
+//! in memory is the words of its slot. The AAPCS64 limb is two words in the same order.
+//!
+//! The top word is always sign extended from bit `N - 1`. The IR does not say whether a value is
+//! signed, and a value kept this way compares correctly both ways: the extension maps the unsigned
+//! values of `N` bits onto the words in the same order, and the signed ones onto the signed words.
+//! So every instruction that writes a top word writes it extended, and nothing has to ask which
+//! kind it has. The ones that read a value as unsigned, a logical shift, a zero extension, an
+//! unsigned division and the unsigned conversions, clear the bits above `N` on the copy they read.
 //!
 //! # What is a call
 //!
@@ -57,8 +60,38 @@ use rucc_ir::{
     MemInfo, MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
 };
 
-/// One word of a value, which is a register on every machine this pass runs for.
-const WORD: Type = Type::int(64);
+/// One word of a value, which is a register of the machine the pass runs for: sixty four bits on
+/// x86-64 and AArch64, and thirty two on i386, where a `_BitInt` limb is thirty two bits as well.
+#[derive(Clone, Copy)]
+struct Word(u32);
+
+impl Word {
+    /// The integer type of a word.
+    fn ty(self) -> Type {
+        Type::int(self.0)
+    }
+
+    /// How many bytes a word is.
+    fn bytes(self) -> u64 {
+        u64::from(self.0 / 8)
+    }
+
+    /// How many words a value of this width is kept in.
+    fn count(self, bits: u32) -> u32 {
+        bits.div_ceil(self.0)
+    }
+
+    /// How many bits of the top word of a value of this width are above the value, and zero when
+    /// the value fills its top word.
+    fn spare(self, bits: u32) -> u32 {
+        (self.0 - bits % self.0) % self.0
+    }
+
+    /// The shift that turns a count of words into a count of bits.
+    fn log2(self) -> u32 {
+        self.0.trailing_zeros()
+    }
+}
 
 /// The widest integer the rest of the back end takes. [`crate::wide`] splits one this wide.
 const SPLIT: u32 = 128;
@@ -73,23 +106,19 @@ fn width(func: &Func, value: Value) -> u32 {
     func[value].ty.bits()
 }
 
-/// How many words a value of this width is kept in.
-fn words(bits: u32) -> u32 {
-    bits.div_ceil(64)
-}
-
 /// Rewrites every value wider than a hundred and twenty eight bits into the words in its slot.
 ///
-/// `word` is the size of a register in bytes. Only a machine with sixty four bit registers lets a
-/// `_BitInt` this wide, so any other answer leaves the function alone.
+/// `word` is the size of a register in bytes, which is the size of a word here. Eight is x86-64
+/// and AArch64 and four is i386. Any other answer leaves the function alone.
 ///
 /// Answers whether it rewrote the function, which is `false` for a function with no value this
 /// wide in it and for one with something on such a value it does not know. See the module's last
 /// section for the second.
 pub fn limbs(func: &mut Func, names: &mut Interner, word: u32) -> bool {
-    if word != 8 || !func.values().any(|value| wide(func[value].ty)) {
+    if !matches!(word, 4 | 8) || !func.values().any(|value| wide(func[value].ty)) {
         return false;
     }
+    let w = Word(word * 8);
     let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     if !insts.iter().all(|&inst| understood(func, inst)) {
         return false;
@@ -108,7 +137,7 @@ pub fn limbs(func: &mut Func, names: &mut Interner, word: u32) -> bool {
         for param in func[block].params.clone() {
             let ty = func[param].ty;
             if wide(ty) {
-                slots.insert(param, slot(func, words(ty.bits())));
+                slots.insert(param, slot(w, func, w.count(ty.bits())));
                 params.push(param);
             }
         }
@@ -118,12 +147,12 @@ pub fn limbs(func: &mut Func, names: &mut Interner, word: u32) -> bool {
         for result in results {
             let ty = func[result].ty;
             if wide(ty) {
-                slots.insert(result, slot(func, words(ty.bits())));
+                slots.insert(result, slot(w, func, w.count(ty.bits())));
             }
         }
     }
 
-    let mut pass = Pass { names, slots, renamed: HashMap::new() };
+    let mut pass = Pass { w, names, slots, renamed: HashMap::new() };
     for &inst in &insts {
         if !func.is_terminator(inst) {
             pass.rewrite(func, inst);
@@ -144,7 +173,7 @@ pub fn limbs(func: &mut Func, names: &mut Interner, word: u32) -> bool {
     let values: Vec<Value> = func.values().collect();
     for value in values {
         if wide(func[value].ty) {
-            func.retype(value, WORD);
+            func.retype(value, w.ty());
         }
     }
     let renamed = pass.renamed;
@@ -221,6 +250,8 @@ fn mode(ty: Type) -> Option<&'static str> {
 
 /// What the pass carries from one instruction to the next.
 struct Pass<'a> {
+    /// The word values are kept in.
+    w: Word,
     /// Where the names of the routines it calls are kept.
     names: &'a mut Interner,
     /// The slot each value this wide is kept in.
@@ -238,6 +269,7 @@ impl Pass<'_> {
 
     /// Rewrites one instruction that is not a terminator, if it touches a value this wide.
     fn rewrite(&mut self, func: &mut Func, inst: Inst) {
+        let w = self.w;
         let data = func[inst];
         let args = func[data.args].to_vec();
         let result = data.first_result;
@@ -252,15 +284,13 @@ impl Pass<'_> {
                     return;
                 };
                 let value = func[imm].signed(func[result].ty);
-                let count = words(width(func, result));
+                let count = w.count(width(func, result));
                 for at in 0..count {
-                    let word = match at {
-                        0 => value as i64,
-                        1 => (value >> 64) as i64,
-                        _ => (value >> 127) as i64,
-                    };
-                    let word = constant(func, inst, WORD, i128::from(word));
-                    write(func, inst, word, into, at);
+                    // The bits of the word, and the sign once the words are past the `i128`.
+                    let word = value >> (at * w.0).min(127);
+                    let spare = 128 - w.0;
+                    let word = constant(func, inst, w.ty(), (word << spare) >> spare);
+                    write(w, func, inst, word, into, at);
                 }
             }
             Opcode::Add | Opcode::Sub => {
@@ -269,44 +299,44 @@ impl Pass<'_> {
                 let (a, b) = (self.held(args[0]), self.held(args[1]));
                 let add = data.opcode == Opcode::Add;
                 let mut carry = None;
-                let count = words(n);
+                let count = w.count(n);
                 for at in 0..count {
-                    let x = read(func, inst, a, at);
-                    let y = read(func, inst, b, at);
-                    let mut sum = op(func, inst, data.opcode, &[x, y], WORD);
+                    let x = read(w, func, inst, a, at);
+                    let y = read(w, func, inst, b, at);
+                    let mut sum = op(func, inst, data.opcode, &[x, y], w.ty());
                     let pred = IntPred::Ult;
                     // The carry out of an addition is a sum below either operand. The borrow out
                     // of a subtraction is the first operand below the second.
                     let mut out = if add {
-                        less(func, inst, pred, sum, x)
+                        less(w, func, inst, pred, sum, x)
                     } else {
-                        less(func, inst, pred, x, y)
+                        less(w, func, inst, pred, x, y)
                     };
                     if let Some(carry) = carry {
                         let before = sum;
-                        sum = op(func, inst, data.opcode, &[sum, carry], WORD);
+                        sum = op(func, inst, data.opcode, &[sum, carry], w.ty());
                         let again = if add {
-                            less(func, inst, pred, sum, before)
+                            less(w, func, inst, pred, sum, before)
                         } else {
-                            less(func, inst, pred, before, carry)
+                            less(w, func, inst, pred, before, carry)
                         };
-                        out = op(func, inst, Opcode::Or, &[out, again], WORD);
+                        out = op(func, inst, Opcode::Or, &[out, again], w.ty());
                     }
                     if at + 1 == count {
-                        sum = extended(func, inst, sum, n);
+                        sum = extended(w, func, inst, sum, n);
                     }
-                    write(func, inst, sum, into, at);
+                    write(w, func, inst, sum, into, at);
                     carry = Some(out);
                 }
             }
             Opcode::And | Opcode::Or | Opcode::Xor => {
                 let (Some(into), Some(result)) = (into, result) else { return };
                 let (a, b) = (self.held(args[0]), self.held(args[1]));
-                for at in 0..words(width(func, result)) {
-                    let x = read(func, inst, a, at);
-                    let y = read(func, inst, b, at);
-                    let word = op(func, inst, data.opcode, &[x, y], WORD);
-                    write(func, inst, word, into, at);
+                for at in 0..w.count(width(func, result)) {
+                    let x = read(w, func, inst, a, at);
+                    let y = read(w, func, inst, b, at);
+                    let word = op(func, inst, data.opcode, &[x, y], w.ty());
+                    write(w, func, inst, word, into, at);
                 }
             }
             Opcode::Shl | Opcode::LShr | Opcode::AShr => {
@@ -314,20 +344,13 @@ impl Pass<'_> {
                 let amount = self.amount(func, inst, args[1]);
                 match into {
                     Some(into) => {
-                        shift(
-                            func,
-                            inst,
-                            data.opcode,
-                            self.held(args[0]),
-                            amount,
-                            into,
-                            width(func, result),
-                        );
+                        let operands = [self.held(args[0]), amount];
+                        shift(w, func, inst, data.opcode, operands, into, width(func, result));
                     }
                     // A narrow value shifted by a wide amount, which is the amount's bottom word.
                     None => {
                         let ty = func[result].ty;
-                        let amount = narrowed(func, inst, amount, ty);
+                        let amount = narrowed(w, func, inst, amount, ty);
                         let value = op(func, inst, data.opcode, &[args[0], amount], ty);
                         self.renamed.insert(result, value);
                     }
@@ -337,22 +360,22 @@ impl Pass<'_> {
                 let (Some(result), Extra::IntPred(pred)) = (result, data.extra) else { return };
                 let n = width(func, args[0]);
                 let (a, b) = (self.held(args[0]), self.held(args[1]));
-                let answer = compare(func, inst, pred, a, b, n);
+                let answer = compare(w, func, inst, pred, a, b, n);
                 self.renamed.insert(result, answer);
             }
             Opcode::Select => {
                 let (Some(into), Some(result)) = (into, result) else { return };
                 let (a, b) = (self.held(args[1]), self.held(args[2]));
-                for at in 0..words(width(func, result)) {
-                    let x = read(func, inst, a, at);
-                    let y = read(func, inst, b, at);
-                    let word = op(func, inst, Opcode::Select, &[args[0], x, y], WORD);
-                    write(func, inst, word, into, at);
+                for at in 0..w.count(width(func, result)) {
+                    let x = read(w, func, inst, a, at);
+                    let y = read(w, func, inst, b, at);
+                    let word = op(func, inst, Opcode::Select, &[args[0], x, y], w.ty());
+                    write(w, func, inst, word, into, at);
                 }
             }
             Opcode::Expect => {
                 let (Some(into), Some(result)) = (into, result) else { return };
-                copy(func, inst, self.held(args[0]), into, words(width(func, result)));
+                copy(w, func, inst, self.held(args[0]), into, w.count(width(func, result)));
             }
             Opcode::Trunc => {
                 let Some(result) = result else { return };
@@ -361,17 +384,17 @@ impl Pass<'_> {
                 match into {
                     Some(into) => {
                         let n = ty.bits();
-                        let count = words(n);
+                        let count = w.count(n);
                         for at in 0..count {
-                            let mut word = read(func, inst, from, at);
+                            let mut word = read(w, func, inst, from, at);
                             if at + 1 == count {
-                                word = extended(func, inst, word, n);
+                                word = extended(w, func, inst, word, n);
                             }
-                            write(func, inst, word, into, at);
+                            write(w, func, inst, word, into, at);
                         }
                     }
                     None => {
-                        let value = bottom(func, inst, from, ty);
+                        let value = bottom(w, func, inst, from, ty);
                         self.renamed.insert(result, value);
                     }
                 }
@@ -383,16 +406,16 @@ impl Pass<'_> {
             }
             Opcode::PtrToInt => {
                 let (Some(into), Some(result)) = (into, result) else { return };
-                let low = op(func, inst, Opcode::PtrToInt, &args[..1], WORD);
-                let zero = constant(func, inst, WORD, 0);
-                write(func, inst, low, into, 0);
-                for at in 1..words(width(func, result)) {
-                    write(func, inst, zero, into, at);
+                let low = op(func, inst, Opcode::PtrToInt, &args[..1], w.ty());
+                let zero = constant(func, inst, w.ty(), 0);
+                write(w, func, inst, low, into, 0);
+                for at in 1..w.count(width(func, result)) {
+                    write(w, func, inst, zero, into, at);
                 }
             }
             Opcode::IntToPtr => {
                 let Some(result) = result else { return };
-                let low = read(func, inst, self.held(args[0]), 0);
+                let low = read(w, func, inst, self.held(args[0]), 0);
                 let value = op(func, inst, Opcode::IntToPtr, &[low], Type::PTR);
                 self.renamed.insert(result, value);
             }
@@ -400,26 +423,26 @@ impl Pass<'_> {
                 let (Some(into), Some(result), Extra::Mem(mem)) = (into, result, data.extra) else {
                     return;
                 };
-                let align = func[mem].align.clamp(1, 8);
+                let align = func[mem].align.clamp(1, w.0 / 8);
                 let n = width(func, result);
-                let count = words(n);
+                let count = w.count(n);
                 for at in 0..count {
-                    let address = offset(func, inst, args[0], u64::from(at) * 8);
-                    let mut word = load(func, inst, address, align);
+                    let address = offset(w, func, inst, args[0], u64::from(at) * w.bytes());
+                    let mut word = load(w, func, inst, address, align);
                     if at + 1 == count {
-                        word = extended(func, inst, word, n);
+                        word = extended(w, func, inst, word, n);
                     }
-                    write(func, inst, word, into, at);
+                    write(w, func, inst, word, into, at);
                 }
             }
             Opcode::Store => {
                 let Extra::Mem(mem) = data.extra else { return };
-                let align = func[mem].align.clamp(1, 8);
+                let align = func[mem].align.clamp(1, w.0 / 8);
                 let from = self.held(args[0]);
-                for at in 0..words(width(func, args[0])) {
-                    let word = read(func, inst, from, at);
-                    let address = offset(func, inst, args[1], u64::from(at) * 8);
-                    store(func, inst, word, address, align);
+                for at in 0..w.count(width(func, args[0])) {
+                    let word = read(w, func, inst, from, at);
+                    let address = offset(w, func, inst, args[1], u64::from(at) * w.bytes());
+                    store(w, func, inst, word, address, align);
                 }
             }
             Opcode::Mul => {
@@ -434,7 +457,7 @@ impl Pass<'_> {
                 let (a, b) = (self.held(args[0]), self.held(args[1]));
                 let call = [into, out, a, precision, b, precision];
                 self.call(func, inst, "__mulbitint3", &call, None);
-                settle(func, inst, into, n);
+                settle(w, func, inst, into, n);
             }
             Opcode::SDiv | Opcode::UDiv | Opcode::SRem | Opcode::URem => {
                 let (Some(into), Some(result)) = (into, result) else { return };
@@ -444,10 +467,10 @@ impl Pass<'_> {
                 let precision = constant(func, inst, Type::int(32), i128::from(precision));
                 let (mut a, mut b) = (self.held(args[0]), self.held(args[1]));
                 if !signed {
-                    a = cleared(func, inst, a, n);
-                    b = cleared(func, inst, b, n);
+                    a = cleared(w, func, inst, a, n);
+                    b = cleared(w, func, inst, b, n);
                 }
-                let zero = constant(func, inst, WORD, 0);
+                let zero = constant(func, inst, w.ty(), 0);
                 let none = op(func, inst, Opcode::IntToPtr, &[zero], Type::PTR);
                 let unused = constant(func, inst, Type::int(32), 0);
                 // What libgcc writes has the precision `N` either way, as for a product.
@@ -460,7 +483,7 @@ impl Pass<'_> {
                     [none, unused, into, out, a, precision, b, precision]
                 };
                 self.call(func, inst, "__divmodbitint4", &call, None);
-                settle(func, inst, into, n);
+                settle(w, func, inst, into, n);
             }
             Opcode::SIToFP | Opcode::UIToFP => {
                 let Some(result) = result else { return };
@@ -471,7 +494,7 @@ impl Pass<'_> {
                 let precision = if data.opcode == Opcode::SIToFP {
                     signed_precision(n)
                 } else {
-                    from = cleared(func, inst, from, n);
+                    from = cleared(w, func, inst, from, n);
                     unsigned_precision(n)
                 };
                 let precision = constant(func, inst, Type::int(32), i128::from(precision));
@@ -493,7 +516,7 @@ impl Pass<'_> {
                 let precision = constant(func, inst, Type::int(32), i128::from(precision));
                 let routine = format!("__fix{mode}bitint");
                 self.call(func, inst, &routine, &[into, precision, args[0]], None);
-                settle(func, inst, into, n);
+                settle(w, func, inst, into, n);
             }
             _ => return,
         }
@@ -503,28 +526,30 @@ impl Pass<'_> {
     /// The amount a shift reads, as a word: the bottom word of a wide one, and a narrow one widened
     /// or narrowed to a word.
     fn amount(&self, func: &mut Func, inst: Inst, amount: Value) -> Value {
+        let w = self.w;
         if let Some(&slot) = self.slots.get(&amount) {
-            return read(func, inst, slot, 0);
+            return read(w, func, inst, slot, 0);
         }
         let bits = func[amount].ty.bits();
-        match bits.cmp(&64) {
-            std::cmp::Ordering::Less => op(func, inst, Opcode::ZExt, &[amount], WORD),
+        match bits.cmp(&w.0) {
+            std::cmp::Ordering::Less => op(func, inst, Opcode::ZExt, &[amount], w.ty()),
             std::cmp::Ordering::Equal => amount,
-            std::cmp::Ordering::Greater => op(func, inst, Opcode::Trunc, &[amount], WORD),
+            std::cmp::Ordering::Greater => op(func, inst, Opcode::Trunc, &[amount], w.ty()),
         }
     }
 
     /// A value widened into the words of a wider one, with the sign or with zeros.
     fn extend(&self, func: &mut Func, inst: Inst, from: Value, into: Value, n: u32, signed: bool) {
-        let count = words(n);
+        let w = self.w;
+        let count = w.count(n);
         let mut low = Vec::new();
         if let Some(&slot) = self.slots.get(&from) {
             let m = func[from].ty.bits();
-            let had = words(m);
+            let had = w.count(m);
             for at in 0..had {
-                let mut word = read(func, inst, slot, at);
+                let mut word = read(w, func, inst, slot, at);
                 if at + 1 == had && !signed {
-                    word = masked(func, inst, word, m);
+                    word = masked(w, func, inst, word, m);
                 }
                 low.push(word);
             }
@@ -532,32 +557,38 @@ impl Pass<'_> {
             let ty = func[from].ty;
             let m = ty.bits();
             let opcode = if signed { Opcode::SExt } else { Opcode::ZExt };
-            if m <= 64 {
-                let word = if m == 64 { from } else { op(func, inst, opcode, &[from], WORD) };
+            if m <= w.0 {
+                let word = if m == w.0 { from } else { op(func, inst, opcode, &[from], w.ty()) };
                 low.push(word);
             } else {
-                let pair = Type::int(SPLIT);
-                let whole = if m == SPLIT { from } else { op(func, inst, opcode, &[from], pair) };
-                let bottom = op(func, inst, Opcode::Trunc, &[whole], WORD);
-                let sixty_four = constant(func, inst, pair, 64);
-                let top = op(func, inst, Opcode::LShr, &[whole, sixty_four], pair);
-                let top = op(func, inst, Opcode::Trunc, &[top], WORD);
-                low.extend([bottom, top]);
+                // Widened to a width the splitting takes, and cut into words.
+                let whole = Type::int(if m <= 64 { 64 } else { SPLIT });
+                let value =
+                    if m == whole.bits() { from } else { op(func, inst, opcode, &[from], whole) };
+                for at in 0..w.count(whole.bits()) {
+                    let part = if at == 0 {
+                        value
+                    } else {
+                        let by = constant(func, inst, whole, i128::from(at * w.0));
+                        op(func, inst, Opcode::LShr, &[value, by], whole)
+                    };
+                    low.push(op(func, inst, Opcode::Trunc, &[part], w.ty()));
+                }
             }
         }
         let fill = if signed {
             let last = *low.last().expect("a value has at least one word");
-            let sixty_three = constant(func, inst, WORD, 63);
-            op(func, inst, Opcode::AShr, &[last, sixty_three], WORD)
+            let sign = constant(func, inst, w.ty(), i128::from(w.0 - 1));
+            op(func, inst, Opcode::AShr, &[last, sign], w.ty())
         } else {
-            constant(func, inst, WORD, 0)
+            constant(func, inst, w.ty(), 0)
         };
         for at in 0..count {
             let mut word = low.get(at as usize).copied().unwrap_or(fill);
             if at + 1 == count {
-                word = extended(func, inst, word, n);
+                word = extended(w, func, inst, word, n);
             }
-            write(func, inst, word, into, at);
+            write(w, func, inst, word, into, at);
         }
     }
 
@@ -590,6 +621,7 @@ impl Pass<'_> {
     /// The edges out of one terminator, with the words of each wide argument copied into the slot
     /// of the parameter it arrives as.
     fn edges(&mut self, func: &mut Func, inst: Inst) {
+        let w = self.w;
         let list = func.target_list(inst);
         let alone = list.len() == 1 && func[inst].opcode == Opcode::Jump;
         for at in list.iter() {
@@ -615,7 +647,7 @@ impl Pass<'_> {
                 .filter_map(|(arg, param)| {
                     let to = *self.slots.get(param)?;
                     let from = self.held(*arg);
-                    Some((from, to, words(func[*param].ty.bits())))
+                    Some((from, to, w.count(func[*param].ty.bits())))
                 })
                 .filter(|(from, to, _)| from != to)
                 .collect();
@@ -625,17 +657,17 @@ impl Pass<'_> {
                 let staged: Vec<(Value, Value, u32)> = pairs
                     .iter()
                     .map(|&(from, to, count)| {
-                        let stage = slot(func, count);
-                        copy(func, before, from, stage, count);
+                        let stage = slot(w, func, count);
+                        copy(w, func, before, from, stage, count);
                         (stage, to, count)
                     })
                     .collect();
                 for (stage, to, count) in staged {
-                    copy(func, before, stage, to, count);
+                    copy(w, func, before, stage, to, count);
                 }
             } else {
                 for &(from, to, count) in &pairs {
-                    copy(func, before, from, to, count);
+                    copy(w, func, before, from, to, count);
                 }
             }
             let passed: Vec<Value> = args
@@ -680,16 +712,24 @@ fn unsigned_precision(n: u32) -> i32 {
 /// decides when it differs and passes on what the words below it said when it does not. Only the
 /// top word is compared signed for a signed order, and see the module's first section for why the
 /// unsigned orders need no clearing first.
-fn compare(func: &mut Func, inst: Inst, pred: IntPred, a: Value, b: Value, n: u32) -> Value {
-    let count = words(n);
-    let zero = constant(func, inst, WORD, 0);
+fn compare(
+    w: Word,
+    func: &mut Func,
+    inst: Inst,
+    pred: IntPred,
+    a: Value,
+    b: Value,
+    n: u32,
+) -> Value {
+    let count = w.count(n);
+    let zero = constant(func, inst, w.ty(), 0);
     if matches!(pred, IntPred::Eq | IntPred::Ne) {
         let mut differ = zero;
         for at in 0..count {
-            let x = read(func, inst, a, at);
-            let y = read(func, inst, b, at);
-            let bits = op(func, inst, Opcode::Xor, &[x, y], WORD);
-            differ = op(func, inst, Opcode::Or, &[differ, bits], WORD);
+            let x = read(w, func, inst, a, at);
+            let y = read(w, func, inst, b, at);
+            let bits = op(func, inst, Opcode::Xor, &[x, y], w.ty());
+            differ = op(func, inst, Opcode::Or, &[differ, bits], w.ty());
         }
         return icmp(func, inst, pred, differ, zero);
     }
@@ -703,196 +743,200 @@ fn compare(func: &mut Func, inst: Inst, pred: IntPred, a: Value, b: Value, n: u3
     };
     let mut below = zero;
     for at in 0..count {
-        let p = read(func, inst, x, at);
-        let q = read(func, inst, y, at);
+        let p = read(w, func, inst, x, at);
+        let q = read(w, func, inst, y, at);
         let pred = if signed && at + 1 == count { IntPred::Slt } else { IntPred::Ult };
-        let here = less(func, inst, pred, p, q);
+        let here = less(w, func, inst, pred, p, q);
         let same = icmp(func, inst, IntPred::Eq, p, q);
-        let same = op(func, inst, Opcode::ZExt, &[same], WORD);
-        let kept = op(func, inst, Opcode::And, &[same, below], WORD);
-        below = op(func, inst, Opcode::Or, &[here, kept], WORD);
+        let same = op(func, inst, Opcode::ZExt, &[same], w.ty());
+        let kept = op(func, inst, Opcode::And, &[same, below], w.ty());
+        below = op(func, inst, Opcode::Or, &[here, kept], w.ty());
     }
     let pred = if denied { IntPred::Eq } else { IntPred::Ne };
     icmp(func, inst, pred, below, zero)
 }
 
-/// A shift of a value kept in words by an amount in a word, into a slot.
+/// A shift of a value kept in words by an amount in a word, into a slot. The operands are the
+/// value and the amount.
 ///
 /// The words are put in a buffer with a word of fill for every word of the value and one more, and
 /// each word of the answer is two neighbouring words of the buffer at an offset the amount picks,
 /// shifted by what is left of the amount and joined. The offset is held to the value's length so a
 /// shift by its width or more, which C leaves undefined, still reads inside the buffer.
 fn shift(
+    w: Word,
     func: &mut Func,
     inst: Inst,
     opcode: Opcode,
-    from: Value,
-    amount: Value,
+    [from, amount]: [Value; 2],
     into: Value,
     n: u32,
 ) {
-    let count = words(n);
-    let buffer = slot(func, 2 * count + 1);
-    let zero = constant(func, inst, WORD, 0);
-    let sixty_three = constant(func, inst, WORD, 63);
-    let one = constant(func, inst, WORD, 1);
-    let six = constant(func, inst, WORD, 6);
-    let three = constant(func, inst, WORD, 3);
-    let most = constant(func, inst, WORD, i128::from(count));
-    let skip = op(func, inst, Opcode::LShr, &[amount, six], WORD);
+    let count = w.count(n);
+    let buffer = slot(w, func, 2 * count + 1);
+    let zero = constant(func, inst, w.ty(), 0);
+    let top_bit = constant(func, inst, w.ty(), i128::from(w.0 - 1));
+    let one = constant(func, inst, w.ty(), 1);
+    let to_words = constant(func, inst, w.ty(), i128::from(w.log2()));
+    let to_bytes = constant(func, inst, w.ty(), i128::from(w.log2() - 3));
+    let most = constant(func, inst, w.ty(), i128::from(count));
+    let skip = op(func, inst, Opcode::LShr, &[amount, to_words], w.ty());
     let over = icmp(func, inst, IntPred::Ugt, skip, most);
-    let skip = op(func, inst, Opcode::Select, &[over, most, skip], WORD);
-    let rest = op(func, inst, Opcode::And, &[amount, sixty_three], WORD);
-    let other = op(func, inst, Opcode::Sub, &[sixty_three, rest], WORD);
+    let skip = op(func, inst, Opcode::Select, &[over, most, skip], w.ty());
+    let rest = op(func, inst, Opcode::And, &[amount, top_bit], w.ty());
+    let other = op(func, inst, Opcode::Sub, &[top_bit, rest], w.ty());
     if opcode == Opcode::Shl {
         // Fill below, then the value: the word an answer reads comes from `skip` words down.
         for at in 0..=count {
-            write(func, inst, zero, buffer, at);
+            write(w, func, inst, zero, buffer, at);
         }
         for at in 0..count {
-            let word = read(func, inst, from, at);
-            write(func, inst, word, buffer, count + 1 + at);
+            let word = read(w, func, inst, from, at);
+            write(w, func, inst, word, buffer, count + 1 + at);
         }
-        let back = op(func, inst, Opcode::Sub, &[most, skip], WORD);
-        let bytes = op(func, inst, Opcode::Shl, &[back, three], WORD);
+        let back = op(func, inst, Opcode::Sub, &[most, skip], w.ty());
+        let bytes = op(func, inst, Opcode::Shl, &[back, to_bytes], w.ty());
         let base = op(func, inst, Opcode::PtrAdd, &[buffer, bytes], Type::PTR);
         for at in 0..count {
-            let low = read(func, inst, base, at);
-            let high = read(func, inst, base, at + 1);
-            let high = op(func, inst, Opcode::Shl, &[high, rest], WORD);
-            // Two shifts rather than one by `64 - rest`, which is a shift by sixty four when
-            // `rest` is zero and that is not a shift the machine does.
-            let low = op(func, inst, Opcode::LShr, &[low, one], WORD);
-            let low = op(func, inst, Opcode::LShr, &[low, other], WORD);
-            let mut word = op(func, inst, Opcode::Or, &[high, low], WORD);
+            let low = read(w, func, inst, base, at);
+            let high = read(w, func, inst, base, at + 1);
+            let high = op(func, inst, Opcode::Shl, &[high, rest], w.ty());
+            // Two shifts rather than one by the word's width less `rest`, which is a shift by the
+            // whole width when `rest` is zero and that is not a shift the machine does.
+            let low = op(func, inst, Opcode::LShr, &[low, one], w.ty());
+            let low = op(func, inst, Opcode::LShr, &[low, other], w.ty());
+            let mut word = op(func, inst, Opcode::Or, &[high, low], w.ty());
             if at + 1 == count {
-                word = extended(func, inst, word, n);
+                word = extended(w, func, inst, word, n);
             }
-            write(func, inst, word, into, at);
+            write(w, func, inst, word, into, at);
         }
     } else {
         // The value, then fill above: the word an answer reads comes from `skip` words up.
         let mut top = zero;
         for at in 0..count {
-            let mut word = read(func, inst, from, at);
+            let mut word = read(w, func, inst, from, at);
             if at + 1 == count {
                 if opcode == Opcode::LShr {
-                    word = masked(func, inst, word, n);
+                    word = masked(w, func, inst, word, n);
                 }
                 top = word;
             }
-            write(func, inst, word, buffer, at);
+            write(w, func, inst, word, buffer, at);
         }
         let fill = if opcode == Opcode::AShr {
-            op(func, inst, Opcode::AShr, &[top, sixty_three], WORD)
+            op(func, inst, Opcode::AShr, &[top, top_bit], w.ty())
         } else {
             zero
         };
         for at in count..=2 * count {
-            write(func, inst, fill, buffer, at);
+            write(w, func, inst, fill, buffer, at);
         }
-        let bytes = op(func, inst, Opcode::Shl, &[skip, three], WORD);
+        let bytes = op(func, inst, Opcode::Shl, &[skip, to_bytes], w.ty());
         let base = op(func, inst, Opcode::PtrAdd, &[buffer, bytes], Type::PTR);
         for at in 0..count {
-            let low = read(func, inst, base, at);
-            let high = read(func, inst, base, at + 1);
-            let low = op(func, inst, Opcode::LShr, &[low, rest], WORD);
-            let high = op(func, inst, Opcode::Shl, &[high, one], WORD);
-            let high = op(func, inst, Opcode::Shl, &[high, other], WORD);
-            let mut word = op(func, inst, Opcode::Or, &[high, low], WORD);
+            let low = read(w, func, inst, base, at);
+            let high = read(w, func, inst, base, at + 1);
+            let low = op(func, inst, Opcode::LShr, &[low, rest], w.ty());
+            let high = op(func, inst, Opcode::Shl, &[high, one], w.ty());
+            let high = op(func, inst, Opcode::Shl, &[high, other], w.ty());
+            let mut word = op(func, inst, Opcode::Or, &[high, low], w.ty());
             if at + 1 == count {
-                word = extended(func, inst, word, n);
+                word = extended(w, func, inst, word, n);
             }
-            write(func, inst, word, into, at);
+            write(w, func, inst, word, into, at);
         }
     }
 }
 
 /// The bottom of a value kept in words, as a narrower integer.
-fn bottom(func: &mut Func, inst: Inst, from: Value, ty: Type) -> Value {
+fn bottom(w: Word, func: &mut Func, inst: Inst, from: Value, ty: Type) -> Value {
     let n = ty.bits();
-    let low = read(func, inst, from, 0);
-    if n <= 64 {
-        return narrowed(func, inst, low, ty);
+    let low = read(w, func, inst, from, 0);
+    if n <= w.0 {
+        return narrowed(w, func, inst, low, ty);
     }
-    let pair = Type::int(SPLIT);
-    let high = read(func, inst, from, 1);
-    let low = op(func, inst, Opcode::ZExt, &[low], pair);
-    let high = op(func, inst, Opcode::ZExt, &[high], pair);
-    let sixty_four = constant(func, inst, pair, 64);
-    let high = op(func, inst, Opcode::Shl, &[high, sixty_four], pair);
-    let whole = op(func, inst, Opcode::Or, &[high, low], pair);
-    if n == SPLIT { whole } else { op(func, inst, Opcode::Trunc, &[whole], ty) }
+    // The words joined at a width the splitting takes, the bottom one first.
+    let whole = Type::int(if n <= 64 { 64 } else { SPLIT });
+    let mut value = op(func, inst, Opcode::ZExt, &[low], whole);
+    for at in 1..w.count(whole.bits()) {
+        let word = read(w, func, inst, from, at);
+        let word = op(func, inst, Opcode::ZExt, &[word], whole);
+        let by = constant(func, inst, whole, i128::from(at * w.0));
+        let word = op(func, inst, Opcode::Shl, &[word, by], whole);
+        value = op(func, inst, Opcode::Or, &[value, word], whole);
+    }
+    if n == whole.bits() { value } else { op(func, inst, Opcode::Trunc, &[value], ty) }
 }
 
-/// A word as a narrower integer, or as itself at sixty four bits.
-fn narrowed(func: &mut Func, inst: Inst, word: Value, ty: Type) -> Value {
-    if ty.bits() == 64 { word } else { op(func, inst, Opcode::Trunc, &[word], ty) }
+/// A word as a narrower integer, or as itself at the word's width.
+fn narrowed(w: Word, func: &mut Func, inst: Inst, word: Value, ty: Type) -> Value {
+    if ty.bits() == w.0 { word } else { op(func, inst, Opcode::Trunc, &[word], ty) }
 }
 
 /// The top word of a value `n` bits wide, sign extended from bit `n - 1`.
-fn extended(func: &mut Func, inst: Inst, word: Value, n: u32) -> Value {
-    let spare = (64 - n % 64) % 64;
+fn extended(w: Word, func: &mut Func, inst: Inst, word: Value, n: u32) -> Value {
+    let spare = w.spare(n);
     if spare == 0 {
         return word;
     }
-    let spare = constant(func, inst, WORD, i128::from(spare));
-    let up = op(func, inst, Opcode::Shl, &[word, spare], WORD);
-    op(func, inst, Opcode::AShr, &[up, spare], WORD)
+    let spare = constant(func, inst, w.ty(), i128::from(spare));
+    let up = op(func, inst, Opcode::Shl, &[word, spare], w.ty());
+    op(func, inst, Opcode::AShr, &[up, spare], w.ty())
 }
 
 /// The top word of a value `n` bits wide, with the bits above `n` cleared.
-fn masked(func: &mut Func, inst: Inst, word: Value, n: u32) -> Value {
-    let used = n % 64;
+fn masked(w: Word, func: &mut Func, inst: Inst, word: Value, n: u32) -> Value {
+    let used = n % w.0;
     if used == 0 {
         return word;
     }
-    let mask = constant(func, inst, WORD, (1i128 << used) - 1);
-    op(func, inst, Opcode::And, &[word, mask], WORD)
+    let mask = constant(func, inst, w.ty(), (1i128 << used) - 1);
+    op(func, inst, Opcode::And, &[word, mask], w.ty())
 }
 
 /// A copy of a value kept in words with the bits above `n` cleared, which is how an unsigned value
 /// is handed to libgcc. The value itself when there are no such bits.
-fn cleared(func: &mut Func, inst: Inst, from: Value, n: u32) -> Value {
-    if n % 64 == 0 {
+fn cleared(w: Word, func: &mut Func, inst: Inst, from: Value, n: u32) -> Value {
+    if w.spare(n) == 0 {
         return from;
     }
-    let count = words(n);
-    let copy = slot(func, count);
+    let count = w.count(n);
+    let copy = slot(w, func, count);
     for at in 0..count {
-        let mut word = read(func, inst, from, at);
+        let mut word = read(w, func, inst, from, at);
         if at + 1 == count {
-            word = masked(func, inst, word, n);
+            word = masked(w, func, inst, word, n);
         }
-        write(func, inst, word, copy, at);
+        write(w, func, inst, word, copy, at);
     }
     copy
 }
 
 /// The top word of a slot libgcc wrote, put back into the form this pass keeps, since the bits
 /// above `n` are not something a routine promises anything about.
-fn settle(func: &mut Func, inst: Inst, slot: Value, n: u32) {
-    if n % 64 == 0 {
+fn settle(w: Word, func: &mut Func, inst: Inst, slot: Value, n: u32) {
+    if w.spare(n) == 0 {
         return;
     }
-    let top = words(n) - 1;
-    let word = read(func, inst, slot, top);
-    let word = extended(func, inst, word, n);
-    write(func, inst, word, slot, top);
+    let top = w.count(n) - 1;
+    let word = read(w, func, inst, slot, top);
+    let word = extended(w, func, inst, word, n);
+    write(w, func, inst, word, slot, top);
 }
 
 /// The words of one slot copied into another.
-fn copy(func: &mut Func, inst: Inst, from: Value, into: Value, count: u32) {
+fn copy(w: Word, func: &mut Func, inst: Inst, from: Value, into: Value, count: u32) {
     for at in 0..count {
-        let word = read(func, inst, from, at);
-        write(func, inst, word, into, at);
+        let word = read(w, func, inst, from, at);
+        write(w, func, inst, word, into, at);
     }
 }
 
 /// A comparison of two words, as a word that is zero or one.
-fn less(func: &mut Func, inst: Inst, pred: IntPred, a: Value, b: Value) -> Value {
+fn less(w: Word, func: &mut Func, inst: Inst, pred: IntPred, a: Value, b: Value) -> Value {
     let bit = icmp(func, inst, pred, a, b);
-    op(func, inst, Opcode::ZExt, &[bit], WORD)
+    op(func, inst, Opcode::ZExt, &[bit], w.ty())
 }
 
 /// A comparison in front of an instruction.
@@ -903,45 +947,45 @@ fn icmp(func: &mut Func, inst: Inst, pred: IntPred, a: Value, b: Value) -> Value
 }
 
 /// A slot of `count` words at the top of the entry block.
-fn slot(func: &mut Func, count: u32) -> Value {
+fn slot(w: Word, func: &mut Func, count: u32) -> Value {
     let entry = func.entry().expect("a function with blocks has an entry");
     let inst = func[entry].first.expect("the entry block of a function this wide is not empty");
-    let info = MemInfo { size: u64::from(count) * 8, align: 16, ..access(8) };
+    let info = MemInfo { size: u64::from(count) * w.bytes(), align: 16, ..access(w, w.0 / 8) };
     let extra = Extra::Mem(func.add_mem(info));
     put(func, inst, InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
 }
 
 /// Word `at` of a slot.
-fn read(func: &mut Func, inst: Inst, slot: Value, at: u32) -> Value {
-    let address = offset(func, inst, slot, u64::from(at) * 8);
-    load(func, inst, address, 8)
+fn read(w: Word, func: &mut Func, inst: Inst, slot: Value, at: u32) -> Value {
+    let address = offset(w, func, inst, slot, u64::from(at) * w.bytes());
+    load(w, func, inst, address, w.0 / 8)
 }
 
 /// A word written as word `at` of a slot.
-fn write(func: &mut Func, inst: Inst, word: Value, slot: Value, at: u32) {
-    let address = offset(func, inst, slot, u64::from(at) * 8);
-    store(func, inst, word, address, 8);
+fn write(w: Word, func: &mut Func, inst: Inst, word: Value, slot: Value, at: u32) {
+    let address = offset(w, func, inst, slot, u64::from(at) * w.bytes());
+    store(w, func, inst, word, address, w.0 / 8);
 }
 
 /// An address that many bytes past another one.
-fn offset(func: &mut Func, inst: Inst, base: Value, bytes: u64) -> Value {
+fn offset(w: Word, func: &mut Func, inst: Inst, base: Value, bytes: u64) -> Value {
     if bytes == 0 {
         return base;
     }
-    let bytes = constant(func, inst, WORD, i128::from(bytes));
+    let bytes = constant(func, inst, w.ty(), i128::from(bytes));
     op(func, inst, Opcode::PtrAdd, &[base, bytes], Type::PTR)
 }
 
 /// A word read from an address.
-fn load(func: &mut Func, inst: Inst, address: Value, align: u32) -> Value {
-    let extra = Extra::Mem(func.add_mem(access(align)));
+fn load(w: Word, func: &mut Func, inst: Inst, address: Value, align: u32) -> Value {
+    let extra = Extra::Mem(func.add_mem(access(w, align)));
     let args = func.push_values(&[address]);
-    put(func, inst, InstData { args, extra, ..InstData::new(Opcode::Load) }, WORD)
+    put(func, inst, InstData { args, extra, ..InstData::new(Opcode::Load) }, w.ty())
 }
 
 /// A word written to an address.
-fn store(func: &mut Func, inst: Inst, word: Value, address: Value, align: u32) {
-    let extra = Extra::Mem(func.add_mem(access(align)));
+fn store(w: Word, func: &mut Func, inst: Inst, word: Value, address: Value, align: u32) {
+    let extra = Extra::Mem(func.add_mem(access(w, align)));
     let args = func.push_values(&[word, address]);
     let data = InstData { args, extra, ..InstData::new(Opcode::Store) };
     let span = func.span(inst);
@@ -950,9 +994,9 @@ fn store(func: &mut Func, inst: Inst, word: Value, address: Value, align: u32) {
 }
 
 /// A plain access to one word.
-fn access(align: u32) -> MemInfo {
+fn access(w: Word, align: u32) -> MemInfo {
     MemInfo {
-        size: 8,
+        size: w.bytes(),
         align,
         order: MemOrder::NotAtomic,
         tbaa: None,
@@ -1023,8 +1067,14 @@ mod tests {
     /// The pass run on a function, which then has to be valid IR with no value wider than a
     /// hundred and twenty eight bits read or written anywhere in it.
     fn rewritten(names: &mut Interner, func: &mut Func) {
-        assert!(limbs(func, names, 8), "the function was left alone");
-        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        rewritten_on(names, func, Arch::X86_64);
+    }
+
+    /// [`rewritten`] for the machine of a target, whose register size the pass is given.
+    fn rewritten_on(names: &mut Interner, func: &mut Func, arch: Arch) {
+        let target = TargetInfo::new(Triple::new(arch, Os::Linux, Env::Gnu));
+        let word = target.pointer_width / 8;
+        assert!(limbs(func, names, word), "the function was left alone");
         let module = Module::new(names.intern("f.c"), &target);
         rucc_ir::verify_func(&module, func, names).expect("the rewrite builds valid IR");
         let blocks: Vec<Block> = func.blocks().collect();
@@ -1204,19 +1254,67 @@ mod tests {
     }
 
     #[test]
-    fn a_function_with_nothing_this_wide_or_on_a_narrow_machine_is_left_alone() {
+    fn a_function_with_nothing_this_wide_is_left_alone() {
         let (mut names, mut func, entry, args) = three();
         let mut build = Builder::new(&mut func, entry);
         let a = build.load(Type::int(128), args[0], whole(), Flags::NONE);
         build.store(a, args[2], whole(), Flags::NONE);
         build.ret(&[]);
         assert!(!limbs(&mut func, &mut names, 8));
-
-        let (mut names, mut func, entry, args) = three();
-        let mut build = Builder::new(&mut func, entry);
-        let a = build.load(WIDE, args[0], whole(), Flags::NONE);
-        build.store(a, args[2], whole(), Flags::NONE);
-        build.ret(&[]);
         assert!(!limbs(&mut func, &mut names, 4));
+    }
+
+    /// tamnd/rucc#4333. On i386 a `_BitInt(200)` is seven limbs of thirty two bits, twenty eight
+    /// bytes aligned to four, and the words of the pass are those limbs. A word of sixty four bits
+    /// would read and write four bytes past the object, and would hand libgcc limbs of the wrong
+    /// size.
+    #[test]
+    fn on_i386_a_wide_value_is_thirty_two_bit_words_and_its_object_is_seven_of_them() {
+        let (mut names, mut func, entry, args) = three();
+        let object = MemInfo { size: 28, align: 4, ..whole() };
+        let mut build = Builder::new(&mut func, entry);
+        let a = build.load(WIDE, args[0], object, Flags::NONE);
+        let b = build.load(WIDE, args[1], object, Flags::NONE);
+        let product = build.binary(Opcode::Mul, a, b, Flags::NONE);
+        let sum = build.binary(Opcode::Add, product, a, Flags::NONE);
+        let small = build.iconst(Type::int(64), -5);
+        let wider = build.unary(Opcode::SExt, small, WIDE);
+        let narrow = build.unary(Opcode::Trunc, sum, Type::int(96));
+        let back = build.unary(Opcode::SExt, narrow, WIDE);
+        let mixed = build.binary(Opcode::Xor, back, wider, Flags::NONE);
+        let shifted = build.binary(Opcode::AShr, mixed, b, Flags::NONE);
+        build.store(shifted, args[2], object, Flags::NONE);
+        build.ret(&[]);
+        rewritten_on(&mut names, &mut func, Arch::X86);
+        assert_eq!(called(&func, &names), ["__mulbitint3"]);
+        assert_eq!(precisions(&func), [vec![200, -200, -200]]);
+        let mut stored = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let data = func[inst];
+                let Extra::Mem(mem) = data.extra else { continue };
+                if matches!(data.opcode, Opcode::Load | Opcode::Store) {
+                    assert_eq!(func[mem].size, 4, "{}", data.opcode.name());
+                }
+                if data.opcode != Opcode::Store {
+                    continue;
+                }
+                // The bytes past the start of the object the program gave, for a store into it.
+                let address = func[data.args][1];
+                if address == args[2] {
+                    stored.push(0);
+                }
+                let Def::Result { inst: made, .. } = func[address].def else { continue };
+                let made = func[made];
+                if made.opcode == Opcode::PtrAdd && func[made.args][0] == args[2] {
+                    let Def::Result { inst: by, .. } = func[func[made.args][1]].def else {
+                        continue;
+                    };
+                    let Extra::Imm(imm) = func[by].extra else { continue };
+                    stored.push(func[imm].signed(Type::int(32)));
+                }
+            }
+        }
+        assert_eq!(stored, [0, 4, 8, 12, 16, 20, 24]);
     }
 }
