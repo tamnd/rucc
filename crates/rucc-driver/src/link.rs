@@ -720,6 +720,12 @@ pub(crate) fn bsd_triple(target: Triple, pinned: Option<TargetTuple>) -> String 
     bsd::triple(target, pinned)
 }
 
+/// The linker of FreeBSD's GCC port, which that GCC answers `-print-prog-name=ld` with and links
+/// with. [`None`] for any other target and for a command line that named no target.
+pub(crate) fn bsd_port_linker(target: Triple, pinned: Option<TargetTuple>) -> Option<PathBuf> {
+    bsd::port_linker(target, pinned)
+}
+
 /// The same answer with the host as a parameter, so that both branches are testable on one machine.
 fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option<Sysroot> {
     if opts.sysroot.is_some() {

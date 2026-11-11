@@ -51,13 +51,17 @@ pub(super) enum Ld {
 /// alone then, because it links for this machine. Then `<triple>-ld`, the name a cross binutils
 /// installs on `PATH`, which is the name collect2 of a cross GCC looks for there. lld comes last,
 /// which links for every BSD from one binary.
+///
+/// Before all of them, the linker of FreeBSD's GCC port when the target was named, see
+/// [`port_linker`].
 pub(super) fn order(
     target: Triple,
     pinned: Option<TargetTuple>,
     host: Option<Triple>,
     prefixes: &[PathBuf],
 ) -> Vec<String> {
-    let mut names = Vec::new();
+    let mut names: Vec<String> =
+        port_linker(target, pinned).map(|path| path.display().to_string()).into_iter().collect();
     if native(target, host) {
         names.push("ld".to_owned());
     } else {
@@ -67,6 +71,25 @@ pub(super) fn order(
     }
     names.extend(["ld.lld".to_owned(), "lld".to_owned()]);
     names
+}
+
+/// The linker of FreeBSD's GCC port for the target: `/usr/local/bin/x86_64-unknown-freebsd15.1-ld`.
+///
+/// The port, `devel/freebsd-gcc15` and the ports of the other releases, configures GCC with
+/// `--with-ld=${LOCALBASE}/bin/<triple>-ld`, and FreeBSD's `buildworld` runs that GCC as its
+/// `CROSS_TOOLCHAIN`. GCC looks at that path before it looks anywhere else. Its `find_a_program`
+/// answers `-print-prog-name=ld` with it before the `-B` directories, and collect2 links with it.
+/// So a compile that named a FreeBSD target does the same when the file is there.
+///
+/// A compile that named no target is the base system's `cc`, which has no such path. The other
+/// systems have [`None`], because their GCC is in the base system and was configured without one.
+pub(crate) fn port_linker(target: Triple, pinned: Option<TargetTuple>) -> Option<PathBuf> {
+    match (target.os, pinned) {
+        (Os::FreeBsd(_), Some(_)) => {
+            Some(Path::new("/usr/local/bin").join(format!("{}-ld", triple(target, pinned))))
+        }
+        _ => None,
+    }
 }
 
 /// The triple a GCC for the target is configured with, which is what its `-dumpmachine` prints
@@ -1097,7 +1120,39 @@ mod tests {
         // for, as `x86_64-unknown-freebsd15.1` installs `x86_64-unknown-freebsd15.1-ld`.
         let named = "x86_64-unknown-freebsd15.1".parse::<TargetTuple>().ok();
         let target = bsd(Arch::X86_64, Os::FreeBsd(15));
-        assert_eq!(order(target, named, linux(), &[])[0], "x86_64-unknown-freebsd15.1-ld");
+        assert_eq!(order(target, named, linux(), &[])[1], "x86_64-unknown-freebsd15.1-ld");
+    }
+
+    #[test]
+    fn a_named_freebsd_target_links_first_with_the_linker_of_the_gcc_port() {
+        let named = "x86_64-unknown-freebsd15.1".parse::<TargetTuple>().ok();
+        let target = bsd(Arch::X86_64, Os::FreeBsd(15));
+        let port = Path::new("/usr/local/bin").join("x86_64-unknown-freebsd15.1-ld");
+        assert_eq!(port_linker(target, named), Some(port.clone()));
+        let port = port.display().to_string();
+        // Before the `-B` directories, as GCC's `--with-ld` path is.
+        let dirs = [PathBuf::from("/w/usr/bin")];
+        let ld = Path::new("/w/usr/bin").join("ld").display().to_string();
+        assert_eq!(
+            order(target, named, linux(), &dirs),
+            [
+                port.clone(),
+                ld,
+                "x86_64-unknown-freebsd15.1-ld".to_owned(),
+                "ld.lld".to_owned(),
+                "lld".to_owned()
+            ]
+        );
+        // And before the machine's own `ld` on FreeBSD itself.
+        let host = Some(bsd(Arch::X86_64, Os::FreeBsd(15)));
+        assert_eq!(
+            order(target, named, host, &dirs),
+            [port, "ld".to_owned(), "ld.lld".to_owned(), "lld".to_owned()]
+        );
+        // No target named is the base system's `cc`, and NetBSD's GCC has no port.
+        assert_eq!(port_linker(target, None), None);
+        let netbsd = "x86_64-unknown-netbsd".parse::<TargetTuple>().ok();
+        assert_eq!(port_linker(bsd(Arch::X86_64, Os::NetBsd), netbsd), None);
     }
 
     #[test]

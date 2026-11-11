@@ -4938,11 +4938,14 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
         Query::Libgcc => found("libgcc.a"),
         // A program rather than a library: the linker and the archiver are the ones a build asks
         // about, and this compiler finds them on the path or under `-B` rather than shipping
-        // them, so the name back is the honest answer unless a `-B` prefix holds one.
-        Query::ProgName(name) => link
-            .prefixes
-            .iter()
-            .map(|dir| dir.join(name))
+        // them, so the name back is the honest answer unless a `-B` prefix holds one. The linker
+        // of FreeBSD's GCC port comes before the `-B` prefixes, as that GCC answers with it and
+        // the link uses it.
+        Query::ProgName(name) => (name == "ld")
+            .then(|| link::bsd_port_linker(opts.target, link.pinned))
+            .flatten()
+            .into_iter()
+            .chain(link.prefixes.iter().map(|dir| dir.join(name)))
             .find(|path| path.is_file())
             .map_or_else(|| name.clone(), |path| path.display().to_string()),
     })
