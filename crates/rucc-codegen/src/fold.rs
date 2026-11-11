@@ -356,6 +356,11 @@ fn folds(
     let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
     let sum = mir::Opcode::new(names.join(insts.prefix, insts.sum));
     let step = mir::Opcode::new(names.join(insts.prefix, insts.add));
+    let number = mir::Opcode::new(names.join(insts.prefix, insts.imm));
+    // Only x86 has an address with no register in it. i386 counts addresses in 32 bits, so a
+    // number above `i32::MAX` is still one address there, and x86-64 sign extends the field.
+    let i386 = std::ptr::eq(machine, &rucc_target::x86::MACHINE);
+    let numbers = i386 || std::ptr::eq(machine, &rucc_target::x86_64::MACHINE);
     let mut reads = Reads::of(func);
     let mut held = pending.held();
     // The moves are kept here and made once at the end, since nothing reads the lists before then
@@ -368,6 +373,27 @@ fn folds(
         // writes what the address reads, or a reader turns up that cannot take it.
         let mut open: Map<mir::Reg, Open> = Map::default();
         for inst in func.insts(block).collect::<Vec<_>>() {
+            // A constant added to a constant is one constant, which the walk then offers to the
+            // readers of the sum. `((__seg_fs struct pcpu *)0)->pc_prvspace` is a zero, an
+            // `add $4` and a load, and only the sum is an address.
+            if numbers && func[inst].opcode == step {
+                if let Some((from, sum)) = summed_numbers(func, &open, inst, number, i386) {
+                    let def = func[func[inst].operands][0];
+                    let plan = Plan {
+                        opcode: number,
+                        operands: vec![mir::Operand::write(def.reg, def.class)],
+                        imm: Some(sum),
+                        amode: None,
+                        symbol: None,
+                    };
+                    let mut set = Changes::new();
+                    set.rewrite(inst, plan);
+                    set.remove(from);
+                    if set.commit(func, &mut reads, names, machine).is_ok() {
+                        open.retain(|_, held| held.from != from);
+                    }
+                }
+            }
             if let Some(ready) = offer(func, &mut open, inst, absolute) {
                 // The set is the whole of what this fold is: every reader takes the address and
                 // the address computation goes, and a set that is missing either half is one that
@@ -434,6 +460,11 @@ fn folds(
                 }
             } else if func[inst].opcode == step && machine.index_and_disp {
                 let Some(address) = stepped(func, inst) else { continue };
+                if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
+                    open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
+                }
+            } else if func[inst].opcode == number && numbers {
+                let Some(address) = numbered(func, inst, i386) else { continue };
                 if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
                     open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
                 }
@@ -619,6 +650,61 @@ fn stepped(func: &mir::Func, inst: mir::Inst) -> Option<mir::Amode> {
     }
     let disp = i32::try_from(func[func[inst].imm?].0).ok()?;
     Some(mir::Amode { base: Some(1), disp, ..mir::Amode::NOTHING })
+}
+
+/// The address a constant is, as a displacement with no register.
+///
+/// `*(volatile int *)0x1000` and the per-CPU reads of the BSD kernels on i386 are a constant moved
+/// into a register and a load through it. The FreeBSD `PCPU_GET` is `movl %fs:%1` against `"m"`
+/// at the offset of the field, and it came out as `movl $8, %eax` and `movl %fs:(%eax), %eax`,
+/// where gcc writes `movl %fs:8, %eax`. As an address the constant is the displacement, and the
+/// load reads no register for it.
+///
+/// The operand is the register written, and the instruction carries no address of its own. `None`
+/// when the constant does not fit in the field. On i386 the field is the whole address, so any
+/// 32-bit number fits, and `wraps` says that.
+fn numbered(func: &mir::Func, inst: mir::Inst, wraps: bool) -> Option<mir::Amode> {
+    let [_] = &func[func[inst].operands] else { return None };
+    if func[inst].mem.is_some() {
+        return None;
+    }
+    let value = func[func[inst].imm?].0;
+    let disp = match i32::try_from(value) {
+        Ok(disp) => disp,
+        Err(_) if wraps => i32::from_ne_bytes(u32::try_from(value).ok()?.to_ne_bytes()),
+        Err(_) => return None,
+    };
+    Some(mir::Amode { disp, ..mir::Amode::NOTHING })
+}
+
+/// The constant move an addition of a constant reads, and the sum, when the addition is the one
+/// reader of the move. Only a move of a `number`, since a step that is open holds an immediate as
+/// well and is not a constant. The sum is counted in 32 bits on i386, where `wraps` is set, since an
+/// address there is 32 bits.
+fn summed_numbers(
+    func: &mir::Func,
+    open: &Map<mir::Reg, Open>,
+    inst: mir::Inst,
+    number: mir::Opcode,
+    wraps: bool,
+) -> Option<(mir::Inst, i64)> {
+    let [_, read] = &func[func[inst].operands] else { return None };
+    if func[inst].mem.is_some() {
+        return None;
+    }
+    let held = open.get(&read.reg)?;
+    if func[held.from].opcode != number || held.wanted != 1 || !held.folds.is_empty() {
+        return None;
+    }
+    let number = func[func[held.from].imm?].0;
+    let step = func[func[inst].imm?].0;
+    let sum = if wraps {
+        let low = |value: i64| i32::from_ne_bytes((value as u32).to_ne_bytes());
+        i64::from(low(number).wrapping_add(low(step)))
+    } else {
+        number.checked_add(step)?
+    };
+    Some((held.from, sum))
 }
 
 /// Whether an address is one every reader can carry in the room it already has, which is what
@@ -2941,6 +3027,180 @@ mod tests {
 
         assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// A per-CPU read as selection leaves it: the offset of the field moved into a register and a
+    /// load through it in `%fs`, which is how `PCPU_GET` on i386 reaches the field.
+    fn numbered_read(
+        names: &mut Interner,
+        move_to: &str,
+        offset: i64,
+    ) -> (mir::Func, mir::Block, mir::Reg) {
+        let mut func = mir::Func::new(names.intern("f"));
+        let block = func.create_block();
+        let at = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(names, move_to)).def(at, GPR).imm(offset).finish();
+        let mem = mir::Mem {
+            segment: Some(rucc_target::Segment::Fs),
+            ..mir::Mem::at(mir::Operand::read(at, GPR))
+        };
+        func.build(block, op(names, "mov_rm_32")).def(value, GPR).mem(mem).finish();
+        (func, block, at)
+    }
+
+    #[test]
+    fn a_constant_address_becomes_the_displacement_of_the_load() {
+        let mut names = Interner::new();
+        let (mut func, block, _) = numbered_read(&mut names, FRAME.imm, 8);
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the constant is still moved on its own: {left:?}");
+        let amode = left[0].1;
+        assert_eq!((amode.base, amode.index, amode.disp), (None, None, 8));
+        assert_eq!(amode.segment, Some(rucc_target::Segment::Fs), "the segment went");
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(func[func[inst].operands].len(), 1, "the load still reads a register");
+    }
+
+    /// `0x2000(,%eax,4)` is what gcc writes for a subscript of an array at a fixed address.
+    #[test]
+    fn a_constant_address_keeps_the_index_the_load_had() {
+        let (mut names, mut func, block) = empty();
+        let at = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(&mut names, FRAME.imm)).def(at, GPR).imm(0x2000).finish();
+        func.build(block, op(&mut names, "mov_rm_32"))
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(at, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 4),
+            )
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1);
+        let amode = left[0].1;
+        assert_eq!((amode.base, amode.scale, amode.disp), (None, 4, 0x2000));
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![index]);
+    }
+
+    /// A constant that something reads as a number is a number the program wants, and it stays.
+    #[test]
+    fn a_constant_address_read_as_a_number_as_well_is_left_where_it_is() {
+        let mut names = Interner::new();
+        let (mut func, block, at) = numbered_read(&mut names, FRAME.imm, 8);
+        let sum = func.new_vreg(GPR);
+        let add = op(&mut names, "add_rr_64");
+        func.build(block, add).def(sum, GPR).uses(at, GPR).uses(at, GPR).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// x86-64 sign extends the four bytes of the field, so an address above them stays in a
+    /// register.
+    #[test]
+    fn a_constant_address_too_wide_for_the_field_stays_in_its_register() {
+        let mut names = Interner::new();
+        let (mut func, block, _) = numbered_read(&mut names, FRAME.imm, 0x1_0000_0000);
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 2);
+    }
+
+    /// A field of a struct at address zero is a zero, an add of the field's offset and a load,
+    /// which is one constant address.
+    #[test]
+    fn a_constant_added_to_a_constant_address_is_one_address() {
+        let (mut names, mut func, block) = empty();
+        let zero = func.new_vreg(GPR);
+        let field = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(&mut names, FRAME.imm)).def(zero, GPR).imm(0).finish();
+        func.build(block, op(&mut names, FRAME.add))
+            .operand(mir::Operand::write(field, GPR).with(mir::Constraint::Reuse(1)))
+            .uses(zero, GPR)
+            .imm(4)
+            .finish();
+        let mem = mir::Mem {
+            segment: Some(rucc_target::Segment::Fs),
+            ..mir::Mem::at(mir::Operand::read(field, GPR))
+        };
+        func.build(block, op(&mut names, "mov_rm_64")).def(value, GPR).mem(mem).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the constant or the add is still there: {left:?}");
+        let amode = left[0].1;
+        assert_eq!((amode.base, amode.index, amode.disp), (None, None, 4));
+        assert_eq!(amode.segment, Some(rucc_target::Segment::Fs));
+    }
+
+    /// An add of a constant to an add of a constant is not a constant, and the register under
+    /// both stays in the address.
+    #[test]
+    fn a_constant_added_to_a_step_is_not_a_constant_address() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        for (into, from, by) in [(first, base, 8), (second, first, 4)] {
+            func.build(block, op(&mut names, FRAME.add))
+                .operand(mir::Operand::write(into, GPR).with(mir::Constraint::Reuse(1)))
+                .uses(from, GPR)
+                .imm(by)
+                .finish();
+        }
+        func.build(block, op(&mut names, "mov_rm_64"))
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(second, GPR)))
+            .finish();
+
+        folds(&mut func, &mut names);
+
+        let load = func.insts(block).last().expect("the load is still there");
+        let regs = address_regs(&func, load);
+        assert!(regs == [base] || regs == [first], "the load lost its base: {regs:?}");
+        assert!(
+            shape(&func, &names, block).iter().all(|(opcode, _)| !opcode.ends_with(FRAME.imm)),
+            "an add became a constant"
+        );
+    }
+
+    /// i386 counts addresses in 32 bits, so the local APIC at `0xfee00020` is a displacement
+    /// there, the four bytes of the field.
+    #[test]
+    fn a_constant_address_above_i32_max_is_a_displacement_on_i386() {
+        let mut names = Interner::new();
+        let (mut func, block, _) =
+            numbered_read(&mut names, rucc_target::x86::FRAME.imm, 0xfee0_0020);
+        let (mut locals, mut arguments, mut growable) = (Vec::new(), Vec::new(), Vec::new());
+        let folded = addresses(
+            &mut func,
+            &rucc_target::x86::FRAME,
+            &rucc_target::x86::MACHINE,
+            &mut names,
+            &mut Pending {
+                addresses: &mut locals,
+                arguments: &mut arguments,
+                dynamic: &mut growable,
+            },
+            true,
+        );
+
+        assert_eq!(folded, 1);
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].1.disp, i32::from_ne_bytes(0xfee0_0020_u32.to_ne_bytes()));
     }
 
     /// The pass that moves a constant into the displacement, run on its own.

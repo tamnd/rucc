@@ -8038,13 +8038,33 @@ impl<'a> Lowering<'a> {
                 // `"m" (x)` for an `x` in `__seg_gs`, and the kernel's percpu templates rely on
                 // it from 6.9, when they stopped writing `%%gs:` themselves.
                 let segment = self.segment(inst);
+                // A constant address is the displacement and nothing else, as gcc writes it. The
+                // per-CPU reads of the BSD kernels on i386 are `movl %%fs:%1` against `"m"` at the
+                // offset of the field, which was `movl $8, %eax` and `movl %fs:(%eax), %eax` where
+                // gcc writes `movl %fs:8, %eax`. Only x86 has an address with no register in it.
+                let fixed = self.fixed_address(value).filter(|_| local.is_none() && !a64 && !rv);
                 // A name this file can reach from the instruction pointer is spelled that way, as
                 // gcc spells it, rather than through a register its address was put in. The
                 // kernel's paravirt calls are `call *%[paravirt_opptr]` against `"m" (pv_ops.op)`,
                 // and the patching that turns them into direct calls only reads `call *x(%rip)`.
-                match self.near_name(value).filter(|_| local.is_none() && segment.is_none()) {
-                    Some((symbol, disp)) => Some(mir::Mem { disp, ..mir::Mem::of(symbol) }),
-                    None => {
+                match (
+                    self.near_name(value).filter(|_| local.is_none() && segment.is_none()),
+                    fixed,
+                ) {
+                    (Some((symbol, disp)), _) => Some(mir::Mem { disp, ..mir::Mem::of(symbol) }),
+                    (None, Some(disp)) => Some(mir::Mem {
+                        base: None,
+                        index: None,
+                        scale: 1,
+                        disp,
+                        symbol: None,
+                        block: None,
+                        table: None,
+                        reach: mir::Reach::Itself,
+                        segment,
+                        widen: None,
+                    }),
+                    (None, None) => {
                         // A constant added to a pointer is the displacement, as gcc writes it. The
                         // kernel's atomics are `"m" (v->counter)`, and a counter that is not first
                         // in its struct was an `add` into a register of its own in front of every
@@ -9541,6 +9561,26 @@ impl<'a> Lowering<'a> {
         }
         let spare = 128 - width;
         Some(((bits << spare) as i128) >> spare)
+    }
+
+    /// The number a pointer is, for a constant or a constant turned into a pointer, when it fits in
+    /// the displacement of an address. i386 counts addresses in 32 bits and x86-64 sign extends the
+    /// field, so the number read signed at the width of an address is what has to fit.
+    fn fixed_address(&self, value: Value) -> Option<i32> {
+        let mut number = value;
+        if let Def::Result { inst, .. } = self.source[value].def {
+            if self.source[inst].opcode == Opcode::IntToPtr {
+                let &[from] = &self.source[self.source[inst].args] else { return None };
+                if self.source[from].ty.bits() != self.address_bits() {
+                    return None;
+                }
+                number = from;
+            }
+        }
+        if !self.is_address_width(self.source[number].ty) {
+            return None;
+        }
+        i32::try_from(self.bare_number(number)?).ok()
     }
 
     /// Whether that value is a zero, a null pointer among them, which is what AArch64 spells as
