@@ -329,6 +329,37 @@ fn an_instruction_this_compiler_has_no_bytes_for_is_refused_by_name_and_by_line(
 }
 
 #[test]
+fn a_symbol_defined_with_defsym_has_its_value_and_the_lines_stay_where_they_were() {
+    // tamnd/rucc#4268. FreeBSD's mbr.S writes `.byte FLAGS` and its Makefile passes
+    // `-Wa,-defsym,FLAGS=0x80`. Without the definition the name is undefined and the byte is a
+    // relocation, so the value in the object says the definition was read.
+    let dir = dir("defsym");
+    let text = "\t.data\nflags:\t.byte FLAGS\n\t.byte NEXT\n";
+    for name in ["mbr.s", "mbr.S"] {
+        write(&dir, name, text);
+        let out = format!("{name}.o");
+        let (ok, said) = run(
+            &dir,
+            &["-Wa,-defsym,FLAGS=0x80", "-Wa,--defsym=NEXT=FLAGS+1", "-c", name, "-o", &out],
+        );
+        assert!(ok, "{name} was refused:\n{said}");
+        let bytes = std::fs::read(dir.join(&out)).expect("the object was written");
+        assert!(
+            bytes.windows(2).any(|pair| pair == [0x80, 0x81]),
+            "{name}: the two bytes are not 0x80 and 0x81"
+        );
+    }
+    // The definitions go in front of the file, and an error after them is still on its own line.
+    write(&dir, "hot.s", "\t.text\n\tvpdpbusd %zmm1, %zmm2, %zmm3\n");
+    let (ok, said) = run(&dir, &["-Wa,-defsym,FLAGS=0x80", "-c", "hot.s"]);
+    assert!(!ok, "an instruction with no bytes behind it was accepted:\n{said}");
+    assert!(
+        said.contains("hot.s:2: error:"),
+        "the message is not on the line of the source:\n{said}"
+    );
+}
+
+#[test]
 fn an_error_in_a_preprocessed_file_gives_the_line_of_the_source() {
     // The preprocessor drops the lines of a directive and puts the text of a header in front, so
     // the line in its output is not the line in the file. gas follows the line markers and says

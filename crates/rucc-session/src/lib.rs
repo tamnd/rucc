@@ -2971,6 +2971,10 @@ pub struct Options {
     /// Whether `-Wa,-mrelax-relocations=no` was given, which reads every slot of the global offset
     /// table through the relocation the linker may not rewrite, as gas does under it.
     pub asm_keep_slots: bool,
+    /// The symbols `-Wa,-defsym,NAME=VALUE` defines, in the order given. gas defines each one
+    /// before it reads the file, as `.set NAME, VALUE` does, and so does the assembler here for a
+    /// file of assembly. FreeBSD's boot sectors mbr and pmbr get their flags byte this way.
+    pub asm_defsyms: Vec<(String, String)>,
     /// Whether the linker may relax RISC-V code, which is gcc's and gas's default there and what
     /// `-mno-relax` and `-Wa,-mno-relax` turn off. Under it the assembler marks the instructions
     /// gas marks with `R_RISCV_RELAX`, leaves every distance in code to the linker and pads an
@@ -3331,6 +3335,7 @@ impl Options {
             asm_fatal_warnings: false,
             asm_noexecstack: false,
             asm_keep_slots: false,
+            asm_defsyms: Vec::new(),
             relax: true,
             sixteen: false,
             regparm: 0,
