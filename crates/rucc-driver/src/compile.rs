@@ -376,7 +376,21 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let incomplete_lines: Vec<rucc_sema::IncompleteLine> = parsed
         .incomplete_pragmas
         .iter()
-        .map(|line| rucc_sema::IncompleteLine { kind: line.kind, name: line.name, span: line.span })
+        .map(|line| rucc_sema::IncompleteLine {
+            kind: line.kind,
+            name: line.name,
+            span: line.span,
+            decls: line.decls,
+        })
+        .collect();
+    let varargck_lines: Vec<rucc_sema::VarargckLine> = parsed
+        .varargck_pragmas
+        .iter()
+        .map(|line| rucc_sema::VarargckLine {
+            pragma: varargck_pragma(&line.pragma),
+            span: line.span,
+            decls: line.decls,
+        })
         .collect();
 
     let mut artifact = Artifact::Nothing;
@@ -408,6 +422,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 plan9_extensions: sess.plan9_extensions(),
                 kencc: opts.kencc,
                 kencc_strict_void: opts.kencc_strict_void,
+                kencc_format: opts.kencc_format,
                 trapping_math: opts.trapping_math,
                 isa: opts.isa,
                 x87: opts.x87,
@@ -418,6 +433,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             },
         );
         checker.set_incomplete_lines(&incomplete_lines);
+        checker.set_varargck_lines(&varargck_lines);
         checker.check_unit();
         // After the whole file, because a `#pragma weak` applies to the name wherever the line
         // stands relative to its declarations.
@@ -3773,6 +3789,25 @@ fn lower_check(check: rucc_session::Check) -> rucc_lower::Check {
         rucc_session::Check::Report => rucc_lower::Check::Report,
         rucc_session::Check::Abort => rucc_lower::Check::Abort,
         rucc_session::Check::Trap => rucc_lower::Check::Trap,
+    }
+}
+
+/// A `#pragma varargck` line of the parser, as the checker takes it.
+fn varargck_pragma(pragma: &rucc_parse::Varargck) -> rucc_sema::VarargckPragma {
+    use rucc_parse::{Varargck, VarargckType};
+    use rucc_sema::{VarargckPragma, VarargckType as Ty};
+    match pragma {
+        &Varargck::Argpos { name, param } => VarargckPragma::Argpos { name, param },
+        Varargck::Type { format, ty, stars } => VarargckPragma::Type {
+            format: format.clone(),
+            ty: match *ty {
+                VarargckType::Name(name) => Ty::Name(name),
+                VarargckType::Keyword(keyword) => Ty::Keyword(keyword.as_str()),
+            },
+            stars: *stars,
+        },
+        &Varargck::Flag(rune) => VarargckPragma::Flag(rune),
+        Varargck::Bad => VarargckPragma::Bad,
     }
 }
 

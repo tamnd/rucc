@@ -311,6 +311,10 @@ pub fn plan(
     if o.has(b'T') {
         common.push("-fkencc-signatures".to_owned());
     }
+    // `-F` checks the formats that `#pragma varargck` names.
+    if o.has(b'F') {
+        common.push("-fkencc-format".to_owned());
+    }
     for d in &o.defines {
         common.push(format!("-D{d}"));
     }
@@ -456,6 +460,7 @@ mod tests {
                 "-fkencc",
                 "-fkencc-strict-void",
                 "-fkencc-signatures",
+                "-fkencc-format",
                 "-idirafter",
                 ".",
                 "-O2",
@@ -610,6 +615,7 @@ mod tests {
                 "-fkencc",
                 "-fkencc-strict-void",
                 "-fkencc-signatures",
+                "-fkencc-format",
                 "-I../common",
                 "-idirafter",
                 ".",

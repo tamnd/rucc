@@ -1952,6 +1952,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-kencc-strict-void" => opts.kencc_strict_void = false,
             "-fkencc-signatures" => opts.kencc_signatures = true,
             "-fno-kencc-signatures" => opts.kencc_signatures = false,
+            "-fkencc-format" => opts.kencc_format = true,
+            "-fno-kencc-format" => opts.kencc_format = false,
             // Both directions of this one are recorded, and what they decide is whether lowering
             // names the type each access goes through. Turning it off is the front end leaving the
             // name off rather than a pass being told to ignore one it can see, which is one
