@@ -29,10 +29,15 @@ use rucc_object::plan9::{Addr6, History, Machine, NSNAME, Object, Prog6, Progs, 
 use crate::Trouble;
 
 mod arm64;
+mod oplook7;
 mod optab;
 // `r9 optab` writes the table, with each class and a `pub` that the check does not use.
 #[allow(dead_code, unreachable_pub)]
 mod optab6;
+// `r9 optab --row arm64` writes the table, with each class and a `pub`.
+#[allow(dead_code, unreachable_pub)]
+#[rustfmt::skip]
+mod optab7;
 
 pub use arm64::arm64;
 
