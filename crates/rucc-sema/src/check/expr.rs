@@ -1315,6 +1315,14 @@ impl Checker<'_> {
                     let what = if op == UnaryOp::Plus { "plus" } else { "minus" };
                     return self.wrong_operand(&format!("unary {what}"), span);
                 }
+                // kencc has no negation of a floating value. `tcom` in `cc/com.c` makes `-x`
+                // into `0 - x` where `machcap` refuses the operator, so `-0.0` is `+0.0`.
+                let real = rucc_types::is_real_floating(&self.types, self.tast[operand].ty);
+                if self.cx.kencc && op == UnaryOp::Minus && real {
+                    let int = self.types.int(IntKind::Int);
+                    let zero = self.constant(Const::Int(0), int, span);
+                    return self.arithmetic_binary(BinaryOp::Sub, zero, operand, false, span);
+                }
                 // `-(a * b)` keeps the wide product, which a sum around it then uses.
                 let ty = self.tast[operand].ty;
                 let operand = self.conv().unexcess(operand);
