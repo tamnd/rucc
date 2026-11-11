@@ -4101,6 +4101,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     opts.asm_fatal_warnings = assembler.fatal_warnings;
     opts.asm_noexecstack = assembler.noexecstack;
     opts.asm_keep_slots = assembler.keep_slots;
+    opts.asm_defsyms = assembler.defsyms;
     opts.relax = assembler.relax.unwrap_or(relax);
     // gcc's `finish_options`, read as a table. An executable is what nothing at all means, and
     // what `-fpie` means whatever the other family said, so `-fPIE -fno-pic` is still position
@@ -6244,7 +6245,7 @@ fn gas_banner(version: rucc_session::GasVersion) -> String {
 }
 
 /// What the words a build handed the assembler come to.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Assembler {
     /// `--version`, which prints the assembler's banner instead of assembling anything.
     version: bool,
@@ -6258,6 +6259,8 @@ struct Assembler {
     /// `-mrelax` or `-mno-relax` on RISC-V, the last of them, which wins over the compiler's own
     /// flag of the same name as it does when gcc passes both to gas.
     relax: Option<bool>,
+    /// `-defsym NAME=VALUE`, each name and the text of its value, in the order given.
+    defsyms: Vec<(String, String)>,
 }
 
 /// The words of every `-Wa,` and `-Xassembler`, each one honored, taken because it describes what
@@ -6332,6 +6335,20 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
                 }
             }
             _ if word.starts_with("-I") => {}
+            // A symbol defined before the file is read, as `.set` defines one. gas takes the
+            // option with one dash or two, and the definition as the next word or after `=`.
+            "-defsym" | "--defsym" => {
+                let Some((next, _)) = words.next() else {
+                    return Err(refuse("-defsym requires a NAME=VALUE"));
+                };
+                out.defsyms
+                    .push(defsym(next).ok_or_else(|| refuse("-defsym requires a NAME=VALUE"))?);
+            }
+            _ if word.starts_with("-defsym=") || word.starts_with("--defsym=") => {
+                let (_, given) = word.split_once('=').expect("the prefix has one");
+                out.defsyms
+                    .push(defsym(given).ok_or_else(|| refuse("-defsym requires a NAME=VALUE"))?);
+            }
             // The architecture gas takes instructions from. The kernel passes `armv8.4-a` or
             // `armv8.5-a` on AArch64 so that the assembler takes instructions the compiler must not
             // generate, and this assembler takes every instruction it can encode whatever
@@ -6368,6 +6385,14 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
         }
     }
     Ok(out)
+}
+
+/// The name and the value of a `-defsym`, which gas splits at the first `=`. The value is the text
+/// of an expression, read by the assembler as the value of a `.set` is.
+fn defsym(given: &str) -> Option<(String, String)> {
+    let (name, value) = given.split_once('=')?;
+    let (name, value) = (name.trim(), value.trim());
+    (!name.is_empty() && !value.is_empty()).then(|| (name.to_owned(), value.to_owned()))
 }
 
 /// Writes what a printing action answers to stdout. A reader that stops early closes the pipe, as
@@ -11021,6 +11046,37 @@ mod tests {
         let (opts, _) = compile(&[x86, "-Wa,--fatal-warnings", "-c", "a.c"]);
         assert!(opts.asm_fatal_warnings, "--fatal-warnings did not reach the assembler");
         assert!(!compile(&[x86, "-c", "a.c"]).0.asm_fatal_warnings);
+    }
+
+    /// tamnd/rucc#4268. FreeBSD's mbr and pmbr pass `-Wa,-defsym,FLAGS=0x80`. gas takes the option
+    /// with one dash or two, and the definition as the next word or after `=`.
+    #[test]
+    fn defsym_reaches_the_assembler_in_each_spelling_gas_takes() {
+        let x86 = "--target=x86_64-unknown-freebsd15.1";
+        let (opts, _) = compile(&[
+            x86,
+            "-m32",
+            "-Wa,-defsym,FLAGS=0x80",
+            "-Wa,--defsym,B=A+1",
+            "-Wa,--defsym=C=2",
+            "-Xassembler",
+            "-defsym",
+            "-Xassembler",
+            "D=3",
+            "-c",
+            "a.c",
+        ]);
+        let want = [("FLAGS", "0x80"), ("B", "A+1"), ("C", "2"), ("D", "3")]
+            .map(|(name, value)| (name.to_owned(), value.to_owned()));
+        assert_eq!(opts.asm_defsyms, want);
+        assert!(compile(&[x86, "-c", "a.c"]).0.asm_defsyms.is_empty());
+        for words in [&["-Wa,-defsym"][..], &["-Wa,-defsym,FLAGS"], &["-Wa,--defsym==1"]] {
+            let mut line = vec![x86];
+            line.extend_from_slice(words);
+            line.extend_from_slice(&["-c", "a.c"]);
+            let why = refused(&line);
+            assert!(why.contains("requires a NAME=VALUE"), "{words:?}: {why}");
+        }
     }
 
     #[test]

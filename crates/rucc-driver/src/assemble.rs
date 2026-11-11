@@ -55,6 +55,8 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         }
     };
 
+    let text = defined(opts, name, text);
+
     if opts.target.arch.is_wasm() {
         // The dialect of LLVM for wasm, as `rucc -S` writes it, which the reader in `rucc-wasm`
         // takes back into the object model of that back end (tamnd/rucc#3141).
@@ -120,6 +122,24 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
             done(Artifact::Nothing, messages, 1, deps, preprocessed, temps)
         }
     }
+}
+
+/// The text with a `.set` in front for each `-Wa,-defsym`, which is what gas does with them: each
+/// symbol is defined before the first line of the file is read. A line marker after them says the
+/// file starts at its own first line again, so an error is still reported at the line it is on.
+/// A C unit gets no symbol from `-defsym`. gcc's would have one, which nothing reads but an `asm`
+/// that names it.
+fn defined(opts: &Options, name: &str, text: String) -> String {
+    if opts.asm_defsyms.is_empty() {
+        return text;
+    }
+    let mut out = String::new();
+    for (sym, value) in &opts.asm_defsyms {
+        out.push_str(&format!(".set {sym}, {value}\n"));
+    }
+    out.push_str(&format!("# 1 \"{name}\"\n"));
+    out.push_str(&text);
+    out
 }
 
 /// The file and the line a line of the text came from, by the line markers in front of it.
