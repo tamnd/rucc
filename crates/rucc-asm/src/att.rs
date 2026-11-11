@@ -367,6 +367,12 @@ impl Frame {
                     self.saved.remove(&reg);
                 }
             },
+            // A row only a file of assembly has, and this state is only kept for the compiler's own
+            // functions, so it never arrives. The nearest the state can say is that no slot holds
+            // the register.
+            CfiOp::Undefined(reg) => {
+                self.saved.remove(&reg);
+            }
             CfiOp::RememberState => stack.push(self.clone()),
             CfiOp::RestoreState => {
                 if let Some(state) = stack.pop() {
@@ -823,6 +829,7 @@ impl Writer<'_> {
             CfiOp::DefCfaRegister(reg) => writeln!(self.out, "\t.cfi_def_cfa_register {reg}"),
             CfiOp::Offset { reg, offset } => writeln!(self.out, "\t.cfi_offset {reg}, {offset}"),
             CfiOp::Restore(reg) => writeln!(self.out, "\t.cfi_restore {reg}"),
+            CfiOp::Undefined(reg) => writeln!(self.out, "\t.cfi_undefined {reg}"),
             CfiOp::RememberState => writeln!(self.out, "\t.cfi_remember_state"),
             CfiOp::RestoreState => writeln!(self.out, "\t.cfi_restore_state"),
             CfiOp::NegateRaState => writeln!(self.out, "\t.cfi_negate_ra_state"),

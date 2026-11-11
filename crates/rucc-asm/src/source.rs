@@ -2122,6 +2122,7 @@ impl Reader {
             | "cfi_offset"
             | "cfi_rel_offset"
             | "cfi_restore"
+            | "cfi_undefined"
             | "cfi_remember_state"
             | "cfi_restore_state"
             | "cfi_personality"
@@ -2209,6 +2210,9 @@ impl Reader {
             }
             "cfi_restore" => {
                 CfiOp::Restore(self.dwarf(args.first().map_or("", |arg| arg.as_str()))?)
+            }
+            "cfi_undefined" => {
+                CfiOp::Undefined(self.dwarf(args.first().map_or("", |arg| arg.as_str()))?)
             }
             "cfi_remember_state" => {
                 frame.remembered.push(frame.cfa);
@@ -11139,6 +11143,43 @@ nop
             0, 0, 0, 0, 0x01, 0x7a, 0x52, 0x00, 0x01, 0x7c, 0x08, 0x01, 0x1b, 0x0c, 0x04, 0x04,
             0x88, 0x01, 0, 0, 0x10, 0, 0, 0, 0x1c, 0, 0, 0, 0, 0, 0, 0,
             0x02, 0, 0, 0, 0x00, 0x41, 0x0e, 0x08,
+        ];
+        assert_eq!(bytes(&read, ".eh_frame"), gas);
+    }
+
+    /// The start code of FreeBSD, lib/csu/i386/crt1_s.S and lib/csu/amd64/crt1_s.S. It says the
+    /// return address is undefined, so that an unwinder stops there, and the i386 one pops the word
+    /// the kernel left and says the frame ends 4 bytes below the stack pointer. A negative end gets
+    /// the signed forms, counted in slots of -4. The rows at the first byte go in the header, as gas
+    /// puts them there. The bytes are what gas 2.42 writes, but for the one that says where
+    /// `_start` is, which the object writer fills in from the relocation.
+    #[test]
+    fn the_start_code_has_an_undefined_return_address_and_a_frame_below_the_stack_pointer() {
+        let read = i386(concat!(
+            "_start:\n\t.cfi_startproc\n\t.cfi_undefined %eip\n\tpopl %esi\n",
+            "\t.cfi_def_cfa_offset -4\n\tpushl %esi\n\t.cfi_def_cfa_offset 0\n\tpushl %ebp\n",
+            "\t.cfi_offset %ebp,-4\n\tmovl %esp,%ebp\n\t.cfi_def_cfa_register %ebp\n\thlt\n",
+            "\t.cfi_def_cfa %esp, -8\n\thlt\n\t.cfi_endproc\n",
+        ));
+        #[rustfmt::skip]
+        let gas = [
+            0x14, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x7a, 0x52, 0x00, 0x01, 0x7c, 0x08, 0x01,
+            0x1b, 0x0c, 0x04, 0x04, 0x88, 0x01, 0x07, 0x08, 0x20, 0, 0, 0, 0x1c, 0, 0, 0,
+            0, 0, 0, 0, 0x07, 0, 0, 0, 0x00, 0x41, 0x13, 0x01, 0x41, 0x0e, 0x00, 0x41,
+            0x85, 0x01, 0x42, 0x0d, 0x05, 0x41, 0x12, 0x04, 0x02, 0, 0, 0,
+        ];
+        assert_eq!(bytes(&read, ".eh_frame"), gas);
+        let read = assembled(concat!(
+            "_start:\n\t.cfi_startproc\n\t.cfi_undefined %rip\n\txorl %ebp,%ebp\n",
+            "\tpushq %rbp\n\t.cfi_def_cfa_offset 8\n\tmovq %rsp,%rbp\n",
+            "\t.cfi_offset %rbp, -16\n\t.cfi_def_cfa_register %rbp\n\thlt\n\t.cfi_endproc\n",
+        ));
+        #[rustfmt::skip]
+        let gas = [
+            0x14, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x7a, 0x52, 0x00, 0x01, 0x78, 0x10, 0x01,
+            0x1b, 0x0c, 0x07, 0x08, 0x90, 0x01, 0x07, 0x10, 0x1c, 0, 0, 0, 0x1c, 0, 0, 0,
+            0, 0, 0, 0, 0x07, 0, 0, 0, 0x00, 0x43, 0x0e, 0x08, 0x43, 0x86, 0x02, 0x0d,
+            0x06, 0, 0, 0, 0, 0, 0, 0,
         ];
         assert_eq!(bytes(&read, ".eh_frame"), gas);
     }
