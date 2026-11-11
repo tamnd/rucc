@@ -9755,6 +9755,32 @@ _tls$tlv$init:
         assert_eq!(reloc.addend, -4);
     }
 
+    /// `@plt` in an address is the distance to the name's stub, which gas writes as
+    /// `R_X86_64_PLT32` with the end of the instruction taken off, as it does for a call. A static
+    /// name defined here needs no stub, and the distance to it is worked out. FreeBSD's amd64
+    /// crt1_s.S has `leaq main@plt(%rip), %r8`. The relocations are the ones gas 2.42 writes.
+    #[test]
+    fn plt_in_an_address_is_the_distance_to_the_stub() {
+        let read = assembled(
+            "\t.globl g\ng:\tret\ns:\tret\n\
+             \tleaq main@plt(%rip), %r8\n\tleaq main@PLT(%rip), %r8\n\
+             \tleaq g@plt(%rip), %rax\n\tleaq s@plt(%rip), %rax\n\
+             \tmovq main@plt+8(%rip), %rax\n\tcmpl $1, main@plt(%rip)\n\tcall main@plt\n",
+        );
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (5, "main", Reference::Call, -4),
+                (12, "main", Reference::Call, -4),
+                (19, "g", Reference::Call, -4),
+                (33, "main", Reference::Call, 4),
+                (39, "main", Reference::Call, -5),
+                (45, "main", Reference::Call, -4),
+            ]
+        );
+        assert_eq!(bytes(&read, ".text")[23..30], [0x48, 0x8d, 0x05, 0xe3, 0xff, 0xff, 0xff]);
+    }
+
     #[test]
     fn a_datum_reached_from_the_instruction_pointer_is_a_relocation_that_may_not() {
         let out = assembled("\t.text\n\tmovq message(%rip), %rax\n");

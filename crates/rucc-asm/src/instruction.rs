@@ -109,11 +109,16 @@ pub(crate) enum Sort {
 /// `__tls_get_addr`. `@tlsdesc` is the address of a TLS descriptor, which the call after it goes
 /// through. Reading them back is what lets a file it emitted be assembled by it. gas reads
 /// each in either case and gcc writes them in lower case, so the case is not looked at.
+///
+/// `@PLT` is the distance to the name's stub, which is what a branch gets. gas writes
+/// `R_X86_64_PLT32` for it in an address too, and FreeBSD's amd64 crt1_s.S has
+/// `leaq main@plt(%rip), %r8`.
 fn reached(named: &str) -> Result<(String, Sort), String> {
     let Some((name, how)) = named.split_once('@') else {
         return Ok((named.to_owned(), Sort::Near));
     };
-    const SUFFIXES: [(&str, Sort); 5] = [
+    const SUFFIXES: [(&str, Sort); 6] = [
+        ("PLT", Sort::Branch),
         ("GOTPCREL", Sort::Table),
         ("GOTTPOFF", Sort::Thread),
         ("TLSGD", Sort::Dynamic(Tls::General)),
@@ -751,7 +756,7 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
         let (name, sort) = match name.split_once('@') {
             None if mode == Mode::Bits32 => (name.clone(), Sort::Plain),
             None => (name.clone(), Sort::Branch),
-            Some((name, "PLT")) => (name.to_owned(), Sort::Branch),
+            Some((name, how)) if how.eq_ignore_ascii_case("PLT") => (name.to_owned(), Sort::Branch),
             Some((_, how)) => {
                 return Err(format!("'@{how}' is not a way of reaching somewhere to go"));
             }
