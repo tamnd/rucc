@@ -2079,16 +2079,11 @@ impl Checker<'_> {
                     self.invalid_computation(op, target, source, span);
                     return None;
                 }
-                // kencc computes `a op= b` in the type of its table with no promotion.
-                let kencc = self.cx.kencc.then(|| {
-                    rucc_types::kencc_arithmetic(
-                        &mut self.types,
-                        target,
-                        source,
-                        false,
-                        self.cx.target,
-                    )
-                });
+                // kencc computes `a op= b` in the type of `a`, with `b` cast to it.
+                let kencc = self
+                    .cx
+                    .kencc
+                    .then(|| rucc_types::kencc_assignment(&mut self.types, target, source));
                 let Some(computation) = kencc.flatten().or_else(|| {
                     rucc_types::usual_arithmetic(&mut self.types, target, source, self.cx.target)
                 }) else {
