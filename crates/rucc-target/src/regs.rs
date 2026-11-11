@@ -362,6 +362,16 @@ pub struct Trace {
     pub late: &'static str,
     /// Which of the two a command line that named neither gets.
     pub fentry: bool,
+    /// Whether the hook is called the way the program calls a function, from the top of the body
+    /// with the address the function returns to as its one argument, rather than written into the
+    /// prologue as a call every register comes back from unchanged.
+    ///
+    /// gcc writes the hook this way on AArch64 and RISC-V: `_mcount` given the link register, and
+    /// what the registers hold across it is the allocator's business as with any other call. The
+    /// C library's `_mcount` on those machines is written for that, and NetBSD's on RISC-V reads
+    /// the address in the first argument register. On such a convention [`Trace::late`] is the
+    /// name and [`Trace::early`] is never asked for, since there is no `-mfentry` there.
+    pub called: bool,
 }
 
 /// What a platform calls the routine that reaches the pages of a frame before the frame is taken.
