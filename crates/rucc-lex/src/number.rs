@@ -1445,13 +1445,14 @@ mod tests {
     #[test]
     fn a_suffix_goes_where_the_type_it_names_goes() {
         // The rows are gcc 13's, measured with the cross compilers. armv7 has no type wider than
-        // a `double`, so all three of these are refused there, and i686 has the quad and not the
-        // half, so one of them is.
+        // a `double`, so all three of these are refused there. s390x has the quad and not the
+        // half, so one of them is. i686 has both since tamnd/rucc#4324.
         // The three field triple cannot spell either of these machines, so they come from the
         // tuple, which spells all forty three rows.
         let arm =
             TargetInfo::for_tuple("armv7-linux-gnueabihf".parse().expect("a row in the table"));
         let i686 = TargetInfo::for_tuple("i686-linux-gnu".parse().expect("a row in the table"));
+        let s390x = TargetInfo::for_tuple("s390x-linux-gnu".parse().expect("a row in the table"));
         for text in ["1.0f16", "1.0f128", "1.0q", "1.0f64x"] {
             assert_eq!(
                 floating(text, Std::C23, &arm),
@@ -1461,10 +1462,12 @@ mod tests {
             assert!(float(text).is_ok(), "{text} on x86-64");
         }
         assert_eq!(
-            floating("1.0f16", Std::C23, &i686),
+            floating("1.0f16", Std::C23, &s390x),
             Err(FloatError::UnsupportedType),
-            "the half is the one i686 has no format for"
+            "the half is the one s390x has no format for"
         );
+        assert!(floating("1.0f128", Std::C23, &s390x).is_ok());
+        assert!(floating("1.0f16", Std::C23, &i686).is_ok());
         assert!(floating("1.0f128", Std::C23, &i686).is_ok());
         // `_Float64x` is the x87 format on i686 as it is on x86-64, which is the target's answer
         // and was not this crate's: a copy of the rule here asked for x86-64 alone.
