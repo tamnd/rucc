@@ -38,7 +38,7 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_types::{
     ArrayLen, Extent, FloatKind, IntKind, Layout, LayoutError, RecordId, TypeId, TypeKind, align,
     compatible, element_as_written, is_arithmetic, is_complete, is_floating, is_function,
-    is_integer, is_pointer, is_record, is_void, kencc_signature, layout,
+    is_integer, is_pointer, is_record, is_void, layout,
 };
 
 use crate::check::Checker;
@@ -428,7 +428,7 @@ impl Checker<'_> {
             );
             return self.poison(span);
         }
-        let value = kencc_signature(&self.types, ty, self.cx.target, &|_| false);
+        let value = self.kencc_signature(ty);
         let ulong = self.types.int(IntKind::ULong);
         self.constant(Const::Int(i128::from(value)), ulong, span)
     }

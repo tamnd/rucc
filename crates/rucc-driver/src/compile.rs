@@ -373,6 +373,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let diagnostic_pragmas = parsed.diagnostic_pragmas;
     let weak_pragmas = parsed.weak_pragmas;
     let extname_pragmas = parsed.extname_pragmas;
+    let incomplete_lines: Vec<rucc_sema::IncompleteLine> = parsed
+        .incomplete_pragmas
+        .iter()
+        .map(|line| rucc_sema::IncompleteLine { kind: line.kind, name: line.name, span: line.span })
+        .collect();
 
     let mut artifact = Artifact::Nothing;
     // Zero when nothing instruments, which is the truthful summary of a file built without
@@ -413,6 +418,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 excess_constants: opts.excess_constants.unwrap_or(!opts.gnu_extensions),
             },
         );
+        checker.set_incomplete_lines(&incomplete_lines);
         checker.check_unit();
         // After the whole file, because a `#pragma weak` applies to the name wherever the line
         // stands relative to its declarations.
@@ -720,6 +726,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                         name,
                                         meaning: &meaning,
                                         copies: &copied,
+                                        signatures: opts
+                                            .kencc_signatures
+                                            .then_some(&checked.kencc_signatures),
                                     },
                                 )
                             });
@@ -972,7 +981,13 @@ pub(crate) fn joined(opts: &Options, units: &[rucc_lto::Unit<'_>]) -> Result<Vec
             spent: &mut Spent::default(),
         },
         &mut None,
-        Origin { map: &sess.sources, name, meaning: &meaning, copies: &rucc_ir::Copies::default() },
+        Origin {
+            map: &sess.sources,
+            name,
+            meaning: &meaning,
+            copies: &rucc_ir::Copies::default(),
+            signatures: None,
+        },
     )
     .map_err(flat)?;
     match made {
@@ -1369,6 +1384,9 @@ struct Origin<'a> {
     meaning: &'a crate::shapes::Meaning,
     /// The bodies the inliner copied and the declarations of each copy. See [`rucc_ir::Copies`].
     copies: &'a rucc_ir::Copies,
+    /// The kencc type signatures of the external names, which a Plan 9 object holds under `-T`,
+    /// and nothing where the build did not ask for them.
+    signatures: Option<&'a Map<String, u32>>,
 }
 
 /// Why there is no code for this target, or `None` when there is a back end for it.
@@ -1972,6 +1990,12 @@ fn generate(
             // Each `#pragma lib` names a library that the linker loads, as with kencc.
             for lib in module.linker_options() {
                 object.history.push(rucc_object::plan9::History::library(lib, 1));
+            }
+            // `-T` puts the type signature of each external name in the object, which the
+            // linker compares across the objects.
+            if let Some(signatures) = origin.signatures {
+                object.signed = true;
+                object.signatures.clone_from(signatures);
             }
             let bytes = rucc_object::plan9::write_plan9(&object)
                 .map_err(|why| vec![internal(&format!("a Plan 9 object: {why:?}"))])?;

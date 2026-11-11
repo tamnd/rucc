@@ -2685,6 +2685,10 @@ pub struct Options {
     /// type. APE's `sys/socket.h` declares `getpeername(int, void *, int *)`, and the definition
     /// takes a `struct sockaddr *`.
     pub kencc_strict_void: bool,
+    /// Whether a Plan 9 object holds the kencc type signature of each external name, which is
+    /// `-fkencc-signatures`. The kencc driver sets it for `-T`, and the linker then compares the
+    /// signatures of one name across the objects.
+    pub kencc_signatures: bool,
     /// The 9P server that the sysroot is on, as a dial string, from `--sysroot=9p:<address>`.
     ///
     /// The sysroot is then the text `9p:<address>`, and the driver reads each path under it from
@@ -3268,6 +3272,7 @@ impl Options {
             kencc: false,
             ansi_preprocessor: false,
             kencc_strict_void: false,
+            kencc_signatures: false,
             nine_p: None,
             common: None,
             zero_initialized_in_bss: true,

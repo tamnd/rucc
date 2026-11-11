@@ -42,6 +42,7 @@ const PACKED: &str = "#pragma pack on\n\
                       #pragma varargck type \"V\" void*\n\
                       #pragma varargck argpos print 1\n\
                       #pragma varargck flag ','\n\
+                      typedef struct Intmap Intmap;\n\
                       #pragma incomplete Intmap\n\
                       #pragma src \"/sys/src/libc\"\n\
                       #pragma profile off\n\

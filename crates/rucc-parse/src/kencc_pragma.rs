@@ -10,16 +10,21 @@
 //!   that number. As with gcc, the value at the closing brace of a record body applies.
 //! - `lib "name"` asks the linker for a library. It goes to the driver as `#pragma comment(lib)`
 //!   does, and the object writer of the Plan 9 targets puts it in the object.
-//! - `varargck` and `incomplete` give format checking and type signatures. They act only under
-//!   `-F` and `-T`, and they are read with that work.
+//! - `incomplete` names a structure or a union whose members the type signature leaves out, as
+//!   `pragincomplete` does. The line goes to the checker, which marks the record at the place of
+//!   the line. The forms `_off_` and `_on_` change `-T` for the rest of the file in kencc, and no
+//!   file of 9front has them, so they are ignored.
+//! - `varargck` gives format checking. It acts only under `-F`, and it is read with that work.
 //! - `profile` and `fpround` change nothing that rucc writes yet.
 //!
 //! `#pragma once` never gets here, because the preprocessor reads it. kencc ignores it, so a
 //! header included twice is read twice. A header that kencc reads twice with no error gives the
 //! same declarations when rucc reads it once, so rucc keeps `once`.
 
+use rucc_ast::RecordKind;
+use rucc_base::Symbol;
 use rucc_diag::Span;
-use rucc_lex::Token;
+use rucc_lex::{Keyword, Token};
 
 use crate::comment::Comment;
 use crate::parser::Parser;
@@ -31,6 +36,7 @@ impl Parser<'_> {
         match self.cx.interner.resolve(word) {
             "pack" => self.kencc_pack(&line[1..]),
             "lib" => self.kencc_lib(&line[1..], span),
+            "incomplete" => self.kencc_incomplete(&line[1..], span),
             _ => {}
         }
     }
@@ -54,4 +60,48 @@ impl Parser<'_> {
             _ => self.error("E0798", "syntax in `#pragma lib`", span),
         }
     }
+
+    /// `#pragma incomplete`, as `pragincomplete` in `cc/dpchk.c` reads it: a name whose type is
+    /// the record, or `struct` or `union` and a tag.
+    fn kencc_incomplete(&mut self, rest: &[Token], span: Span) {
+        let Some(first) = rest.first() else { return };
+        let kind = match first.keyword() {
+            Some(Keyword::Struct) => Some(RecordKind::Struct),
+            Some(Keyword::Union) => Some(RecordKind::Union),
+            _ => None,
+        };
+        let name = match kind {
+            Some(_) => match rest.get(1).and_then(|token| token.ident()) {
+                Some(name) => name,
+                None => {
+                    let what = if rest.len() < 2 {
+                        "missing struct/union tag in pragma incomplete"
+                    } else {
+                        "invalid struct/union tag in pragma incomplete"
+                    };
+                    return self.error("E0798", what, span);
+                }
+            },
+            None => match first.ident() {
+                Some(name) => name,
+                None => return,
+            },
+        };
+        if kind.is_none() && matches!(self.cx.interner.resolve(name), "_off_" | "_on_") {
+            return;
+        }
+        self.incomplete_pragmas.push(IncompletePragma { kind, name, span });
+    }
+}
+
+/// What one `#pragma incomplete` line names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncompletePragma {
+    /// `struct` or `union` when the line names a tag, and nothing when it names an ordinary
+    /// name whose type is the record.
+    pub kind: Option<RecordKind>,
+    /// The name.
+    pub name: Symbol,
+    /// Where the line is. The checker marks the record when it reaches this place.
+    pub span: Span,
 }

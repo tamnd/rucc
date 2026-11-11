@@ -84,6 +84,9 @@ pub struct Parsed {
     /// The unit's `#pragma redefine_extname` lines, one for each name, in the order they were
     /// written, which the checker applies by name once it has seen the whole file.
     pub extname_pragmas: Vec<crate::ExtnamePragma>,
+    /// The unit's kencc `#pragma incomplete` lines, in the order they were written, which the
+    /// checker applies at the place of each line.
+    pub incomplete_pragmas: Vec<crate::IncompletePragma>,
 }
 
 impl Parsed {
@@ -118,6 +121,8 @@ pub struct Parser<'a> {
     pub(crate) weak_pragmas: Vec<crate::WeakPragma>,
     /// The `#pragma redefine_extname` lines read so far, which is in `extname.rs`.
     pub(crate) extname_pragmas: Vec<crate::ExtnamePragma>,
+    /// The kencc `#pragma incomplete` lines read so far, which is in `kencc_pragma.rs`.
+    pub(crate) incomplete_pragmas: Vec<crate::IncompletePragma>,
     /// How many `__extension__` keywords are in effect where the cursor is.
     ///
     /// gcc reads the keyword as a promise that what follows uses an extension on purpose, and
@@ -153,6 +158,7 @@ impl<'a> Parser<'a> {
             diagnostic_pragmas: Vec::new(),
             weak_pragmas: Vec::new(),
             extname_pragmas: Vec::new(),
+            incomplete_pragmas: Vec::new(),
             extension: 0,
             ints: vec![None; tokens.ints.len()],
         }
@@ -168,6 +174,7 @@ impl<'a> Parser<'a> {
             diagnostic_pragmas: self.diagnostic_pragmas,
             weak_pragmas: self.weak_pragmas,
             extname_pragmas: self.extname_pragmas,
+            incomplete_pragmas: self.incomplete_pragmas,
         }
     }
 

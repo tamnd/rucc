@@ -320,6 +320,10 @@ pub fn plan(
     if o.has(b'V') {
         common.push("-fkencc-strict-void".to_owned());
     }
+    // `-T` puts the type signatures in the object.
+    if o.has(b'T') {
+        common.push("-fkencc-signatures".to_owned());
+    }
     for d in &o.defines {
         common.push(format!("-D{d}"));
     }
@@ -486,6 +490,7 @@ mod tests {
                 "-c",
                 "-fkencc",
                 "-fkencc-strict-void",
+                "-fkencc-signatures",
                 "-idirafter",
                 ".",
                 "-O2",
@@ -639,6 +644,7 @@ mod tests {
                 "-c",
                 "-fkencc",
                 "-fkencc-strict-void",
+                "-fkencc-signatures",
                 "-I../common",
                 "-idirafter",
                 ".",
