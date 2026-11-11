@@ -905,7 +905,7 @@ impl Reader {
             return self.directive(directive, rest);
         }
         if self.riscv {
-            if rest.contains(['*', '/', '<', '>', '|', '&', '^', '~', '(', '+', '-'])
+            if rest.contains(['*', '/', '<', '>', '|', '&', '^', '~', '(', '+', '-', '\''])
                 || !self.values.is_empty()
             {
                 return self.rv64(&format!("{word} {}", self.rv_sums(rest)));
@@ -1136,7 +1136,8 @@ impl Reader {
     /// front of `(reg)`, worked out to its number.
     ///
     /// The kernel writes these through the preprocessor, `addi sp, sp, -12*SZREG` and
-    /// `REG_S s0, 1*SZREG(sp)` in the vDSO's ChaCha, and with `.set` names. An operand with a
+    /// `REG_S s0, 1*SZREG(sp)` in the vDSO's ChaCha, and with `.set` names. A character is a
+    /// constant too: NetBSD's riscv `locore.S` prints a letter with `li a0, 'P'`. An operand with a
     /// symbol in it, `%lo(x)` or `.+8` is left to the reader, since only the linker or the place
     /// knows what it is.
     fn rv_sums(&self, rest: &str) -> String {
@@ -1144,6 +1145,7 @@ impl Reader {
             let text = text.trim();
             let sum = !text.starts_with(['%', '.'])
                 && (self.values.contains_key(text)
+                    || text.starts_with('\'')
                     || text.contains(['*', '/', '<', '>', '|', '&', '^', '~', '('])
                     || text.get(1..).is_some_and(|after| after.contains(['+', '-'])));
             sum.then(|| {
@@ -8210,6 +8212,17 @@ _tls$tlv$init:
         ] {
             assert!(super::read(line, Arch::Riscv64).is_err(), "{line}");
         }
+    }
+
+    #[test]
+    fn a_riscv_character_is_the_number_of_its_letter() {
+        // How NetBSD's riscv locore.S prints a letter on the console before the kernel is up.
+        let read = match read("\t.option norvc\n\tli a0, 'P'\n\tli a1, ','\n", Arch::Riscv64) {
+            Ok(assembled) => assembled,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        // The words GNU as writes for the same lines: `addi a0, zero, 80` and `addi a1, zero, 44`.
+        assert_eq!(words(&read, ".text"), [0x0500_0513, 0x02c0_0593]);
     }
 
     #[test]
