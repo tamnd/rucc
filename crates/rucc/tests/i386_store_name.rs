@@ -1,6 +1,7 @@
 //! On i386 outside position independent code, a store of the address of a name carries the name as
 //! its immediate, `movl $g, (%eax)`, the way gcc writes it. It used to be a `leal g, %ecx` and a
-//! store of `%ecx`. An address that something other than a store reads keeps its `leal`.
+//! store of `%ecx`. An address that something other than a store reads is put in a register, with
+//! `movl $g, %reg` as gcc writes it and not `leal g, %reg`, which is a byte longer.
 
 use std::process::Command;
 
@@ -47,7 +48,8 @@ fn a_stored_address_is_the_immediate_of_the_store() {
         ] {
             assert!(text.contains(line), "{level} {line:?}:\n{text}");
         }
-        assert_eq!(text.matches("\tleal\tg, ").count(), 1, "{level}:\n{text}");
+        assert_eq!(text.matches("\tmovl\t$g, %e").count(), 1, "{level}:\n{text}");
+        assert!(!text.contains("\tleal\tg"), "{level}:\n{text}");
     }
 }
 

@@ -3308,7 +3308,7 @@ mod tests {
             let locals = [local];
             let base = Layout::new(&SYSV, REGS);
             let layout = Layout { locals: &locals, leaf, grows, forced: true, ..base };
-            assert!(crate::frame::keeps_frame_pointer(&layout) || leaf);
+            assert!(crate::frame::keeps_frame_pointer(&layout, true) || leaf);
             Frame::of(&func, &allocation, &layout).realign()
         };
         let narrow = Local { size: 8, align: 8 };

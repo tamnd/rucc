@@ -1124,15 +1124,20 @@ fn width(layout: &Layout<'_>, class: RegClass) -> u32 {
 /// one input that is not known up front is how widely aligned the spill slots are, and that is
 /// bounded by the width of a whole register of each class a value can be spilled from, which is
 /// what a slot is at its widest. tamnd/rucc#2777.
+///
+/// `held` is whether the function has a value of the vector class at all. One that has none has
+/// nothing to spill from a vector register, whatever the command line lets it use. i386 keeps the
+/// vector registers on under `-march=i386`, and the boot code's `-mpreferred-stack-boundary=2`
+/// then made the sixteen byte slot of a value that is not there keep `ebp` in every function.
 #[must_use]
-pub fn keeps_frame_pointer(layout: &Layout<'_>) -> bool {
+pub fn keeps_frame_pointer(layout: &Layout<'_>, held: bool) -> bool {
     let conv = layout.conv;
     let saved = layout.vectors && !conv.sse_saved.is_empty();
     let vector = conv.sse_kept.map_or_else(|| width(layout, conv.sse_class), u32::from);
     // A function that may not use the vector registers has no value in one to spill. Counting the
     // slot anyway kept a frame pointer in every function of a kernel, whose stack is only on a
     // multiple of eight, and so took `rbp` away from the allocator everywhere.
-    let spilled = layout.vectors.then(|| width(layout, conv.sse_class));
+    let spilled = (layout.vectors && held).then(|| width(layout, conv.sse_class));
     let most = layout
         .locals
         .iter()
@@ -1408,12 +1413,16 @@ mod tests {
         // What is asked before allocation is what the frame says once there is one, for every
         // reason a frame keeps one and for the near misses of each. tamnd/rucc#2777.
         for (at, (layout, kept)) in layouts.into_iter().enumerate() {
-            assert_eq!(keeps_frame_pointer(&layout), kept, "layout {at}");
+            assert_eq!(keeps_frame_pointer(&layout, true), kept, "layout {at}");
             assert_eq!(Frame::of(&func, &allocation, &layout).frame_pointer(), kept, "layout {at}");
         }
         // Where a vector might be spilled the answer has to allow for its slot, which is wider
         // than a stack on a multiple of eight.
-        assert!(keeps_frame_pointer(&Layout { conv: eight, ..base }));
+        assert!(keeps_frame_pointer(&Layout { conv: eight, ..base }, true));
+        // And where none is held there is no such slot, whatever the function may use.
+        let held = Layout { conv: eight, ..base };
+        assert!(!keeps_frame_pointer(&held, false));
+        assert!(!Frame::of(&func, &allocation, &held).frame_pointer());
     }
 
     #[test]

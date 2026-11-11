@@ -361,7 +361,14 @@ impl Machine {
         // `ebx` holds the address of the GOT.
         let low = [x86::EBX, x86::ESI];
         let rest: Vec<PhysReg> = every.iter().copied().filter(|reg| !low.contains(reg)).collect();
-        let last = order.contains(&x86::EBX).then(|| [env(&rest, &low), env(&rest, &low)]);
+        // The frame pointer last, for a function that keeps none, as gcc gives `ebp` out under
+        // `-fomit-frame-pointer`. It has no low byte, so [`crate::bytes::bar`] keeps a value named
+        // as a byte out of it as it does out of `esi` and `edi`. A kernel that keeps its frame
+        // pointer keeps `ebp` out of this, see `keeps_frame_pointer`.
+        let spared = |order: &[PhysReg]| -> Vec<PhysReg> {
+            order.iter().copied().chain([conv.frame_pointer]).collect()
+        };
+        let last = order.contains(&x86::EBX).then(|| [env(&rest, &low), env(&spared(&rest), &low)]);
         Self {
             conv,
             file: x86::REGS,
@@ -374,10 +381,9 @@ impl Machine {
             short: &x86::SHORT,
             selector: &select::x86::SELECTOR,
             env: env(&order, &X86_SCRATCH),
-            // Not on this machine. The kernel keeps `ebp` for its frame, and it has no byte form.
-            spare: None,
-            wide: Some([env(&every, &[]), env(&every, &[])]),
-            middle: Some([env(&some, held), env(&some, held)]),
+            spare: Some(env(&spared(&order), &X86_SCRATCH)),
+            wide: Some([env(&every, &[]), env(&spared(&every), &[])]),
+            middle: Some([env(&some, held), env(&spared(&some), held)]),
             last,
         }
     }
@@ -1389,10 +1395,13 @@ pub fn compile_recording(
     // One more register in a function that will keep no frame pointer, which is asked of the parts
     // of the frame the allocator cannot change. Not in a naked function, which has no prologue to
     // save it in, nor in one that saves every register, which has a list of its own to save.
+    let vector =
+        |number| func.class_of(rucc_mir::Reg::virtual_reg(number)) == Some(machine.conv.sse_class);
+    let held = (0..func.vregs()).filter_map(|n| u32::try_from(n).ok()).any(vector);
     let spare = machine
         .spare
         .as_ref()
-        .filter(|_| !naked && !saves_all && !frame::keeps_frame_pointer(&layout));
+        .filter(|_| !naked && !saves_all && !frame::keeps_frame_pointer(&layout, held));
     let env = spare.unwrap_or(&machine.env);
     // The scratch registers handed out too, where nothing after allocation writes into one while a
     // value may be in it. The protector's check writes into one at every return, and the walk over

@@ -1222,6 +1222,17 @@ impl Writer<'_> {
                 mnemonic = "movq";
                 args[0] = format!("${}", args[0]);
             }
+            // The same on i386, where an address with no register in it is always the number
+            // itself. `leal sym, %eax` is six bytes and `movl $sym, %eax` is five, and both leave
+            // `R_386_32` and the condition state alone. gcc writes the move, and the boot code
+            // that has to fit in a sector wrote the `leal` 52 times in `boot2.c`.
+            if mnemonic == "leal"
+                && self.arch == Arch::X86
+                && data.mem.is_some_and(|mem| named_number(&func[mem]))
+            {
+                mnemonic = "movl";
+                args[0] = format!("${}", args[0]);
+            }
             if args.is_empty() {
                 let _ = writeln!(self.out, "\t{mnemonic}");
             } else {
@@ -1483,6 +1494,17 @@ impl Writer<'_> {
             Some(number) => format!("{}{func_name}_{number}", self.directives.local()),
         }
     }
+}
+
+/// Whether an i386 address is a name, a label or a jump table and a constant, with no register and
+/// no segment in it, which is a number the linker or the assembler fills in. A `leal` of one is a
+/// `movl` of that number.
+fn named_number(amode: &Amode) -> bool {
+    (amode.symbol.is_some() || amode.block.is_some() || amode.table.is_some())
+        && amode.reach == Reach::Itself
+        && amode.base.is_none()
+        && amode.index.is_none()
+        && amode.segment.is_none()
 }
 
 /// The directive that writes a number that many bytes wide, and `None` for a width none does.
