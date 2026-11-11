@@ -268,7 +268,8 @@ fn listing(
     }
     // Padded to the width of an address, which is four bytes on i386 and eight everywhere else.
     let align = if writer.arch == Arch::X86 { 4 } else { 8 };
-    writer.directives.end(&mut writer.out, property, align, ident);
+    let stack = rucc_object::marks_stack(target);
+    writer.directives.end(&mut writer.out, property, align, ident, stack);
     Ok(writer.out)
 }
 

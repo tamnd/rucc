@@ -13,6 +13,8 @@
 //! which section 11.3 calls out as a real and recurring security bug rather than a missing nicety.
 //! It is an empty section and nothing reads its contents, and leaving it out is the kind of mistake
 //! that produces a working program with a weakness in it, so it is written here and a test says so.
+//! NetBSD is the one exception: its gcc writes no marker and its kernel does not read one, so an
+//! object for NetBSD has none, see [`marks_stack`].
 
 use object::write::{Object as Writer, SymbolId};
 use object::{Architecture, SectionFlags, SectionKind, SymbolFlags, elf};
@@ -354,9 +356,21 @@ pub(crate) const FRAMES: (&str, u64) = (".eh_frame", 8);
 /// and none for this half of it, so it is added by hand.
 pub(crate) const REL_RO_LOCAL: Option<&str> = Some(".data.rel.ro.local");
 
-/// The empty section whose absence makes the stack executable.
-pub(crate) fn marker(obj: &mut Writer<'_>) {
-    obj.add_section(Vec::new(), b".note.GNU-stack".to_vec(), SectionKind::Metadata);
+/// The empty section whose absence makes the stack executable, where the system's gcc writes it.
+pub(crate) fn marker(obj: &mut Writer<'_>, target: &TargetInfo) {
+    if marks_stack(target) {
+        obj.add_section(Vec::new(), b".note.GNU-stack".to_vec(), SectionKind::Metadata);
+    }
+}
+
+/// Whether an ELF object for this target has the empty `.note.GNU-stack`.
+///
+/// NetBSD's own gcc 12 has no hook at the end of a file on any machine, so it writes no marker, and
+/// the NetBSD kernel takes the stack permission from its own defaults and does not read
+/// `PT_GNU_STACK`. An object for NetBSD has the sections that gcc's object has, so it has no marker.
+/// Every other ELF target gets the marker, as its gcc writes it.
+pub fn marks_stack(target: &TargetInfo) -> bool {
+    target.tuple.os() != Os::NetBsd
 }
 
 /// Ties each record of where a patcher's room is to the text it is a record of.

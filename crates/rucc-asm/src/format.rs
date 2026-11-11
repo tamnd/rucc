@@ -656,8 +656,16 @@ impl Directives {
     /// `property` is what the file says it was built to have checked, which is written on the one
     /// format that has somewhere to put it and is nothing on the other two, padded to `align`,
     /// which is the width of an address. So is `ident`, which is what made the file and goes where
-    /// gcc writes its own.
-    pub fn end(self, out: &mut String, property: Property, align: u32, ident: Option<&str>) {
+    /// gcc writes its own. `stack` is whether the file ends with the empty `.note.GNU-stack`, which
+    /// is [`rucc_object::marks_stack`] and is not written for NetBSD.
+    pub fn end(
+        self,
+        out: &mut String,
+        property: Property,
+        align: u32,
+        ident: Option<&str>,
+        stack: bool,
+    ) {
         match self {
             Directives::Elf => {
                 if property.any() {
@@ -667,7 +675,9 @@ impl Directives {
                     let _ = writeln!(out, "\t.ident\t\"{ident}\"");
                 }
                 // Without this the stack is executable, which is not a default anybody chose.
-                out.push_str("\t.section\t.note.GNU-stack,\"\",@progbits\n");
+                if stack {
+                    out.push_str("\t.section\t.note.GNU-stack,\"\",@progbits\n");
+                }
             }
             // What lets the linker throw away a function nothing calls, which it cannot do
             // without being told that the boundaries between them are real.
@@ -1053,9 +1063,17 @@ mod tests {
         // The absence of this is what makes it executable, so the test is that it is there
         // rather than that it is spelled a particular way.
         let mut out = String::new();
-        Directives::Elf.end(&mut out, Property::default(), 8, None);
+        Directives::Elf.end(&mut out, Property::default(), 8, None, true);
         assert!(out.contains(".note.GNU-stack"), "{out}");
         assert!(!out.contains(".note.gnu.property"), "nothing was asked to be checked");
+    }
+
+    /// NetBSD's gcc writes no marker, so a listing for NetBSD ends without one.
+    #[test]
+    fn an_elf_file_for_netbsd_has_no_marker() {
+        let mut out = String::new();
+        Directives::Elf.end(&mut out, Property::default(), 8, Some("rucc"), false);
+        assert_eq!(out, "\t.ident\t\"rucc\"\n");
     }
 
     /// What the file says it was built to have checked, as the assembler reads it.
@@ -1072,6 +1090,7 @@ mod tests {
             Property { features: Property::IBT, ..Property::default() },
             8,
             None,
+            true,
         );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(
@@ -1095,10 +1114,10 @@ mod tests {
     #[test]
     fn an_i386_coff_file_says_it_is_safe_for_safeseh() {
         let mut out = String::new();
-        Directives::CoffI386.end(&mut out, Property::default(), 4, None);
+        Directives::CoffI386.end(&mut out, Property::default(), 4, None, true);
         assert_eq!(out, "\t.set\t@feat.00, 1\n");
         let mut out = String::new();
-        Directives::Coff.end(&mut out, Property::default(), 8, None);
+        Directives::Coff.end(&mut out, Property::default(), 8, None, true);
         assert!(out.is_empty(), "x86-64 has no SafeSEH: {out}");
     }
 
@@ -1118,7 +1137,7 @@ mod tests {
                 "",
             );
             directives.close(&mut out, "f");
-            directives.end(&mut out, Property::default(), 8, None);
+            directives.end(&mut out, Property::default(), 8, None, true);
             assert!(out.ends_with('\n'), "{format:?} left a line unfinished");
         }
     }

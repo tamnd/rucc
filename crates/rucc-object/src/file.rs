@@ -303,9 +303,9 @@ impl Flavour {
     }
 
     /// The marker a linker looks for in every input, where there is one.
-    pub(crate) fn marker(self, obj: &mut Writer<'_>) {
+    pub(crate) fn marker(self, obj: &mut Writer<'_>, target: &TargetInfo) {
         match self {
-            Flavour::Elf => elf::marker(obj),
+            Flavour::Elf => elf::marker(obj, target),
             Flavour::Coff => coff::marker(obj),
             Flavour::MachO => {}
         }
@@ -1034,8 +1034,9 @@ pub fn write(
     }
 
     // Written rather than left out, because a linker that does not find it in every input marks
-    // the stack executable, on the format that has one.
-    flavour.marker(&mut obj);
+    // the stack executable, on the format that has one. NetBSD is the exception, see
+    // [`elf::marks_stack`].
+    flavour.marker(&mut obj, target);
 
     let mut bytes = obj.write().map_err(|why| Error::Refused { why: why.to_string() })?;
     // The writer gives a section of strings entries a byte wide, which is right for every one but
@@ -1903,6 +1904,38 @@ mod tests {
         let file = object::File::parse(&bytes[..]).expect("a readable object");
         let note = file.section_by_name(".note.GNU-stack").expect("the marker");
         assert!(note.data().expect("no bytes").is_empty());
+    }
+
+    /// NetBSD's gcc writes no marker, so an object for NetBSD has none,
+    /// on each machine with a writer.
+    #[test]
+    fn an_object_for_netbsd_has_no_marker_as_its_gcc_writes_none() {
+        for arch in [Arch::X86_64, Arch::X86] {
+            let netbsd = TargetInfo::new(Triple::new(arch, Os::NetBsd, Env::None));
+            let bytes = write(
+                &calling("puts"),
+                &Data::default(),
+                &[],
+                &netbsd,
+                Output::default(),
+                &Info::default(),
+            )
+            .expect("an object");
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            assert!(file.section_by_name(".note.GNU-stack").is_none(), "{arch:?}");
+        }
+        let freebsd = TargetInfo::new(Triple::new(Arch::X86_64, Os::FreeBsd(15), Env::None));
+        let bytes = write(
+            &calling("puts"),
+            &Data::default(),
+            &[],
+            &freebsd,
+            Output::default(),
+            &Info::default(),
+        )
+        .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.section_by_name(".note.GNU-stack").is_some(), "FreeBSD's gcc writes it");
     }
 
     /// What the file says it was built to have checked, byte for byte.
