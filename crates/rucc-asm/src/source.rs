@@ -2656,6 +2656,8 @@ impl Reader {
             "long" | "int" | "4byte" => self.data(&args, 4)?,
             "quad" | "8byte" | "xword" | "dword" => self.data(&args, 8)?,
             "octa" => self.octa(&args)?,
+            "float" | "single" => self.floats(&args, false)?,
+            "double" => self.floats(&args, true)?,
             "uleb128" => self.leb(&args, false)?,
             "sleb128" => self.leb(&args, true)?,
 
@@ -3762,6 +3764,30 @@ impl Reader {
                 None => i128::from(self.number(arg)?).to_le_bytes(),
             };
             self.put(&bytes)?;
+        }
+        Ok(())
+    }
+
+    /// `.float` and `.single`, four bytes of an IEEE float each, and `.double`, eight bytes.
+    ///
+    /// A number is read as a decimal, with `inf` and `nan` too, and rounded to nearest at its
+    /// width. gas skips a `0` and a letter in front of one, as in `0f1.5`, and so does this.
+    /// compiler-rt's `x86_64/floatundisf.S` writes `.single 2.0`.
+    fn floats(&mut self, args: &[String], double: bool) -> Result<(), Trouble> {
+        for arg in args {
+            let text = arg.trim();
+            let text = match text.as_bytes() {
+                [b'0', letter, ..] if letter.is_ascii_alphabetic() => &text[2..],
+                _ => text,
+            };
+            let bad = || self.bad(&format!("{text} is not a floating point number"));
+            if double {
+                let value: f64 = text.parse().map_err(|_| bad())?;
+                self.put(&value.to_le_bytes())?;
+            } else {
+                let value: f32 = text.parse().map_err(|_| bad())?;
+                self.put(&value.to_le_bytes())?;
+            }
         }
         Ok(())
     }
@@ -6338,7 +6364,7 @@ pub(crate) fn constant(text: &str) -> Option<i64> {
 const DATA: &[&str] = &[
     "byte", "short", "word", "hword", "value", "2byte", "long", "int", "4byte", "quad", "8byte",
     "xword", "dword", "octa", "uleb128", "sleb128", "ascii", "asciz", "string", "incbin", "space",
-    "skip", "zero", "fill", "dcb", "dcb.b", "dcb.w", "dcb.l",
+    "skip", "zero", "fill", "dcb", "dcb.b", "dcb.w", "dcb.l", "float", "single", "double",
 ];
 
 /// One expression, being read.
@@ -8840,6 +8866,22 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn single_float_and_double_are_ieee_numbers_as_gas_writes_them() {
+        let out = assembled(
+            "\t.data\n\t.single 2.0\n\t.float -1.5, 0f0.1\n\t.double 0.1, 1e300\n\t.float inf\n",
+        );
+        let mut want = Vec::new();
+        for value in [2.0f32, -1.5, 0.1] {
+            want.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [0.1f64, 1e300] {
+            want.extend_from_slice(&value.to_le_bytes());
+        }
+        want.extend_from_slice(&f32::INFINITY.to_le_bytes());
+        assert_eq!(bytes(&out, ".data"), want);
+    }
+
+    #[test]
     fn a_number_that_is_negative_is_written_as_the_width_asked_for() {
         // Two's complement in that many bytes, not a refusal, because `.short -1` is how a file
         // says two bytes of ones and every table of small offsets somewhere has one in it.
@@ -10756,7 +10798,9 @@ nop
     /// `gdtrr:` and then `.quad` with no value at the end of its self relocation code.
     #[test]
     fn a_data_directive_with_nothing_after_it_writes_nothing() {
-        for word in ["byte", "short", "word", "long", "int", "quad", "octa"] {
+        for word in
+            ["byte", "short", "word", "long", "int", "quad", "octa", "float", "single", "double"]
+        {
             let read = assembled(&format!("\t.data\n\t.byte 1\nmark:\n\t.{word}\n\t.byte 2\n"));
             assert_eq!(bytes(&read, ".data"), [1, 2], ".{word}");
         }
