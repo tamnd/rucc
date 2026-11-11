@@ -368,6 +368,7 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::Return
             | Opcode::Jump
             | Opcode::BrIf
+            | Opcode::IndirectBr
             | Opcode::InlineAsm
             | Opcode::RegisterValue
             | Opcode::Memcpy
@@ -896,7 +897,7 @@ fn rewrite(
         Opcode::Memcpy | Opcode::Memmove | Opcode::Memset if takes => length(func, halves, inst),
         Opcode::PtrAdd | Opcode::IntToPtr if takes => length(func, halves, inst),
         Opcode::PtrToInt if produces => address(func, width, halves, inst),
-        Opcode::Jump | Opcode::BrIf => edges(func, halves, inst),
+        Opcode::Jump | Opcode::BrIf | Opcode::IndirectBr => edges(func, halves, inst),
         _ => {}
     }
 }
@@ -2277,6 +2278,10 @@ fn address(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
 }
 
 /// A branch, whose arguments hang on the edge rather than on the instruction.
+///
+/// A computed `goto` is one too. Its address is never wide, and a wide value live around the loop
+/// of an interpreter rides on its edges like on any other. Lua's `luaV_execute` has one, and on i386
+/// the whole function was left unsplit for it (tamnd/rucc#4265).
 fn edges(func: &mut Func, halves: &Halves, inst: Inst) {
     for at in func.target_list(inst).iter() {
         let call = func[at];
@@ -2441,7 +2446,8 @@ fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Abi, Block, Builder, Flags, Float, Func, MemOrder, Module, Restrict, Signature, Type, Value,
+        Abi, Block, BlockCall, Builder, Flags, Float, Func, MemOrder, Module, Restrict, Signature,
+        Type, Value,
     };
     use rucc_target::x86_64::{MINGW64, SYSV};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
@@ -2661,6 +2667,31 @@ mod tests {
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         assert!(text.contains("block1(%7: i64, %8: i64)"), "the block takes two: {text}");
+        assert_eq!(text.matches("block1(").count(), 3, "and both edges pass two: {text}");
+    }
+
+    /// A computed `goto` passes a wide value to its targets the same way, so the loop of an
+    /// interpreter that keeps one live across it is split and not left whole.
+    #[test]
+    fn a_computed_goto_passes_two_for_a_wide_argument() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[wide()], &[wide()]);
+        let top = func.create_block();
+        let carried = func.append_param(top, wide());
+        let mut build = Builder::new(&mut func, entry);
+        build.jump(top, &[params[0]]);
+        let mut build = Builder::new(&mut func, top);
+        let address = build.block_addr(top);
+        let branch = build.indirect_br(address, &[top]);
+        let at = func.target_list(branch).iter().next().expect("one target");
+        let call = func[at];
+        let args = func.push_values(&[carried]);
+        func.set_block_call(at, BlockCall { args, ..call });
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i128"), "nothing that wide is left: {text}");
+        assert!(text.contains("block1(%2: i64, %3: i64)"), "the block takes two: {text}");
         assert_eq!(text.matches("block1(").count(), 3, "and both edges pass two: {text}");
     }
 
