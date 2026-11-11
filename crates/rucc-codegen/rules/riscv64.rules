@@ -948,6 +948,20 @@
                        (bvadd (bvadd a k) 6) (extract 55 48 v))
                        (bvadd (bvadd a k) 7) (extract 63 56 v)) (result))))
 
+;; A half without the half extension. It is the low sixteen bits of a word in a float register.
+;; It is read with `lhu` and `fmv.w.x` moves the word across, which is what GCC does without
+;; `Zfh`. There is no rule for a store, because `crate::half` writes one as its bits and a store
+;; of those.
+
+(rule (lower (load.f16 (value.i64 a)))
+      (rv.fmov_to_f16 (rv.ld_16 (amode_base a)))
+      (spec (= (float_from_bits 16 (concat (select (mem) (bvadd a 1)) (select (mem) a))) (result))))
+
+(rule (lower (load.f16 (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (>= k -2048) (< k 2048)))
+      (rv.fmov_to_f16 (rv.ld_16 (amode_base_offset a k)))
+      (spec (= (float_from_bits 16 (concat (select (mem) (bvadd (bvadd a k) 1)) (select (mem) (bvadd a k)))) (result))))
+
 (rule (lower (load.f32 (value.i64 a)))
       (rv.ld_f32 (amode_base a))
       (spec (= (float_from_bits 32 (concat (select (mem) (bvadd a 3)) (select (mem) (bvadd a 2))
@@ -1037,6 +1051,10 @@
 
 (rule (lower (ret.i64 (value.i64 v)))
       (rv.ret_val_64 v)
+      (spec (= v (result))))
+
+(rule (lower (ret.f16 (value.f16 v)))
+      (rv.ret_val_f16 v)
       (spec (= v (result))))
 
 (rule (lower (ret.f32 (value.f32 v)))
@@ -1264,7 +1282,16 @@
 
 
 ;; Moving a register from one file to the other, which is what a bitcast is. `fmv.x.w` sign
-;; extends the word it moves.
+;; extends the word it moves. A half goes across in the low sixteen bits of a word, as a load of
+;; one does.
+
+(rule (lower (bitcast.f16.i16 (value.f16 x)))
+      (rv.fmov_from_f16 x)
+      (spec (= (bits_from_float 16 x) (result))))
+
+(rule (lower (bitcast.i16.f16 (value.i16 x)))
+      (rv.fmov_to_f16 x)
+      (spec (= (float_from_bits 16 x) (result))))
 
 (rule (lower (bitcast.f32.i32 (value.f32 x)))
       (rv.fmov_from_f32 x)

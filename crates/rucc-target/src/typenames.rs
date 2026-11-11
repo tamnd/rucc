@@ -12,8 +12,8 @@
 //!
 //! x86-64 and AArch64 have `__bf16`, the brain float, which is the top half of a `float`. gcc 13
 //! made it an arithmetic type on both. `arm_neon.h` and the AVX-512 headers build their vectors of
-//! it out of it. gcc 15 has it on RISC-V too, and rucc does not yet, because it cannot move a half
-//! there (tamnd/rucc#4276).
+//! it out of it. gcc 15 has it on RISC-V too, where it is computed in `float` and moved as a half
+//! without the half extension.
 //!
 //! x86 and PowerPC have one more, `__float128`, which is gcc's older name for `_Float128` and the
 //! one code written before C23 reaches for. gcc has it on those two and nowhere else, and
@@ -156,12 +156,17 @@ const FLOAT128: &[(&str, TypeName)] = &[("__float128", TypeName::Float128)];
 const X86_64: &[(&str, TypeName)] =
     &[("__float128", TypeName::Float128), ("__bf16", TypeName::BFloat16)];
 
+/// RISC-V's, which is the brain float. gcc has it there from 15 on. The name is here for every
+/// `__GNUC__`, since a name that a program does not use changes nothing.
+const RISCV64: &[(&str, TypeName)] = &[("__bf16", TypeName::BFloat16)];
+
 /// The names `arch` has before anything is read, and what each one is.
 #[must_use]
 pub(crate) fn type_names(arch: Arch) -> &'static [(&'static str, TypeName)] {
     match arch {
         Arch::Aarch64 => AARCH64,
         Arch::X86_64 => X86_64,
+        Arch::Riscv64 => RISCV64,
         Arch::X86 | Arch::PowerPc64 | Arch::Wasm32 => FLOAT128,
         _ => &[],
     }
@@ -203,12 +208,10 @@ mod tests {
     #[test]
     fn the_brain_float_is_a_name_where_gcc_computes_with_it() {
         let has = |arch| type_names(arch).iter().any(|&(name, _)| name == "__bf16");
-        for arch in [Arch::X86_64, Arch::Aarch64] {
+        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64] {
             assert!(has(arch), "{arch:?}");
         }
-        for arch in
-            [Arch::X86, Arch::Riscv64, Arch::PowerPc64, Arch::Wasm32, Arch::Arm, Arch::S390x]
-        {
+        for arch in [Arch::X86, Arch::PowerPc64, Arch::Wasm32, Arch::Arm, Arch::S390x] {
             assert!(!has(arch), "{arch:?}");
         }
     }

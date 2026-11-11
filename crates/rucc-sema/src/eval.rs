@@ -658,6 +658,14 @@ impl<'a> Eval<'a> {
                 let Some(info) = self.int_shape(self.tast[operand].ty) else {
                     return Err(self.stop(expr));
                 };
+                // Past a hundred and twenty eight bits the answer is folded only where it is the
+                // exact value, which is every one of a signed type and none of an unsigned one but
+                // the negation of zero. See [`exact`].
+                if info.width > 128 {
+                    let value =
+                        if op == UnaryOp::BitNot { Some(!value) } else { value.checked_neg() };
+                    return exact(info, value).map(Const::Int).ok_or_else(|| self.stop(expr));
+                }
                 if matches!(op, UnaryOp::BitNot) {
                     return Ok(Const::Int(info.wrap(!value)));
                 }
@@ -807,6 +815,16 @@ impl<'a> Eval<'a> {
         right: i128,
         info: IntegerInfo,
     ) -> Result<Const, NotConstant> {
+        if info.width > 128 {
+            let value = match op {
+                BinaryOp::Add => left.checked_add(right),
+                BinaryOp::Sub => left.checked_sub(right),
+                BinaryOp::Mul => left.checked_mul(right),
+                BinaryOp::Div => left.checked_div(right),
+                _ => left.checked_rem(right),
+            };
+            return exact(info, value).map(Const::Int).ok_or_else(|| self.stop(expr));
+        }
         if !info.signed {
             let (left, right) = (left as u128, right as u128);
             let value = match op {
@@ -1021,6 +1039,15 @@ impl<'a> Eval<'a> {
             return Ok(Const::Int(if sign { -1 } else { 0 }));
         }
         let count = count as u32;
+        if info.width > 128 {
+            let value = match op {
+                // The sign is all that is left once the count reaches the top of an `i128`.
+                BinaryOp::Shr => Some(value >> count.min(127)),
+                _ if value == 0 => Some(0),
+                _ => value.checked_shl(count).filter(|&moved| moved >> count == value),
+            };
+            return exact(info, value).map(Const::Int).ok_or_else(|| self.stop(expr));
+        }
         let value = match (op, info.signed) {
             (BinaryOp::Shr, true) => value >> count,
             (BinaryOp::Shr, false) => ((value as u128) >> count) as i128,
@@ -1501,19 +1528,30 @@ impl<'a> Eval<'a> {
             TypeKind::Bool => Some(Const::Int(i128::from(truth(value)?))),
             TypeKind::Int(_) | TypeKind::BitInt { .. } | TypeKind::Enum(_) => {
                 let info = self.int_shape(to)?;
+                // A type wider than a folded constant takes the value the operand has where that
+                // is the exact value, and is not a constant otherwise. The one operand whose
+                // `i128` is not its value is an unsigned one of a hundred and twenty eight bits
+                // with the top bit set, which is a number no `i128` holds.
+                let whole = |value: i128| {
+                    let from = self.int_shape(from).filter(|from| from.width >= 128);
+                    let bits = from.is_some_and(|from| !from.signed) && value < 0;
+                    exact(info, (!bits).then_some(value)).map(Const::Int)
+                };
+                let float = |value: Float| match float_integer(value, info) {
+                    (_, status) if info.width > 128 && status.has(Status::INVALID) => None,
+                    (value, _) => Some(Const::Int(value)),
+                };
                 match value {
+                    Const::Int(value) if info.width > 128 => whole(value),
+                    Const::ComplexInt { real, .. } if info.width > 128 => whole(real),
                     Const::Int(value) => Some(Const::Int(info.wrap(value))),
                     // Out of range is undefined behaviour rather than a value, and what comes
                     // back is the nearest end of the range with a flag on it. The flag is the
                     // caller's to warn about and is why this drops it rather than reads it.
-                    Const::Float(value) => {
-                        Some(Const::Int(value.to_integer(info.width, info.signed).0))
-                    }
+                    Const::Float(value) => float(value),
                     // Complex to real keeps the real half and drops the imaginary one, 6.3.1.7p2,
                     // and then it is the conversion above.
-                    Const::Complex { real, .. } => {
-                        Some(Const::Int(real.to_integer(info.width, info.signed).0))
-                    }
+                    Const::Complex { real, .. } => float(real),
                     Const::ComplexInt { real, .. } => Some(Const::Int(info.wrap(real))),
                     // An address into nothing is a number this compiler already knows, so it
                     // becomes one and is wrapped to the target's width like any other. That is
@@ -1523,7 +1561,7 @@ impl<'a> Eval<'a> {
                     // because there is no relocation for a narrow type to lose half of: gcc takes
                     // `(int) &((struct S *)0)->field` too.
                     Const::Address(Address { base: Base::Absolute, offset }) => {
-                        Some(Const::Int(info.wrap(offset)))
+                        exact(info, Some(info.wrap(offset))).map(Const::Int)
                     }
                     // An address written as a number is still an address, and it survives only
                     // where every bit of it does. That is the whole difference between gcc
@@ -1670,13 +1708,15 @@ impl<'a> Eval<'a> {
     }
 }
 
-/// The shape of an integer type, and [`None`] for anything a folded constant cannot hold.
+/// The shape of an integer type, and [`None`] for anything that is not one.
 ///
-/// A `_BitInt` wider than a hundred and twenty eight bits is the one integer type in that second
-/// group. It is refused where it is written rather than folded to a wrong answer here.
+/// A `_BitInt` wider than a hundred and twenty eight bits has a shape too, and a folded constant
+/// of it is an `i128` that is its exact value. The folds past that width answer only where the
+/// value stays an `i128`, which [`exact`] says, and leave the rest to the program
+/// (tamnd/rucc#2490).
 pub(crate) fn int_shape(types: &Types, ty: TypeId, target: &TargetInfo) -> Option<IntegerInfo> {
     let info = integer_info(types, ty, target)?;
-    (info.width > 0 && info.width <= 128).then_some(info)
+    (info.width > 0).then_some(info)
 }
 
 /// Whether a constant is true, which is a comparison against zero and not a look at the bits.
@@ -1805,9 +1845,53 @@ fn holds(op: BinaryOp, ordering: Ordering) -> Option<bool> {
     })
 }
 
+/// A value folded in a type wider than a hundred and twenty eight bits, where it is the exact
+/// value, and [`None`] where it is not.
+///
+/// A folded constant is an `i128`, and a `_BitInt` of more bits than that has values no `i128`
+/// holds. So past that width a value is folded only where the arithmetic did not leave the `i128`
+/// and gives the number itself: a signed value is that, and an unsigned one is that where it is
+/// not negative. Anything else is computed by the program instead, a limb at a time, and is not a
+/// constant expression here where gcc's arbitrary precision folds it (tamnd/rucc#2490). A type no
+/// wider than that wraps the value as it always has.
+fn exact(info: IntegerInfo, value: Option<i128>) -> Option<i128> {
+    if info.width <= 128 {
+        return value.map(|value| info.wrap(value));
+    }
+    value.filter(|&value| info.signed || value >= 0)
+}
+
+/// A floating value converted to an integer of this shape, as [`Float::to_integer`] answers.
+///
+/// Past a hundred and twenty eight bits the answer is the one an `i128` gives, or a non negative
+/// one for an unsigned type, which is [`exact`]'s rule. A value outside that comes back with
+/// [`Status::INVALID`] although the type may hold it, so a caller that needs the value is to
+/// take the flag as no value rather than as an overflow. [`float_overflows`] is the question of
+/// whether the type holds it.
+pub(crate) fn float_integer(value: Float, info: IntegerInfo) -> (i128, Status) {
+    match (info.width > 128, info.signed) {
+        (false, _) => value.to_integer(info.width, info.signed),
+        (true, signed) => value.to_integer(if signed { 128 } else { 127 }, signed),
+    }
+}
+
+/// Whether a floating value is outside the range of an integer of this shape, which is the
+/// conversion gcc warns about.
+///
+/// Past a hundred and twenty eight bits only a nan and an infinity are known to be. The finite
+/// values between the `i128` and the type are in range and fold to nothing, and the finite ones
+/// past the type are not told apart from them, which leaves a warning out rather than gives a
+/// wrong one.
+fn float_overflows(value: Float, info: IntegerInfo) -> bool {
+    if info.width > 128 {
+        return value.is_nan() || value.is_infinite();
+    }
+    value.to_integer(info.width, info.signed).1.has(Status::INVALID)
+}
+
 /// The least value a signed type of this shape holds, which is meaningless for an unsigned one.
 fn least(info: IntegerInfo) -> i128 {
-    info.wrap(1i128 << info.width.saturating_sub(1))
+    info.wrap(1i128 << info.width.saturating_sub(1).min(127))
 }
 
 /// What a type is once the sugar, the qualifiers and `_Atomic` are off it.
@@ -1831,9 +1915,9 @@ pub(crate) fn spell_int(value: i128, info: IntegerInfo) -> String {
 pub(crate) fn narrowed(value: Const, info: IntegerInfo) -> i128 {
     match value {
         Const::Int(value) => info.wrap(value),
-        Const::Float(value) => value.to_integer(info.width, info.signed).0,
+        Const::Float(value) => float_integer(value, info).0,
         // The real half is what a complex value narrows through, 6.3.1.7p2.
-        Const::Complex { real, .. } => real.to_integer(info.width, info.signed).0,
+        Const::Complex { real, .. } => float_integer(real, info).0,
         Const::ComplexInt { real, .. } => info.wrap(real),
         // Nothing narrows an address, since the caller asked for a number and got one of these
         // instead. Zero is a value it will not use.
@@ -1889,12 +1973,10 @@ pub(crate) fn overflows(value: Const, info: IntegerInfo) -> bool {
         // A conversion that had to saturate, which is the flag the float arithmetic raises for
         // a value out of range and for a nan. Dropping a fraction is not overflow and gcc does
         // not warn about `char c = 3.5;` either.
-        Const::Float(value) => value.to_integer(info.width, info.signed).1.has(Status::INVALID),
+        Const::Float(value) => float_overflows(value, info),
         // The imaginary half is dropped whatever is in it, which is the conversion and not an
         // overflow, so the question is the one the real half answers.
-        Const::Complex { real, .. } => {
-            real.to_integer(info.width, info.signed).1.has(Status::INVALID)
-        }
+        Const::Complex { real, .. } => float_overflows(real, info),
         Const::ComplexInt { real, .. } => {
             !IntegerInfo::new(true, info.width).holds(real)
                 && !IntegerInfo::new(false, info.width).holds(real)
@@ -2776,6 +2858,31 @@ mod tests {
         // type is that it does what it says rather than promoting out of the question.
         assert_eq!(fold(&mut c, sum), Ok(-56));
         assert_eq!(messages(&c).len(), 1, "{:?}", messages(&c));
+    }
+
+    /// tamnd/rucc#2490. A `_BitInt` wider than 128 bits folds where the value stays an `i128`,
+    /// which is what `_BitInt(200) g = 12345;` needs, and is the program's where it does not.
+    #[test]
+    fn a_bit_int_wider_than_an_i128_folds_where_the_value_is_exact() {
+        let mut f = Fixture::new();
+        let (five, three) = (f.bit_int(5, true, 200), f.int(3, IntKind::Int));
+        let product = f.binary(BinaryOp::Mul, five, three);
+        let negated = f.unary(UnaryOp::Minus, product);
+        let mut c = f.checker();
+        assert_eq!(fold(&mut c, negated), Ok(-15));
+        assert!(messages(&c).is_empty(), "{:?}", messages(&c));
+
+        let mut f = Fixture::new();
+        let (zero, one) = (f.bit_int(0, false, 200), f.bit_int(1, false, 200));
+        let below = f.binary(BinaryOp::Sub, zero, one);
+        let mut c = f.checker();
+        assert!(fold(&mut c, below).is_err(), "the unsigned value is 2^200 - 1, past an i128");
+
+        let mut f = Fixture::new();
+        let (most, one) = (f.bit_int(i128::MAX as u128, true, 200), f.bit_int(1, true, 200));
+        let past = f.binary(BinaryOp::Add, most, one);
+        let mut c = f.checker();
+        assert!(fold(&mut c, past).is_err(), "2^127 is a value of the type and not of an i128");
     }
 
     #[test]

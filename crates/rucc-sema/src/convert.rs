@@ -575,8 +575,10 @@ impl Conv<'_> {
                 _ => return None,
             }
         };
-        let (folded, status) = value.to_integer(info.width, info.signed);
-        if !status.has(Status::INVALID) {
+        // Past a hundred and twenty eight bits the flag says no `i128` holds the value, which is
+        // not the overflow this folds, so the conversion is the program's.
+        let (folded, status) = value.to_integer(info.width.min(128), info.signed);
+        if info.width > 128 || !status.has(Status::INVALID) {
             return None;
         }
         let span = self.tast.expr_span(operand);

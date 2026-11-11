@@ -65,8 +65,8 @@ use rucc_target::{CallRegs, CountInst};
 
 use crate::switch::{Force, Lowered};
 use crate::{
-    brain, decimal, divide, expand, fills, forks, half, locked, maths, quad, retry, rolled, switch,
-    varargs, wide, widths,
+    brain, decimal, divide, expand, fills, forks, half, limbs, locked, maths, quad, retry, rolled,
+    switch, varargs, wide, widths,
 };
 
 /// One member of the group.
@@ -78,6 +78,14 @@ use crate::{
 pub enum Step {
     /// A `switch`, as the decision tree document 24 describes.
     Switches,
+    /// An integer wider than a hundred and twenty eight bits, as the words it is kept in memory
+    /// as.
+    ///
+    /// Below the switches, so that a `switch` over a `_BitInt` this wide is the comparisons it
+    /// becomes there. Above everything else, because every other step is written about widths a
+    /// register or a pair of them holds, and what this one leaves is loads, stores, word
+    /// arithmetic and calls. The steps below see none of the width it took out.
+    Limbs,
     /// A read modify write this machine has no single instruction for, as a loop around the compare
     /// and exchange.
     ///
@@ -204,6 +212,7 @@ impl Step {
     /// The group, in the order it runs, which is the membership section 36.1 asks to see.
     pub const GROUP: &'static [Self] = &[
         Self::Switches,
+        Self::Limbs,
         Self::Retries,
         Self::Fills,
         Self::Rolled,
@@ -231,6 +240,7 @@ impl Step {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Switches => "switches",
+            Self::Limbs => "limbs",
             Self::Retries => "retries",
             Self::Fills => "fills",
             Self::Rolled => "rolled",
@@ -259,6 +269,7 @@ impl Step {
     pub const fn construct(self) -> &'static str {
         match self {
             Self::Switches => "a switch",
+            Self::Limbs => "an integer wider than two registers",
             Self::Retries => "a read modify write with no instruction behind it",
             Self::Fills => "a fill that has to be written inline",
             Self::Rolled => "a copy or fill gcc writes as a string instruction",
@@ -291,9 +302,9 @@ impl Step {
     /// dump which of those happened.
     ///
     /// Empty for [`Step::Rounds`], which rewrites an operand rather than taking an instruction out,
-    /// and empty for the five that work by type rather than by opcode: an integer of forty bits,
-    /// one of a hundred and twenty eight, a quad float, a half float and a brain float are all
-    /// spelled with the same opcodes as anything else, and what makes them the construct is the type on the values.
+    /// and empty for the six that work by type rather than by opcode: an integer of forty bits,
+    /// one of a hundred and twenty eight, one wider than that, a quad float, a half float and a
+    /// brain float are all spelled with the same opcodes as anything else, and what makes them the construct is the type on the values.
     #[must_use]
     pub const fn opcodes(self) -> &'static [Opcode] {
         match self {
@@ -309,7 +320,8 @@ impl Step {
                 Opcode::UMulOverflow,
                 Opcode::SMulOverflow,
             ],
-            Self::BrainFloats
+            Self::Limbs
+            | Self::BrainFloats
             | Self::Decimals
             | Self::HalfFloats
             | Self::Halves
@@ -336,23 +348,23 @@ impl Step {
 
     /// Whether this step works on the whole function at once and says whether it rewrote it.
     ///
-    /// Two of them do. Both retype every value of a width, so either the whole function can be
+    /// Three of them do. Each retypes every value of a width, so either the whole function can be
     /// rewritten or none of it can, and they answer with a boolean for that reason. A `false` from
     /// one covers two different things, a function with nothing at that width in it and a function
     /// holding something the step did not understand, and neither is an error: the second leaves
     /// the selector to refuse by naming the construct it had no rule for.
     ///
     /// Everything else here works instruction by instruction and has nothing to say at that scale,
-    /// which is why [`Did::untouched`] is only ever true for these two.
+    /// which is why [`Did::untouched`] is only ever true for these three.
     #[must_use]
     pub const fn whole_function(self) -> bool {
-        matches!(self, Self::Halves | Self::Widths)
+        matches!(self, Self::Limbs | Self::Halves | Self::Widths)
     }
 
     /// Runs this one step, answering whether it rewrote the function.
     ///
-    /// Only the two that [`Step::whole_function`] names ever answer `false`, because they are the
-    /// only two that know. The rest work instruction by instruction and are not asked.
+    /// Only the three that [`Step::whole_function`] names ever answer `false`, because they are the
+    /// only three that know. The rest work instruction by instruction and are not asked.
     ///
     /// `switching` is the level's goal, the shape `-Zswitch=` forced, whether a jump table may
     /// be written at all and whether the machine has a conditional move, `counts` is the bit
@@ -374,6 +386,7 @@ impl Step {
             Self::Switches => {
                 switched.extend(switch::lowered(func, goal, force, tables, conv.word * 8))
             }
+            Self::Limbs => return limbs::limbs(func, names, conv.word),
             Self::Retries => retry::loops(func, conv.word, conv.rmw_bits),
             Self::Fills => fills::loops(func, names, conv.word, conv.unaligned, goal),
             Self::Rolled => {
@@ -423,7 +436,7 @@ pub struct Did {
     pub before: usize,
     /// How many it had after.
     pub after: usize,
-    /// Whether it said it left the function exactly as it was, which only the two that
+    /// Whether it said it left the function exactly as it was, which only the three that
     /// [`Step::whole_function`] names ever say.
     pub untouched: bool,
 }
@@ -469,7 +482,7 @@ impl Ran {
                 did.before,
                 did.after
             );
-            // Said the rare way round on purpose. The two whole function steps answer `false` for
+            // Said the rare way round on purpose. The whole function steps answer `false` for
             // every function with nothing at their width in it, which is nearly all of them, so a
             // line per function saying so would bury the one that matters.
             if did.step.whole_function() && !did.untouched {
@@ -702,6 +715,9 @@ mod tests {
             names,
             [
                 "switches",
+                // Ahead of every step written about a register's width, and below the switches so
+                // a `switch` over a wide `_BitInt` is comparisons by the time it runs.
+                "limbs",
                 "retries",
                 // Beside the retries, since both make blocks.
                 "fills",
@@ -1073,16 +1089,16 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_steps_that_retype_a_whole_function_ever_say_they_touched_nothing() {
+    fn only_the_three_steps_that_retype_a_whole_function_ever_say_they_touched_nothing() {
         // The rest work instruction by instruction and are never asked, so a `true` from one of
         // them is not evidence of anything and the dump does not print it.
         assert_eq!(
             Step::GROUP.iter().filter(|step| step.whole_function()).copied().collect::<Vec<_>>(),
-            [Step::Widths, Step::Halves]
+            [Step::Limbs, Step::Widths, Step::Halves]
         );
         for step in Step::GROUP {
             if step.whole_function() {
-                // Both of them are about the width on a value rather than about an opcode, so
+                // All of them are about the width on a value rather than about an opcode, so
                 // there is nothing for `found` and `left` to count.
                 assert!(step.opcodes().is_empty(), "{} counts opcodes", step.name());
             }

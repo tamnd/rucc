@@ -95,9 +95,11 @@ impl Imm {
     #[must_use]
     pub fn signed(self, ty: Type) -> i128 {
         assert!(ty.is_int(), "an integer immediate needs an integer type");
-        let spare = 128 - ty.bits();
-        // Shifting left and then arithmetic right is the branch-free way to sign extend from
-        // an arbitrary width, and it is correct for a width of 128 because the shift is zero.
+        // An integer wider than 128 bits, which is a `_BitInt` of up to 65535, has the immediates
+        // an `i128` holds, sign extended into the rest of its width, so its bits read as signed
+        // are its value. Shifting left and then arithmetic right is the branch-free way to sign
+        // extend from a narrower width, and the shift is zero from 128 bits up.
+        let spare = 128u32.saturating_sub(ty.bits());
         ((self.0 << spare) as i128) >> spare
     }
 }

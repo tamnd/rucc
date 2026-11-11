@@ -463,6 +463,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("ld_f64", LoadFp),
     ("st_f32", StoreFp),
     ("st_f64", StoreFp),
+    // A half in the word of its argument slot, which is where the convention puts one that got no
+    // register. Only an argument is read and written this way. See `rucc_codegen::abi::riscv64`.
+    ("ld_f16_word", LoadFp),
+    ("st_f16_word", StoreFp),
     // Floating point arithmetic.
     ("fadd_f32", FAlu),
     ("fadd_f64", FAlu),
@@ -511,8 +515,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("fcvtzu_f64_32", FpToInt),
     ("fcvtzu_f64_64", FpToInt),
     // The bits of a register moved across to the other file unchanged.
+    ("fmov_to_f16", IntToFp),
     ("fmov_to_f32", IntToFp),
     ("fmov_to_f64", IntToFp),
+    ("fmov_from_f16", FpToInt),
     ("fmov_from_f32", FpToInt),
     ("fmov_from_f64", FpToInt),
     // Floating point comparisons. `feq`, `flt` and `fle` are false when either side is not a
@@ -542,14 +548,17 @@ pub static INSTS: &[(&str, Form)] = &[
     // Values arriving and leaving in the registers the convention names. None is an instruction.
     ("ret_val_32", RetVal),
     ("ret_val_64", RetVal),
+    ("ret_val_f16", RetValFp),
     ("ret_val_f32", RetValFp),
     ("ret_val_f64", RetValFp),
     ("ret_val2_32", RetVal2),
     ("ret_val2_64", RetVal2),
+    ("ret_val2_f16", RetVal2Fp),
     ("ret_val2_f32", RetVal2Fp),
     ("ret_val2_f64", RetVal2Fp),
     ("arg_val_32", ArgVal),
     ("arg_val_64", ArgVal),
+    ("arg_val_f16", ArgValFp),
     ("arg_val_f32", ArgValFp),
     ("arg_val_f64", ArgValFp),
     ("br_cond_32", BrCond),
