@@ -1347,6 +1347,15 @@ pub enum Growing {
     /// is IR that arrived without going through that pass and the fixed local in
     /// [`crate::pipeline`] that wants the same thing from the other side.
     Aligned,
+    /// A variable length array in a function whose register allocator put a value in a spill slot
+    /// that wants more alignment than a call leaves the stack pointer with.
+    ///
+    /// The same frame as [`Growing::Aligned`], arrived at after allocation rather than before it.
+    /// On i386 NetBSD the stack pointer is kept on four bytes, and a `__float128` or a vector kept
+    /// in a vector register is spilled with an aligned move into sixteen. libquadmath's
+    /// `printf_fp.c` has both with `alloca` (tamnd/rucc-bsd#3). gcc keeps a second base register
+    /// for it, and nothing here holds one, so this is a refusal and not wrong code.
+    Spilled,
     /// A variable length array in a function written without a prologue.
     ///
     /// A frame that grows is reached from a frame pointer, and establishing one is the first two
@@ -1364,6 +1373,10 @@ impl Growing {
             Growing::Aligned => {
                 "wants more alignment than the stack pointer is left on, which needs a base \
                  register nothing here keeps"
+            }
+            Growing::Spilled => {
+                "is in a function that spills a value to a slot wanting more alignment than the \
+                 stack pointer is left on, which needs a base register nothing here keeps"
             }
             Growing::Naked => {
                 "is in a function that is `naked`, which has no prologue to point a frame pointer \
