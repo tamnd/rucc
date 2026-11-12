@@ -314,6 +314,15 @@ impl Off {
 /// would then call the library for every float, which a kernel does not link, so refusing the
 /// function is the same build failing sooner.
 ///
+/// A `float` or `double` that is only moved is not worked on, though, and gcc moves one through
+/// an xmm register when the command line turned SSE back on, with no call. NetBSD's AES and ChaCha
+/// code for SSE2 is built with `-msoft-float -msse -msse2`, and `_mm_load1_ps` and `_mm_shuffle_ps`
+/// load a lane, take one out of a vector and put it back. So on i386 with the vector registers on,
+/// a scalar float that a load, a constant, a lane taken out of a vector, a `bitcast` or a `select`
+/// gives is kept there and not refused. Arithmetic on one and a conversion to or from one is
+/// still refused, and so is one that is passed or given back, whose place the x87 stack decides.
+/// See tamnd/rucc#4523.
+///
 /// `x87_return` is `-mno-fp-ret-in-387` read the other way round. The kernel's display code turns
 /// the x87 stack back on with `-mhard-float` and leaves that flag in place, so a `long double` may
 /// be computed with and not returned, and gcc refuses only a function that returns one.
@@ -353,10 +362,30 @@ pub fn off_registers(
             return Err(refused);
         }
     }
+    let moved = |inst: Inst, ty: Type| {
+        stacked
+            && vector
+            && ty.is_scalar()
+            && ty.is_float()
+            && ty.bits() != 80
+            && matches!(
+                source[inst].opcode,
+                Opcode::Load
+                    | Opcode::AtomicLoad
+                    | Opcode::FConst
+                    | Opcode::ExtractLane
+                    | Opcode::Bitcast
+                    | Opcode::Select
+            )
+    };
     for block in source.blocks() {
         for inst in source.insts(block) {
             for value in source[inst].results() {
-                if let Some(refused) = refuse(Some(inst), source[value].ty) {
+                let ty = source[value].ty;
+                if moved(inst, ty) {
+                    continue;
+                }
+                if let Some(refused) = refuse(Some(inst), ty) {
                     return Err(refused);
                 }
             }
