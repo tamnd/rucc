@@ -1456,6 +1456,27 @@ fn spelled(
             }
         }
     }
+    // The AT&T name with only the letter of what is read, which gas finishes with the letter of
+    // the register written, so `movzb %al, %rax` is `movzbq`. nettle's x86_64 AES writes it. What
+    // is read has to be as wide as the letter says, because the row does not look at the width of
+    // a register and would take `%ax` for `%al`.
+    if let (Some(kind @ ("movzb" | "movzw" | "movsb" | "movsw")), [from, Operand::Reg(_, to)]) =
+        (Some(word), operands)
+    {
+        let read = if kind.ends_with('b') { Width::Byte } else { Width::Word };
+        let agrees = match from {
+            Operand::Reg(_, width) => *width == read,
+            Operand::High(_) => read == Width::Byte,
+            Operand::Mem(..) => true,
+            _ => false,
+        };
+        if agrees && to.bits() > read.bits() {
+            let spelled = format!("{kind}{}", letter(*to));
+            if let Some(row) = encoding(&spelled, &kinds, imm) {
+                return Ok((spelled, row));
+            }
+        }
+    }
     if let Some(width) = stated(word, operands)? {
         let letter = letter(width);
         for name in names.iter().flatten() {
@@ -3575,6 +3596,19 @@ mod tests {
         assert_eq!(bytes("movzx %bl, %edi"), bytes("movzbl %bl, %edi"));
         assert_eq!(bytes("movzx %ah, %esi"), bytes("movzbl %ah, %esi"));
         assert_eq!(bytes("movsx %cx, %rax"), bytes("movswq %cx, %rax"));
+    }
+
+    #[test]
+    fn movzb_and_movsb_take_the_last_letter_from_the_register_written() {
+        assert_eq!(bytes("movzb %al, %rax"), bytes("movzbq %al, %rax"));
+        assert_eq!(bytes("movzb %bl, %r11d"), bytes("movzbl %bl, %r11d"));
+        assert_eq!(bytes("movzb %ah, %ecx"), bytes("movzbl %ah, %ecx"));
+        assert_eq!(bytes("movzb 3(%rdi), %eax"), bytes("movzbl 3(%rdi), %eax"));
+        assert_eq!(bytes("movzw %dx, %rsi"), bytes("movzwq %dx, %rsi"));
+        assert_eq!(bytes("movsb %cl, %ax"), bytes("movsbw %cl, %ax"));
+        assert_eq!(bytes("movsw (%rsi), %r9"), bytes("movswq (%rsi), %r9"));
+        assert!(one("movzb", &["%ax".to_owned(), "%eax".to_owned()]).is_err());
+        assert!(one("movzw", &["%al".to_owned(), "%eax".to_owned()]).is_err());
     }
 
     /// What a line was read as, holes and all.
