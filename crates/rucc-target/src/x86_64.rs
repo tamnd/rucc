@@ -68,7 +68,7 @@ use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
 };
 use crate::short::{
-    Cleared, Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed,
+    Cleared, Copied, Filled, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed,
 };
 use rucc_abi::Convention;
 
@@ -780,6 +780,7 @@ pub static FLAGS: FlagInsts = FlagInsts {
 pub static SHORT: ShortInsts = ShortInsts {
     prefix: "x64.",
     zeroing: &SHORTER_ZEROS,
+    filling: &MINUS_ONES,
     clearing: &LOW_BYTE_CLEARS,
     narrowing: &NARROWER_MOVES,
     whole: &WHOLE_MOVES,
@@ -811,6 +812,17 @@ static SHORTER_ZEROS: [Zeroed; 3] = [
     Zeroed { name: "mov_ri_16", into: "xor_rr_16" },
     Zeroed { name: "mov_ri_32", into: "xor_rr_32" },
     Zeroed { name: "mov_ri_64", into: "xor_rr_32" },
+];
+
+/// Writing minus one into a register by oring minus one into it, at -Os and -Oz.
+///
+/// `movl $-1, %eax` is five bytes and `orl $-1, %eax` is three, since the `or` carries its number
+/// as one byte the processor sign extends. `movq $-1, %rax` is seven and `orq $-1, %rax` is four.
+/// The `or` reads the register, which the move does not, so gcc writes it at `-Os` and not at
+/// `-O2`, and FreeBSD's `boot2` has seven of these. Sixteen bits is four bytes either way.
+static MINUS_ONES: [Filled; 2] = [
+    Filled { name: "mov_ri_32", into: "or_ri_32" },
+    Filled { name: "mov_ri_64", into: "or_ri_64" },
 ];
 
 /// Clearing the low byte of a register without spelling out the mask.

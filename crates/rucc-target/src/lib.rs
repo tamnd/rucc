@@ -86,7 +86,7 @@ pub use crate::regs::{
     Trace, Where,
 };
 pub use crate::short::{
-    Cleared, Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed,
+    Cleared, Copied, Filled, Narrowed, ShortInsts, Spread, Stepped, Tested, Widened, Zeroed,
 };
 pub use crate::timing::{Timing, TimingInsts, Unit};
 pub use crate::typenames::{Lane, TypeName};

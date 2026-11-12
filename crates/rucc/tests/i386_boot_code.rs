@@ -209,3 +209,19 @@ fn the_arguments_a_call_passes_on_the_stack_are_stored_at_o2() {
     let say = body(&text, "say");
     assert!(!say.iter().any(|line| line.starts_with("pushl\t$")), "{text}");
 }
+
+/// A function that answers -1 once a call is over, which `boot2` does on each of its errors.
+const MINUS: &str = "\
+int g(void);
+int fail(void) { g(); return -1; }
+";
+
+#[test]
+fn minus_one_is_an_or_into_the_register_at_os() {
+    let text = listing_of(MINUS, "minus-os", &[]);
+    let fail = body(&text, "fail");
+    assert!(fail.contains(&"orl\t$-1, %eax"), "three bytes where the move is five\n{text}");
+    let text = listing_of(MINUS, "minus-o2", &["-O2"]);
+    let fail = body(&text, "fail");
+    assert!(fail.contains(&"movl\t$-1, %eax"), "the move reads nothing at -O2\n{text}");
+}

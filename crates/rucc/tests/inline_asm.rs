@@ -1012,13 +1012,16 @@ fn a_search_tied_to_its_starting_value_keeps_it_for_zero() {
         let dest = search.rsplit(',').next().expect("two operands").trim().to_string();
         let src = search.split(',').next().expect("two operands").split_whitespace().last();
         assert_ne!(src, Some(dest.as_str()), "the source took the destination at {level}:\n{body}");
-        // The -1 is in the destination when the search runs.
+        // The -1 is in the destination when the search runs. At -Os it goes in as an or of -1,
+        // which is shorter than the move.
         let wide = dest.replace("%r", "%e").replace("%ee", "%e");
-        let set = format!("movl\t$-1, {wide}");
-        assert!(
-            body.contains(&set) || body.contains(&format!("movq\t$-1, {dest}")),
-            "{level}:\n{body}"
-        );
+        let sets = [
+            format!("movl\t$-1, {wide}"),
+            format!("movq\t$-1, {dest}"),
+            format!("orl\t$-1, {wide}"),
+            format!("orq\t$-1, {dest}"),
+        ];
+        assert!(sets.iter().any(|set| body.contains(set.as_str())), "{level}:\n{body}");
     }
 }
 

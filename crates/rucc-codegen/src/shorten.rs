@@ -5,7 +5,7 @@
 //! about the back end never learning what it is compiling for, and names three of these as free
 //! before any of that is settled and one as waiting for it.
 //!
-//! Eight rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! Nine rewrites. A move of zero into a register becomes an exclusive or of the register with
 //! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
 //! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
 //! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
@@ -69,9 +69,17 @@
 //! bytes of nothing put after each byte move instead. So most of what this buys there is where the
 //! code behind it falls, and the wait is the rest, which came out ahead in each of the three pairs.
 //!
-//! That fourth one and the eighth are the only ones here that are not free, and they are the only
-//! ones that read the goal. The eighth costs three bytes for each one it writes and is taken only
-//! where the goal is not size, which is the other way round from the fourth.
+//! And a move of minus one into a register becomes the `or` of minus one into it where the goal is
+//! size. `movl $-1, %eax` is five bytes and `orl $-1, %eax` is three, since the `or` carries its
+//! number as one sign extended byte. It reads the register, so the processor waits for whatever
+//! wrote the register last, and it writes the condition state, so it waits on the state being dead
+//! the way the exclusive or does. gcc writes it at `-Os` and not at `-O2`, and FreeBSD's `boot2`,
+//! which has to fit in 7.5 KiB, has seven of them.
+//!
+//! That fourth one, the eighth and the ninth are the only ones here that are not free, and they are
+//! the only ones that read the goal. The eighth costs three bytes for each one it writes and is
+//! taken only where the goal is not size, which is the other way round from the fourth and the
+//! ninth.
 //!
 //! The fourth one is the one with a reason that needs saying. An addition writes the carry and an
 //! increment leaves the carry as it found it, so the machine has to merge what was left with what
@@ -225,6 +233,7 @@ pub fn shorter(
     // holds a name it read out of the interner while it edits the function and interning a new one
     // there would be the same interner borrowed twice. The same reason [`crate::compare`] has.
     let wanted = short.zeroing.iter().map(|entry| entry.into);
+    let wanted = wanted.chain(short.filling.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.clearing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.whole.iter().map(|entry| entry.into));
@@ -286,6 +295,16 @@ pub fn shorter(
                     took += 1;
                     // What stands there now writes the state, and the state was already dead, so
                     // nothing about what the instructions in front of it may do has changed.
+                    continue;
+                }
+            }
+            // Minus one, as the register ored with minus one. That reads the register, so it is a
+            // trade of time for bytes and waits for a level that asked for small code, and it
+            // writes the state, so it waits for the state to be dead the way the exclusive or does.
+            if small && !live && known.filling {
+                let into = filled_form(func, short, names, &opcodes, inst);
+                if into.is_some_and(|op| filled(func, &mut counts, machine, names, inst, op)) {
+                    took += 1;
                     continue;
                 }
             }
@@ -593,6 +612,8 @@ fn live_out(
 struct Known {
     /// Whether it has a shorter way of writing zero.
     zeroing: bool,
+    /// Whether it has a shorter way of writing minus one.
+    filling: bool,
     /// Whether it has a shorter way of clearing the low byte.
     clearing: bool,
     /// Whether it has a narrower instruction.
@@ -637,6 +658,7 @@ impl Known {
             let name = opcode(func, flags, names, inst);
             Self {
                 zeroing: has(|short, bare| short.zeroed(bare).is_some()),
+                filling: has(|short, bare| short.filled(bare).is_some()),
                 clearing: has(|short, bare| short.clearing.iter().any(|entry| entry.name == bare)),
                 narrowing: has(|short, bare| short.narrowed(bare).is_some()),
                 whole: has(|short, bare| short.whole(bare).is_some()),
@@ -674,6 +696,23 @@ fn shorter_form(
     let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
     let into = short.zeroed(name)?;
     if func[inst].imm.map(|at| func[at].0) != Some(0) {
+        return None;
+    }
+    opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)
+}
+
+/// The instruction that ors minus one into the register this one writes, when it has one and the
+/// number it carries is minus one.
+fn filled_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> Option<mir::Opcode> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let into = short.filled(name)?;
+    if func[inst].imm.map(|at| func[at].0) != Some(-1) {
         return None;
     }
     opcodes.iter().find(|&&(at, _)| at == into).map(|&(_, opcode)| opcode)
@@ -968,6 +1007,35 @@ fn zeroed(
     inst: mir::Inst,
     opcode: mir::Opcode,
 ) -> bool {
+    onto_itself(func, counts, machine, names, inst, opcode, None)
+}
+
+/// Rewrites the move of minus one as the `or` of minus one into the register it wrote.
+///
+/// The same rewrite as [`zeroed`], which builds every operand on the one register, except that the
+/// number stays: the `or` carries the minus one the move did.
+fn filled(
+    func: &mut mir::Func,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    opcode: mir::Opcode,
+) -> bool {
+    onto_itself(func, counts, machine, names, inst, opcode, Some(-1))
+}
+
+/// The instruction rewritten as `opcode` with each operand on the one register it wrote, carrying
+/// `imm`.
+fn onto_itself(
+    func: &mut mir::Func,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    opcode: mir::Opcode,
+    imm: Option<i64>,
+) -> bool {
     let written: Vec<mir::Operand> = func[func[inst].operands]
         .iter()
         .filter(|operand| operand.role != Role::Use)
@@ -992,7 +1060,7 @@ fn zeroed(
         })
         .collect();
     let mut set = Changes::new();
-    set.rewrite(inst, Plan { opcode, operands, imm: None, ..Plan::of(func, inst) });
+    set.rewrite(inst, Plan { opcode, operands, imm, ..Plan::of(func, inst) });
     set.commit(func, counts, names, machine).is_ok()
 }
 
@@ -1522,6 +1590,48 @@ mod tests {
 
         assert_eq!(takes(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, block), ["xor_rr_32"]);
+    }
+
+    /// A move of minus one at a level that wanted small code becomes the `or` of minus one into the
+    /// register, which names the register in both its operands and keeps the number.
+    #[test]
+    fn a_move_of_minus_one_becomes_an_or_of_minus_one_for_size() {
+        let (mut names, mut func, block) = empty();
+        let rcx = mir::Reg::physical(rucc_target::x86_64::RCX);
+        let rdx = mir::Reg::physical(rucc_target::x86_64::RDX);
+        let ones = op(&mut names, "mov_ri_32");
+        let wide = op(&mut names, "mov_ri_64");
+        let inst = func.build(block, ones).def(rcx, GPR).imm(-1).finish();
+        func.build(block, wide).def(rdx, GPR).imm(-1).finish();
+
+        assert_eq!(small(&mut func, &mut names), 2);
+        assert_eq!(shape(&func, &names, block), ["or_ri_32", "or_ri_64"]);
+        assert_eq!(regs(&func, inst), [rcx, rcx]);
+        assert_eq!(imm(&func, inst), Some(-1));
+    }
+
+    /// The `or` reads the register, which the move does not, so at a level that wanted fast code
+    /// the move stays. With the state read behind it, it stays at any level.
+    #[test]
+    fn a_move_of_minus_one_stays_for_speed_or_when_the_state_is_read() {
+        let (mut names, mut func, block) = empty();
+        let into = func.new_vreg(GPR);
+        let ones = op(&mut names, "mov_ri_32");
+        func.build(block, ones).def(into, GPR).imm(-1).finish();
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["mov_ri_32"]);
+
+        let (mut names, mut func, block) = empty();
+        let rcx = mir::Reg::physical(rucc_target::x86_64::RCX);
+        let byte = func.new_vreg(GPR);
+        let ones = op(&mut names, "mov_ri_32");
+        let cmp = op(&mut names, "cmp_rr_32");
+        let set = op(&mut names, "set_e");
+        func.build(block, cmp).uses(rcx, GPR).uses(rcx, GPR).finish();
+        func.build(block, ones).def(rcx, GPR).imm(-1).finish();
+        func.build(block, set).def(byte, GPR).finish();
+        assert_eq!(small(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["cmp_rr_32", "mov_ri_32", "set_e"]);
     }
 
     /// A mask that clears the low byte of a register and keeps the rest, with nothing reading the
