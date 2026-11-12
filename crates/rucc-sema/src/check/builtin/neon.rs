@@ -209,9 +209,7 @@ impl Checker<'_> {
                 }
                 let (low, high) = op.range(lane);
                 let constant = self.eval_integer(count).ok();
-                if let Some(shift) = constant
-                    && !(low..=high).contains(&shift)
-                {
+                if let Some(shift) = constant.filter(|shift| !(low..=high).contains(shift)) {
                     let what = format!(
                         "the shift count of '{name}' is {shift}, and it must be from {low} to \
                          {high}"
