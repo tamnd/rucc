@@ -8710,7 +8710,8 @@ mod tests {
 
         // `-dumpversion` is a different flag that happens to start the same way, and it is read
         // as itself rather than as a dump of nothing.
-        assert_eq!(printed(&["-dumpversion", "a.c"]), "16");
+        // A BSD answers with the whole release, so the target is one that answers with the major.
+        assert_eq!(printed(&["-dumpversion", LINUX, "a.c"]), "16");
     }
 
     #[test]
@@ -10826,6 +10827,10 @@ mod tests {
             let claim = format!("-fgnuc-version={claim}");
             let mut line = vec![claim.as_str()];
             line.extend_from_slice(flags);
+            // The host may be a BSD, whose answers differ, so a line with no target names Linux.
+            if !flags.iter().any(|flag| flag.starts_with("--target=")) {
+                line.push(LINUX);
+            }
             printed(&line)
         };
         assert_eq!(ask("4.9.4", &["-dumpversion"]), "4.9.4");
