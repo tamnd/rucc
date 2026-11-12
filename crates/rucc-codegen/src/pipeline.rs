@@ -70,6 +70,7 @@ use crate::pads;
 use crate::pairs;
 use crate::pressure::{Cost, Pressure};
 use crate::product;
+use crate::quotient;
 use crate::scaled;
 use crate::schedule;
 use crate::select::{self, Selector};
@@ -1127,6 +1128,8 @@ pub fn compile_recording(
         double::doubles(&mut func, machine.shapes, names);
         // The same moment for the same reason. See [`crate::product`].
         product::products(&mut func, machine.shapes, names);
+        // The same moment for the same reason. See [`crate::quotient`].
+        quotient::pairs(&mut func, machine.shapes, names);
         // After both, which write instructions of their own. See [`crate::fresh`].
         fresh::constants(&mut func, machine.shapes, names);
     }

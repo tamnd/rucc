@@ -199,6 +199,7 @@ pub mod pipeline;
 pub mod pressure;
 pub mod product;
 pub mod quad;
+pub mod quotient;
 pub mod retry;
 pub mod rolled;
 pub mod scaled;
