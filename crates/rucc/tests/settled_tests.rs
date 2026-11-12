@@ -405,7 +405,7 @@ fn a_static_that_is_read_or_written_through_volatile_is_kept() {
         void set(int v) { kept = v; *(volatile int *)&loud = v; }\n\
         int get(void) { return kept; }\n";
     let listing = asm("write-read", source);
-    assert!(listing.contains("kept:"), "the read object went:\n{listing}");
+    assert!(listing.contains("\t.comm\tkept,4,4\n"), "the read object went:\n{listing}");
     assert!(listing.contains("loud"), "the volatile store went:\n{listing}");
 }
 

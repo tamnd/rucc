@@ -140,3 +140,19 @@ int (*tab[])(void) = { g4, g3 };
     let names = ["tab", "s1", "s2", "s3", "s4"];
     assert_eq!(labels(&text, &names), ["s4", "s3", "s1", "s2", "tab"], "{text}");
 }
+
+/// A zero filled `static` is `.local` and `.comm` in the listing, as gcc writes it, and the
+/// assembler puts it after the globals in `.bss`. A global keeps its label.
+#[test]
+fn a_zero_filled_static_is_written_as_a_local_common() {
+    let source = "\
+int e1;
+int f(void) { static int s; return s++ + e1; }
+static int c;
+int h(void) { return c++; }
+";
+    let text = assembly("local-common", source);
+    assert!(text.contains("\t.local\tc\n\t.comm\tc,4,4\n"), "{text}");
+    assert!(text.contains("\t.comm\ts."), "{text}");
+    assert_eq!(labels(&text, &["e1", "s", "c"]), ["e1"]);
+}

@@ -521,6 +521,21 @@ impl Directives {
                     writeln!(out, "\t.zerofill\t__DATA,__bss,{symbol}{name},{},{align}", var.size);
                 return false;
             }
+            // A zero filled `static` in `.bss` itself is `.local` and `.comm`, which is how gcc
+            // writes one. gas puts it after every other variable in `.bss`, and so do the assembler
+            // here and the object writer. One with a redzone is not, as gcc never writes a
+            // variable it guards that way.
+            (Directives::Elf, Place::Zero)
+                if var.binding == Binding::Local
+                    && var.redzone == 0
+                    && !var.retain
+                    && !sections.data =>
+            {
+                let name = self.spell(&var.name);
+                let _ = writeln!(out, "\t.local\t{name}");
+                let _ = writeln!(out, "\t.comm\t{name},{},{}", var.size, var.align.max(1));
+                return false;
+            }
             _ => {}
         }
         if var.retain {
@@ -757,6 +772,7 @@ mod tests {
     use rucc_object::FUNC_ALIGN;
 
     use super::*;
+    use crate::data::Piece;
 
     #[test]
     fn a_mach_o_symbol_is_the_c_name_with_an_underscore_in_front_of_it() {
@@ -807,6 +823,35 @@ mod tests {
         let mut elf = String::new();
         Directives::Elf.variable(&mut elf, &var, Sections::default());
         assert_eq!(elf, "\t.comm\tshared,16,8\n");
+    }
+
+    /// What gcc writes for `static int c;`, which gas puts after every other variable in `.bss`.
+    /// A global in `.bss`, and a `static` under `-fdata-sections`, is a label in a section.
+    #[test]
+    fn a_zero_filled_static_is_a_local_common_as_gcc_writes_it() {
+        let var = |name: &str, binding| Variable {
+            name: name.to_owned(),
+            size: 4,
+            align: 4,
+            place: Place::Zero,
+            binding,
+            visibility: Visibility::Default,
+            retain: false,
+            pieces: vec![Piece::Zero(4)],
+            redzone: 0,
+        };
+        let said = |name, binding, sections| {
+            let mut out = String::new();
+            let image = Directives::Elf.variable(&mut out, &var(name, binding), sections);
+            (image, out)
+        };
+        let (image, out) = said("c", Binding::Local, Sections::default());
+        assert!(!image);
+        assert_eq!(out, "\t.local\tc\n\t.comm\tc,4,4\n");
+        let (image, out) = said("g", Binding::Global, Sections::default());
+        assert!(image && out.starts_with("\t.bss\n") && out.ends_with("g:\n"), "{out}");
+        let (image, out) = said("c", Binding::Local, Sections { functions: false, data: true });
+        assert!(image && out.contains(".bss.c") && out.ends_with("c:\n"), "{out}");
     }
 
     #[test]
