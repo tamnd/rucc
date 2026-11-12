@@ -349,9 +349,9 @@ impl Tast {
     ///
     /// gcc makes the entry for an object in its symbol table at the first declaration that
     /// defines it, tentatively or with an initializer, and an `extern` one before it does not
-    /// count. The same is true of a function and its body. The table is the order the variables
-    /// are laid out in, so the place is kept for the lowering. Only the first one counts, since
-    /// a second definition does not move the entry again.
+    /// count unless it names a section. The same is true of a function and its body. The table
+    /// is the order the variables are laid out in, so the place is kept for the lowering. Only
+    /// the first one counts, since a second definition does not move the entry again.
     pub fn record_placed(&mut self, decl: DeclId) {
         let at = (self.top_level.len(), self.placed.len());
         self.placed.entry(decl).or_insert(at);

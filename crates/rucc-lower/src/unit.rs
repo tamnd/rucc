@@ -895,9 +895,10 @@ impl Unit<'_> {
     ///
     /// `places` has a place for each object the walk over the declarations at file scope made.
     /// An object declared `extern` first goes where the first declaration that defines it is,
-    /// since gcc makes no entry for an `extern` one. A `static` in a function body goes after
-    /// every object at file scope, in the order of [`reach::analyzed`], since gcc makes the entry
-    /// for one when it analyzes the body, and it does that when the whole file has been read.
+    /// since gcc makes no entry for an `extern` one, unless that `extern` one names a section.
+    /// A `static` in a function body goes after every object at file scope, in the order of
+    /// [`reach::analyzed`], since gcc makes the entry for one when it analyzes the body, and it
+    /// does that when the whole file has been read.
     /// What was made after the walk stays at the end, and the rest keep the order they were
     /// made in.
     fn placed(&mut self, written: usize, mut places: Vec<(u8, usize, usize)>) {
