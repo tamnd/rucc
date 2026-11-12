@@ -29,7 +29,7 @@ use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
 use rucc_base::float::{Float as Real, Format};
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Interner, Symbol, dfp};
-use rucc_diag::{Diagnostic, Span};
+use rucc_diag::{BytePos, Diagnostic, Span};
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Counter, Def, Extra, Flags,
     FloatPred, Func, Imm, Inst, InstData, IntPred, MATH_BUILTINS, MemInfo, MemOrder, Opcode, Param,
@@ -259,7 +259,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // and after the stores above, so the expression reads the parameters the call passed.
     for &param in &params {
         let ty = tast.adjusted_from(param).unwrap_or_else(|| tast[param].ty);
-        body.measure(ty);
+        body.measure(ty, None);
     }
 
     // The call on the way in, after the parameters are where the body reads them, which is where
@@ -394,6 +394,9 @@ fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
     }
     if flags.contains(DeclFlags::NO_UBSAN_SIGNED_OVERFLOW) {
         sanitize.signed_overflow = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_VLA_BOUND) {
+        sanitize.vla_bound = Check::Off;
     }
     if flags.contains(DeclFlags::NO_ASAN) || flags.contains(DeclFlags::NAKED) {
         sanitize.address = false;
@@ -1766,8 +1769,9 @@ impl<'u> Body<'_, 'u> {
         let ty = tast[decl].ty;
         let span = tast.decl_span(decl);
         // The sizes first, and once: they are what the object is as long as, and what every
-        // `sizeof` of it and every step over its rows answers with afterwards.
-        self.measure(ty);
+        // `sizeof` of it and every step over its rows answers with afterwards. Each is checked
+        // where the declaration names it, which a typedef does as well.
+        self.measure(ty, Some(span.lo));
         if tast[decl].kind == DeclKind::Type {
             // A name for a type, `typedef char T[n]`, which is in the tree for the measuring
             // above and declares no object to make a slot for.
@@ -1830,15 +1834,23 @@ impl<'u> Body<'_, 'u> {
     /// it any later would be reading `n` at the wrong time, which is the whole point of the
     /// rule that says the size of a variable length array is worked out where its declaration
     /// is and not where it is used.
-    fn measure(&mut self, ty: TypeId) {
+    ///
+    /// `named` is where the declaration names what it declares, for the check of
+    /// `-fsanitize=vla-bound`. A length is checked the first time it is worked out, and one in a
+    /// member of a record is not checked, which is where gcc checks none.
+    fn measure(&mut self, ty: TypeId, named: Option<BytePos>) {
         let canonical = self.types().canonical(ty);
         match self.types().kind(canonical) {
-            TypeKind::Pointer(pointee) => self.measure(pointee),
+            TypeKind::Pointer(pointee) => self.measure(pointee, named),
             TypeKind::Array { elem, len } => {
                 if let ArrayLen::Variable(vla) = len {
-                    self.count(vla);
+                    let fresh = !self.vlas.contains_key(&self.tast().vla_size(vla));
+                    let count = self.count(vla);
+                    if let Some(at) = named.filter(|_| fresh) {
+                        self.check_vla_bound(vla, count, at);
+                    }
                 }
-                self.measure(elem);
+                self.measure(elem, named);
             }
             // A record is as long as its members, so the sizes to evaluate are the ones in them.
             // Only a record that has such a size is walked: an ordinary one is a tree of members
@@ -1851,7 +1863,7 @@ impl<'u> Body<'_, 'u> {
                 let members: Vec<TypeId> =
                     self.types().record_info(record).fields.iter().map(|field| field.ty).collect();
                 for member in members {
-                    self.measure(member);
+                    self.measure(member, None);
                 }
             }
             _ => {}

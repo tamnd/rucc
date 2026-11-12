@@ -7,7 +7,7 @@
 //! operator is and what the types of its operands are called, then each operand as a word. So the
 //! record is laid out the way gcc lays it out, field for field, and the names are gcc's names.
 
-use rucc_ast::BinaryOp;
+use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_diag::{BytePos, Span};
 use rucc_ir::{
@@ -16,7 +16,7 @@ use rucc_ir::{
 };
 use rucc_sema::{Const, Conversion, ExprId, ExprKind};
 use rucc_tuple::Arch;
-use rucc_types::{ArrayLen, FloatKind, IntKind, RecordId, TypeId, TypeKind};
+use rucc_types::{ArrayLen, FloatKind, IntKind, RecordId, RecordKind, TypeId, TypeKind, VlaId};
 
 use super::{Body, MemInfo, Ordered, Place, Where};
 use crate::repr;
@@ -34,7 +34,7 @@ enum Length {
     /// An array of a fixed length.
     Fixed(u64),
     /// A variable length array.
-    Variable(rucc_types::VlaId),
+    Variable(VlaId),
     /// A member that another member counts.
     Counted(Counted),
 }
@@ -344,6 +344,36 @@ impl Body<'_, '_> {
         self.build(span).call(callee, signature, &args);
     }
 
+    /// The check of `-fsanitize=vla-bound` on `count`, the length of a variable length array that
+    /// a declaration has just worked out, which fires when it is not positive.
+    ///
+    /// gcc calls `__ubsan_handle_vla_bound_not_positive` with a record of where the declaration
+    /// names what it declares and the type the length was written in, which is not promoted, and
+    /// the length.
+    pub(super) fn check_vla_bound(&mut self, vla: VlaId, count: Value, at: BytePos) {
+        let check = self.sanitize.vla_bound;
+        if !check.is_on() || self.at.is_none() {
+            return;
+        }
+        let expr = self.tast().vla_size(vla);
+        let ty = self.tast()[expr].ty;
+        let span = self.tast().expr_span(expr);
+        let Some(kind) = self.int_kind(ty) else { return };
+        let signed = kind.is_signed(self.target().char_is_signed);
+        let fires = {
+            let wide = self.func[count].ty;
+            let mut build = self.build(span);
+            let zero = build.iconst(wide, 0);
+            build.icmp(if signed { IntPred::Sle } else { IntPred::Eq }, count, zero)
+        };
+        let data = {
+            let ty = self.unit.int_type(kind);
+            self.unit.ubsan_data(at, &[ty])
+        };
+        let operand = Operand { value: count, ty };
+        self.fire(fires, check, "__ubsan_handle_vla_bound_not_positive", data, &[operand], span);
+    }
+
     /// Where gcc says a read from memory is, which is the `[` of a subscript and where the
     /// expression starts for anything else: the `*` of `*p` and the base of a member.
     fn loaded_at(&self, operand: ExprId, span: Span) -> BytePos {
@@ -376,9 +406,9 @@ impl Body<'_, '_> {
         }
     }
 
-    /// `base[index]` with the check of `-fsanitize=bounds-strict` in front of it, and [`None`]
-    /// when the base is not an array of a length the check knows, which leaves the subscript to
-    /// [`Self::element`].
+    /// `base[index]` with the check of `-fsanitize=bounds-strict` or `-fsanitize=bounds` in front
+    /// of it, and [`None`] when the base is not an array of a length the check knows, which leaves
+    /// the subscript to [`Self::element`]. `bounds` leaves out the arrays [`Self::trailing`] says.
     ///
     /// The length is known for an array of a fixed length, a trailing member of a record as well,
     /// for a variable length array, and for a member that `counted_by` says another member
@@ -406,6 +436,11 @@ impl Body<'_, '_> {
             TypeKind::Pointer(_) if !decayed => None,
             _ => return None,
         };
+        // A member that `counted_by` counts is checked against its count either way.
+        let sized = matches!(len, Some(ArrayLen::Fixed(_) | ArrayLen::Variable(_)));
+        if sized && self.sanitize.trailing && self.trailing(object) {
+            return None;
+        }
         let index_ty = self.tast()[index].ty;
         let kind = self.int_kind(index_ty)?;
         let extra = u64::from(past);
@@ -493,6 +528,65 @@ impl Body<'_, '_> {
         self.fire(fires, check, "__ubsan_handle_out_of_bounds", data, &[operand], span);
         let size = self.stride(ty, span);
         Some(self.step(pointer, steps, signed, size, false, span))
+    }
+
+    /// Whether `object` is an array that `-fsanitize=bounds` does not check, which is how gcc's
+    /// `ubsan_instrument_bounds` finds an array a program may allocate past the end of.
+    ///
+    /// It is a member of an object that a pointer points at, and the last member of its
+    /// structure, and each structure it is in up to the first thing that is not a member is the
+    /// last member of the one around it. A member of a union is last wherever it is. Under
+    /// `-fstrict-flex-arrays=` or `strict_flex_array` an array of a length the level does not
+    /// take is checked even at the end, as with gcc.
+    fn trailing(&self, object: ExprId) -> bool {
+        let tast = self.tast();
+        let types = self.types();
+        if !matches!(tast[object].kind, ExprKind::Member { .. }) || !self.pointed(object) {
+            return false;
+        }
+        let mut at = object;
+        while let ExprKind::Member { base: holder, field } = tast[at].kind {
+            let TypeKind::Record(id) = types.kind(types.canonical(tast[holder].ty)) else {
+                return false;
+            };
+            let info = types.record_info(id);
+            if info.kind == RecordKind::Struct && field as usize + 1 < info.fields.len() {
+                return false;
+            }
+            let Some(member) = info.fields.get(field as usize) else { return false };
+            if let TypeKind::Array { len: ArrayLen::Fixed(count), .. } =
+                types.kind(types.canonical(member.ty))
+            {
+                let level = tast.strict_flex(id, member.name);
+                let checked = match count {
+                    0 => level == 3,
+                    1 => level >= 2,
+                    _ => level >= 1,
+                };
+                if checked {
+                    return false;
+                }
+            }
+            at = holder;
+        }
+        true
+    }
+
+    /// Whether the object `expr` names is reached through a pointer, past every member and every
+    /// element of an array on the way to it.
+    fn pointed(&self, expr: ExprId) -> bool {
+        let tast = self.tast();
+        match tast[expr].kind {
+            ExprKind::Member { base, .. } => self.pointed(base),
+            ExprKind::Subscript { base, .. } => match tast[base].kind {
+                ExprKind::Convert { kind: Conversion::ArrayDecay, operand } => {
+                    self.pointed(operand)
+                }
+                _ => true,
+            },
+            ExprKind::Unary { op: UnaryOp::Deref, .. } => true,
+            _ => false,
+        }
     }
 
     /// The member that counts the member `object` names, when `counted_by` says one does and it

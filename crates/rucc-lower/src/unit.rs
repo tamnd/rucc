@@ -176,8 +176,13 @@ pub struct Sanitize {
     pub shift_base: Check,
     /// `-fsanitize=bool`.
     pub boolean: Check,
-    /// `-fsanitize=bounds-strict`.
+    /// `-fsanitize=bounds-strict`, or `-fsanitize=bounds` when [`Self::trailing`] is set.
     pub bounds: Check,
+    /// The subscript check is `-fsanitize=bounds`, which leaves out an array at the end of a
+    /// structure that a pointer points at.
+    pub trailing: bool,
+    /// `-fsanitize=vla-bound`.
+    pub vla_bound: Check,
     /// `-fsanitize=unreachable`.
     pub unreachable: Check,
     /// `-fsanitize=signed-integer-overflow`.

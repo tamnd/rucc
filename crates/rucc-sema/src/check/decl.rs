@@ -1949,6 +1949,7 @@ impl Checker<'_> {
                 DeclFlags::NO_UBSAN_BOUNDS,
                 DeclFlags::NO_UBSAN_UNREACHABLE,
                 DeclFlags::NO_UBSAN_SIGNED_OVERFLOW,
+                DeclFlags::NO_UBSAN_VLA_BOUND,
                 DeclFlags::NO_ASAN,
                 DeclFlags::COLD,
                 DeclFlags::HOT,

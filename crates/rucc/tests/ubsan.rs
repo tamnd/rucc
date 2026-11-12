@@ -1,5 +1,6 @@
 //! `-fsanitize=integer-divide-by-zero`, `-fsanitize=shift`, `-fsanitize=bool`, `-fsanitize=enum`,
-//! `-fsanitize=bounds-strict` and `-fsanitize=signed-integer-overflow`, which the kernel's `CONFIG_UBSAN` puts on every unit that does
+//! `-fsanitize=bounds-strict`, `-fsanitize=bounds`, `-fsanitize=vla-bound` and
+//! `-fsanitize=signed-integer-overflow`, which the kernel's `CONFIG_UBSAN` puts on every unit that does
 //! not opt out. The calls carry gcc's names, the record each one is
 //! handed is laid out the way gcc lays it out, and a function marked `no_sanitize` makes none.
 
@@ -161,7 +162,7 @@ fn the_flags_that_say_what_a_check_does_are_read() {
 #[test]
 fn the_checks_the_compiler_does_not_have_are_still_refused() {
     let dir = std::env::temp_dir().join(format!("rucc-ubsan-refused-{}", std::process::id()));
-    for asked in ["-fsanitize=undefined", "-fsanitize=bounds", "-fsanitize=shift,null"] {
+    for asked in ["-fsanitize=undefined", "-fsanitize=alignment", "-fsanitize=shift,null"] {
         let out = compile(&dir, SOURCE, &[asked, "-S", "-o", "-"]);
         assert!(!out.status.success(), "{asked} is refused");
         let said = String::from_utf8_lossy(&out.stderr);
@@ -509,5 +510,142 @@ fn the_runtime_is_told_which_operation_left_its_type() {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+}
+
+/// The body of function `name` in a listing.
+fn body<'a>(text: &'a str, name: &str) -> &'a str {
+    let start = text.find(&format!("\n{name}:")).unwrap_or_else(|| panic!("{name} is defined"));
+    let end = text[start..].find(&format!(".size\t{name}")).map_or(text.len(), |at| start + at);
+    &text[start..end]
+}
+
+/// Arrays at the end of a structure and arrays that are not, reached through a pointer and not.
+const TRAILING: &str = r#"struct tail { int n; int a[4]; };
+struct mid { int a[4]; int n; };
+struct outer { struct tail t; };
+struct outer2 { struct tail t; int z; };
+union either { int a[4]; long b; };
+int last(struct tail *p, int i) { return p->a[i]; }
+int middle(struct mid *p, int i) { return p->a[i]; }
+int nested(struct outer *p, int i) { return p->t.a[i]; }
+int inner(struct outer2 *p, int i) { return p->t.a[i]; }
+int local(int i) { struct tail t = {0}; return t.a[i]; }
+int member(union either *p, int i) { return p->a[i]; }
+"#;
+
+fn trailing(args: &[&str]) -> String {
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir = std::env::temp_dir().join(format!("rucc-ubsan-trailing-{}{tag}", std::process::id()));
+    let mut all = vec!["--target=x86_64-unknown-linux-gnu", "-S", "-o", "-"];
+    all.extend(args);
+    let out = compile(&dir, TRAILING, &all);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).expect("a listing is text")
+}
+
+#[test]
+fn bounds_leaves_an_array_at_the_end_of_a_structure_through_a_pointer() {
+    let checked = |text: &str, name| body(text, name).contains("__ubsan_handle_out_of_bounds");
+    let all = ["last", "middle", "nested", "inner", "local", "member"];
+    for level in ["-O0", "-O2"] {
+        let text = trailing(&[level, "-fsanitize=bounds"]);
+        for name in all {
+            let wanted = matches!(name, "middle" | "inner" | "local");
+            assert_eq!(checked(&text, name), wanted, "{level} {name}:\n{text}");
+        }
+        for strict in [&["-fsanitize=bounds-strict"][..], &["-fsanitize=bounds,bounds-strict"]] {
+            let mut args = vec![level];
+            args.extend(strict);
+            let text = trailing(&args);
+            for name in all {
+                assert!(checked(&text, name), "{args:?} {name}:\n{text}");
+            }
+        }
+        let text = trailing(&[level, "-fsanitize=bounds", "-fstrict-flex-arrays=1"]);
+        for name in all {
+            assert!(checked(&text, name), "{level} -fstrict-flex-arrays=1 {name}:\n{text}");
+        }
+    }
+    let text = trailing(&["-O2", "-fsanitize=bounds", "-fsanitize-trap=bounds"]);
+    assert!(!text.contains("__ubsan_handle"), "{text}");
+    assert!(text.contains("ud2"), "{text}");
+}
+
+/// Variable length arrays whose lengths are checked, and in `quiet` one that is not. The lines and
+/// the columns of the names are the ones gcc 13 gives.
+const VLAS: &str = r#"void g(int *);
+void f(short n, unsigned char u){ int a[n]; typedef int T[u]; T b; g(a); g(b); }
+void h(long n){ int (*p)[n] = 0; g(*p); }
+__attribute__((no_sanitize("vla-bound"))) void quiet(int n) { int a[n]; g(a); }
+"#;
+
+#[test]
+fn a_length_that_is_not_positive_calls_the_runtime() {
+    let calls = |text: &str| text.matches("call\t__ubsan_handle_vla_bound_not_positive").count();
+    let dir = std::env::temp_dir().join(format!("rucc-ubsan-vla-{}", std::process::id()));
+    for level in ["-O0", "-O2"] {
+        let args =
+            ["--target=x86_64-unknown-linux-gnu", "-fsanitize=vla-bound", level, "-S", "-o", "-"];
+        let out = compile(&dir, VLAS, &args);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8(out.stdout).expect("a listing is text");
+        assert_eq!(calls(body(&text, "f")), 2, "{level}:\n{text}");
+        assert_eq!(calls(body(&text, "h")), 1, "{level}:\n{text}");
+        assert_eq!(calls(body(&text, "quiet")), 0, "{level}:\n{text}");
+        for wanted in ["'short int'", "'unsigned char'", "'long int'"] {
+            assert!(text.contains(wanted), "{level} has no {wanted}:\n{text}");
+        }
+        for column in [39, 57, 23] {
+            assert!(text.contains(&format!("\t.long\t{column}\n")), "{level} {column}:\n{text}");
+        }
+    }
+    let args = ["-fsanitize=vla-bound", "-fno-sanitize-recover=vla-bound", "-S", "-o", "-"];
+    let out = compile(&dir, VLAS, &args);
+    let text = String::from_utf8(out.stdout).expect("a listing is text");
+    assert!(text.contains("__ubsan_handle_vla_bound_not_positive_abort"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
+#[test]
+fn the_runtime_is_told_the_length_that_was_not_positive() {
+    let source = r#"struct loc { const char *file; unsigned line, column; };
+struct type { unsigned short kind, info; char name[]; };
+struct data { struct loc loc; struct type *type; };
+void _exit(int);
+static int same(const char *a, const char *b) {
+    while (*a && *a == *b)
+        a++, b++;
+    return *a == *b;
+}
+void __ubsan_handle_vla_bound_not_positive(struct data *d, unsigned long v) {
+    _exit(d->loc.line == 16 && d->loc.column == 9 && d->type->info == 11
+        && same(d->type->name, "'int'") && (int)v == -2 ? 0 : 1);
+}
+__attribute__((noinline)) int use(int n) {
+    volatile int k = n;
+    int a[k];
+    a[0] = 5;
+    return a[0];
+}
+int main(int argc, char **argv) {
+    if (use(3) != 5)
+        return 2;
+    use(1 - 3 * argc);
+    return 3;
+}
+"#;
+    for level in ["-O0", "-O2"] {
+        let dir =
+            std::env::temp_dir().join(format!("rucc-ubsan-vla-run-{}{level}", std::process::id()));
+        let program = dir.join("one");
+        let program_text = program.to_str().expect("a temporary path is text");
+        let out = compile(&dir, source, &[level, "-fsanitize=vla-bound", "-o", program_text]);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+        let status = Command::new(&program).status().expect("the program runs");
+        assert_eq!(status.code(), Some(0), "{level}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

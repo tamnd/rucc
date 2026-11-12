@@ -63,6 +63,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `-fsanitize=vla-bound` and `-fsanitize=bounds` now make gcc's checks, where they were refused. A variable length array whose length is zero or negative calls `__ubsan_handle_vla_bound_not_positive`. `bounds` is `bounds-strict`, except that an array at the end of a structure that a pointer points at is not checked. The `-fsanitize=undefined` group now has `bounds` in place of `bounds-strict`, as in gcc. NetBSD's t_ubsan.c asks for both checks (#4391).
 - On i386 NetBSD, which keeps the stack pointer on four bytes, a function whose frame grows with `alloca` or a variable length array and spills a `__float128` or a vector now compiles. The spill slot is on four bytes and the spill and reload use `movups`. It stopped with E0653 before, which is libquadmath's printf_fp.c (#4449)
 - An `asm` constraint with alternatives, such as the `"r,Z"` and `"rI,r"` of GMP's `sub_ddmmss` on AArch64, compiles. The statement takes one alternative for every operand: the first in which no operand must be a constant. Before, every target refused it, which failed 14 units of GMP and MPFR in the NetBSD aarch64 world.
 - On AArch64 a general purpose register in an `asm` template with no modifier is `x` whatever the width of its type, as gcc and clang name it. It was `w` for a type narrower than 64 bits, so libgcc's `mrs %0, ctr_el0` and `mrs %0, fpsr` into an `unsigned int` did not assemble.

@@ -230,6 +230,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_UBSAN_SIGNED_OVERFLOW) {
             head.push_str(" no_sanitize(signed-integer-overflow)");
         }
+        if node.flags.contains(DeclFlags::NO_UBSAN_VLA_BOUND) {
+            head.push_str(" no_sanitize(vla-bound)");
+        }
         if node.flags.contains(DeclFlags::NO_ASAN) {
             head.push_str(" no_sanitize_address");
         }
