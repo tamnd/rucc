@@ -44,6 +44,7 @@ use rucc_sema::{
     StorageDuration, StrId, Tast, Version, Visibility,
 };
 use rucc_target::{Convention, ObjectFormat, TargetInfo};
+use rucc_tuple::{Arch, Os};
 use rucc_types::{ArrayLen, TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
 
 use crate::abi::{self, Plan};
@@ -357,6 +358,13 @@ pub struct Context<'a> {
     /// Whether the build optimizes for size, which is `-Os` and `-Oz`. gcc then gives an object
     /// on AArch64 no more alignment than its type asks for. See `repr::static_align`.
     pub for_size: bool,
+    /// Whether a function only this unit calls takes its first three words of arguments in
+    /// registers on i386, which is what gcc does for a local function when it optimizes.
+    ///
+    /// The driver says no under `-pg` and `-finstrument-functions`, which hand a hook the function
+    /// and its caller. gcc says no under `-pg` without `-mfentry`. The rest of the question is
+    /// asked here, for each function. See [`Unit::takes_registers`].
+    pub local_registers: bool,
     /// The extensions the command line builds for, which a function's own `target` attribute
     /// stands in place of.
     ///
@@ -497,6 +505,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         tls_model,
         reorder,
         for_size,
+        local_registers,
         isa,
         vector,
         read,
@@ -504,6 +513,17 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
     let module = Module::new(names.intern(name), target);
     let (reachable, named) = reach::reachable(reach::Decide::new(tast, types, target, names));
     let live = reach::live(reach::Decide::new(tast, types, target, names));
+    // gcc's i386 rule, `ix86_function_regparm`: a local function takes three words in registers
+    // when the unit has fewer. Not on Windows, whose descriptions here have no such convention,
+    // and not in a file that keeps a register variable, which may be one of the three.
+    let i386 =
+        target.tuple.arch() == Arch::X86 && target.tuple.os() != Os::Windows && target.regparm < 3;
+    let kept = tast.top_level().iter().any(|&decl| tast[decl].register.is_some());
+    let called_only = if local_registers && i386 && !kept {
+        reach::called_only(reach::Decide::new(tast, types, target, names))
+    } else {
+        Set::default()
+    };
     let mut unit = Unit {
         tast,
         types,
@@ -560,6 +580,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         reachable,
         live,
         named,
+        called_only,
         used: Set::default(),
         nest: Nest::default(),
         checked_types: Map::default(),
@@ -720,6 +741,9 @@ pub(crate) struct Unit<'a> {
     /// What something in the file reaches, which is what decides whether a function with
     /// internal linkage is emitted at all.
     reachable: Set<DeclId>,
+    /// The functions every reference to is a call, when the unit may give those its own
+    /// convention, and nothing otherwise. See [`Unit::takes_registers`].
+    called_only: Set<DeclId>,
     /// What something the file has to keep reaches, which is what decides whether a `used`
     /// object in a function body is kept. See [`reach::live`].
     live: Set<DeclId>,
@@ -1336,9 +1360,9 @@ impl Unit<'_> {
         // one of those until something calls it, and the kernel's `irq.h` declares one ahead of
         // the header that finishes it. A call still reports it, from where the call is planned.
         let plan = if body.is_none() {
-            self.try_plan(ty, &[], false).ok()
+            self.try_plan(ty, &[], false, false).ok()
         } else {
-            self.plan(ty, &[], span)
+            self.plan_of(decl, ty, &[], span)
         };
         let Some(mut plan) = plan else { return };
         // A nested function takes its static chain after everything the program wrote, which is
@@ -1723,8 +1747,8 @@ impl Unit<'_> {
     /// as on wasm, and one whose address is taken is refused.
     fn chains(&mut self, escapes: bool, span: Span) -> bool {
         let chain = self.target.call_regs.and_then(|regs| regs.chain);
-        let wasm = self.target.tuple.arch() == rucc_tuple::Arch::Wasm32;
-        let i386 = self.target.tuple.arch() == rucc_tuple::Arch::X86;
+        let wasm = self.target.tuple.arch() == Arch::Wasm32;
+        let i386 = self.target.tuple.arch() == Arch::X86;
         let why = match chain {
             None if wasm && escapes => Some(
                 "its address is taken, and a call through the address needs a trampoline, which \
@@ -1741,7 +1765,7 @@ impl Unit<'_> {
             Some(_) if self.target.object_format != ObjectFormat::Elf => {
                 Some("the heap trampolines it is called through are libgcc's, which is ELF only")
             }
-            Some(_) if self.fixed_x18 && self.target.tuple.arch() == rucc_tuple::Arch::Aarch64 => {
+            Some(_) if self.fixed_x18 && self.target.tuple.arch() == Arch::Aarch64 => {
                 Some("its static chain travels in x18, which -ffixed-x18 keeps for something else")
             }
             Some(_) => None,
@@ -1763,7 +1787,7 @@ impl Unit<'_> {
     /// the module as assembly at file scope with a declaration of its name beside it so that the
     /// address taken of it is the address of something in this file.
     fn trampoline_target(&mut self, function: Symbol) {
-        if self.target.tuple.arch() != rucc_tuple::Arch::X86_64 {
+        if self.target.tuple.arch() != Arch::X86_64 {
             return;
         }
         let spelled = self.names.resolve(function).to_string();
@@ -2606,7 +2630,66 @@ impl Unit<'_> {
     /// the prototype: what a variadic argument does is decided from what was written there, and
     /// there is no parameter to decide it from. A definition passes nothing for it.
     pub(crate) fn plan(&mut self, ty: TypeId, actual: &[TypeId], span: Span) -> Option<Plan> {
-        self.plan_with(ty, actual, false, span)
+        self.plan_with(ty, actual, false, false, span)
+    }
+
+    /// [`Self::plan`] for the function `decl` names, which is the same unless the unit gives
+    /// that function its arguments in registers. See [`Self::takes_registers`].
+    pub(crate) fn plan_of(
+        &mut self,
+        decl: DeclId,
+        ty: TypeId,
+        actual: &[TypeId],
+        span: Span,
+    ) -> Option<Plan> {
+        let local = self.takes_registers(decl);
+        self.plan_with(ty, actual, false, local, span)
+    }
+
+    /// Whether the unit gives this function its first three words of arguments in registers,
+    /// which is gcc's convention for a local function on i386 when it optimizes.
+    ///
+    /// The function has to be one whose every call this unit sees: internal linkage, defined
+    /// here, named only as the function a call goes to, and with nothing that reaches it from
+    /// elsewhere, which is an attribute that keeps it, an alias or an `ifunc`, and the copies
+    /// `target_clones` and `simd` make. Its type has to have a prototype, a fixed list and the
+    /// target's own convention, so a `regparm`, `stdcall` or `-mrtd` function keeps what it
+    /// asked for. And it has to be a function that reads its arguments as parameters, so not
+    /// `naked`, not an interrupt handler, not `ms_hook_prologue`, and not `noipa` or
+    /// `optimize ("O0")`, which gcc does not change either.
+    pub(crate) fn takes_registers(&self, decl: DeclId) -> bool {
+        if !self.called_only.contains(&decl) {
+            return false;
+        }
+        let node = &self.tast[decl];
+        let barred = [
+            DeclFlags::NAKED,
+            DeclFlags::INTERRUPT,
+            DeclFlags::SAVES_ALL,
+            DeclFlags::RETAINED,
+            DeclFlags::RETAIN,
+            DeclFlags::OPTIMIZE_NONE,
+            DeclFlags::NOIPA,
+            DeclFlags::MS_HOOK,
+            DeclFlags::WEAK,
+            DeclFlags::WEAKREF,
+        ];
+        if node.kind != DeclKind::Function
+            || node.linkage != Linkage::Internal
+            || node.body.is_none()
+            || node.alias.is_some()
+            || barred.iter().any(|&flag| node.flags.contains(flag))
+            || self.tast.is_ifunc(decl)
+            || self.tast.versions(decl).is_some()
+            || !self.tast.simd_clones(decl).is_empty()
+        {
+            return false;
+        }
+        let TypeKind::Function(id) = self.types.kind(self.types.canonical(node.ty)) else {
+            return false;
+        };
+        let signature = self.types.signature(id);
+        signature.prototyped && !signature.variadic && signature.convention == Convention::Target
     }
 
     /// The same, as the call site sees it rather than as the function does.
@@ -2620,8 +2703,18 @@ impl Unit<'_> {
     /// name, and one it is not compatible with gives way to what was actually written. A call
     /// like that is undefined behaviour if control reaches it and the file still has to
     /// translate, which is the same position [`Body::direct`](crate::body) already takes.
-    pub(crate) fn call_plan(&mut self, ty: TypeId, actual: &[TypeId], span: Span) -> Option<Plan> {
-        self.plan_with(ty, actual, true, span)
+    ///
+    /// `callee` is the function the call names, when it names one, which matters for a function
+    /// the unit gives its arguments in registers. See [`Self::takes_registers`].
+    pub(crate) fn call_plan(
+        &mut self,
+        callee: Option<DeclId>,
+        ty: TypeId,
+        actual: &[TypeId],
+        span: Span,
+    ) -> Option<Plan> {
+        let local = callee.is_some_and(|decl| self.takes_registers(decl));
+        self.plan_with(ty, actual, true, local, span)
     }
 
     fn plan_with(
@@ -2629,9 +2722,10 @@ impl Unit<'_> {
         ty: TypeId,
         actual: &[TypeId],
         at_call: bool,
+        local: bool,
         span: Span,
     ) -> Option<Plan> {
-        match self.try_plan(ty, actual, at_call) {
+        match self.try_plan(ty, actual, at_call, local) {
             Ok(plan) => Some(plan),
             Err(what) => {
                 self.unsupported(what, span);
@@ -2670,7 +2764,13 @@ impl Unit<'_> {
     }
 
     /// The plan, or what stopped it, said to nobody.
-    fn try_plan(&self, ty: TypeId, actual: &[TypeId], at_call: bool) -> Result<Plan, &'static str> {
+    fn try_plan(
+        &self,
+        ty: TypeId,
+        actual: &[TypeId],
+        at_call: bool,
+        local: bool,
+    ) -> Result<Plan, &'static str> {
         let canonical = self.types.canonical(ty);
         let canonical = match self.types.kind(canonical) {
             // A call goes through a pointer to a function, and the type in hand may be either.
@@ -2685,6 +2785,7 @@ impl Unit<'_> {
         // Normalised against `-mregparm=`, which a variadic function does not follow. A function
         // with no prototype is not variadic for this, which is how gcc has it.
         let convention = self.target.convention_for(signature.convention, signature.variadic);
+        let convention = if local { Convention::Regparm(3) } else { convention };
         // A function declared without a prototype takes what it is given, which is what a
         // signature with no parameters and no end to them says. C23 removed these and this is
         // what `int f();` means in every dialect before it.
@@ -2699,7 +2800,7 @@ impl Unit<'_> {
         // caller counts what it pushed, so a call passes each argument as a parameter here too
         // and is not variadic, and the caller then knows the callee took them. Such a call does
         // not match the declaration's empty list, so it goes through the address, as on wasm32.
-        let wasm = self.target.tuple.arch() == rucc_tuple::Arch::Wasm32;
+        let wasm = self.target.tuple.arch() == Arch::Wasm32;
         let pops = signature.convention.callee_pops() && !signature.variadic;
         let each = wasm || pops;
         let variadic = signature.variadic || (!signature.prototyped && !each);
@@ -3193,7 +3294,7 @@ impl Unit<'_> {
     fn function_name(&mut self, id: StrId, bytes: Vec<u8>, align: u32) -> Symbol {
         let symbol = self.names.intern(&format!("__func__.{}", self.strings.len()));
         let size = bytes.len() as u64;
-        let align = if self.target.tuple.arch() == rucc_tuple::Arch::X86_64 {
+        let align = if self.target.tuple.arch() == Arch::X86_64 {
             match size {
                 32.. => 32,
                 16.. => 16,
@@ -3323,8 +3424,7 @@ impl Unit<'_> {
     /// Everything else, a variadic function included since the front end never gives one either
     /// convention, is the name as it was.
     fn decorated(&mut self, ty: TypeId, symbol: Symbol) -> Symbol {
-        if self.target.object_format != ObjectFormat::Coff
-            || self.target.tuple.arch() != rucc_tuple::Arch::X86
+        if self.target.object_format != ObjectFormat::Coff || self.target.tuple.arch() != Arch::X86
         {
             return symbol;
         }
@@ -3463,8 +3563,7 @@ fn assembler_name(tast: &Tast, target: &TargetInfo, id: StrId) -> String {
     let spelled: String =
         tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
     let underscored = target.object_format == ObjectFormat::MachO
-        || (target.object_format == ObjectFormat::Coff
-            && target.tuple.arch() == rucc_tuple::Arch::X86);
+        || (target.object_format == ObjectFormat::Coff && target.tuple.arch() == Arch::X86);
     if underscored {
         if let Some(bare) = spelled.strip_prefix('_') {
             return bare.to_string();
