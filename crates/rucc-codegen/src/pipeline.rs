@@ -944,11 +944,13 @@ pub fn compile_recording(
     // the inliner runs in between, and a copy of a body inlined into another function would call
     // the hook a second time with the other function's address. Not in a naked function or in
     // one that said `no_instrument_function`, the same as the hook in the prologue.
-    if let Some(trace) = machine.conv.trace.filter(|trace| trace.called)
-        && flags.profile != Profile::No
-        && !source.attrs.set.contains(ir::AttrSet::NO_INSTRUMENT)
-        && !source.attrs.set.contains(ir::AttrSet::NAKED)
-    {
+    let trace = machine.conv.trace.filter(|trace| {
+        trace.called
+            && flags.profile != Profile::No
+            && !source.attrs.set.contains(ir::AttrSet::NO_INSTRUMENT)
+            && !source.attrs.set.contains(ir::AttrSet::NAKED)
+    });
+    if let Some(trace) = trace {
         profiled(source, names, trace.late);
     }
     // A copy or fill gcc writes as a string instruction only where it may not write vector moves, so a

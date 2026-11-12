@@ -68,7 +68,10 @@ fn the_first_integer_goes_in_rbp_and_the_rest_in_their_slots() {
         let (ok, asm, err) = compile("call", level, SOURCE);
         assert!(ok, "{level}: {err}");
         let c = body(&asm, "c");
-        assert!(c.iter().any(|line| line.ends_with(", %rbp")), "{level}: {c:?}");
+        // An int is written into `rbp` with a 32 bit move when the constant goes straight there,
+        // as kencc writes `MOVL $1, BP`. The move clears the high half.
+        let first = |line: &&str| line.ends_with(", %rbp") || line.ends_with(", %ebp");
+        assert!(c.iter().any(first), "{level}: {c:?}");
         assert!(c.iter().any(|line| line.ends_with(", 8(%rsp)")), "{level}: {c:?}");
         assert!(c.iter().any(|line| line.ends_with(", 16(%rsp)")), "{level}: {c:?}");
         assert!(!c.iter().any(|line| line.ends_with(", (%rsp)")), "{level}: {c:?}");
