@@ -1653,6 +1653,10 @@ impl Checker<'_> {
         if !rucc_types::is_vector(&self.types, left) && !rucc_types::is_vector(&self.types, right) {
             return None;
         }
+        let (lhs, rhs) = match self.signedness_meet(left, right) {
+            Some(ty) => (self.reinterpret(lhs, ty, span), self.reinterpret(rhs, ty, span)),
+            None => (lhs, rhs),
+        };
         let Some((lhs, rhs, ty)) = self.lanewise(lhs, rhs) else {
             return Some(self.invalid_operands(op, lhs, rhs, span));
         };
@@ -1662,6 +1666,39 @@ impl Checker<'_> {
         }
         let node = ExprKind::Binary { op, lhs, rhs };
         Some(self.tast.expr(Expr::new(node, ty, Category::Rvalue), span))
+    }
+
+    /// The vector that two vectors meet in when their lanes are integers of one rank that differ
+    /// only in signedness, and [`None`] for every other pair.
+    ///
+    /// GNU C lets `a ^ b` and `a ^= b` take a vector of `int` and a vector of `unsigned int` with
+    /// the same number of lanes, and does the operation in the unsigned one, the way the usual
+    /// arithmetic conversions do it for two scalars. Comparisons are not given this, since gcc
+    /// refuses to compare two such vectors. The NEON code in NetBSD's AES writes
+    /// `t ^= carry & mask` with `t` an `int32x4_t` and the other two `uint32x4_t`.
+    fn signedness_meet(&mut self, a: TypeId, b: TypeId) -> Option<TypeId> {
+        let (a, b) = (self.types.unqualified(a), self.types.unqualified(b));
+        let (x, y) = (rucc_types::element(&self.types, a)?, rucc_types::element(&self.types, b)?);
+        if rucc_types::lanes(&self.types, a) != rucc_types::lanes(&self.types, b)
+            || !self.differ_in_signedness(x, y)
+        {
+            return None;
+        }
+        let signed = self.cx.target.char_is_signed;
+        match self.types.kind(self.types.canonical(x)) {
+            TypeKind::Int(kind) if !kind.is_signed(signed) => Some(a),
+            _ => Some(b),
+        }
+    }
+
+    /// A vector used as another vector of the same size, which is the reinterpretation that
+    /// `(V)x` writes.
+    fn reinterpret(&mut self, value: ExprId, to: TypeId, span: Span) -> ExprId {
+        let from = self.tast[value].ty;
+        if self.types.canonical(from) == self.types.canonical(to) {
+            return value;
+        }
+        self.tast.expr(Expr::new(ExprKind::Cast(value), to, Category::Rvalue), span)
     }
 
     /// `<<` and `>>` where either side is a vector, which is not the lanewise operator the
@@ -2071,6 +2108,15 @@ impl Checker<'_> {
             // two it is decides what has to be converted, and the lane is what an operator that
             // wants integers is asking about.
             _ if rucc_types::is_vector(&self.types, target) => {
+                // Two vectors whose lanes differ only in signedness, which GNU C takes. The right
+                // side is used as the left side's vector, and the operation is done in the left
+                // side's lanes. That gives the bits gcc gives for every operator but `/` and `%`,
+                // where gcc divides in the unsigned lane, and so those two are still refused.
+                if self.signedness_meet(target, source).is_some()
+                    && !matches!(op, BinaryOp::Div | BinaryOp::Rem)
+                {
+                    return Some((target, self.reinterpret(rhs, target, span)));
+                }
                 let lane = rucc_types::element(&self.types, target).expect("a vector");
                 let (a, b) = (self.types.unqualified(target), self.types.unqualified(source));
                 let same =
@@ -3625,6 +3671,62 @@ mod tests {
         assert!(text.starts_with("assign = : __vector(4) unsigned int\n"), "{text}");
         // The conversion is a reinterpretation, so it is written as the cast that `(V)x` is.
         assert!(text.contains("cast : __vector(4) unsigned int\n"), "{text}");
+    }
+
+    /// A checker with `a` a vector of four `int` and `b` a vector of four `unsigned int`, and the
+    /// expression `build` makes of the two checked.
+    fn signed_and_unsigned(
+        build: impl FnOnce(&mut Fixture, ast::ExprId, ast::ExprId) -> ast::ExprId,
+    ) -> (Vec<String>, String) {
+        let mut f = Fixture::new();
+        let a = f.name("a");
+        let b = f.name("b");
+        let use_a = f.expr(ast::Expr::Name(a));
+        let use_b = f.expr(ast::Expr::Name(b));
+        let expr = build(&mut f, use_a, use_b);
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let uint = c.types.int(IntKind::UInt);
+        let signed = c.types.vector(int, 4);
+        let unsigned = c.types.vector(uint, 4);
+        c.declare_object(a, signed, Span::DUMMY);
+        c.declare_object(b, unsigned, Span::DUMMY);
+        let id = c.check_expr(expr);
+        (messages(&c), dump(&c, id))
+    }
+
+    #[test]
+    fn two_vectors_that_differ_only_in_signedness_meet_in_the_unsigned_one() {
+        let (errors, text) = signed_and_unsigned(|f, a, b| f.binary(BinaryOp::BitXor, a, b));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(text.starts_with("binary ^ : __vector(4) unsigned int\n"), "{text}");
+        assert!(text.contains("cast : __vector(4) unsigned int\n"), "{text}");
+    }
+
+    #[test]
+    fn a_compound_assignment_takes_a_vector_that_differs_only_in_signedness() {
+        // `t ^= carry & mask` in NetBSD's NEON AES, with `t` signed and the rest unsigned.
+        let (errors, text) = signed_and_unsigned(|f, a, b| {
+            f.expr(ast::Expr::Assign { op: Some(BinaryOp::BitXor), lhs: a, rhs: b })
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(text.starts_with("assign ^= : __vector(4) int\n"), "{text}");
+        assert!(text.contains("cast : __vector(4) int\n"), "{text}");
+    }
+
+    #[test]
+    fn a_compound_division_by_a_vector_of_the_other_signedness_is_still_refused() {
+        let (errors, _) = signed_and_unsigned(|f, a, b| {
+            f.expr(ast::Expr::Assign { op: Some(BinaryOp::Div), lhs: a, rhs: b })
+        });
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn two_vectors_that_differ_in_signedness_are_not_compared() {
+        let (errors, _) = signed_and_unsigned(|f, a, b| f.binary(BinaryOp::Lt, a, b));
+        assert_eq!(errors.len(), 1, "{errors:?}");
     }
 
     #[test]

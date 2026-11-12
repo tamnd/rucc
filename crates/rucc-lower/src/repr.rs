@@ -316,6 +316,12 @@ pub(crate) fn local_align(types: &Types, target: &TargetInfo, id: TypeId, align:
 /// optimizes for size. The kernel's tracepoint names show it there, 8 apart in
 /// `__tracepoints_strings` as on x86.
 ///
+/// On RISC-V gcc aligns every array, structure and union shorter than a word to a word, whatever
+/// its size and at every level. That is `DATA_ALIGNMENT` in gcc's `riscv.h`. NetBSD shows it:
+/// `db_symtab` in `kern_ksyms.c` is a `char` array that `dbsym` fills with the kernel's own
+/// symbol table, and `ksyms_addsyms_elf` refuses one that does not start on a `long`. Without the
+/// rule the kernel has no symbols, and no module can be loaded.
+///
 /// Mach-O is left alone, since the compiler a Mach-O target is compared with is clang, which has
 /// no such rule.
 #[must_use]
@@ -330,7 +336,8 @@ pub(crate) fn static_align(
     let arch = target.tuple.arch();
     let x86 = matches!(arch, rucc_tuple::Arch::X86_64 | rucc_tuple::Arch::X86);
     let a64 = arch == rucc_tuple::Arch::Aarch64 && !for_size;
-    if !(x86 || a64) || target.object_format == rucc_target::ObjectFormat::MachO {
+    let riscv = matches!(arch, rucc_tuple::Arch::Riscv64 | rucc_tuple::Arch::Riscv32);
+    if !(x86 || a64 || riscv) || target.object_format == rucc_target::ObjectFormat::MachO {
         return align;
     }
     let aggregate =
@@ -341,8 +348,11 @@ pub(crate) fn static_align(
     if a64 {
         return align.max(8);
     }
-    let size = size_of(types, target, id);
     let word = u64::from(target.pointer_width / 8);
+    if riscv {
+        return align.max(u32::try_from(word).unwrap_or(align));
+    }
+    let size = size_of(types, target, id);
     let wanted = match size {
         32.. => 32,
         _ if target.pointer_width == 64 && size >= 16 => 16,

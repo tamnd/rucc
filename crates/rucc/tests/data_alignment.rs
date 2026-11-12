@@ -1,6 +1,7 @@
 //! Tests for how far an object with static storage is aligned on x86-64, which is past what its
 //! type asks for once it is long enough, as gcc does it under `-malign-data=compat`, and on
-//! AArch64, where gcc aligns every aggregate to a word unless it optimizes for size.
+//! AArch64, where gcc aligns every aggregate to a word unless it optimizes for size, and on
+//! RISC-V, where gcc aligns every aggregate to a word at every level.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -109,4 +110,27 @@ fn every_aggregate_on_aarch64_is_aligned_to_a_word_unless_it_is_built_for_size()
     let listing = asm_for(target, "a64s", "-Os", source);
     assert_eq!(p2align(&listing, "small"), 0, "{listing}");
     assert_eq!(p2align(&listing, "pair"), 2, "{listing}");
+}
+
+/// gcc aligns every array, structure and union on RISC-V to a word, at every level. NetBSD's
+/// `db_symtab` is the case that needs it: the kernel refuses a symbol table that does not start on
+/// a `long`, and without the symbols no module loads.
+#[test]
+fn every_aggregate_on_riscv_is_aligned_to_a_word() {
+    let source = "struct one { char c; };\n\
+        struct one small = { 1 };\n\
+        int pad = 1;\n\
+        char db_symtab[4096] = \"SYMTAB\";\n\
+        char three[3];\n\
+        __thread char each[3];\n\
+        struct one asked __attribute__((aligned(2))) = { 1 };\n\
+        int scalar = 1;\n";
+    for level in ["-O0", "-O2", "-Os"] {
+        let listing = asm_for("riscv64-unknown-linux-gnu", "rv", level, source);
+        for name in ["small", "db_symtab", "three", "each"] {
+            assert_eq!(p2align(&listing, name), 3, "{name} at {level}:\n{listing}");
+        }
+        assert_eq!(p2align(&listing, "asked"), 1, "{listing}");
+        assert_eq!(p2align(&listing, "scalar"), 2, "{listing}");
+    }
 }
