@@ -12488,6 +12488,26 @@ mod tests {
         assert_eq!(refused(&["-fgnuc-version=14", flag, "-c", "a.c"]), why);
     }
 
+    /// NetBSD 10 builds with gcc 10.5 and NetBSD 11 with gcc 12.5, and a build that claims either
+    /// gets the answer that gcc gives to a warning name it does not know yet.
+    #[test]
+    fn a_warning_newer_than_a_netbsd_gcc_is_unknown_to_it() {
+        for (flag, lacks, knows) in [
+            ("-Wuse-after-free", "10.5.0", "12.5.0"),
+            ("-Wdangling-pointer=2", "10.5.0", "11"),
+            ("-Wxor-used-as-pow", "12.5.0", "13"),
+            ("-Wreturn-mismatch", "13.3.0", "14"),
+        ] {
+            let why = format!("unknown option `{flag}`");
+            let claim = format!("-fgnuc-version={lacks}");
+            assert_eq!(refused(&[claim.as_str(), flag, "-c", "a.c"]), why);
+            compile(&[&format!("-fgnuc-version={knows}"), flag, "-c", "a.c"]);
+        }
+        for flag in ["-Wstringop-overflow", "-Wimplicit-fallthrough=3", "-Wno-use-after-free"] {
+            compile(&["-fgnuc-version=10.5.0", flag, "-c", "a.c"]);
+        }
+    }
+
     /// `-finline-limit=N` sets the two limits gcc's `opts.cc` sets, to half of N, and an explicit
     /// `--param` for either one holds whichever side of it it is written on (tamnd/rucc#4092).
     #[test]
