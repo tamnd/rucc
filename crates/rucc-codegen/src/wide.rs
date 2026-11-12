@@ -207,7 +207,7 @@ impl Width {
 /// rewriting into something that guessed.
 ///
 /// On a machine of thirty two bits a value of a hundred and twenty eight is split twice, into two
-/// halves of sixty four and then each of those into two words, see [`Width::outer`]. When the
+/// halves of sixty four and then each of those into two words, see `Width::outer`. When the
 /// second split leaves the function alone, so is the first undone, and the function is split at
 /// the register width only, as it was before there was a first split.
 pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {

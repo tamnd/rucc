@@ -302,7 +302,7 @@ fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: 
 ///
 /// `size` is whether the build asked for small code. On i386 outside position independent code the
 /// address of a name read at several offsets then goes into every reader when that is fewer bytes,
-/// which [`fewer_bytes`] works out, where otherwise one reader is the most it goes into.
+/// which `fewer_bytes` works out, where otherwise one reader is the most it goes into.
 ///
 /// Run after lowering and before allocation. Running it twice at that point can find more than
 /// running it once in principle: folding a `lea` into a second `lea` leaves that second one foldable

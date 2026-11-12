@@ -102,9 +102,11 @@ fn an_unknown_pragma_in_a_system_header_is_not_said_even_under_dash_wsystem_head
     }
     let shift = "left shift count >= width of type";
     let flags = ["-Wall", "-Wsystem-headers", "-Iinc", "-isystem", "sys"];
+    // The header is named with the separator of the host, which is a backslash on Windows.
+    let note = std::path::Path::new("inc").join("note.h");
     assert_eq!(
         warnings(&dir, &flags),
-        [format!("inc/note.h:2: {shift}"), "m.c:2: ignoring `#pragma ident`".to_owned()]
+        [format!("{}:2: {shift}", note.display()), "m.c:2: ignoring `#pragma ident`".to_owned()]
     );
     std::fs::remove_dir_all(&dir).ok();
 }
