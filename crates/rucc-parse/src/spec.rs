@@ -520,6 +520,12 @@ impl Parser<'_> {
         if self.cursor.eat_punct(Punct::ColonColon) {
             namespace = Some(name);
             name = self.attribute_name()?;
+        } else if syntax == AttrSyntax::Standard && self.cx.interner.resolve(name) == "_Noreturn" {
+            // C23 takes `[[_Noreturn]]` as `[[noreturn]]`, so that `[[noreturn]]` still works
+            // after <stdnoreturn.h> has made `noreturn` a macro for `_Noreturn`.
+            if let Some(noreturn) = self.cx.interner.find("noreturn") {
+                name = noreturn;
+            }
         }
         let args = if self.cursor.at_punct(Punct::LParen) {
             self.attribute_args(self.assumes(namespace, name))

@@ -5466,6 +5466,27 @@ mod tests {
         assert!(text.contains("const 8 : unsigned long"), "{text}");
     }
 
+    /// C23 keeps the `noreturn` macro of `<stdnoreturn.h>`, as gcc and clang do, and takes the
+    /// `[[_Noreturn]]` that `[[noreturn]]` turns into after it. nawk in the NetBSD tools build
+    /// writes `noreturn void FATAL(...)` after the header. The checks spell the attribute
+    /// `__noreturn__`, because the macro also changes a `noreturn` in them.
+    #[test]
+    fn the_noreturn_macro_is_kept_in_c23_and_the_attribute_still_works() {
+        let mut opts = freestanding();
+        opts.std = Std::C23;
+        let source = concat!(
+            "#include <stdnoreturn.h>\n",
+            "extern noreturn void fatal(const char *, ...);\n",
+            "[[noreturn]] void stop(void);\n",
+            "[[_Noreturn]] void halt(void);\n",
+            "static_assert(__builtin_has_attribute(fatal, __noreturn__));\n",
+            "static_assert(__builtin_has_attribute(stop, __noreturn__));\n",
+            "static_assert(__builtin_has_attribute(halt, __noreturn__));\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+    }
+
     /// `<stdckdint.h>` is the overflow builtins with the arguments in the standard's order, so a
     /// checked add that wraps says so and still stores the wrapped value.
     #[test]
