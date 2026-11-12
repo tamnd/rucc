@@ -177,6 +177,20 @@ pub fn composite(types: &mut Types, left: TypeId, right: TypeId) -> Option<TypeI
 /// [`FunctionType::params`] is defined to hold types this has already been applied to, so this
 /// belongs to whoever builds the type out of a declarator rather than to the comparison below.
 pub fn adjust_parameter(types: &mut Types, id: TypeId) -> TypeId {
+    // The element as it was written, so `resp_t r` for `typedef u32 resp_t[4]` is a `u32 *` and
+    // `__m128i q[4]` a pointer to `__m128i`. gcc keeps that name in the parameter's type, which
+    // is what its DWARF and so the CTF of the function say, and the element of a `may_alias`
+    // name is a type an access through the pointer may touch anything with. Each typedef name on
+    // the way puts its qualifiers on the elements, as `Types::qualified` does.
+    let mut at = id;
+    loop {
+        let ty = types.get(at);
+        match ty.kind {
+            TypeKind::Typedef { underlying, .. } => at = types.qualified(underlying, ty.quals),
+            TypeKind::Array { elem, .. } => return types.pointer(elem),
+            _ => break,
+        }
+    }
     let canonical = types.canonical(id);
     match types.kind(canonical) {
         // The element keeps its own qualifiers. The ones C99 allows inside the brackets belong

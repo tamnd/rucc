@@ -1189,3 +1189,44 @@ void f(void) { typeof(&tramp) F = reset; update(F, F); }
     let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "address-spelled", source));
     assert!(named(&all, DW_TAG_TYPEDEF, "reset_t").is_some(), "typeof(&tramp) keeps reset_t");
 }
+
+/// An array parameter is a pointer to the element as the declaration wrote the element, so a
+/// typedef name for the element stays in the pointed-to type. That is true of a typedef name for
+/// the whole array, of a `const` on that name, and of a vector type with `may_alias`, which is a
+/// type of its own. gcc's BTF has `u32 *` for the `resp` of the NetBSD kernel's
+/// `sdmmc_mmc_command`, `const u32 *` for a `const` one, and `__m128i *` for the blocks of the
+/// AES code. tamnd/rucc#4481.
+#[test]
+fn an_array_parameter_points_at_the_element_as_written() {
+    let source = "\
+typedef unsigned int u32;
+typedef u32 resp_t[4];
+typedef long long m128 __attribute__((__vector_size__(16), __may_alias__));
+int f_arr(resp_t r) { return (int)r[0]; }
+int f_carr(const resp_t r) { return (int)r[0]; }
+void f_vec(m128 q[4]) { q[0] = q[1]; }
+";
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "array-parameter", source));
+    let pointee = |name: &str| {
+        let function = named(&all, DW_TAG_SUBPROGRAM, name).expect("it is described");
+        let param = function
+            .children
+            .iter()
+            .map(|&child| &all[child])
+            .find(|child| child.tag == DW_TAG_FORMAL_PARAMETER)
+            .expect("the function takes a parameter");
+        let pointer = at(&all, param.ty.expect("a parameter has a type"));
+        assert_eq!(pointer.tag, DW_TAG_POINTER, "{name} takes a pointer");
+        let mut to = at(&all, pointer.ty.expect("the pointer has a type"));
+        let mut quals = Vec::new();
+        while to.tag == DW_TAG_CONST || to.tag == DW_TAG_VOLATILE {
+            quals.push(to.tag);
+            to = at(&all, to.ty.expect("a qualifier has a type"));
+        }
+        (quals, to.tag, to.name.clone())
+    };
+    let typedef = |name: &str| Some(name.to_owned());
+    assert_eq!(pointee("f_arr"), (vec![], DW_TAG_TYPEDEF, typedef("u32")));
+    assert_eq!(pointee("f_carr"), (vec![DW_TAG_CONST], DW_TAG_TYPEDEF, typedef("u32")));
+    assert_eq!(pointee("f_vec"), (vec![], DW_TAG_TYPEDEF, typedef("m128")));
+}
