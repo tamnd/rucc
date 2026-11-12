@@ -1255,6 +1255,9 @@ fn optimize(
     // unless `-mgeneral-regs-only` took those away.
     settings.neon = target.tuple.arch() == Arch::Aarch64 && opts.vector;
     settings.conserve_stack = opts.conserve_stack;
+    // kencc reads memory again on each pass of a loop, and Plan 9 code waits for a lock with a
+    // loop that has nothing else in it.
+    settings.reread = opts.kencc;
     settings.stack_reuse = shares_slots(opts);
     settings.rewriter = rucc_opt::pipeline::Rewriter::from_name(&opts.rewriter).unwrap_or_default();
     settings.fuel = opts.pass_fuel.iter().cloned().collect();

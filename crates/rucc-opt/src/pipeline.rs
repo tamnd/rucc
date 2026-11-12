@@ -44,7 +44,7 @@ use crate::{
     Analyses, Budget, CallGraph, Fuel, Gates, Machine, Pass, Phase, Preserved, Stats, adce,
     constant_p, dce, dse, extents, heap, image, inline, ipasra, ipcp, ipvrp, lanes, libcall, load,
     loop_idiom, modref, nofree, number, objsize, outside, params, pass, purity, readonly, reload,
-    sroa, tailrec, vectorize,
+    reread, sroa, tailrec, vectorize,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -977,6 +977,9 @@ pub struct Options {
     /// since kencc never does it and a Plan 9 kernel does not save the vector registers when it
     /// enters (section 09.3 of the rucc-plan9 plan).
     pub integer_vectors: bool,
+    /// Whether a load in a loop that writes no memory reads memory again on each pass, which is
+    /// what kencc does and what `-fkencc` asks for. See [`reread`].
+    pub reread: bool,
 }
 
 impl Default for Options {
@@ -1003,6 +1006,7 @@ impl Default for Options {
             stack_reuse: false,
             rewriter: Rewriter::Default,
             integer_vectors: true,
+            reread: false,
         }
     }
 }
@@ -1254,6 +1258,11 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         .iter()
         .rfind(|(it, _)| it == inline::SMALL)
         .map_or(matches!(opts.level, OptLevel::O2 | OptLevel::O3), |&(_, on)| on);
+    // Before the inliner too, because the passes the inliner runs over a body can already take a
+    // load out of a loop. Nothing takes a load out of a loop at `-O0`. See [`reread`].
+    if opts.reread && opts.level != OptLevel::O0 {
+        reread::run(module, names);
+    }
     // Before the inliner, which runs passes of its own over a body, and again after it, which can
     // have put a wide callee's body into a caller. See [`hold_wide`].
     hold_wide(module);

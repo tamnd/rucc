@@ -174,6 +174,7 @@ pub mod rangetest;
 pub mod readonly;
 pub mod reassoc;
 pub mod reload;
+pub mod reread;
 pub mod rules;
 pub mod sancov;
 pub mod sccp;
