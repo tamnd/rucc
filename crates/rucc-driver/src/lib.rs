@@ -1173,6 +1173,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `-fmin-function-alignment=`, which is weighed after the loop against what
     // `-falign-functions` said, in whichever order the two came.
     let mut min_function_align: Option<u32> = None;
+    // Whether the command line said where a function starts, with any form of
+    // `-falign-functions`. Without one, `-Os` and `-Oz` put no padding in front of a function on
+    // x86, as gcc does.
+    let mut align_named = false;
     // The register files the kernel keeps out of every function, which are weighed after the
     // loop: the vector registers are off once the extensions they belong to are, whichever flag
     // took those away, whichever flag took them, and in whichever order they came.
@@ -2930,9 +2934,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // itself; and the negative form asks for the smallest boundary the target has. gcc 16
             // rounds a number that is not a power of two up rather than refusing it, which is what
             // `=3` giving `.p2align 2` on x86-64 means, so this rounds too.
-            "-falign-functions" => opts.align_functions = None,
-            "-fno-align-functions" => opts.align_functions = Some(MIN_FUNC_ALIGN),
+            "-falign-functions" => {
+                opts.align_functions = None;
+                align_named = true;
+            }
+            "-fno-align-functions" => {
+                opts.align_functions = Some(MIN_FUNC_ALIGN);
+                align_named = true;
+            }
             _ if arg.starts_with("-falign-functions=") => {
+                align_named = true;
                 opts.align_functions = function_alignment(&arg["-falign-functions=".len()..])
                     .ok_or_else(|| {
                         err(format!("{arg}: the alignment has to be a number of bytes"))
@@ -3818,6 +3829,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         let set = ["max-inline-insns-single", "max-inline-insns-auto"]
             .map(|name| format!("{name}={half}"));
         opts.params.splice(0..0, set);
+    }
+
+    // A unit built for size puts no padding in front of a function on x86, because gcc's `-Os`
+    // and `-Oz` turn `-falign-functions` off there and an x86 instruction may start on any byte.
+    // Boot blocks have a fixed size, and NetBSD builds them with `-Os` to fit. A
+    // `-falign-functions` on the line still wins.
+    if !align_named && opts.opt_level.is_size() && x86 {
+        opts.align_functions = Some(1);
     }
 
     // The floor `-fmin-function-alignment=` put under every function, which `-falign-functions`
@@ -7518,6 +7537,34 @@ mod tests {
         // The last one on the line wins, which is how gcc reads a repeated flag.
         let (opts, _) = compile(&["-c", "-falign-functions=32", "-falign-functions", "a.c"]);
         assert_eq!(opts.align_functions, None);
+
+        let e = parse_args(&args(&["-c", "-falign-functions=big", "a.c"])).unwrap_err();
+        assert!(e.message.contains("number of bytes"), "{}", e.message);
+    }
+
+    /// gcc's `-Os` and `-Oz` put no padding in front of a function on x86, and an `-Os` build of
+    /// NetBSD's boot code needs those bytes. gcc 13 on x86-64 and `-m32` writes no `.p2align`
+    /// before a function at `-Os`. Other targets keep their boundary, and a flag on the line wins.
+    #[test]
+    fn a_unit_built_for_size_puts_no_padding_in_front_of_a_function_on_x86() {
+        let align = |line: &[&str]| {
+            let mut line = line.to_vec();
+            line.extend(["-c", "a.c"]);
+            compile(&line).0.align_functions
+        };
+        let amd64 = "--target=x86_64-unknown-netbsd";
+        let i386 = "--target=i486-unknown-netbsdelf";
+        assert_eq!(align(&[amd64, "-Os"]), Some(1));
+        assert_eq!(align(&[amd64, "-Oz"]), Some(1));
+        assert_eq!(align(&[i386, "-Os"]), Some(1));
+        assert_eq!(align(&[amd64, "-Os", "-m32"]), Some(1));
+        assert_eq!(align(&[amd64, "-O2"]), None, "speed keeps the sixteen bytes");
+        assert_eq!(align(&[amd64, "-Os", "-falign-functions"]), None, "the flag wins");
+        assert_eq!(align(&[amd64, "-falign-functions=32", "-Os"]), Some(32));
+        assert_eq!(align(&[amd64, "-Os", "-fno-align-functions"]), Some(8));
+        assert_eq!(align(&[amd64, "-Os", "-fmin-function-alignment=4"]), Some(4));
+        let arm = "--target=aarch64-unknown-netbsd";
+        assert_eq!(align(&[arm, "-Os"]), None, "an arm instruction needs its four bytes");
 
         let e = parse_args(&args(&["-c", "-falign-functions=big", "a.c"])).unwrap_err();
         assert!(e.message.contains("number of bytes"), "{}", e.message);
