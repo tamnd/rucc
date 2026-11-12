@@ -110,6 +110,8 @@ fn named(line: &mut String, operator: Operator, symbol: Option<&str>) {
         Operator::TprelHi => write!(line, "%tprel_hi({symbol})"),
         Operator::TprelLo => write!(line, "%tprel_lo({symbol})"),
         Operator::TprelAdd => write!(line, "%tprel_add({symbol})"),
+        Operator::PcrelHi => write!(line, "%pcrel_hi({symbol})"),
+        Operator::PcrelLo => write!(line, "%pcrel_lo({symbol})"),
     };
 }
 

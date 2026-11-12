@@ -7876,7 +7876,9 @@ impl<'a> Lowering<'a> {
                     let value = operand.result.or(operand.value).ok_or_else(refused)?;
                     let bits = held_bits(self.source[value].ty, self.address_bits());
                     // `w` and `x` are the two names every general purpose register has, and one
-                    // with no modifier is named at the width of its type, as gcc names it. A
+                    // with no modifier is `x` whatever the width of its type, as gcc and clang
+                    // both name it: libgcc's `__aarch64_sync_cache_range` reads `ctr_el0` into
+                    // an `unsigned int` with `mrs %0`, and `mrs` takes only an `x` register. A
                     // vector register with no modifier is `v`, which is what gcc writes for one
                     // whatever is in it, and the modifiers name the scalar views of it.
                     let width = if rv {
@@ -7902,8 +7904,8 @@ impl<'a> Lowering<'a> {
                             continue;
                         }
                         match (modifier, bits) {
-                            (None, 8 | 16 | 32) | (Some('w'), _) => 'w',
-                            (None, 64) | (Some('x'), _) => 'x',
+                            (Some('w'), _) => 'w',
+                            (None, 8 | 16 | 32 | 64) | (Some('x'), _) => 'x',
                             _ => return Err(refused()),
                         }
                     } else if files[index] != self.gpr {

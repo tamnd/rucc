@@ -440,9 +440,10 @@ fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
         return Ok(value);
     }
     // A number without the `#`, which is how gcc writes every immediate. A float has to start with
-    // a digit or a sign to be one, since `inf` and `nan` are names a file may use.
+    // a digit or a sign to be one, since `inf` and `nan` are names a file may use. An expression of
+    // numbers is the number, as OpenSSL's `vpsm4-armv8.S` writes `ushr v0.4s, v12.4s, 32-2`.
     if lower.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
-        if let Some(value) = number(&lower) {
+        if let Some(value) = number(&lower).or_else(|| folded(&lower)) {
             return Ok(Value::Imm(value));
         }
         if let Ok(value) = lower.parse::<f64>() {
@@ -450,7 +451,7 @@ fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
         }
     }
     if let Some(imm) = lower.strip_prefix('#') {
-        if let Some(value) = number(imm) {
+        if let Some(value) = number(imm).or_else(|| folded(imm)) {
             return Ok(Value::Imm(value));
         }
         if let Ok(value) = imm.parse::<f64>() {
@@ -885,6 +886,17 @@ mod tests {
         assert_eq!(folded("-(8) * 2"), Some(-16));
         assert_eq!(folded("8 * name"), None);
         assert_eq!(folded("4 / 0"), None);
+    }
+
+    /// OpenSSL's `vpsm4-armv8.S` writes the count of a shift as `32-2`, with no `#`.
+    #[test]
+    fn an_immediate_may_be_an_expression_of_numbers() {
+        for text in ["ushr v0.4s, v12.4s, 32-2", "ushr v0.4s, v12.4s, #32-2"] {
+            assert_eq!(read(text).unwrap().values[2], Value::Imm(30), "{text}");
+        }
+        assert_eq!(read("mov x0, -(1 << 3)").unwrap().values[1], Value::Imm(-8));
+        // A numbered label is still a label.
+        assert!(matches!(read("b 1b").unwrap().values[0], Value::Symbol(_)));
     }
 
     #[test]

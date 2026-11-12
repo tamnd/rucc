@@ -130,7 +130,7 @@ pub struct Flags {
     /// gas on RISC-V run with `-mrelax`, its default, where the linker may shorten what the object
     /// holds. Every instruction gas marks for that gets an `R_RISCV_RELAX`, a branch is a relocation
     /// even to a label beside it, a distance between two places in code is a pair of relocations,
-    /// and an alignment in code is padding the linker cuts down. See [`Reader::relaxed`].
+    /// and an alignment in code is padding the linker cuts down.
     pub relax: bool,
 }
 
@@ -1879,7 +1879,11 @@ impl Reader {
         let mut high = None;
         for &(index, field) in &encoded.fixups {
             let word = at + 4 * index as u64;
-            let low = matches!(field, riscv64::Fixup::PcrelLo12I | riscv64::Fixup::PcrelLo12S);
+            // The low half of a pair this instruction is the whole of. A `%pcrel_lo(.L0)` written
+            // by hand is the first word and names the label of its `auipc` itself, which is then
+            // what the relocation reaches, as for any other name.
+            let low = index > 0
+                && matches!(field, riscv64::Fixup::PcrelLo12I | riscv64::Fixup::PcrelLo12S);
             // The label gas makes for the `auipc` is a `.L0 ` when the object is relaxed, and the
             // linker finds it by that symbol rather than by a section and an offset.
             let relaxed = self.relax;
