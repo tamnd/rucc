@@ -187,9 +187,15 @@ pub(super) fn dirs(target: Triple, root: Option<&Path>, prefixes: &[PathBuf]) ->
 }
 
 /// The `-m` words of the line, which are the same on a relocatable link.
+///
+/// i386 is the word gcc's `LINK_SPEC` on amd64 writes for `-m32`, and the word clang writes for
+/// i386 on FreeBSD always. FreeBSD builds its boot code that way, with the compiler and the `ld` of
+/// amd64, and an `ld` given no word links for its own machine and refuses the i386 objects. A gcc
+/// built for i386 writes no word, and its `ld` reads the same one as its default.
 pub(super) fn emulation(target: Triple) -> Vec<String> {
     match (target.os, target.arch) {
         (Os::FreeBsd(_), Arch::X86_64) => vec!["-m".to_owned(), "elf_x86_64_fbsd".to_owned()],
+        (Os::FreeBsd(_), Arch::X86) => vec!["-m".to_owned(), "elf_i386_fbsd".to_owned()],
         (Os::FreeBsd(_) | Os::NetBsd, Arch::Riscv64) => vec!["-melf64lriscv".to_owned()],
         _ => Vec::new(),
     }
@@ -710,7 +716,10 @@ mod tests {
     fn each_freebsd_machine_has_the_words_of_its_own_header() {
         let root = tree("freebsd-arches", FREEBSD);
         let i386 = text(bsd(Arch::X86, Os::FreeBsd(14)), &against(&root), &[]);
-        assert!(i386.starts_with("--sysroot== --eh-frame-hdr -dynamic-linker "), "{i386}");
+        assert!(
+            i386.starts_with("--sysroot== --eh-frame-hdr -m elf_i386_fbsd -dynamic-linker "),
+            "{i386}"
+        );
 
         let arm = bsd(Arch::Aarch64, Os::FreeBsd(14));
         let program = text(arm, &against(&root), &[]);
@@ -1062,6 +1071,9 @@ mod tests {
         assert_eq!(relocatable(netbsd, Ld::Gnu), ["-melf64lriscv", "-dc", "-dp"]);
         assert_eq!(relocatable(netbsd, Ld::Lld), ["-melf64lriscv"]);
         assert_eq!(relocatable(freebsd(), Ld::Gnu), ["-m", "elf_x86_64_fbsd"]);
+        let i386 = bsd(Arch::X86, Os::FreeBsd(15));
+        assert_eq!(relocatable(i386, Ld::Gnu), ["-m", "elf_i386_fbsd"]);
+        assert_eq!(relocatable(i386, Ld::Lld), ["-m", "elf_i386_fbsd"]);
     }
 
     #[test]
