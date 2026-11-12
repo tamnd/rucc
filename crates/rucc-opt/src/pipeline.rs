@@ -662,6 +662,12 @@ const O3: &[&str] = &[
 /// FreeBSD's `boot2`, which must fit in 7680 bytes, `fsread` tests the magic number of a UFS1 or a
 /// UFS2 super block in this form. gcc branches to the next try at once, and before this change
 /// rucc set a byte to 0, tested it and then branched.
+///
+/// `number` runs a second time after `load-forward`, as it does at `-O2`. Two reads of the same
+/// field are two values until `load-forward` makes them one, so the first run sees two different
+/// divisions in `x / s->n + x / s->n`, and only a second run sees one. Removing a computation never
+/// makes the code larger. `fsread` in `boot2` works out the cylinder group of an inode, which is
+/// `inode / fs_ipg`, twice in one block for the UFS1 start of the group and divided twice.
 const OS: &[&str] = &[
     "expect",
     "fold",
@@ -696,6 +702,7 @@ const OS: &[&str] = &[
     "fold",
     "image",
     "fold",
+    "number",
     "simplify",
     "reassoc",
     "simplify-cfg",
@@ -717,7 +724,8 @@ const OS: &[&str] = &[
 /// rather have the branch than the bytes, and every reason to want the do-while form here is a
 /// speed reason.
 ///
-/// `thread` and `rangetest` run again after `phiopt`, as at `-Os`.
+/// `thread` and `rangetest` run again after `phiopt`, and `number` after `load-forward`, as at
+/// `-Os`.
 const OZ: &[&str] = &[
     "expect",
     "fold",
@@ -749,6 +757,7 @@ const OZ: &[&str] = &[
     "fold",
     "image",
     "fold",
+    "number",
     "simplify",
     "simplify-cfg",
     "discharge",
