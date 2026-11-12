@@ -159,6 +159,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::coalesce::Coalesce,
     &crate::sink::Sink,
     &crate::step::StepSink,
+    &crate::arms::ArmHoist,
     &crate::dead_plane::DeadPlane,
     &crate::lanes::Lanes,
     &crate::lanes::Rejoin,
