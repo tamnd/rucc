@@ -2406,9 +2406,8 @@ pub struct Options {
     /// the flag anyway.
     ///
     /// `None` is a command line that said neither. On x86 that keeps it in every leaf but one with
-    /// nothing in its frame when optimizing, as gcc does, and an explicit
-    /// `-mno-omit-leaf-frame-pointer` keeps it there too. On AArch64 it leaves it out of every
-    /// leaf.
+    /// nothing in its frame when optimizing, as gcc does. An explicit `-mno-omit-leaf-frame-pointer`
+    /// gives it back in that leaf too, as gcc does. On AArch64 it leaves it out of every leaf.
     pub leaf_frame_pointer: Option<bool>,
     /// Whether the red zone may be used, from `-mno-red-zone` turned around.
     ///
