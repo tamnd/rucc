@@ -25,6 +25,15 @@
 //! The fused multiply add is also written here, by `fuse`, from a call to `fma` or `fmaf` that
 //! the front end marked as the library's, when the selector can answer it.
 //!
+//! # The square root
+//!
+//! A call to the library's `sqrt` or `sqrtf` is `sqrtsd` or `sqrtss` on x86-64 when the level
+//! optimizes, as gcc writes it. Under `-fmath-errno`, which is the default, the routine must set
+//! `errno` for an operand below zero, so the call stays behind a check for that case and the
+//! instruction answers every other operand. A NaN and a negative zero are not below zero, and the
+//! routine sets nothing for them. Under `-fno-math-errno` the instruction is the whole answer.
+//! See `roots`.
+//!
 //! # What is left alone
 //!
 //! The half float, the eighty bit format and the decimal floats. A half reaching here would be the
@@ -36,10 +45,26 @@
 //! stay where they are and the selector refuses them by name.
 
 use rucc_base::Interner;
-use rucc_ir::{Extra, Flags, Float, Func, Inst, Opcode, Type};
+use rucc_ir::{
+    AsmInfo, BlockCallList, Builder, Extra, Flags, Float, FloatPred, Func, Inst, InstData, Opcode,
+    Type, Value,
+};
 use rucc_target::AbiDescription;
 
 use crate::quad;
+use crate::retry::replace;
+
+/// What a call to the library's `sqrt` or `sqrtf` becomes. See `roots`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Roots {
+    /// The call stays, which is `-O0` and every machine but x86-64 with SSE.
+    #[default]
+    Calls,
+    /// The instruction, and the call for an operand below zero, which is `-fmath-errno`.
+    Checked,
+    /// The instruction alone, which is `-fno-math-errno`.
+    Bare,
+}
 
 /// Rewrites every float remainder and fused multiply add into the call that computes it.
 ///
@@ -51,9 +76,20 @@ use crate::quad;
 /// The instructions are collected first, for the reason every pass in the group does it: a call
 /// that passes an argument by address writes instructions in front of the one it replaces, and the
 /// walk would otherwise see them.
-pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, fused: bool) {
+///
+/// `roots` says what a call to the library's `sqrt` or `sqrtf` becomes. See [`Roots`].
+pub fn calls(
+    func: &mut Func,
+    names: &mut Interner,
+    abi: &'static AbiDescription,
+    fused: bool,
+    roots: Roots,
+) {
     if fused {
         fuse(func, names);
+    }
+    if roots != Roots::Calls {
+        self::roots(func, names, roots);
     }
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
@@ -107,6 +143,89 @@ fn fuse(func: &mut Func, names: &Interner) {
     }
 }
 
+/// Rewrites each call to `sqrt` or `sqrtf` that has [`Flags::LIBRARY`] into the instruction.
+///
+/// The instruction is an `asm` statement with gcc's own template for it, `%vsqrtsd` with the
+/// operands in the AT&T and the Intel order. `%v` writes the VEX form in a function built for AVX.
+/// The output is in a vector register of its own and the operand in another, which is the shape
+/// gcc gives the pattern.
+///
+/// With [`Roots::Checked`] the block is cut after the call. The instruction runs first and the
+/// block then branches on whether the operand is below zero. That edge goes to a block with the
+/// call in it, which sets `errno` and gives the same NaN. The other edge carries the answer of
+/// the instruction. The two meet in a block that has the rest of the old block and takes the
+/// answer as its parameter.
+///
+/// A call stays a call when it does not have the shape of the routine, and when it has an unwind
+/// edge, for the reason `fuse` gives.
+fn roots(func: &mut Func, names: &mut Interner, roots: Roots) {
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
+        let data = &func[inst];
+        let Extra::Call(info) = data.extra else { continue };
+        if data.opcode != Opcode::Call || !data.flags.contains(Flags::LIBRARY) {
+            continue;
+        }
+        let Some(callee) = func[info].callee else { continue };
+        let (ty, template) = match names.resolve(callee) {
+            "sqrt" => (Type::float(Float::F64), "%vsqrtsd\t{%1, %d0|%d0, %1}"),
+            "sqrtf" => (Type::float(Float::F32), "%vsqrtss\t{%1, %d0|%d0, %1}"),
+            _ => continue,
+        };
+        let [operand] = func[data.args] else { continue };
+        let shaped = func[operand].ty == ty && data.results().map(|value| func[value].ty).eq([ty]);
+        if !shaped || func.unwinds_to_pad(inst) {
+            continue;
+        }
+        let old = func[inst].first_result.expect("the call answers");
+        let info = AsmInfo {
+            template: names.intern(template),
+            constraints: names.intern("=x,x"),
+            clobbers: names.intern(""),
+            targets: BlockCallList::EMPTY,
+        };
+        let asm = func.add_asm(info);
+        let args = func.push_values(&[operand]);
+        let data = InstData { args, extra: Extra::Asm(asm), ..InstData::new(Opcode::InlineAsm) };
+        let span = func.span(inst);
+        let made = func.create_inst(data, &[ty], span);
+        func.insert_before(made, inst);
+        let root = func[made].first_result.expect("one result was asked for");
+        if roots == Roots::Bare {
+            func.remove_inst(inst);
+            replace(func, old, root);
+            continue;
+        }
+        checked(func, inst, (operand, root, old), ty);
+    }
+}
+
+/// Cuts the block of the call `inst` after it, so that the call runs only for an operand below
+/// zero and `root` is the answer for every other one. `old` is the answer of the call.
+fn checked(func: &mut Func, inst: Inst, (operand, root, old): (Value, Value, Value), ty: Type) {
+    let head = func.block_of(inst).expect("the call is in a block");
+    let span = func.span(inst);
+    // Everything after the call, which moves into the block where the two paths meet.
+    let tail: Vec<Inst> = func.insts(head).skip_while(|&at| at != inst).skip(1).collect();
+    let slow = func.create_block();
+    let done = func.create_block();
+    let answer = func.append_param(done, ty);
+    for at in tail {
+        func.remove_inst(at);
+        func.append_inst(done, at);
+    }
+    // Before the call moves, so that only the readers of its answer in the tail are rewritten and
+    // the jump below still carries the call's own answer.
+    replace(func, old, answer);
+    func.remove_inst(inst);
+    func.append_inst(slow, inst);
+    Builder::new(func, slow).at(span).jump(done, &[old]);
+    let mut build = Builder::new(func, head).at(span);
+    let zero = build.fconst(ty, 0);
+    let below = build.fcmp(FloatPred::Olt, operand, zero, Flags::NONE);
+    build.br_if(below, slow, &[], done, &[root]);
+}
+
 /// Whether this is a scalar `float` or `double`, the two types the fused rules are written for.
 fn is_single_or_double(ty: Type) -> bool {
     ty.is_scalar() && matches!(ty.format(), Some(Float::F32 | Float::F64))
@@ -142,7 +261,7 @@ mod tests {
     use rucc_ir::{Block, Builder, Flags, InstData, Module, Signature, Value};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple, x86_64};
 
-    use super::{Float, Func, Opcode, Type, calls, routine};
+    use super::{Float, Func, Opcode, Roots, Type, calls, routine};
 
     /// A function whose one instruction is a call to `name` with its three parameters, marked as
     /// the library's when `library` is true, run through the step with `fused` and checked by the
@@ -161,7 +280,7 @@ mod tests {
         if library {
             func[call].flags |= Flags::LIBRARY;
         }
-        calls(&mut func, &mut names, x86_64::SYSV.abi, fused);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, fused, Roots::Calls);
         let module = Module::new(names.intern("m.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the function is valid IR");
         printed(&func, &mut names)
@@ -203,7 +322,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.binary(Opcode::FRem, params[0], params[1], Flags::NONE);
         build.ret(&[answer]);
-        calls(&mut func, &mut names, x86_64::SYSV.abi, false);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, false, Roots::Calls);
         let module = Module::new(names.intern("m.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the call is valid IR");
         printed(&func, &mut names)
@@ -218,7 +337,7 @@ mod tests {
         let args = build.func().push_values(&params);
         let answer = build.value(InstData { args, ..InstData::new(Opcode::Fma) }, ty);
         build.ret(&[answer]);
-        calls(&mut func, &mut names, x86_64::SYSV.abi, false);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, false, Roots::Calls);
         let module = Module::new(names.intern("m.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the call is valid IR");
         printed(&func, &mut names)
@@ -285,7 +404,7 @@ mod tests {
         let args = build.func().push_values(&params);
         let answer = build.value(InstData { args, ..InstData::new(Opcode::Fma) }, ty);
         build.ret(&[answer]);
-        calls(&mut func, &mut names, x86_64::SYSV.abi, true);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, true, Roots::Calls);
         let text = printed(&func, &mut names);
         assert!(words(&text).contains(&"@fmaf128"), "{text}");
     }
@@ -296,6 +415,71 @@ mod tests {
         for format in [Float::F16, Float::F80, Float::D32, Float::D64, Float::D128] {
             assert_eq!(routine(Opcode::FRem, Type::float(format)), None, "{format:?}");
             assert_eq!(routine(Opcode::Fma, Type::float(format)), None, "{format:?}");
+        }
+    }
+
+    /// A function that answers `name` of its one parameter, the call marked as the library's when
+    /// `library` is true, run through the step with `roots` and checked by the verifier.
+    fn rooted(name: &str, format: Float, library: bool, roots: Roots) -> String {
+        let ty = Type::float(format);
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[ty], &[ty]);
+        let callee = names.intern(name);
+        let sig = func.add_signature(Signature::new().with_params(&[ty]).with_returns(&[ty]));
+        let mut build = Builder::new(&mut func, entry);
+        let call = build.call(callee, sig, &params);
+        let answer = build.func()[call].first_result.expect("the call answers");
+        let twice = build.binary(Opcode::FAdd, answer, answer, Flags::NONE);
+        build.ret(&[twice]);
+        if library {
+            func[call].flags |= Flags::LIBRARY;
+        }
+        calls(&mut func, &mut names, x86_64::SYSV.abi, false, roots);
+        let module = Module::new(names.intern("m.c"), &target());
+        rucc_ir::verify_func(&module, &func, &names).expect("the function is valid IR");
+        printed(&func, &mut names)
+    }
+
+    /// Under `-fno-math-errno` the library's `sqrt` and `sqrtf` are the instruction alone.
+    #[test]
+    fn a_library_square_root_is_the_instruction_without_errno() {
+        for (name, format, mnemonic) in
+            [("sqrt", Float::F64, "vsqrtsd"), ("sqrtf", Float::F32, "vsqrtss")]
+        {
+            let text = rooted(name, format, true, Roots::Bare);
+            assert!(text.contains(mnemonic), "{name}: {text}");
+            assert!(!text.contains("call"), "{name}: {text}");
+            assert!(!words(&text).contains(&"br_if"), "{name}: {text}");
+        }
+    }
+
+    /// Under `-fmath-errno` the instruction answers, and the call is still there for an operand
+    /// below zero, on a branch of its own. The rest of the function reads the answer through the
+    /// block where the two paths meet.
+    #[test]
+    fn a_library_square_root_keeps_the_call_below_zero_with_errno() {
+        let text = rooted("sqrt", Float::F64, true, Roots::Checked);
+        assert!(text.contains("vsqrtsd"), "{text}");
+        assert!(words(&text).contains(&"@sqrt"), "{text}");
+        assert!(words(&text).contains(&"br_if"), "{text}");
+        assert!(words(&text).contains(&"olt"), "{text}");
+        let fadd = text.lines().find(|line| line.contains("fadd")).expect("the addition is kept");
+        let block = text.lines().filter(|line| line.starts_with("block")).nth(2);
+        let block = block.expect("a block where the two paths meet");
+        let param = block.split(['(', ':']).nth(1).expect("the block has a parameter").trim();
+        assert!(fadd.contains(param), "the addition reads {param}: {text}");
+    }
+
+    /// A call the front end did not mark is the program's own `sqrt`, and stays a call. So does
+    /// the library's at `-O0` and on a machine without the instruction.
+    #[test]
+    fn a_square_root_stays_a_call_without_the_mark_or_the_instruction() {
+        for (library, roots) in
+            [(false, Roots::Bare), (false, Roots::Checked), (true, Roots::Calls)]
+        {
+            let text = rooted("sqrt", Float::F64, library, roots);
+            assert!(!text.contains("sqrtsd"), "{library} {roots:?}: {text}");
+            assert!(words(&text).contains(&"@sqrt"), "{library} {roots:?}: {text}");
         }
     }
 
