@@ -1173,6 +1173,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `-fmin-function-alignment=`, which is weighed after the loop against what
     // `-falign-functions` said, in whichever order the two came.
     let mut min_function_align: Option<u32> = None;
+    // Whether the command line said anything about where a function starts, which decides whether
+    // the size levels keep the default below.
+    let mut align_asked = false;
     // The register files the kernel keeps out of every function, which are weighed after the
     // loop: the vector registers are off once the extensions they belong to are, whichever flag
     // took those away, whichever flag took them, and in whichever order they came.
@@ -2930,9 +2933,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // itself; and the negative form asks for the smallest boundary the target has. gcc 16
             // rounds a number that is not a power of two up rather than refusing it, which is what
             // `=3` giving `.p2align 2` on x86-64 means, so this rounds too.
-            "-falign-functions" => opts.align_functions = None,
-            "-fno-align-functions" => opts.align_functions = Some(MIN_FUNC_ALIGN),
+            "-falign-functions" => {
+                align_asked = true;
+                opts.align_functions = None;
+            }
+            "-fno-align-functions" => {
+                align_asked = true;
+                opts.align_functions = Some(MIN_FUNC_ALIGN);
+            }
             _ if arg.starts_with("-falign-functions=") => {
+                align_asked = true;
                 opts.align_functions = function_alignment(&arg["-falign-functions=".len()..])
                     .ok_or_else(|| {
                         err(format!("{arg}: the alignment has to be a number of bytes"))
@@ -3818,6 +3828,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         let set = ["max-inline-insns-single", "max-inline-insns-auto"]
             .map(|name| format!("{name}={half}"));
         opts.params.splice(0..0, set);
+    }
+
+    // `-Os` and `-Oz` put no function on a boundary on x86 unless the command line asks for one,
+    // which is what gcc does: its `-falign-functions` is on from `-O2`, and the size levels turn it
+    // off. Sixteen bytes is up to fifteen bytes of padding in front of every function, and
+    // FreeBSD's `boot2`, which has to fit in 7680 bytes, has sixteen of them. Only x86, because an
+    // instruction there may start on any byte, which is not so on the other machines.
+    if !align_asked
+        && matches!(opts.opt_level, rucc_session::OptLevel::Os | rucc_session::OptLevel::Oz)
+        && matches!(opts.target.arch, rucc_target::Arch::X86 | rucc_target::Arch::X86_64)
+    {
+        opts.align_functions = Some(1);
     }
 
     // The floor `-fmin-function-alignment=` put under every function, which `-falign-functions`
@@ -7521,6 +7543,29 @@ mod tests {
 
         let e = parse_args(&args(&["-c", "-falign-functions=big", "a.c"])).unwrap_err();
         assert!(e.message.contains("number of bytes"), "{}", e.message);
+    }
+
+    /// gcc turns `-falign-functions` on from `-O2` and the size levels turn it off, so at `-Os` and
+    /// `-Oz` a function on x86 starts on the next byte. A flag on the line still decides, and the
+    /// other machines keep their boundary, since an instruction there may not start just anywhere.
+    #[test]
+    fn the_size_levels_put_no_function_on_a_boundary_on_x86() {
+        for target in ["--target=x86_64-unknown-linux-gnu", "--target=i386-unknown-freebsd15.1"] {
+            for level in ["-Os", "-Oz"] {
+                let (opts, _) = compile(&["-c", target, level, "a.c"]);
+                assert_eq!(opts.align_functions, Some(1), "{target} {level}");
+            }
+            let (opts, _) = compile(&["-c", target, "-O2", "a.c"]);
+            assert_eq!(opts.align_functions, None, "{target} -O2 keeps the default");
+            let (opts, _) = compile(&["-c", target, "-Os", "-falign-functions=32", "a.c"]);
+            assert_eq!(opts.align_functions, Some(32), "{target} asked for 32");
+            let (opts, _) = compile(&["-c", target, "-Os", "-falign-functions", "a.c"]);
+            assert_eq!(opts.align_functions, None, "{target} asked for the default");
+        }
+        let (opts, _) = compile(&["-c", "--target=x86_64-unknown-linux-gnu", "-m32", "-Os", "a.c"]);
+        assert_eq!(opts.align_functions, Some(1), "-m32");
+        let (opts, _) = compile(&["-c", "--target=aarch64-unknown-linux-gnu", "-Os", "a.c"]);
+        assert_eq!(opts.align_functions, None, "aarch64 keeps its boundary");
     }
 
     /// The other three of the family are about padding inside a body, so none of them is about
