@@ -49,7 +49,7 @@ use rucc_sema::{
     InitList, Linkage, Stmt, StmtId, StorageDuration, StrId, Tast,
 };
 use rucc_target::TargetInfo;
-use rucc_types::{Qualifiers, Types};
+use rucc_types::{ArrayLen, Qualifiers, TypeId, TypeKind, Types};
 
 /// The declarations something in the file reaches, given the file.
 ///
@@ -271,6 +271,9 @@ impl Reach<'_> {
     fn decl(&mut self, decl: DeclId) {
         let node = &self.tast[decl];
         let (init, body, cleanup) = (node.init, node.body, node.cleanup);
+        if node.kind != DeclKind::Function {
+            self.sizes(node.ty);
+        }
         if let Some(init) = init {
             self.init(init);
         }
@@ -280,6 +283,37 @@ impl Reach<'_> {
         if let Some(handler) = cleanup {
             self.named.insert(handler);
             self.mark(handler);
+        }
+    }
+
+    /// What the sizes in a variably modified type reach, which are the ones lowering evaluates
+    /// where the declaration is, in `Body::measure`.
+    ///
+    /// A size is an expression in the type and not in the body, so the walk over the body does
+    /// not see it. FreeBSD's `mmcspi.c` declares `uint8_t txbuf[max(MMCSPI_POLL_LEN, 2)]`, and
+    /// `max` is a `static inline` in `libkern.h` that nothing else in the file calls. The bound
+    /// is a call, so the array is a variable length one, and the object called `max` and did
+    /// not define it, so the kernel did not link.
+    fn sizes(&mut self, ty: TypeId) {
+        let types = self.decide.types;
+        let canonical = types.canonical(ty);
+        match types.kind(canonical) {
+            TypeKind::Pointer(pointee) => self.sizes(pointee),
+            TypeKind::Array { elem, len } => {
+                if let ArrayLen::Variable(vla) = len {
+                    self.expr(self.tast.vla_size(vla));
+                }
+                self.sizes(elem);
+            }
+            TypeKind::Record(record) => {
+                if types.record_info(record).variable.is_none() {
+                    return;
+                }
+                for index in 0..types.record_info(record).fields.len() {
+                    self.sizes(types.record_info(record).fields[index].ty);
+                }
+            }
+            _ => {}
         }
     }
 
