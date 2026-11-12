@@ -1068,6 +1068,14 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         }
         ("jr", [Gpr(rs)]) => out.words.push(i(0x67, 0, ZERO, *rs, 0)),
         ("jalr", [Gpr(rs)]) => out.words.push(i(0x67, 0, RA, *rs, 0)),
+        ("jalr", [Gpr(rd), Gpr(rs)]) => out.words.push(i(0x67, 0, *rd, *rs, 0)),
+        // A jump through a register and a displacement, which FreeBSD's `memset.S` writes as
+        // `jr -4(t2)` to land inside a run of stores. GNU as takes the displacement as an address
+        // or after a comma, and either way it is the `jalr` with the link that name implies.
+        ("jr" | "jalr", [Mem(Addr { base, offset: Offset::Imm(imm) })] | [Gpr(base), Imm(imm)]) => {
+            let link = if mnemonic == "jr" { ZERO } else { RA };
+            out.words.push(i(0x67, 0, link, *base, twelve(*imm)?));
+        }
         ("ret", []) => out.words.push(i(0x67, 0, ZERO, RA, 0)),
         ("call" | "tail", [Symbol(Operator::Plain)]) => {
             let (link, through) = if mnemonic == "call" { (RA, RA) } else { (ZERO, T1) };
@@ -1390,6 +1398,12 @@ mod tests {
             ("bgtz", &[Gpr(10), Imm(8)], 0x00a0_4463),
             ("zext.b", &[Gpr(10), Gpr(11)], 0x0ff5_f513),
             ("jalr", &[Gpr(1), Gpr(10), Imm(4)], 0x0045_00e7),
+            ("jr", &[at(7, -4)], 0xffc3_8067),
+            ("jr", &[at(11, 0)], 0x0005_8067),
+            ("jr", &[Gpr(12), Imm(12)], 0x00c6_0067),
+            ("jalr", &[at(13, 16)], 0x0106_80e7),
+            ("jalr", &[Gpr(16), Imm(20)], 0x0148_00e7),
+            ("jalr", &[Gpr(5), Gpr(15)], 0x0007_82e7),
             // Zicfilp and Zicfiss, from llvm-mc, since binutils 2.42 does not know them.
             ("lpad", &[Imm(0)], 0x0000_0017),
             ("lpad", &[Imm(5)], 0x0000_5017),

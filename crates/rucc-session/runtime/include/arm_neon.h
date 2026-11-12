@@ -10138,6 +10138,69 @@ static __inline__ uint8x16_t vaesimcq_u8(uint8x16_t __d) {
   __asm__("aesimc %0.16b, %1.16b" : "=w"(__r) : "w"(__d));
   return __r;
 }
+/* The SHA-1, SHA-256 and SHA-512 instructions of the cryptographic extension, which FreeBSD's
+ * sha256c_arm64.c and sha512c_arm64.c are written with. Each is one instruction, as in gcc. The
+ * 32 bit word SHA-1 reads and writes is an S register, so it goes in lane 0 of a vector. */
+static __inline__ uint32x4_t vsha1cq_u32(uint32x4_t __abcd, uint32_t __e, uint32x4_t __wk) {
+  uint32x4_t __v = {__e};
+  __asm__("sha1c %q0, %s1, %2.4s" : "+w"(__abcd) : "w"(__v), "w"(__wk));
+  return __abcd;
+}
+static __inline__ uint32x4_t vsha1mq_u32(uint32x4_t __abcd, uint32_t __e, uint32x4_t __wk) {
+  uint32x4_t __v = {__e};
+  __asm__("sha1m %q0, %s1, %2.4s" : "+w"(__abcd) : "w"(__v), "w"(__wk));
+  return __abcd;
+}
+static __inline__ uint32x4_t vsha1pq_u32(uint32x4_t __abcd, uint32_t __e, uint32x4_t __wk) {
+  uint32x4_t __v = {__e};
+  __asm__("sha1p %q0, %s1, %2.4s" : "+w"(__abcd) : "w"(__v), "w"(__wk));
+  return __abcd;
+}
+static __inline__ uint32_t vsha1h_u32(uint32_t __e) {
+  uint32x4_t __v = {__e};
+  __asm__("sha1h %s0, %s0" : "+w"(__v));
+  return __v[0];
+}
+static __inline__ uint32x4_t vsha1su0q_u32(uint32x4_t __a, uint32x4_t __b, uint32x4_t __c) {
+  __asm__("sha1su0 %0.4s, %1.4s, %2.4s" : "+w"(__a) : "w"(__b), "w"(__c));
+  return __a;
+}
+static __inline__ uint32x4_t vsha1su1q_u32(uint32x4_t __a, uint32x4_t __b) {
+  __asm__("sha1su1 %0.4s, %1.4s" : "+w"(__a) : "w"(__b));
+  return __a;
+}
+static __inline__ uint32x4_t vsha256hq_u32(uint32x4_t __abcd, uint32x4_t __efgh, uint32x4_t __wk) {
+  __asm__("sha256h %q0, %q1, %2.4s" : "+w"(__abcd) : "w"(__efgh), "w"(__wk));
+  return __abcd;
+}
+static __inline__ uint32x4_t vsha256h2q_u32(uint32x4_t __efgh, uint32x4_t __abcd, uint32x4_t __wk) {
+  __asm__("sha256h2 %q0, %q1, %2.4s" : "+w"(__efgh) : "w"(__abcd), "w"(__wk));
+  return __efgh;
+}
+static __inline__ uint32x4_t vsha256su0q_u32(uint32x4_t __a, uint32x4_t __b) {
+  __asm__("sha256su0 %0.4s, %1.4s" : "+w"(__a) : "w"(__b));
+  return __a;
+}
+static __inline__ uint32x4_t vsha256su1q_u32(uint32x4_t __a, uint32x4_t __b, uint32x4_t __c) {
+  __asm__("sha256su1 %0.4s, %1.4s, %2.4s" : "+w"(__a) : "w"(__b), "w"(__c));
+  return __a;
+}
+static __inline__ uint64x2_t vsha512hq_u64(uint64x2_t __a, uint64x2_t __b, uint64x2_t __c) {
+  __asm__("sha512h %q0, %q1, %2.2d" : "+w"(__a) : "w"(__b), "w"(__c));
+  return __a;
+}
+static __inline__ uint64x2_t vsha512h2q_u64(uint64x2_t __a, uint64x2_t __b, uint64x2_t __c) {
+  __asm__("sha512h2 %q0, %q1, %2.2d" : "+w"(__a) : "w"(__b), "w"(__c));
+  return __a;
+}
+static __inline__ uint64x2_t vsha512su0q_u64(uint64x2_t __a, uint64x2_t __b) {
+  __asm__("sha512su0 %0.2d, %1.2d" : "+w"(__a) : "w"(__b));
+  return __a;
+}
+static __inline__ uint64x2_t vsha512su1q_u64(uint64x2_t __a, uint64x2_t __b, uint64x2_t __c) {
+  __asm__("sha512su1 %0.2d, %1.2d, %2.2d" : "+w"(__a) : "w"(__b), "w"(__c));
+  return __a;
+}
 static __inline__ int8x16_t vreinterpretq_s8_p128(poly128_t __v) {
   int8x16_t __r;
   __builtin_memcpy(&__r, &__v, sizeof __r);
