@@ -49,14 +49,16 @@ pub(super) enum Ld {
 /// looks for the linker and where FreeBSD's build puts the binutils of the target: it passes
 /// `-B${WORLDTMP}/usr/bin`, or `-B` and its `CROSS_BINUTILS_PREFIX`. The `ld` on `PATH` is left
 /// alone then, because it links for this machine. Then `<triple>-ld`, the name a cross binutils
-/// installs on `PATH`, which is the name collect2 of a cross GCC looks for there. lld comes last,
-/// which links for every BSD from one binary.
+/// installs on `PATH`, which is the name collect2 of a cross GCC looks for there. For NetBSD the
+/// name of [`platform`] comes before it, because that is the name `build.sh` gives the linker in
+/// `TOOLDIR/bin`. lld comes last, which links for every BSD from one binary.
 ///
 /// Before all of them, the linker of FreeBSD's GCC port when the target was named, see
 /// [`port_linker`].
 pub(super) fn order(
     target: Triple,
     pinned: Option<TargetTuple>,
+    narrowed: bool,
     host: Option<Triple>,
     prefixes: &[PathBuf],
 ) -> Vec<String> {
@@ -67,6 +69,9 @@ pub(super) fn order(
     } else {
         // A path, so that the search does not go on to `PATH` with it.
         names.extend(prefixes.iter().map(|dir| dir.join("ld").display().to_string()));
+        if target.os == Os::NetBsd {
+            names.push(format!("{}-ld", platform(configured(target, narrowed))));
+        }
         names.push(format!("{}-ld", triple(target, pinned)));
     }
     names.extend(["ld.lld".to_owned(), "lld".to_owned()]);
@@ -133,6 +138,23 @@ pub(crate) fn triple(target: Triple, pinned: Option<TargetTuple>) -> String {
     format!("{arch}-unknown-{os}")
 }
 
+/// NetBSD's name for the machine, `MACHINE_GNU_PLATFORM` in its `share/mk/bsd.own.mk`:
+/// `x86_64--netbsd`, `i486--netbsdelf` or `aarch64--netbsd`.
+///
+/// `build.sh` configures the binutils and the GCC of its tools with this name, which has no vendor.
+/// So the linker in `TOOLDIR/bin` is `x86_64--netbsd-ld`, and collect2 looks for that name.
+fn platform(machine: Triple) -> String {
+    triple(machine, None).replacen("-unknown-", "--", 1)
+}
+
+/// The machine the GCC is configured for, which is amd64 when `-m32` narrowed an amd64 target.
+///
+/// `-m32` changes the target to 32-bit x86 and does not change the GCC. An amd64 GCC links an
+/// i386 program with the linker of amd64 and tells it the machine with `-m`.
+fn configured(target: Triple, narrowed: bool) -> Triple {
+    if narrowed { Triple { arch: Arch::X86_64, ..target } } else { target }
+}
+
 /// Which linker `--version` says it is.
 pub(super) fn reads(version: &str) -> Ld {
     if version.starts_with("GNU ld") { Ld::Gnu } else { Ld::Lld }
@@ -192,19 +214,25 @@ pub(super) fn dirs(target: Triple, root: Option<&Path>, prefixes: &[PathBuf]) ->
 /// i386 on FreeBSD always. FreeBSD builds its boot code that way, with the compiler and the `ld` of
 /// amd64, and an `ld` given no word links for its own machine and refuses the i386 objects. A gcc
 /// built for i386 writes no word, and its `ld` reads the same one as its default.
-pub(super) fn emulation(target: Triple) -> Vec<String> {
+///
+/// NetBSD's amd64 GCC gives `-m elf_i386` for `-m32`, from `%{m32:-m elf_i386}` in the `LINK_SPEC`
+/// of `i386/netbsd64.h`. Its GNU ld links for amd64 when it is not told otherwise.
+pub(super) fn emulation(target: Triple, narrowed: bool) -> Vec<String> {
     match (target.os, target.arch) {
         (Os::FreeBsd(_), Arch::X86_64) => vec!["-m".to_owned(), "elf_x86_64_fbsd".to_owned()],
         (Os::FreeBsd(_), Arch::X86) => vec!["-m".to_owned(), "elf_i386_fbsd".to_owned()],
         (Os::FreeBsd(_) | Os::NetBsd, Arch::Riscv64) => vec!["-melf64lriscv".to_owned()],
+        (Os::NetBsd, Arch::X86) if narrowed => {
+            vec!["-m".to_owned(), "elf_i386".to_owned()]
+        }
         _ => Vec::new(),
     }
 }
 
 /// The words of a relocatable link before `-r`: the `-m` of the line, and the words of
 /// `LINK_SPEC` that GNU ld reads in a relocatable link, `-maarch64fbsd` and NetBSD's `-dc -dp`.
-pub(super) fn relocatable(target: Triple, ld: Ld) -> Vec<String> {
-    let mut args = emulation(target);
+pub(super) fn relocatable(target: Triple, narrowed: bool, ld: Ld) -> Vec<String> {
+    let mut args = emulation(target, narrowed);
     if ld == Ld::Gnu {
         match (target.os, target.arch) {
             (Os::FreeBsd(_), Arch::Aarch64) => args.push("-maarch64fbsd".to_owned()),
@@ -336,7 +364,7 @@ pub(super) fn line(
 /// `LINK_SPEC` of the target, without the words lld refuses when the linker is lld.
 fn link_spec(target: Triple, opts: &LinkOptions, items: &[Item], ld: Ld) -> Vec<String> {
     let gnu = ld == Ld::Gnu;
-    let mut args = emulation(target);
+    let mut args = emulation(target, opts.narrowed);
     let mut push = |word: &str| args.push(word.to_owned());
     let dynamic = !opts.is_static;
     // `%{!e*:-e ...}`, which reads the `-e` of the command line. The driver hands that on as the
@@ -1065,15 +1093,15 @@ mod tests {
     #[test]
     fn a_relocatable_link_by_gnu_ld_takes_its_words_too() {
         let arm = bsd(Arch::Aarch64, Os::FreeBsd(14));
-        assert_eq!(relocatable(arm, Ld::Gnu), ["-maarch64fbsd"]);
-        assert!(relocatable(arm, Ld::Lld).is_empty());
+        assert_eq!(relocatable(arm, false, Ld::Gnu), ["-maarch64fbsd"]);
+        assert!(relocatable(arm, false, Ld::Lld).is_empty());
         let netbsd = bsd(Arch::Riscv64, Os::NetBsd);
-        assert_eq!(relocatable(netbsd, Ld::Gnu), ["-melf64lriscv", "-dc", "-dp"]);
-        assert_eq!(relocatable(netbsd, Ld::Lld), ["-melf64lriscv"]);
-        assert_eq!(relocatable(freebsd(), Ld::Gnu), ["-m", "elf_x86_64_fbsd"]);
+        assert_eq!(relocatable(netbsd, false, Ld::Gnu), ["-melf64lriscv", "-dc", "-dp"]);
+        assert_eq!(relocatable(netbsd, false, Ld::Lld), ["-melf64lriscv"]);
+        assert_eq!(relocatable(freebsd(), false, Ld::Gnu), ["-m", "elf_x86_64_fbsd"]);
         let i386 = bsd(Arch::X86, Os::FreeBsd(15));
-        assert_eq!(relocatable(i386, Ld::Gnu), ["-m", "elf_i386_fbsd"]);
-        assert_eq!(relocatable(i386, Ld::Lld), ["-m", "elf_i386_fbsd"]);
+        assert_eq!(relocatable(i386, false, Ld::Gnu), ["-m", "elf_i386_fbsd"]);
+        assert_eq!(relocatable(i386, false, Ld::Lld), ["-m", "elf_i386_fbsd"]);
     }
 
     #[test]
@@ -1096,7 +1124,7 @@ mod tests {
         let dirs = [PathBuf::from("/w/usr/bin"), PathBuf::from("/x/bin")];
         let ld = |dir: &str| Path::new(dir).join("ld").display().to_string();
         assert_eq!(
-            order(freebsd(), None, linux(), &dirs),
+            order(freebsd(), None, false, linux(), &dirs),
             [
                 ld("/w/usr/bin"),
                 ld("/x/bin"),
@@ -1108,31 +1136,57 @@ mod tests {
         // On the machine itself the name `ld` is looked for, in the `-B` directories and then on
         // `PATH`.
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(15)));
-        assert_eq!(order(freebsd(), None, host, &dirs), ["ld", "ld.lld", "lld"]);
+        assert_eq!(order(freebsd(), None, false, host, &dirs), ["ld", "ld.lld", "lld"]);
     }
 
     #[test]
     fn the_machines_own_linker_is_first_only_on_that_machine() {
         let cross = ["x86_64-unknown-freebsd14-ld", "ld.lld", "lld"];
-        assert_eq!(order(freebsd(), None, linux(), &[]), cross);
+        assert_eq!(order(freebsd(), None, false, linux(), &[]), cross);
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(13)));
-        assert_eq!(order(freebsd(), None, host, &[]), ["ld", "ld.lld", "lld"]);
+        assert_eq!(order(freebsd(), None, false, host, &[]), ["ld", "ld.lld", "lld"]);
         let arm = Some(bsd(Arch::Aarch64, Os::FreeBsd(14)));
-        assert_eq!(order(freebsd(), None, arm, &[]), cross);
+        assert_eq!(order(freebsd(), None, false, arm, &[]), cross);
     }
 
     #[test]
     fn a_cross_binutils_on_path_is_looked_for_by_the_name_of_the_target() {
-        let names = |arch, os| order(bsd(arch, os), None, linux(), &[]).remove(0);
+        let names = |arch, os| order(bsd(arch, os), None, false, linux(), &[]).remove(0);
         assert_eq!(names(Arch::Aarch64, Os::FreeBsd(14)), "aarch64-unknown-freebsd14-ld");
-        assert_eq!(names(Arch::X86_64, Os::NetBsd), "x86_64-unknown-netbsd-ld");
+        assert_eq!(names(Arch::X86_64, Os::NetBsd), "x86_64--netbsd-ld");
         assert_eq!(names(Arch::X86, Os::OpenBsd), "i386-unknown-openbsd-ld");
         assert_eq!(names(Arch::X86_64, Os::DragonFly), "x86_64-unknown-dragonfly-ld");
         // The release the target named, with its minor number, is the one binutils was configured
         // for, as `x86_64-unknown-freebsd15.1` installs `x86_64-unknown-freebsd15.1-ld`.
         let named = "x86_64-unknown-freebsd15.1".parse::<TargetTuple>().ok();
         let target = bsd(Arch::X86_64, Os::FreeBsd(15));
-        assert_eq!(order(target, named, linux(), &[])[1], "x86_64-unknown-freebsd15.1-ld");
+        assert_eq!(order(target, named, false, linux(), &[])[1], "x86_64-unknown-freebsd15.1-ld");
+    }
+
+    #[test]
+    fn a_netbsd_link_looks_for_the_linker_by_the_name_of_the_netbsd_tools() {
+        let named = |text: &str| text.parse::<TargetTuple>().ok();
+        let amd64 = bsd(Arch::X86_64, Os::NetBsd);
+        let i386 = bsd(Arch::X86, Os::NetBsd);
+        let expect = |first: &str, second: &str| {
+            [first.to_owned(), second.to_owned(), "ld.lld".to_owned(), "lld".to_owned()]
+        };
+        // `TOOLDIR/bin/x86_64--netbsd-ld`, before the name of a binutils configured elsewhere.
+        assert_eq!(
+            order(amd64, named("x86_64--netbsd"), false, linux(), &[]),
+            expect("x86_64--netbsd-ld", "x86_64-unknown-netbsd-ld")
+        );
+        assert_eq!(
+            order(i386, named("i486--netbsdelf"), false, linux(), &[]),
+            expect("i486--netbsdelf-ld", "i486-unknown-netbsdelf-ld")
+        );
+        // `-m32` on amd64 links with the linker of amd64, which is the one its tools have, and
+        // tells it the machine.
+        let m32 = order(i386, None, true, linux(), &[]);
+        assert_eq!(m32, expect("x86_64--netbsd-ld", "i486-unknown-netbsdelf-ld"));
+        assert_eq!(emulation(i386, true), ["-m", "elf_i386"]);
+        assert!(emulation(i386, false).is_empty());
+        assert!(emulation(amd64, false).is_empty());
     }
 
     #[test]
@@ -1146,7 +1200,7 @@ mod tests {
         let dirs = [PathBuf::from("/w/usr/bin")];
         let ld = Path::new("/w/usr/bin").join("ld").display().to_string();
         assert_eq!(
-            order(target, named, linux(), &dirs),
+            order(target, named, false, linux(), &dirs),
             [
                 port.clone(),
                 ld,
@@ -1158,7 +1212,7 @@ mod tests {
         // And before the machine's own `ld` on FreeBSD itself.
         let host = Some(bsd(Arch::X86_64, Os::FreeBsd(15)));
         assert_eq!(
-            order(target, named, host, &dirs),
+            order(target, named, false, host, &dirs),
             [port, "ld".to_owned(), "ld.lld".to_owned(), "lld".to_owned()]
         );
         // No target named is the base system's `cc`, and NetBSD's GCC has no port.

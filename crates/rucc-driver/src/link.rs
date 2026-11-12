@@ -190,6 +190,10 @@ pub struct LinkOptions {
     /// later link, so it takes no startup files, no libraries and nothing about how it will be
     /// loaded, which is what gcc leaves off the line when it sees the flag.
     pub relocatable: bool,
+    /// `-m32` or `-m16` on an x86-64 target, which makes the program i386 and leaves the GCC and
+    /// its linker those of amd64. NetBSD's GCC then links with the linker of amd64 and gives it
+    /// `-m elf_i386`.
+    pub narrowed: bool,
     /// The deployment target on an Apple platform, from `-mmacosx-version-min=` and its friends or
     /// from the tuple, which `ld64` is told in `-platform_version` and checks every object against.
     ///
@@ -568,7 +572,7 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
         return vec!["lld-link".to_owned(), "link.exe".to_owned()];
     }
     if target.os.is_bsd() {
-        return bsd::order(target, opts.pinned, Triple::host(), &opts.prefixes);
+        return bsd::order(target, opts.pinned, opts.narrowed, Triple::host(), &opts.prefixes);
     }
     if cross_sysroot(target, opts).is_some() {
         let mut names = cross_order(target);
@@ -1790,7 +1794,7 @@ fn relocatable_line(
     let mut args = vec!["-o".to_owned(), output.to_owned()];
     if target.os.is_bsd() {
         // The `-m` of the BSD's own line, which is none on most of them, as GCC passes it.
-        args.extend(bsd::relocatable(target, bsd_ld(target, opts)));
+        args.extend(bsd::relocatable(target, opts.narrowed, bsd_ld(target, opts)));
     } else if target.os == Os::Linux {
         args.extend(["-m".to_owned(), emulation(target).to_owned()]);
     } else {

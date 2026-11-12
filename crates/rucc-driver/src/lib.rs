@@ -4343,6 +4343,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // compile, and which directory under the cache it is against. After the loop because the last
     // `--target=` on the command line is the one that counts.
     link.pinned = pinned;
+    link.narrowed = narrowed;
     // The deployment target, from the flag if there was one and from the tuple otherwise. Only an
     // Apple platform has one: anywhere else a version on the tuple is a libc or a preview number.
     if opts.target.os == rucc_target::Os::Darwin {
