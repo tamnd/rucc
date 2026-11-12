@@ -201,10 +201,10 @@ pub fn unframed(
             }
         }
         for (_, op) in &mut func.cfi {
-            if let mir::CfiOp::DefCfaOffset(offset) = op
-                && *offset >= frame
-            {
-                *offset -= bytes;
+            if let mir::CfiOp::DefCfaOffset(offset) = op {
+                if *offset >= frame {
+                    *offset -= bytes;
+                }
             }
         }
     }
@@ -330,10 +330,10 @@ fn plan(
         func[next].opcode == ops.sub
             && func[func[next].operands].iter().any(|op| op.role.is_def() && op.reg == sp)
     });
-    if let Some(sub) = popped
-        && (func[sub].imm.map(|imm| func[imm].0) != Some(i64::from(area))
-            || func.cfi_after(sub).next().is_some())
-    {
+    if popped.is_some_and(|sub| {
+        func[sub].imm.map(|imm| func[imm].0) != Some(i64::from(area))
+            || func.cfi_after(sub).next().is_some()
+    }) {
         return None;
     }
     let before: usize = stores.iter().map(|&store| stored_bytes(func, store, ops)).sum();
