@@ -1175,8 +1175,8 @@ pub fn call(
             .collect()
     };
     let named = spoken_for(conv.int_class);
-    for &reg in conv.int_order {
-        if !conv.preserves_int(reg) && !named.contains(&reg) {
+    for reg in conv.int_clobbered() {
+        if !named.contains(&reg) {
             operands.push(mir::Operand::write(mir::Reg::physical(reg), conv.int_class));
         }
     }

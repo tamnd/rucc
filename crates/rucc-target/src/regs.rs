@@ -997,6 +997,22 @@ impl CallRegs {
         self.int_saved.contains(&reg)
     }
 
+    /// The general purpose registers a call may leave anything in, each one once.
+    ///
+    /// These are the registers the allocator hands out, and the ones an argument arrives in or a
+    /// result comes back in, less the ones the convention keeps. The last two lists are inside the
+    /// first on every convention but kencc on amd64, where the first argument arrives in `BP` and
+    /// `BP` is not handed out. A value that arrived in `BP` is still in it until something writes
+    /// it, and a call into kencc code writes it, so a call has to say so.
+    pub fn int_clobbered(&self) -> impl Iterator<Item = PhysReg> + '_ {
+        let order = self.int_order.iter();
+        let more = self.int_args.iter().chain(self.int_returns).enumerate().filter(|&(at, reg)| {
+            let mut earlier = self.int_args.iter().chain(self.int_returns).take(at);
+            !self.int_order.contains(reg) && !earlier.any(|seen| seen == reg)
+        });
+        order.chain(more.map(|(_, reg)| reg)).copied().filter(|&reg| !self.preserves_int(reg))
+    }
+
     /// Whether a call preserves that vector register.
     #[must_use]
     pub fn preserves_sse(&self, reg: PhysReg) -> bool {
