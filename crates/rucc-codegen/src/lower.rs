@@ -1512,6 +1512,9 @@ pub struct Stack {
     /// The memory the function asked for itself, one entry for every `alloca` in it, in the order
     /// the walk reached them.
     pub locals: Vec<Local>,
+    /// Which of those locals go right below the stack protector's canary, from
+    /// [`Flags::NEAR`] on their `alloca`. See [`Layout::near`].
+    pub near: Vec<usize>,
     /// Which instruction computes the address of which of those locals.
     ///
     /// An address in the frame is a distance from the stack pointer, and there is no frame until
@@ -1657,6 +1660,7 @@ impl Stack {
             leaf: !self.kept && !self.saves_place && !(self.saves_kept && !self.tails.is_empty()),
             outgoing: self.calls.unwrap_or(0),
             locals: &self.locals,
+            near: &self.near,
             grows: self.grown_at.is_some(),
             home: self.home,
             popped: self.popped,
@@ -3388,6 +3392,9 @@ impl<'a> Lowering<'a> {
         // go anywhere.
         let index = self.stack.locals.len();
         self.stack.locals.push(Local { size, align: info.align.max(1) });
+        if data.flags.contains(Flags::NEAR) {
+            self.stack.near.push(index);
+        }
         for decl in self.source.mem_decls(mem) {
             self.stack.declared.push((index, decl));
         }

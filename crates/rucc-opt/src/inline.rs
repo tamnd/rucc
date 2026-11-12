@@ -2583,8 +2583,9 @@ impl Pool {
         users.push(self.site);
         let Extra::Mem(held) = func[*inst].extra else { return None };
         func.align_mem(held, wanted.align);
-        // A slot that holds a local wanting a canary wants one whichever local is in it.
-        func[*inst].flags |= flags.intersection(Flags::GUARD);
+        // A slot that holds a local wanting a canary wants one whichever local is in it, and the
+        // same for one that wants to be next to it.
+        func[*inst].flags |= flags.intersection(Flags::GUARD.union(Flags::NEAR));
         func[*inst].first_result
     }
 

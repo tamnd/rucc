@@ -389,6 +389,41 @@ int gone(int x) { int n = x; put(&n); return n; }
     assert_eq!(protected(&text), ["asked", "gone"], "{text}");
 }
 
+/// A character array ends right where the canary starts, so that a write one byte past its end
+/// changes the canary, which is where gcc puts it.
+///
+/// FreeBSD's `ssp_test` overflows a `char[10]` by a few bytes and expects the check to fail. With
+/// the array at the bottom of the frame and six bytes of padding above it, those writes landed in
+/// the padding and the program returned normally.
+#[test]
+fn a_character_array_ends_where_the_canary_starts() {
+    let source = "\
+void use(void *);
+int f(void) { int n = 0; char b[10]; use(&n); use(b); return n; }
+";
+    for level in ["-fstack-protector-strong", "-fstack-protector-all"] {
+        let text = asm("near", &["-O2", level], source);
+        let at = |line: &str| -> i32 {
+            let (before, _) = line.split_once("(%rsp)").unwrap_or_else(|| panic!("{line}: {text}"));
+            let digits = before.rsplit([' ', '\t', ',']).next().unwrap_or_default();
+            if digits.is_empty() { 0 } else { digits.parse().unwrap_or_else(|_| panic!("{line}")) }
+        };
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let read = lines.iter().position(|line| line.contains("%fs:40")).expect("a canary");
+        let canary = at(lines[read + 1]);
+        // The second call is handed the array, and its address is the last thing put in `%rdi`
+        // before it.
+        let second = lines.iter().rposition(|line| line.starts_with("call\tuse")).expect("a call");
+        let array = lines[..second]
+            .iter()
+            .rev()
+            .find(|line| line.ends_with("%rdi"))
+            .map(|line| if line.starts_with("movq\t%rsp") { 0 } else { at(line) })
+            .expect("an address in %rdi");
+        assert_eq!(array + 10, canary, "{level}: {text}");
+    }
+}
+
 /// The body of one function in an AArch64 listing, from its label to its `.size`.
 fn arm64(what: &str, flags: &[&str], name: &str) -> Vec<String> {
     body(what, "aarch64-unknown-linux-gnu", flags, name)

@@ -180,6 +180,13 @@ impl Flags {
     /// into values takes its canary with it.
     pub const GUARD: Self = Self(1 << 19);
 
+    /// The local goes right below the stack protector's canary when its function has one, which
+    /// is where gcc puts a character array so that a write past its end meets the canary first.
+    /// A fact from the front end about the type the local was declared with, which the code
+    /// generator reads and nothing else does. A pass that drops it moves the array and nothing
+    /// else.
+    pub const NEAR: Self = Self(1 << 30);
+
     /// The `asm` reads and writes no memory the program can see: none of its operands is in
     /// memory and its clobber list does not name `memory`.
     ///
@@ -395,7 +402,7 @@ impl Flags {
             // `ALIGNED` on the bounds check alone, because the alignment conjunct rides on that
             // one and the other two say nothing about where an access starts.
             Opcode::CheckBounds => Self::STATIC.union(Self::HANDED).union(Self::ALIGNED),
-            Opcode::Alloca => Self::NOALIAS.union(Self::GUARD),
+            Opcode::Alloca => Self::NOALIAS.union(Self::GUARD).union(Self::NEAR),
             // `nuw` on an address that moves forward inside its object, which is what lets a back
             // end put the offset in the offset field of a load or a store.
             Opcode::PtrAdd => Self::NOALIAS.union(Self::NUW).union(Self::COUNTED),
@@ -473,6 +480,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::SEG_GS, "seg_gs"),
     (Flags::INLINE, "inline"),
     (Flags::GUARD, "guard"),
+    (Flags::NEAR, "near"),
     (Flags::NOMEM, "nomem"),
     (Flags::NOTRACK, "notrack"),
     (Flags::INDIRECT_RETURN, "indirect_return"),

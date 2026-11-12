@@ -115,6 +115,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         cleans: false,
         saves: false,
         guarded: Set::default(),
+        near: Set::default(),
         hooked: false,
         aligned: Map::default(),
         restrict: Scopes::default(),
@@ -179,6 +180,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     let flags = tast[decl].flags;
     let asked = flags.contains(DeclFlags::STACK_PROTECT) && body.unit.protector != Protector::None;
     if !flags.contains(DeclFlags::NO_STACK_PROTECTOR) {
+        body.near = near(&body, &locals, asked);
         if asked || protects(&body) {
             body.func.attrs.set |= AttrSet::STACK_PROTECT;
         } else {
@@ -514,6 +516,46 @@ fn guarded(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> Set
             }
         })
         .collect()
+}
+
+/// The locals that go right below the canary when the function has one, which is what
+/// [`Flags::NEAR`] on their slot says.
+///
+/// gcc puts these first, in what `expand_used_vars` calls phase 1, so that a write that runs off
+/// the end of one meets the canary at its first byte past the end. Under the plain flag they are
+/// the locals it protects, the large character arrays alone or in a structure. Under the others,
+/// which for `-fstack-protector-explicit` is a function with `__attribute__((stack_protect))`,
+/// they are the character arrays of any size that are not inside a structure. See
+/// `stack_protect_decl_phase`. FreeBSD's `ssp_test` overflows a `char[10]` by a few bytes and
+/// expects the check to see it.
+fn near(body: &Body<'_, '_>, locals: &[DeclId], asked: bool) -> Set<DeclId> {
+    let want = body.unit.protector;
+    let bare = match want {
+        Protector::None => return Set::default(),
+        Protector::Explicit if !asked => return Set::default(),
+        Protector::Buffers => false,
+        Protector::Explicit | Protector::Strong | Protector::All => true,
+    };
+    let buffer = body.unit.ssp_buffer_size;
+    let types = body.types();
+    let target = body.target();
+    let tast = body.tast();
+    locals
+        .iter()
+        .copied()
+        .filter(|&local| {
+            let ty = tast[local].ty;
+            if bare { char_array(types, ty) } else { holds_char_buffer(types, target, ty, buffer) }
+        })
+        .collect()
+}
+
+/// Whether an object of that type is an array of one of the three character types, of any size.
+fn char_array(types: &Types, ty: TypeId) -> bool {
+    match types.kind(types.canonical(ty)) {
+        TypeKind::Array { elem, .. } => is_char(types, elem),
+        _ => false,
+    }
 }
 
 /// Whether an object of that type is, or has among its members, an array of `char`, `signed char`
@@ -974,6 +1016,8 @@ struct Body<'a, 'u> {
     /// The locals whose slot gives the function a canary while the slot is in its frame. See
     /// [`guarded`].
     guarded: Set<DeclId>,
+    /// The locals whose slot goes right below the canary. See [`near`].
+    near: Set<DeclId>,
     /// Whether the function calls the profiling hooks, which puts one call in front of the first
     /// statement and one in front of every return. See [`Body::hook`].
     hooked: bool,
@@ -1434,14 +1478,21 @@ impl<'u> Body<'_, 'u> {
         self.vars.insert(decl, Local::Slot(slot));
     }
 
-    /// Marks the slot of a local [`guarded`] picked, which a slot shared with another local keeps
-    /// when either of the two was picked.
+    /// Marks the slot of a local [`guarded`] or [`near`] picked, which a slot shared with another
+    /// local keeps when either of the two was picked.
     fn guard(&mut self, decl: DeclId, slot: Value) {
-        if !self.guarded.contains(&decl) {
+        let mut flags = Flags::NONE;
+        if self.guarded.contains(&decl) {
+            flags |= Flags::GUARD;
+        }
+        if self.near.contains(&decl) {
+            flags |= Flags::NEAR;
+        }
+        if flags.is_empty() {
             return;
         }
         if let Def::Result { inst, .. } = self.func[slot].def {
-            self.func[inst].flags |= Flags::GUARD;
+            self.func[inst].flags |= flags;
         }
     }
 
