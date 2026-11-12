@@ -41,7 +41,8 @@
 use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    AttrSet, Datum, Dll, Extra, Global, Linkage, Module, Opcode, Pic, TlsModel, Visibility,
+    AliasKind, AttrSet, Datum, Dll, Extra, Global, Linkage, Module, Opcode, Pic, TlsModel,
+    Visibility,
 };
 use rucc_target::ObjectFormat;
 
@@ -589,6 +590,10 @@ impl Elsewhere {
     /// Which functions this module defines is kept alongside, because a call to anything else goes
     /// through the procedure linkage table, and on i386 that is a call that needs the table's
     /// address in `%ebx`. See [`Self::linked`].
+    ///
+    /// An ifunc is read out of the table too, `static` or not. The linker refuses its distance from
+    /// the table in a shared library, because the place the name marks is its resolver and the
+    /// address the program wants is the one the resolver gives. gcc writes `movl f@GOT(%ebx)` for it.
     #[must_use]
     pub fn based_on_table(mut self, module: &Module) -> Self {
         self.based = true;
@@ -597,6 +602,8 @@ impl Elsewhere {
             .filter(|&id| !module[id].is_declaration())
             .map(|id| module[id].name)
             .collect();
+        let ifuncs = module.aliases().filter(|&id| module[id].kind == AliasKind::IFunc);
+        self.names.extend(ifuncs.map(|id| module[id].name));
         self
     }
 
@@ -1153,5 +1160,29 @@ mod tests {
         let elsewhere = Elsewhere::of(&module, Pic::Absolute, ObjectFormat::Elf, true);
         assert!(!elsewhere.holds(names.intern("exit")));
         assert!(!Elsewhere::needs_indirect(&module));
+    }
+
+    /// i386 position independent code reads the address of an ifunc out of the table, a `static`
+    /// one included, and calls it through the procedure linkage table. An ordinary `static` alias
+    /// is still reached from the table's address, and the other targets do not ask.
+    #[test]
+    fn an_i386_ifunc_is_read_out_of_the_table_even_when_it_is_static() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut ifunc = Alias::new(names.intern("pick"), names.intern("here"));
+        ifunc.kind = AliasKind::IFunc;
+        ifunc.linkage = Linkage::Internal;
+        module.add_alias(ifunc);
+        let mut quiet = Alias::new(names.intern("other"), names.intern("here"));
+        quiet.linkage = Linkage::Internal;
+        module.add_alias(quiet);
+        for pic in [Pic::Executable, Pic::Library] {
+            let elsewhere = Elsewhere::of(&module, pic, ObjectFormat::Elf, false);
+            assert!(!elsewhere.holds(names.intern("pick")), "{pic:?}");
+            let elsewhere = elsewhere.based_on_table(&module);
+            assert!(elsewhere.holds(names.intern("pick")), "{pic:?}");
+            assert!(elsewhere.linked(names.intern("pick")), "{pic:?}");
+            assert!(!elsewhere.holds(names.intern("other")), "{pic:?}");
+        }
     }
 }
