@@ -2147,6 +2147,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-builtins-lib" => link.no_builtins_lib = true,
             "-fbuiltins-lib" => link.no_builtins_lib = false,
             "-rdynamic" | "-export-dynamic" => link.export_dynamic = true,
+            // gcc's spec turns it into `-Bsymbolic` for the linker, in its place among the inputs,
+            // so that a shared object binds its own global symbols to itself. NetBSD links
+            // ld.elf_so with it when the compiler is gcc. tamnd/rucc#4508.
+            "-symbolic" => inputs.push(Input::linker("-Bsymbolic")),
             // Apple's two kinds of loadable file. `-dynamiclib` is a library other links name,
             // which is what `-shared` is on a Mac as well, and `-bundle` is a file a program opens
             // with `dlopen`, which is how Postgres links every module there. tamnd/rucc#2010.
@@ -9758,6 +9762,20 @@ mod tests {
                 link::Item::Linker("/opt/lib".into()),
                 link::Item::File("a.o".into()),
             ]
+        );
+    }
+
+    /// `-symbolic` reaches the linker as `-Bsymbolic`, where it was written, as gcc's spec has it.
+    /// tamnd/rucc#4508.
+    #[test]
+    fn symbolic_goes_to_the_linker_as_bsymbolic() {
+        let netbsd = "--target=x86_64-unknown-netbsd";
+        let (link, plan) = linking(&[netbsd, "-symbolic", "-shared", "a.c", "-o", "ld.elf_so"]);
+        assert!(link.shared);
+        let link = plan.link.expect("expected a link step");
+        assert_eq!(
+            link.inputs,
+            vec![link::Item::Linker("-Bsymbolic".into()), link::Item::File("a.o".into())]
         );
     }
 
