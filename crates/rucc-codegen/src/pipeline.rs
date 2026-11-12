@@ -66,6 +66,7 @@ use crate::lifetimes;
 use crate::locked;
 use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
+use crate::maths;
 use crate::pads;
 use crate::pairs;
 use crate::pressure::{Cost, Pressure};
@@ -690,6 +691,12 @@ pub struct Flags {
     /// address the call returns to is inside the function. x86-64 Windows asks for it, whose
     /// unwinder finds a frame's record by that address. See [`crate::trailing`].
     pub trailing: bool,
+    /// Whether a call to the library's `sqrt` or `sqrtf` may be the instruction, which every level
+    /// above `-O0` asks for. See [`crate::maths::Roots`].
+    pub roots: bool,
+    /// Whether a function of the maths library is taken to set `errno`, from `-fmath-errno`, which
+    /// is on by default.
+    pub math_errno: bool,
 }
 
 impl Default for Flags {
@@ -741,6 +748,8 @@ impl Default for Flags {
             zero: None,
             zero_extension: zero::Extension::Sse,
             trailing: false,
+            roots: false,
+            math_errno: true,
         }
     }
 }
@@ -975,7 +984,21 @@ pub fn compile_recording(
     });
     // AArch64 converts a half with `fcvt` and stores one with `str h`. See [`crate::half`].
     let converts = std::ptr::eq(machine.shapes, &aarch64::MACHINE);
-    let built = lowering::Built { fused, pairs, converts };
+    // gcc writes the library's `sqrt` and `sqrtf` as `sqrtsd` and `sqrtss` on x86-64 when it
+    // optimizes. Not where the floats are on the x87 stack or there are no vector registers. See
+    // [`crate::maths`].
+    let roots = if !flags.roots
+        || !flags.vector
+        || machine.conv.x87_floats
+        || !std::ptr::eq(machine.shapes, &x86_64::MACHINE)
+    {
+        maths::Roots::Calls
+    } else if flags.math_errno {
+        maths::Roots::Checked
+    } else {
+        maths::Roots::Bare
+    };
+    let built = lowering::Built { fused, pairs, converts, roots };
     let ran = lowering::group(source, names, conv, switching, &counts, built, counting);
     // AArch64 has the conditional compare, which is what gcc keeps the and for. See [`jumps`].
     if flags.jumps && !std::ptr::eq(machine.shapes, &aarch64::MACHINE) {

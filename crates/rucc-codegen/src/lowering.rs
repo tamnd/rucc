@@ -418,7 +418,7 @@ impl Step {
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func, conv.byte_swaps),
             Self::Counts => expand::counts(func, counts),
-            Self::Maths => maths::calls(func, names, conv.abi, built.fused),
+            Self::Maths => maths::calls(func, names, conv.abi, built.fused, built.roots),
             Self::Quads => quad::calls(func, names, conv.abi, conv.word),
             Self::Pairs => return quad::pairs(func, names, conv),
             Self::Floats => expand::floats(func, conv.word),
@@ -615,6 +615,8 @@ pub struct Built {
     /// and stores one in one, which is AArch64, in which case [`half::calls`] keeps those as they
     /// are rather than calling a routine.
     pub converts: bool,
+    /// What a call to the library's `sqrt` or `sqrtf` becomes. See [`maths::Roots`].
+    pub roots: maths::Roots,
 }
 
 /// Runs the whole group over one function, in the order [`Step::GROUP`] gives.
@@ -886,7 +888,7 @@ mod tests {
                 build.ret(&[answer]);
             });
             let switching = (Goal::Speed, None, true, true);
-            let built = Built { fused, pairs: None, converts: false };
+            let built = Built { fused, ..Built::default() };
             let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, &[], built, true);
             assert_eq!((ran.of(Step::Maths).found, ran.of(Step::Maths).left), (1, left));
         }

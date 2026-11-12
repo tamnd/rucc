@@ -1741,6 +1741,9 @@ fn generate(
         // x86-64 Windows, whose unwinder looks a frame up by the address its call returns to.
         trailing: target.tuple.arch() == Arch::X86_64
             && target.tuple.os().object_format() == Some(ObjectFormat::Coff),
+        // On at every level above `-O0`, where gcc writes `sqrt` as the instruction.
+        roots: opts.opt_level.runs_optimizer(),
+        math_errno: opts.math.errno,
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one
