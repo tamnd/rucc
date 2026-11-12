@@ -138,7 +138,7 @@ fn hoist(
     // they may read it.
     let mut late = false;
     for inst in first {
-        if leaf(func, inst) {
+        if leaf(func, inst) || indexed_name(func, inst) {
             continue;
         }
         let args: Vec<Value> = func[func[inst].args].to_vec();
@@ -228,6 +228,25 @@ fn movable(func: &Func, inst: Inst) -> bool {
 fn leaf(func: &Func, inst: Inst) -> bool {
     matches!(func[inst].opcode, Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr)
         && func[func[inst].args].is_empty()
+}
+
+/// Whether this is the address of a name plus an index that is not a constant.
+///
+/// Such a sum stays in its arm. Each access in the arm puts the name and the index into its own
+/// address, as `movl types+8(%eax), %ecx` on i386. If the sum goes above the branch, a register
+/// holds it across the branch and each access reads it, which is no fewer bytes and costs a
+/// register. The index still goes up when both arms compute it.
+fn indexed_name(func: &Func, inst: Inst) -> bool {
+    let data = &func[inst];
+    if data.opcode != Opcode::PtrAdd {
+        return false;
+    }
+    let args = &func[data.args];
+    let name = |value: Value| {
+        matches!(func[value].def, Def::Result { inst, .. }
+            if func[inst].opcode == Opcode::GlobalAddr && leaf(func, inst))
+    };
+    args.len() == 2 && name(args[0]) && !leaf_value(func, args[1])
 }
 
 /// Whether a value is a result of a [`leaf`].
@@ -477,5 +496,46 @@ block3(%6: i32):
 }
 "#);
         assert_eq!(count(&out, "load.i32"), 2, "{out}");
+    }
+
+    #[test]
+    fn the_index_goes_up_and_the_name_plus_the_index_stays_in_each_arm() {
+        let out = run(r#"
+global @types : bytes 1, align 4, linkage(external)
+
+func @f(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = iconst.i32 0
+    %3 = icmp ne %1, %2
+    br_if %3, block1, block2
+
+block1:
+    %4 = iconst.i32 28
+    %5 = mul %0, %4
+    %6 = global_addr @types
+    %7 = ptr_add %6, %5
+    %8 = iconst.i32 8
+    %9 = ptr_add.nuw %7, %8
+    %10 = load.i32 %9, align 4
+    jump block3(%10)
+
+block2:
+    %11 = iconst.i32 28
+    %12 = mul %0, %11
+    %13 = global_addr @types
+    %14 = ptr_add %13, %12
+    %15 = iconst.i32 12
+    %16 = ptr_add.nuw %14, %15
+    %17 = load.i32 %16, align 4
+    jump block3(%17)
+
+block3(%18: i32):
+    return %18
+}
+"#);
+        assert_eq!(count(&out, "mul"), 1, "{out}");
+        assert!(between(&out, "block0(", "block1:").contains("mul"), "{out}");
+        assert_eq!(count(&out, "ptr_add %"), 2, "{out}");
+        assert!(!between(&out, "block0(", "block1:").contains("ptr_add"), "{out}");
     }
 }
