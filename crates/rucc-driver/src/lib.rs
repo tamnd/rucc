@@ -3639,12 +3639,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // if it did. The first two are about a way of ordering the compilation that has
             // been GCC's only way for twenty years. `-mthreads` is mingw's, and what it links is
             // `libmingwthrd.a`, which mingw-w64 keeps as an empty archive because its CRT does the
-            // thread cleanup for every program. Section 4.1 asks for the list to be short and for
-            // adding to it to be deliberate, which is why it is written out here.
+            // thread cleanup for every program. `-static-libstdc++` asks the C++ driver for a
+            // static libstdc++, and gcc takes it and does nothing with it for a C program. GCC's
+            // top-level configure puts it with `-static-libgcc` in the LDFLAGS of every host
+            // module, so the C link tests of lto-plugin and libiberty pass it. Section 4.1 asks
+            // for the list to be short and for adding to it to be deliberate, which is why it is
+            // written out here.
             "-funit-at-a-time"
             | "-fno-unit-at-a-time"
             | "-shared-libgcc"
             | "-static-libgcc"
+            | "-static-libstdc++"
             | "-mthreads"
             | "-fpch-deps"
             | "-fno-pch-deps" => {}
@@ -9588,6 +9593,15 @@ mod tests {
         let e = parse_args(&args(&["-c", "-fcf-protection=all", "a.c"])).unwrap_err();
         assert!(e.message.contains("is not a control flow protection"), "{}", e.message);
         assert!(e.message.contains("full, branch, return, none or check"), "{}", e.message);
+    }
+
+    /// GCC's top-level configure links the C tests of lto-plugin and libiberty with
+    /// `-static-libstdc++ -static-libgcc`, and gcc takes both for a C program and changes nothing.
+    #[test]
+    fn static_libstdcxx_is_taken_and_changes_nothing_in_a_c_link() {
+        let (taken, _) = linking(&["-static-libstdc++", "-static-libgcc", "a.c"]);
+        let (plain, _) = linking(&["a.c"]);
+        assert_eq!(format!("{taken:?}"), format!("{plain:?}"));
     }
 
     #[test]
