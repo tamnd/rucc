@@ -87,6 +87,31 @@ pub(crate) fn live(decide: Decide<'_>) -> Set<DeclId> {
 /// follows a statement control never comes out of. See [`Reach::pruned`]. `objects` is whether
 /// every object with static storage is a root.
 fn walk(decide: Decide<'_>, pruned: bool, objects: bool) -> (Set<DeclId>, Set<DeclId>) {
+    let walk = run(decide, pruned, objects);
+    (walk.seen, walk.named)
+}
+
+/// The functions every reference to is the function a call goes to, among the ones something in
+/// the file reaches.
+///
+/// These are the functions whose calls the unit can see all of, so the unit may choose how their
+/// arguments travel, the way gcc gives a local function on i386 its arguments in registers. A
+/// name in any other place is an address that may leave the unit, and so is a name an `alias`,
+/// a `weakref` or a `cleanup` attribute gives as a string or a handler. A call through a type
+/// with no prototype is not counted as a call either, since the arguments of one of those are
+/// not converted to what the function takes. And a function whose body saves its argument
+/// registers with `__builtin_apply_args` reads them where the target's convention puts them.
+pub(crate) fn called_only(decide: Decide<'_>) -> Set<DeclId> {
+    let mut walk = run(decide, false, true);
+    let escaped = std::mem::take(&mut walk.escaped);
+    let seen = std::mem::take(&mut walk.seen);
+    let mut called = std::mem::take(&mut walk.called);
+    called.retain(|decl| !escaped.contains(decl) && seen.contains(decl));
+    called
+}
+
+/// The walk itself, handed back whole for the sets each question reads.
+fn run(decide: Decide<'_>, pruned: bool, objects: bool) -> Reach<'_> {
     let tast = decide.tast;
     let mut walk = Reach {
         tast,
@@ -97,6 +122,9 @@ fn walk(decide: Decide<'_>, pruned: bool, objects: bool) -> (Set<DeclId>, Set<De
         work: Vec::new(),
         valued: Set::default(),
         unlowered: false,
+        called: Set::default(),
+        escaped: Set::default(),
+        current: None,
     };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
@@ -110,18 +138,20 @@ fn walk(decide: Decide<'_>, pruned: bool, objects: bool) -> (Set<DeclId>, Set<De
     // were not, which is how the kernel's `SYSCALL_DEFINE0(vhangup)` came to call a `capable` the
     // file never defined: `__x64_sys_vhangup` is an alias of the `static` function with the body.
     for decl in aliased(tast, decide.names) {
+        walk.escaped.insert(decl);
         walk.mark(decl);
     }
     // The same for a `weakref` whose target the file defines, which is a reference by a string
     // as well. A `static` function with no other caller is otherwise dropped, and the weakref is
     // left pointing at a symbol nothing defines.
     for decl in weakly_referred(tast, decide.names) {
+        walk.escaped.insert(decl);
         walk.mark(decl);
     }
     while let Some(decl) = walk.work.pop() {
         walk.decl(decl);
     }
-    (walk.seen, walk.named)
+    walk
 }
 
 /// The declarations something the file emits names, which is the second set `reachable` hands
@@ -250,6 +280,13 @@ struct Reach<'a> {
     /// printk index entry inside it was in gcc's `.printk_index` and not in rucc's. An arm of a
     /// `?:` or of a `&&` is folded away before that, so a `static` in one of those is not kept.
     unlowered: bool,
+    /// The functions a call names as the function it goes to. See [`called_only`].
+    called: Set<DeclId>,
+    /// The functions named anywhere else, or by a string, or whose body saves the registers it
+    /// was called with. See [`called_only`].
+    escaped: Set<DeclId>,
+    /// The function whose body the walk is in.
+    current: Option<DeclId>,
 }
 
 impl Reach<'_> {
@@ -278,10 +315,13 @@ impl Reach<'_> {
             self.init(init);
         }
         if let Some(body) = body {
+            let outer = self.current.replace(decl);
             self.stmt(body);
+            self.current = outer;
         }
         if let Some(handler) = cleanup {
             self.named.insert(handler);
+            self.escaped.insert(handler);
             self.mark(handler);
         }
     }
@@ -461,8 +501,12 @@ impl Reach<'_> {
             | ExprKind::DwarfCfa
             | ExprKind::TimeStamp { aux: None }
             | ExprKind::Eflags { value: None }
-            | ExprKind::CpuModel { .. }
-            | ExprKind::ApplyArgs => {}
+            | ExprKind::CpuModel { .. } => {}
+            ExprKind::ApplyArgs => {
+                if let Some(saves) = self.current {
+                    self.escaped.insert(saves);
+                }
+            }
             ExprKind::Apply { function, args, .. }
             | ExprKind::EhReturn { offset: function, handler: args } => {
                 self.expr(function);
@@ -477,6 +521,7 @@ impl Reach<'_> {
             ExprKind::Decl(_) | ExprKind::CompoundLiteral(_) if self.unlowered => {}
             ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => {
                 self.named.insert(decl);
+                self.escaped.insert(decl);
                 self.mark(decl);
             }
             ExprKind::StmtExpr(body) => {
@@ -534,7 +579,19 @@ impl Reach<'_> {
                 self.expr(rhs);
             }
             ExprKind::Call { callee, args } => {
-                self.expr(callee);
+                match self.direct_callee(callee) {
+                    // The name of the function a call goes to is a reference that is not an
+                    // address, which is the one kind [`called_only`] counts.
+                    Some((effects, decl)) if !self.unlowered => {
+                        for effect in effects {
+                            self.expr(effect);
+                        }
+                        self.named.insert(decl);
+                        self.called.insert(decl);
+                        self.mark(decl);
+                    }
+                    _ => self.expr(callee),
+                }
                 for index in 0..self.tast[args].len() {
                     let arg = self.tast[args][index];
                     self.expr(arg);
@@ -593,6 +650,26 @@ impl Reach<'_> {
 }
 
 impl Reach<'_> {
+    /// The function a call goes to by name, with the expressions a comma put in front of it, when
+    /// the call is to a name through a prototype.
+    fn direct_callee(&self, mut callee: ExprId) -> Option<(Vec<ExprId>, DeclId)> {
+        let mut effects = Vec::new();
+        while let ExprKind::Comma { lhs, rhs } = self.tast[callee].kind {
+            effects.push(lhs);
+            callee = rhs;
+        }
+        let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = self.tast[callee].kind
+        else {
+            return None;
+        };
+        let ExprKind::Decl(decl) = self.tast[operand].kind else { return None };
+        let types = self.decide.types;
+        let TypeKind::Function(id) = types.kind(types.canonical(self.tast[operand].ty)) else {
+            return None;
+        };
+        types.signature(id).prototyped.then_some((effects, decl))
+    }
+
     /// Whether a statement has a place in it that control can arrive at from outside.
     ///
     /// A `case` counts as well as a label, since the `switch` it belongs to may be outside the

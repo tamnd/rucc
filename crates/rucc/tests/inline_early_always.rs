@@ -52,7 +52,10 @@ fn ir(target: &str) -> String {
 fn a_wrapper_around_an_always_inline_body_stays_a_call() {
     for target in ["i686-linux-gnu", "x86_64-linux-gnu"] {
         let text = ir(target);
-        assert!(text.contains("func @fn("), "{target}: the wrapper went\n{text}");
+        // On i686 the wrapper is a local function and so prints as `func @fn regparm(3) (`.
+        let kept =
+            text.lines().any(|line| line.starts_with("func @fn(") || line.starts_with("func @fn "));
+        assert!(kept, "{target}: the wrapper went\n{text}");
         let calls =
             text.lines().filter(|line| line.contains("= call") && line.contains(" @fn(")).count();
         assert_eq!(calls, 3, "{target}\n{text}");

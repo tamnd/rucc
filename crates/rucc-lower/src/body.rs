@@ -11942,7 +11942,8 @@ impl<'u> Body<'_, 'u> {
         let ty = tast[callee].ty;
         let count = tast[args].len();
         let actual: Vec<TypeId> = (0..count).map(|index| tast[tast[args][index]].ty).collect();
-        let plan = self.unit.call_plan(ty, &actual, span)?;
+        let named = self.callee_decl(callee);
+        let plan = self.unit.call_plan(named, ty, &actual, span)?;
 
         let mut values = Vec::with_capacity(count + 1);
         let destination = if plan.returns_through_memory() {
@@ -12222,7 +12223,7 @@ impl<'u> Body<'_, 'u> {
         // The declaration carries the type the whole file settled on and the expression carries
         // the one that was in scope where the call was written, which is how the two differ.
         let declared = self.tast()[decl].ty;
-        let settled = self.unit.plan(declared, actual, span)?;
+        let settled = self.unit.plan_of(decl, declared, actual, span)?;
         let alike = settled.args.len() == plan.args.len()
             && travels_alike(&settled.ret, &plan.ret)
             && settled.args.iter().zip(&plan.args).all(|(a, b)| travels_alike(a, b));
@@ -12368,6 +12369,20 @@ impl<'u> Body<'_, 'u> {
             }
         }
         u64::try_from(self.bits_of(value)?).ok().filter(|&size| size <= SMALL)
+    }
+
+    /// The function a call names, through any commas in front of it.
+    fn callee_decl(&self, callee: ExprId) -> Option<DeclId> {
+        let tast = self.tast();
+        let callee = self.named_callee(callee).1;
+        let ExprKind::Convert { kind: Conversion::FunctionDecay, operand } = tast[callee].kind
+        else {
+            return None;
+        };
+        match tast[operand].kind {
+            ExprKind::Decl(decl) => Some(decl),
+            _ => None,
+        }
     }
 
     /// The callee with the commas in front of it taken off, and the left sides they had.

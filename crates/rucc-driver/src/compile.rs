@@ -617,6 +617,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 .unwrap_or_else(|| opts.opt_level.runs_optimizer())
                                 && sess.target.object_format != rucc_target::ObjectFormat::MachO,
                             for_size: opts.opt_level.is_size(),
+                            local_registers: opts.opt_level.runs_optimizer()
+                                && !opts.profile
+                                && !opts.instrument_functions,
                             isa: opts.isa,
                             vector: opts.vector,
                             read: &mut read,
