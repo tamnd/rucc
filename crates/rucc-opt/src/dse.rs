@@ -1100,6 +1100,35 @@ block0(%0: i32):
         assert_eq!(stores(&out), 1, "{out}");
     }
 
+    /// A call reads the object it passes by value, because the copy is made at the call, and a
+    /// `const` callee does not change that. This is `conjl(1.0)` in msun's ctrig_test, whose
+    /// argument was never written before this.
+    #[test]
+    fn a_store_to_an_object_a_const_callee_takes_by_value_stays() {
+        let out = cleaned(
+            r#"
+func @conjl(ptr byval(32, align 16)) -> (f80, f80), linkage(external), attrs(readnone);
+func @use(f80), linkage(external);
+
+func @f(), linkage(external) {
+block0:
+    %0 = alloca, size 32, align 16
+    %1 = fconst.f80 0x3fff8000000000000000
+    store %1 -> %0, align 16
+    %2 = iconst.i64 16
+    %3 = ptr_add.nuw %0, %2
+    %4 = fconst.f80 0x0
+    store %4 -> %3, align 16
+    %5, %6 = call @conjl(%0) : (ptr byval(32, align 16)) -> (f80, f80)
+    lifetime_end %0
+    call @use(%5) : (f80)
+    return
+}
+"#,
+        );
+        assert_eq!(stores(&out), 2, "{out}");
+    }
+
     /// A fill of a local whose address a call was handed earlier is dead when the local's
     /// lifetime ends after it, which is `memset(k, 0, sizeof k)` in front of a return, and the end
     /// of another local's lifetime reads nothing of it.

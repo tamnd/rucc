@@ -115,7 +115,7 @@ use std::cell::OnceCell;
 
 use rucc_base::hash::Set;
 use rucc_cost::heuristics;
-use rucc_ir::{Block, Def, Flags, Func, Inst, Opcode, Value};
+use rucc_ir::{Abi, Block, Def, Extra, Flags, Func, Inst, Opcode, Value};
 
 use crate::alias::{Access, Alias, Escapes, Origin, origin};
 use crate::cfg::Cfg;
@@ -413,7 +413,9 @@ fn call_untouched(
     let summary = modref.at(func, inst);
     // A callee that reads nothing cannot read what the loop wrote, so there is no write in the
     // loop worth asking about and the oracle is not needed. This is the one tamnd/rucc#1576 did.
-    if summary.is_some_and(Summary::touches_nothing) {
+    // A structure the call takes by value is copied out of the caller's object at the call, so a
+    // callee that reads nothing still reads those bytes, and the writes in the loop are asked about.
+    if summary.is_some_and(Summary::touches_nothing) && !by_value(func, inst) {
         return Clear::Yes;
     }
     if !summary.is_some_and(Summary::writes_nothing) {
@@ -468,6 +470,16 @@ fn call_untouched(
         }
     }
     Clear::Yes
+}
+
+/// Whether the call passes an argument by value, which it copies out of memory the caller has.
+fn by_value(func: &Func, call: Inst) -> bool {
+    let Extra::Call(info) = func[call].extra else {
+        return false;
+    };
+    let info = &func[info];
+    let named = func[info.signature].params.iter().map(|param| param.abi);
+    named.chain(func[info.varargs].iter().copied()).any(|abi| matches!(abi, Abi::ByVal { .. }))
 }
 
 /// Whether the call being moved can read what another call in the loop wrote.
