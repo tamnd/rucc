@@ -244,6 +244,14 @@ impl Slots {
         &self.cells
     }
 
+    /// Puts every cell on no more than that many bytes, for a frame whose slots are written with
+    /// moves that take any address. See `x86::FRAME_UNALIGNED` in `rucc_target`.
+    pub fn cap(&mut self, align: u32) {
+        for cell in &mut self.cells {
+            cell.align = cell.align.min(align);
+        }
+    }
+
     /// Which cell a local is in.
     #[must_use]
     pub fn local(&self, local: usize) -> Option<usize> {

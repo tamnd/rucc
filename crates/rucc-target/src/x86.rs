@@ -564,6 +564,13 @@ static X86_MOVES: [ClassMoves; 2] = [
     ClassMoves { mov: "movaps_rr", load: "movaps_rm", store: "movaps_mr", narrow: &[] },
 ];
 
+// The unaligned vector moves, for the one frame on this machine whose slots cannot be on sixteen
+// bytes. See [`FRAME_UNALIGNED`].
+static X86_UNALIGNED_MOVES: [ClassMoves; 2] = [
+    ClassMoves { mov: "mov_rr_32", load: "mov_rm_32", store: "mov_mr_32", narrow: &[] },
+    ClassMoves { mov: "movaps_rr", load: "movups_rm", store: "movups_mr", narrow: &[] },
+];
+
 /// What an i386 prologue, epilogue, spill and reload are made of.
 ///
 /// [`crate::x86_64::FRAME`] at thirty two bits: a register and an address are both four bytes, so
@@ -608,6 +615,16 @@ pub static FRAME: FrameInsts = FrameInsts {
     through: None,
     table: Some(table_base),
 };
+
+/// [`FRAME`] with a vector spilled and reloaded by `movups` rather than `movaps`.
+///
+/// For a frame that grows while it runs on a convention that keeps the stack pointer on less than
+/// sixteen bytes, which is i386 NetBSD. Such a frame cannot also force the stack pointer onto
+/// sixteen bytes, because the frame pointer is then the one register that reaches both the
+/// arguments and the slots. So its vector slots are on whatever the stack pointer is on, and the
+/// move into and out of one is the one that does not fault there. gcc does the other thing and
+/// keeps a second base register for the arguments, which costs a register this machine has few of.
+pub static FRAME_UNALIGNED: FrameInsts = FrameInsts { classes: &X86_UNALIGNED_MOVES, ..FRAME };
 
 /// The two instructions that put the global offset table's address in that register, such as
 /// `%esi`, which is what gcc writes for `%ebx` at the top of a function:
