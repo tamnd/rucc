@@ -20,7 +20,21 @@ int (*keep)(int, int, int) = taken;
 int use(void) { return local(v, v, v) + taken(v, v, v) + listed(v, v); }
 ";
 
+/// A structure too large to unroll a copy of on a convention with three argument registers,
+/// passed by value to a function that takes the first three words in them.
+const COPIED: &str = "\
+struct big { int w[32]; };
+extern struct big b;
+static __attribute__((noinline)) int local(int x, int y, int z, struct big s)
+{ return x + y + z + s.w[31]; }
+int use(int x) { return local(x, x, x, b); }
+";
+
 fn compile(flags: &[&str]) -> String {
+    compile_source(SOURCE, flags)
+}
+
+fn compile_source(source: &str, flags: &[&str]) -> String {
     // The tests in this file run on threads of one process, so each takes a directory of its own.
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -28,7 +42,7 @@ fn compile(flags: &[&str]) -> String {
         std::env::temp_dir().join(format!("rucc-i386-local-registers-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
-    std::fs::write(&path, SOURCE).expect("the fixture can be written");
+    std::fs::write(&path, source).expect("the fixture can be written");
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .args(["--target=i686-unknown-linux-gnu", "-fno-asynchronous-unwind-tables", "-S"])
         .args(flags)
@@ -81,4 +95,23 @@ fn no_function_changes_without_the_optimizer_or_under_a_hook() {
             "{flags:?}:\n{call}"
         );
     }
+}
+
+/// The copy of a structure passed by value to such a function is not a call to `memcpy` in the
+/// function's registers. `memcpy` is an ordinary function and reads its arguments from the stack,
+/// and in position independent code it is called through the procedure linkage table. The lib32
+/// `libc.so.7` of FreeBSD did not link, because `fnmatch` passed two `mbstate_t` that way and the
+/// plain `call memcpy` was a relocation in `.text` (tamnd/rucc-bsd#7).
+#[test]
+fn a_structure_passed_by_value_to_such_a_function_is_copied_in_the_unit_s_convention() {
+    for flags in [&["-O2"][..], &["-O2", "-fPIC"], &["-Os", "-fPIC"]] {
+        let listing = compile_source(COPIED, flags);
+        let call = body(&listing, "use");
+        assert!(call.contains("call\tlocal"), "{flags:?}:\n{call}");
+        assert!(!call.contains("memcpy"), "{flags:?}:\n{call}");
+    }
+    // A unit whose own functions take three registers calls `memcpy` in them, through the table.
+    let listing = compile_source(COPIED, &["-O2", "-fPIC", "-mregparm=3"]);
+    let call = body(&listing, "use");
+    assert!(call.contains("call\tmemcpy@PLT"), "{call}");
 }
