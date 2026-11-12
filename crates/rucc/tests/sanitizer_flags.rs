@@ -72,7 +72,6 @@ fn asking_for_a_sanitizer_is_refused_by_name_and_writes_no_object() {
         "hwaddress",
         "thread",
         "leak",
-        "undefined",
         "float-cast-overflow",
         "memory",
         "alias",

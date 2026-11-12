@@ -4,7 +4,7 @@
 //! `-fsanitize=object-size`, `-fsanitize=pointer-overflow`, `-fsanitize=nonnull-attribute`,
 //! `-fsanitize=returns-nonnull-attribute` and `-fsanitize=builtin`, which the kernel's
 //! `CONFIG_UBSAN` and a userland built with `-fsanitize=undefined` put on every unit that does
-//! not opt out. The calls carry gcc's names, the record each one is
+//! not opt out. `-fsanitize=undefined` is all of them but `-fsanitize=bounds-strict`. The calls carry gcc's names, the record each one is
 //! handed is laid out the way gcc lays it out, and a function marked `no_sanitize` makes none.
 
 use std::path::Path;
@@ -165,17 +165,22 @@ fn the_flags_that_say_what_a_check_does_are_read() {
 #[test]
 fn the_checks_the_compiler_does_not_have_are_still_refused() {
     let dir = std::env::temp_dir().join(format!("rucc-ubsan-refused-{}", std::process::id()));
-    for asked in [
-        "-fsanitize=undefined",
-        "-fsanitize=float-cast-overflow",
-        "-fsanitize=shift,float-divide-by-zero",
-    ] {
+    for asked in ["-fsanitize=float-cast-overflow", "-fsanitize=shift,float-divide-by-zero"] {
         let out = compile(&dir, SOURCE, &[asked, "-S", "-o", "-"]);
         assert!(!out.status.success(), "{asked} is refused");
         let said = String::from_utf8_lossy(&out.stderr);
         assert!(said.contains("-fsafety=detect"), "{asked}: {said}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// gcc's `undefined` group is every check this compiler makes but `bounds-strict`, so a userland
+/// built with it, NetBSD's `t_ubsan.c` among them, compiles.
+#[test]
+fn the_undefined_group_is_every_check_and_is_taken() {
+    let (text, _) = listing("x86_64-unknown-linux-gnu", &["-O2", "-fsanitize=undefined"]);
+    assert!(text.contains("__ubsan_handle_divrem_overflow"), "{text}");
+    assert!(text.contains("__ubsan_handle_shift_out_of_bounds"), "{text}");
 }
 
 #[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]

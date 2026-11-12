@@ -585,8 +585,8 @@ fn protector_param(opts: &mut Options, spec: &str) -> Result<bool, String> {
 ///
 /// `shift` is the two shift checks together, as gcc has it, so `-fsanitize=shift
 /// -fno-sanitize=shift-base` leaves the count checked and the value not. `all` and `undefined` in
-/// the families that say what a check does are every check this compiler makes, and they stay one
-/// name in `-fsanitize=`, where `undefined` is refused for the checks in it that are not made.
+/// the families that say what a check does are every check this compiler makes. `undefined`
+/// leaves out `bounds-strict`, as gcc's group does.
 fn sanitizer_names(name: &str) -> Vec<&str> {
     match name {
         "shift" => vec!["shift-exponent", "shift-base"],
@@ -3916,6 +3916,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
     }
     sanitizers.retain(|asked| !Sanitize::NAMES.contains(asked));
+    // Every check in gcc's `undefined` group is made now, so the name of the group asks for
+    // nothing more than the checks it was read as. NetBSD's userland tests build with it.
+    sanitizers.retain(|&asked| asked != "undefined");
     // The shadow checks, which gcc makes without being told how only on the targets it has a
     // shadow offset for. The kernel always says where its shadow is.
     if sanitizers.contains(&"kernel-address") {
@@ -3944,11 +3947,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         return Err(err("-fasan-shadow-offset should only be used with -fsanitize=kernel-address"));
     }
     // A run that writes no code puts in no checks, so under `-E` and `-fsyntax-only` the checks of
-    // `-fsanitize=undefined` that this compiler does not make yet are taken. gcc defines no macro
-    // for any of them, so the text and the diagnostics are the same as gcc's. The shadow and the
-    // thread sanitizers stay refused there, as gcc defines `__SANITIZE_ADDRESS__`,
-    // `__SANITIZE_HWADDRESS__` and `__SANITIZE_THREAD__` for them. NetBSD's t_ubsan.c is
-    // compiled with `-fsanitize=undefined`.
+    // gcc's undefined family that this compiler does not make, `float-divide-by-zero` and
+    // `float-cast-overflow`, are taken. gcc defines no macro for any of them, so the text and the
+    // diagnostics are the same as gcc's. The shadow and the thread sanitizers stay refused there,
+    // as gcc defines `__SANITIZE_ADDRESS__`, `__SANITIZE_HWADDRESS__` and `__SANITIZE_THREAD__`
+    // for them.
     if matches!(opts.emit, EmitKind::Preprocessed | EmitKind::SyntaxOnly) {
         sanitizers.retain(|asked| !UNDEFINED.contains(asked));
     }
@@ -10333,7 +10336,9 @@ mod tests {
     /// for the wrong reason rather than a slower program.
     #[test]
     fn a_sanitizer_that_is_still_asked_for_at_the_end_of_the_line_is_refused_by_name() {
-        for asked in ["address", "undefined", "thread", "kernel-hwaddress", "leak", "memory"] {
+        for asked in
+            ["address", "float-cast-overflow", "thread", "kernel-hwaddress", "leak", "memory"]
+        {
             let failed = refused(&[&format!("-fsanitize={asked}"), "-c", "a.c"]);
             assert!(failed.contains(asked), "the refusal names what was asked for: {failed}");
             assert!(failed.contains("-fsafety=detect"), "and the nearest thing: {failed}");
@@ -10384,7 +10389,7 @@ mod tests {
         }
         assert!(refused(&["-fsanitize-recover=bogus", "-c", "a.c"]).contains("is not a sanitizer"));
 
-        // A run that writes no code takes the checks of `undefined`, as it puts in none. The
+        // A run that writes no code takes every check of `undefined`, as it puts in none. The
         // sanitizers that make gcc define a macro stay refused there.
         for mode in ["-E", "-fsyntax-only"] {
             for asked in ["-fsanitize=undefined", "-fsanitize=null,pointer-overflow"] {
@@ -10395,7 +10400,15 @@ mod tests {
                 assert!(!refused(&[asked, mode, "a.c"]).is_empty(), "{asked} {mode}");
             }
         }
-        assert!(refused(&["-fsanitize=undefined", "-S", "a.c"]).contains("undefined"));
+        assert!(refused(&["-fsanitize=float-cast-overflow", "-S", "a.c"]).contains("float-cast"));
+
+        // `undefined` is every check of gcc's group, which leaves `bounds-strict` out.
+        let (opts, _) = compile(&["-fsanitize=undefined", "-c", "a.c"]);
+        let sanitize = opts.sanitize;
+        assert_eq!(sanitize.pointer_overflow, Check::Report, "{sanitize:?}");
+        assert_eq!(sanitize.null, Check::Report, "{sanitize:?}");
+        assert_eq!(sanitize.bounds, Check::Report, "{sanitize:?}");
+        assert_eq!(sanitize.bounds_strict, Check::Off, "{sanitize:?}");
 
         // The two kinds of coverage gcc has are taken, on one flag or two, and any other is
         // refused rather than dropped, because a fuzzer with no feedback runs blind.
