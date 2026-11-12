@@ -665,8 +665,16 @@ impl Walk<'_> {
     /// them is the join with the locals the back end placed, which happens in this crate.
     fn signature(&mut self, tast: &Tast, id: DeclId) -> Option<(Sig, Vec<Option<u32>>)> {
         let declared = tast[id].ty;
-        let TypeKind::Function(which) = self.types.kind(self.types.canonical(declared)) else {
-            return None;
+        // The function type as it was declared where it is one, and the canonical one only for
+        // a function declared with a typedef name for its whole type. The canonical type returns
+        // what is under a typedef with an attribute, so `__m128i f(void)` would return the
+        // vector the name stands for and not `__m128i`, which is what gcc says.
+        let which = match self.types.kind(declared) {
+            TypeKind::Function(which) => which,
+            _ => match self.types.kind(self.types.canonical(declared)) {
+                TypeKind::Function(which) => which,
+                _ => return None,
+            },
         };
         let signature = self.types.signature(which).clone();
         // A function declared with a typedef name for the whole of its type returns what that
