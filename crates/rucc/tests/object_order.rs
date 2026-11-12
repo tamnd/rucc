@@ -2,10 +2,11 @@
 //!
 //! gcc lays them out newest first, and an object is as new as its entry in gcc's symbol table.
 //! The entry is made at the first declaration that defines the object, so an `extern` one above
-//! it does not count, and the entry for a `static` in a function body is made when gcc analyzes
-//! the body, after it has read the whole file and in the order its walk over the call graph
-//! reaches the body. The order is seen from outside where objects share a section, as the
-//! NetBSD kernel's link sets do, and in the padding between objects of different sizes.
+//! it does not count unless it names a section, and the entry for a `static` in a function body
+//! is made when gcc analyzes the body, after it has read the whole file and in the order its walk
+//! over the call graph reaches the body. The order is seen from outside where objects share a
+//! section, as the NetBSD kernel's link sets do, and in the padding between objects of different
+//! sizes.
 //! tamnd/rucc#4338.
 //!
 //! Each order below is the one gcc 13 lays the source out in at `-O2`.
@@ -82,6 +83,25 @@ int use_b(void) { return b; }
 ";
     let text = assembly("extern", source);
     assert_eq!(labels(&text, &["a", "b", "c", "d", "e"]), ["e", "d", "c", "b", "a"], "{text}");
+}
+
+/// An object declared `extern` with a section above its definition is as old as that `extern`
+/// declaration, since gcc makes the entry to keep the section in. This is the shape of a NetBSD
+/// module hook, which a header declares `extern` and `__cacheline_aligned`. In `sys/net/if.c`
+/// the hook `if_vlan_vlan_input_hook` then comes after `ifnet_mtx` in gcc's
+/// `.data.cacheline_aligned`.
+#[test]
+fn an_object_declared_extern_with_a_section_first_is_as_old_as_that_declaration() {
+    let source = "\
+#define S __attribute__((section(\"set_x\")))
+extern long h S; extern long g;
+long m S = 1;
+long h = 2;
+long g S = 3;
+long x S = 4;
+";
+    let text = assembly("extern-section", source);
+    assert_eq!(labels(&text, &["h", "g", "m", "x"]), ["x", "g", "m", "h"], "{text}");
 }
 
 /// A `static` in a function body is newer than every object at file scope, whatever the line it

@@ -2198,11 +2198,15 @@ impl Checker<'_> {
         };
         // A name declared first without a definition takes its place among the symbols here,
         // at the first declaration that defines it, which is where gcc puts it in the list the
-        // layout of its variables follows. See `Tast::record_placed`.
+        // layout of its variables follows. See `Tast::record_placed`. A declaration before it
+        // that named a section already made the entry, because gcc makes the entry to keep the
+        // section in. The kernel's module hooks are declared `extern` and `__cacheline_aligned`
+        // in a header and defined further down.
         if node.kind != DeclKind::Type
             && node.state == Definition::Declared
             && declared.state != Definition::Declared
             && self.scopes.at_file_scope()
+            && self.tast.section(previous).is_none()
         {
             self.tast.record_placed(previous);
         }
