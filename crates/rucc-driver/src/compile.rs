@@ -1636,8 +1636,10 @@ fn generate(
         // also holds the return address and so, under `-mbranch-protection=pac-ret`, costs a
         // signature and a check on every call.
         leaf_frame_pointer: opts.leaf_frame_pointer.unwrap_or(target.tuple.arch() != Arch::Aarch64),
-        // Only when optimizing, which is the one place gcc looks for a leaf to give it back in.
-        spare_frame_pointer: opts.leaf_frame_pointer.is_none() && opts.opt_level.runs_optimizer(),
+        // Only when optimizing, which is the one place gcc looks for a leaf to give it back in. An
+        // explicit `-mno-omit-leaf-frame-pointer` does not stop it, since gcc on x86 does not read
+        // that flag there. See `ix86_finalize_stack_frame_flags`.
+        spare_frame_pointer: opts.opt_level.runs_optimizer(),
         red_zone: opts.red_zone,
         code_model: opts.code_model,
         vector: opts.vector,

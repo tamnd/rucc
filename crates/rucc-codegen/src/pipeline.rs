@@ -549,8 +549,8 @@ pub struct Flags {
     /// `-mno-omit-leaf-frame-pointer`, and `-momit-leaf-frame-pointer` turns it off.
     pub leaf_frame_pointer: bool,
     /// Whether a leaf that keeps one only because of [`Flags::frame_pointer`] may give it back
-    /// once it turns out to need no frame at all, which gcc does on x86 unless the command line
-    /// said `-mno-omit-leaf-frame-pointer` itself. See [`crate::frame::Layout::spare_frame_pointer`].
+    /// once it turns out to need no frame at all, which gcc does on x86 when it optimizes, also
+    /// under `-mno-omit-leaf-frame-pointer`. See [`crate::frame::Layout::spare_frame_pointer`].
     pub spare_frame_pointer: bool,
     /// Whether the red zone may be used, which `-mno-red-zone` and every kernel turns off.
     pub red_zone: bool,
@@ -3762,12 +3762,12 @@ mod tests {
             .expect("every instruction has a rule");
 
         // A function that keeps a frame pointer keeps it whether it needed one or not, which is
-        // what `-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer` is for.
+        // what `-fno-omit-frame-pointer` does at `-O0`.
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.push_64 $rbp"), "{text}");
         assert!(text.contains("$rbp = x64.mov_rr_64 $rsp"), "{text}");
 
-        // Without the second flag a leaf with nothing in its frame gives it back, as with gcc.
+        // When optimizing, a leaf with nothing in its frame gives it back, as with gcc.
         let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
             .expect("every instruction has a rule");
         let text = mir::print_func(&out, &names, &REGS);

@@ -9,11 +9,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// A leaf, which calls nothing, and a function that calls a function in another file, so that
-/// inlining cannot make it a leaf.
+/// inlining cannot make it a leaf. The last one is a leaf with a local in its frame.
 const SOURCE: &str = "\
 int other(int);
 int leaf(int a, int b) { return a * b + 1; }
 int caller(int a) { return other(a) + 2; }
+int framed(int i) { volatile int a[16]; a[i & 15] = i; return a[0]; }
 ";
 
 fn fixture(what: &str) -> PathBuf {
@@ -65,11 +66,15 @@ fn a_leaf_keeps_the_frame_pointer_only_where_gcc_keeps_it() {
         {
             let text = asm(target, what, flags);
             // Except that gcc on x86 gives it back in a leaf with nothing in its frame, which
-            // this one is, unless the command line asked for it in leaves outright. gcc on
+            // this one is, also when the command line asked for it in leaves outright. gcc on
             // AArch64 leaves it out of every leaf unless asked.
-            let kept = what == "keep";
+            let kept = what == "keep" && setup == "x29";
             assert_eq!(body(&text, "leaf").contains(setup), kept, "{target} {what}:\n{text}");
             assert!(body(&text, "caller").contains(setup), "{target} {what}:\n{text}");
+            if what == "keep" {
+                // A leaf with something in its frame keeps it, as with gcc.
+                assert!(body(&text, "framed").contains(setup), "{target} {what}:\n{text}");
+            }
         }
         let text = asm(target, "omit", &["-momit-leaf-frame-pointer"]);
         assert!(!body(&text, "leaf").contains(setup), "{target} omit:\n{text}");
