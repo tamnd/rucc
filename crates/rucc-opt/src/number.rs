@@ -121,7 +121,9 @@
 
 use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{Block, Def, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, Sig, Type, Value};
+use rucc_ir::{
+    Abi, Block, Def, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, Sig, Type, Value,
+};
 
 use crate::purity::{Callee, Facts};
 use crate::uses::substitute;
@@ -506,7 +508,12 @@ fn call_key(
     // first call is above this one in the same block, so it has already been made and control has
     // already come back from it. A second call on the same arguments reading the same memory does
     // what the first one did, which was come back.
-    let memory = if purity.depends_only_on_arguments() { 0 } else { memory };
+    // A structure passed by value is bytes the call reads out of the caller's object, so even a
+    // `const` callee depends on memory there, and two of its calls are one value only when nothing
+    // wrote memory between them.
+    let copies =
+        func[info.signature].params.iter().any(|param| matches!(param.abi, Abi::ByVal { .. }));
+    let memory = if purity.depends_only_on_arguments() && !copies { 0 } else { memory };
     let mut results = data.results();
     let (Some(result), None) = (results.next(), results.next()) else { return None };
     let args = func[data.args].iter().map(|&arg| same.get(&arg).copied().unwrap_or(arg)).collect();

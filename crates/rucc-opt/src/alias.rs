@@ -85,7 +85,7 @@ use std::cell::OnceCell;
 use rucc_base::Symbol;
 use rucc_base::hash::Set;
 use rucc_ir::{
-    AttrSet, Attrs, Def, Extra, Flags, Func, Imm, Inst, MemInfo, Meta, Opcode, Restrict, Type,
+    Abi, AttrSet, Attrs, Def, Extra, Flags, Func, Imm, Inst, MemInfo, Meta, Opcode, Restrict, Type,
     Value,
 };
 
@@ -802,6 +802,23 @@ impl<'a> Alias<'a> {
     ///
     /// Only for a local that did not escape, where it is the difference between the one call that
     /// was handed the address and every other call in the function.
+    /// Whether the call copies bytes this reference may cover into an argument it passes by value.
+    fn copies(&self, reference: &Access, call: Inst) -> bool {
+        let Extra::Call(info) = self.func[call].extra else {
+            return false;
+        };
+        let info = &self.func[info];
+        let named = self.func[info.signature].params.iter().map(|param| param.abi);
+        let abis = named.chain(self.func[info.varargs].iter().copied());
+        self.func[self.func[call].args].iter().zip(abis).any(|(&arg, abi)| {
+            let Abi::ByVal { size, .. } = abi else {
+                return false;
+            };
+            let copied = Access { size: Some(size), ..Access::through(self.func, arg) };
+            !self.decide(reference, &copied).is_no()
+        })
+    }
+
     fn handed(&self, local: Inst, call: Inst) -> bool {
         self.func[self.func[call].args]
             .iter()
@@ -906,6 +923,14 @@ impl<'a> Alias<'a> {
             if !self.handed(local, call) {
                 return Answer::No(Reason::Escape);
             }
+        }
+
+        // A structure passed by value is copied out of the caller's object at the call, so the
+        // call reads those bytes whatever its callee is declared to do. `conjl` is `const` and takes
+        // its `long double complex` by value, and without this dse removed the stores that made
+        // the argument of `conjl(1.0)` in msun's ctrig_test.
+        if !writing && self.copies(reference, call) {
+            return Answer::May;
         }
 
         let Some(attrs) = self.callee(call) else {
