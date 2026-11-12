@@ -34,7 +34,7 @@ use rucc_target::{CallRegs, FrameInsts, MachineInsts};
 const PUSH_IMM: &str = "push_i_32";
 
 /// Rewrites the stack arguments of each of those calls as pushes where that is fewer bytes, and
-/// gives back how many calls it rewrote.
+/// gives back what it rewrote.
 ///
 /// `calls` is each call that passes arguments on the stack with how many bytes of the outgoing area
 /// they take, which is `passing` on [`crate::lower::Stack`]. A call is left alone when its area is
@@ -47,7 +47,7 @@ pub fn arguments(
     machine: &MachineInsts,
     conv: &CallRegs,
     names: &mut Interner,
-) -> usize {
+) -> Pushed {
     let mut opcode = |name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
     let ops = Ops {
         store: opcode("mov_mr_32"),
@@ -59,17 +59,160 @@ pub fn arguments(
     };
     let stack = conv.stack_pointer;
     let sp = mir::Reg::physical(stack);
-    let mut pushed = 0;
+    let mut pushed = Pushed { calls: 0, back: Vec::new() };
     for &(call, area) in calls {
         if area == 0 || area % 4 != 0 || area % conv.stack_align != 0 {
             continue;
         }
         let Some(plan) = plan(func, call, area, sp, &ops, machine, names) else { continue };
         let at = cfa(func, call, conv);
-        rewrite(func, call, area, &plan, &ops, conv, at);
-        pushed += 1;
+        pushed.back.extend(rewrite(func, call, area, &plan, &ops, conv, at));
+        pushed.calls += 1;
     }
     pushed
+}
+
+/// Takes the outgoing area out of a frame that holds nothing else, once [`arguments`] has pushed
+/// what each call passed in it, and says whether it did.
+///
+/// `size` is how many bytes the prologue takes off the stack pointer and `outgoing` is how many of
+/// those are the area. When the two are the same and no instruction reads the area any longer, the
+/// `subl $8, %esp` of the prologue and the `addl $8, %esp` of each epilogue are six bytes that do
+/// nothing, and gcc has neither at -Os. Each address counted from the stack pointer is then that
+/// many bytes nearer to it.
+///
+/// The function is left alone when the stack pointer is written by anything but the prologue, an
+/// epilogue, a push, a pop, a call and the `back` of [`Pushed`], or read other than as the base of
+/// an address or by a call, since each of those counts the frame from where the prologue left the
+/// stack pointer. Each row of the unwind table inside the frame is moved by the same bytes, and the
+/// function is left alone when a row counts the frame from another register.
+#[allow(clippy::too_many_arguments)]
+pub fn unframed(
+    func: &mut mir::Func,
+    size: u32,
+    outgoing: u32,
+    pushed: &Pushed,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    conv: &CallRegs,
+    names: &mut Interner,
+) -> bool {
+    if size == 0 || size != outgoing || size % conv.stack_align != 0 {
+        return false;
+    }
+    let Ok(bytes) = i32::try_from(size) else { return false };
+    let sub = mir::Opcode::new(names.join(insts.prefix, insts.sub));
+    let add = mir::Opcode::new(names.join(insts.prefix, insts.add));
+    // What moves the stack pointer by a word or takes the return address off it, which leaves
+    // each address counted from it the same distance from the frame either way.
+    let mut moving = vec![
+        mir::Opcode::new(names.join(insts.prefix, insts.push)),
+        mir::Opcode::new(names.join(insts.prefix, PUSH_IMM)),
+        mir::Opcode::new(names.join(insts.prefix, insts.pop)),
+        mir::Opcode::new(names.join(insts.prefix, insts.ret)),
+    ];
+    if let Some(ret_pop) = insts.ret_pop {
+        moving.push(mir::Opcode::new(names.join(insts.prefix, ret_pop)));
+    }
+    let sp = mir::Reg::physical(conv.stack_pointer);
+    let Some(entry) = func.entry() else { return false };
+    let mut prologue = None;
+    let mut epilogues = Vec::new();
+    let mut based = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            let operands = &func[data.operands];
+            let base = match data.mem {
+                Some(mem) => {
+                    let amode = func[mem];
+                    let names_sp = |at: Option<u8>| {
+                        at.and_then(|at| operands.get(usize::from(at)))
+                            .is_some_and(|op| op.reg == sp)
+                    };
+                    if names_sp(amode.index) {
+                        return false;
+                    }
+                    if names_sp(amode.base) {
+                        // A word of the area still read or written.
+                        if amode.disp < bytes {
+                            return false;
+                        }
+                        if !based.contains(&mem) {
+                            based.push(mem);
+                        }
+                    }
+                    amode.base
+                }
+                None => None,
+            };
+            let writes = operands.iter().any(|op| op.reg == sp && op.role != mir::Role::Use);
+            let reads = operands.iter().enumerate().any(|(at, op)| {
+                op.reg == sp && op.role == mir::Role::Use && base != u8::try_from(at).ok()
+            });
+            let imm = data.imm.map(|imm| func[imm].0);
+            if moving.contains(&data.opcode) || machine.calls(names.resolve(data.opcode.name())) {
+                continue;
+            }
+            if writes {
+                if pushed.back.contains(&inst) {
+                    continue;
+                }
+                if data.opcode == sub
+                    && imm == Some(i64::from(size))
+                    && block == entry
+                    && prologue.is_none()
+                {
+                    prologue = Some(inst);
+                } else if data.opcode == add && imm == Some(i64::from(size)) {
+                    epilogues.push(inst);
+                } else {
+                    return false;
+                }
+            } else if reads {
+                return false;
+            }
+        }
+    }
+    let Some(prologue) = prologue else { return false };
+    // Each row of the unwind table counts the frame from the stack pointer here, so a row inside
+    // the frame is that many bytes nearer to it and the rows of the two instructions go with them.
+    if !func.cfi.is_empty() {
+        let frame = func.cfi.iter().find_map(|&(inst, op)| match op {
+            mir::CfiOp::DefCfaOffset(offset) if inst == prologue => Some(offset),
+            _ => None,
+        });
+        let counted = func.cfi.iter().all(|(_, op)| {
+            !matches!(op, mir::CfiOp::DefCfa { .. } | mir::CfiOp::DefCfaRegister(_))
+        });
+        let Some(frame) = frame.filter(|_| counted) else { return false };
+        func.cfi.retain(|(inst, _)| *inst != prologue && !epilogues.contains(inst));
+        for (_, op) in &mut func.cfi {
+            if let mir::CfiOp::DefCfaOffset(offset) = op
+                && *offset >= frame
+            {
+                *offset -= bytes;
+            }
+        }
+    }
+    func.remove_inst(prologue);
+    for epilogue in epilogues {
+        func.remove_inst(epilogue);
+    }
+    for mem in based {
+        func[mem].disp -= bytes;
+    }
+    true
+}
+
+/// What [`arguments`] rewrote.
+#[derive(Debug)]
+pub struct Pushed {
+    /// How many calls.
+    pub calls: usize,
+    /// The `addl` behind each of those calls that takes its arguments off again, which a callee
+    /// that takes them off itself has none of.
+    pub back: Vec<mir::Inst>,
 }
 
 /// The opcodes the rewrite reads and writes.
@@ -276,7 +419,7 @@ fn cfa(func: &mir::Func, call: mir::Inst, conv: &CallRegs) -> Option<i32> {
 }
 
 /// The stores taken out, a push of each in front of the call from the top word down, and the area
-/// given back behind it.
+/// given back behind it. Gives back the `addl` it wrote for that, when it wrote one.
 fn rewrite(
     func: &mut mir::Func,
     call: mir::Inst,
@@ -285,7 +428,7 @@ fn rewrite(
     ops: &Ops,
     conv: &CallRegs,
     cfa: Option<i32>,
-) {
+) -> Option<mir::Inst> {
     let mut below = cfa;
     for &store in plan.stores.iter().rev() {
         let data = func[store];
@@ -308,10 +451,10 @@ fn rewrite(
             func.cfi.push((push, mir::CfiOp::DefCfaOffset(offset)));
         }
     }
-    let back = match plan.popped {
+    let (back, added) = match plan.popped {
         Some(sub) => {
             func.remove_inst(sub);
-            call
+            (call, None)
         }
         None => {
             let sp = mir::Reg::physical(conv.stack_pointer);
@@ -325,12 +468,13 @@ fn rewrite(
                 .imm(i64::from(area))
                 .finish();
             func.insert_after(call, add);
-            add
+            (add, Some(add))
         }
     };
     if let Some(offset) = cfa {
         func.cfi.push((back, mir::CfiOp::DefCfaOffset(offset)));
     }
+    added
 }
 
 #[cfg(test)]
@@ -340,7 +484,7 @@ mod tests {
     use rucc_target::CallRegs;
     use rucc_target::x86::{EAX, ECX, ESP, FRAME, GPR, MACHINE, REGS, SYSV};
 
-    use super::arguments;
+    use super::{arguments, unframed};
 
     /// The opcode of that name on this target.
     fn op(names: &mut Interner, name: &str) -> Opcode {
@@ -391,7 +535,7 @@ mod tests {
         calls: &[(Inst, u32)],
         conv: &CallRegs,
     ) -> (usize, Vec<String>) {
-        let count = arguments(func, calls, &FRAME, &MACHINE, conv, names);
+        let count = arguments(func, calls, &FRAME, &MACHINE, conv, names).calls;
         let lines = rucc_mir::print_func(func, names, &REGS)
             .lines()
             .filter_map(|line| line.find("x64.").map(|at| line[at..].to_owned()))
@@ -558,5 +702,76 @@ mod tests {
         );
         let back = func.next_inst(call).expect("the add");
         assert!(func.cfi_after(back).eq([CfiOp::DefCfaOffset(16)]));
+    }
+
+    /// `printf("%d", x)` in a frame of `size` bytes whose bottom `outgoing` are the area, with the
+    /// prologue's `subl` in front, the epilogue's `addl` behind and a read of the word at `read` in
+    /// front of the stores, and the unwind rows of the two. Pushed and then unframed, one
+    /// instruction to a line from the opcode on, and the offsets the rows are left with.
+    fn framed(size: i64, outgoing: u32, read: i32) -> (bool, Vec<String>, Vec<i32>) {
+        let mut names = Interner::new();
+        let (mut func, call) = printf(&mut names, |_, _, _| {});
+        let block = func.blocks().next().expect("a block");
+        let first = func.insts(block).next().expect("a store");
+        let ret = func.insts(block).last().expect("the return");
+        let esp = Reg::physical(ESP);
+        let sub = op(&mut names, "sub_ri_32");
+        let frame = func.build_loose(sub).def(esp, GPR).uses(esp, GPR).imm(size).finish();
+        func.insert_before(first, frame);
+        let bytes = i32::try_from(size).expect("a size");
+        func.cfi.push((frame, CfiOp::DefCfaOffset(4 + bytes)));
+        let load = op(&mut names, "mov_rm_32");
+        let read =
+            func.build_loose(load).def(Reg::physical(EAX), GPR).mem(Mem::at(sp()).plus(read));
+        let read = read.finish();
+        func.insert_before(first, read);
+        let add = op(&mut names, "add_ri_32");
+        let back = func.build_loose(add).def(esp, GPR).uses(esp, GPR).imm(size).finish();
+        func.insert_before(ret, back);
+        func.cfi.push((back, CfiOp::DefCfaOffset(4)));
+        let pushed = arguments(&mut func, &[(call, 8)], &FRAME, &MACHINE, words(), &mut names);
+        let size = u32::try_from(size).expect("a size");
+        let gone =
+            unframed(&mut func, size, outgoing, &pushed, &FRAME, &MACHINE, words(), &mut names);
+        let lines = rucc_mir::print_func(&func, &names, &REGS)
+            .lines()
+            .filter_map(|line| line.find("x64.").map(|at| line[at..].to_owned()))
+            .collect();
+        let mut rows: Vec<i32> = func
+            .cfi
+            .iter()
+            .filter_map(|(_, row)| match row {
+                CfiOp::DefCfaOffset(offset) => Some(*offset),
+                _ => None,
+            })
+            .collect();
+        rows.sort_unstable();
+        (gone, lines, rows)
+    }
+
+    #[test]
+    fn a_frame_that_was_only_the_outgoing_area_goes_once_the_arguments_are_pushed() {
+        let (gone, lines, rows) = framed(8, 8, 16);
+        assert!(gone, "{lines:#?}");
+        // The two pushes and the way back, each eight bytes nearer, and no row for the frame.
+        assert_eq!(rows, [4, 8, 12], "{lines:#?}");
+        assert!(!lines.iter().any(|line| line.starts_with("x64.sub_ri_32")), "{lines:#?}");
+        let adds = lines.iter().filter(|line| line.starts_with("x64.add_ri_32")).count();
+        assert_eq!(adds, 1, "only the one behind the call is left\n{lines:#?}");
+        assert!(lines[0].starts_with("x64.mov_rm_32") && lines[0].contains("+ 8]"), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_frame_with_more_than_the_outgoing_area_in_it_stays() {
+        let (gone, lines, _) = framed(12, 8, 8);
+        assert!(!gone, "{lines:#?}");
+        assert!(lines.iter().any(|line| line.starts_with("x64.sub_ri_32")), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_frame_whose_area_is_still_read_stays() {
+        let (gone, lines, _) = framed(8, 8, 4);
+        assert!(!gone, "{lines:#?}");
+        assert!(lines.iter().any(|line| line.starts_with("x64.sub_ri_32")), "{lines:#?}");
     }
 }

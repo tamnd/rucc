@@ -204,10 +204,25 @@ fn the_arguments_a_call_passes_on_the_stack_are_pushed_at_os() {
 }
 
 #[test]
+fn a_frame_that_was_only_the_area_of_the_pushed_arguments_goes_at_os() {
+    let text = listing_of(PASSED, "unframed", &[]);
+    let say = body(&text, "say");
+    assert!(!say.iter().any(|line| line.starts_with("subl")), "{text}");
+    let adds = say.iter().filter(|line| line.starts_with("addl")).count();
+    assert_eq!(adds, 1, "only the caller's add behind the call is left\n{text}");
+    let five = body(&text, "five");
+    assert!(
+        !five.iter().any(|line| line.ends_with(", %esp")),
+        "the callee takes the pushes off and there is no frame to give back\n{text}"
+    );
+}
+
+#[test]
 fn the_arguments_a_call_passes_on_the_stack_are_stored_at_o2() {
     let text = listing_of(PASSED, "stored", &["-O2"]);
     let say = body(&text, "say");
     assert!(!say.iter().any(|line| line.starts_with("pushl\t$")), "{text}");
+    assert!(say.iter().any(|line| line.starts_with("subl")), "the frame holds the area\n{text}");
 }
 
 /// A function that answers -1 once a call is over, which `boot2` does on each of its errors.
