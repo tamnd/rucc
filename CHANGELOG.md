@@ -65,6 +65,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `-fsanitize=undefined` is taken for code now. It is every check of gcc's group, which leaves `bounds-strict` out. Before, it was refused, because some checks of the group were not made. NetBSD builds `t_ubsan.c` with it. (Part of #4391)
 - `-fsanitize=object-size`, `-fsanitize=pointer-overflow`, `-fsanitize=nonnull-attribute`, `-fsanitize=returns-nonnull-attribute` and `-fsanitize=builtin` now make gcc's checks, where they were refused. Each calls the routine of libubsan that gcc calls, with the same record. `object-size` is made from `-O1` up. `returns_nonnull` is now read, and the `-fsanitize=undefined` group in `no_sanitize` now has the five checks (#4391).
 - `-fsanitize=null` and `-fsanitize=alignment` now make gcc's checks, where they were refused. A read or a write through a pointer that is null or not aligned for its type calls `__ubsan_handle_type_mismatch_v1`, with the same record that gcc makes. The `-fsanitize=undefined` group in `no_sanitize` now has both checks (#4391).
 - `-fsanitize=vla-bound` and `-fsanitize=bounds` now make gcc's checks, where they were refused. A variable length array whose length is zero or negative calls `__ubsan_handle_vla_bound_not_positive`. `bounds` is `bounds-strict`, except that an array at the end of a structure that a pointer points at is not checked. The `-fsanitize=undefined` group now has `bounds` in place of `bounds-strict`, as in gcc. NetBSD's t_ubsan.c asks for both checks (#4391).
