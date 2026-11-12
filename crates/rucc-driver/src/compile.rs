@@ -593,6 +593,17 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 vla_bound: lower_check(opts.sanitize.vla_bound),
                                 null: lower_check(opts.sanitize.null),
                                 alignment: lower_check(opts.sanitize.alignment),
+                                object_size: if opts.opt_level == rucc_session::OptLevel::O0 {
+                                    rucc_lower::Check::Off
+                                } else {
+                                    lower_check(opts.sanitize.object_size)
+                                },
+                                pointer_overflow: lower_check(opts.sanitize.pointer_overflow),
+                                nonnull_attribute: lower_check(opts.sanitize.nonnull_attribute),
+                                returns_nonnull_attribute: lower_check(
+                                    opts.sanitize.returns_nonnull_attribute,
+                                ),
+                                builtin: lower_check(opts.sanitize.builtin),
                                 unreachable: lower_check(opts.sanitize.unreachable),
                                 signed_overflow: lower_check(opts.sanitize.signed_overflow),
                                 address: opts.kasan.on,

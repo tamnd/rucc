@@ -405,6 +405,25 @@ fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
     if flags.contains(DeclFlags::NO_UBSAN_ALIGNMENT) {
         sanitize.alignment = Check::Off;
     }
+    if flags.contains(DeclFlags::NO_UBSAN_OBJECT_SIZE) {
+        sanitize.object_size = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_POINTER_OVERFLOW) {
+        sanitize.pointer_overflow = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_NONNULL_ATTRIBUTE) {
+        sanitize.nonnull_attribute = Check::Off;
+    }
+    // The check is of what a function that says it never answers with a null pointer answers
+    // with, so a function that says nothing has nothing to check.
+    if flags.contains(DeclFlags::NO_UBSAN_RETURNS_NONNULL)
+        || !flags.contains(DeclFlags::RETURNS_NONNULL)
+    {
+        sanitize.returns_nonnull_attribute = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_BUILTIN) {
+        sanitize.builtin = Check::Off;
+    }
     if flags.contains(DeclFlags::NO_ASAN) || flags.contains(DeclFlags::NAKED) {
         sanitize.address = false;
     }
@@ -1015,9 +1034,9 @@ struct Body<'a, 'u> {
     /// asked for less the ones a `no_sanitize` attribute on the function takes away.
     sanitize: Sanitize,
     /// The subscript whose address is all that is wanted of it, which `-fsanitize=bounds-strict`
-    /// lets go one past the end. Set by `&a[i]` and by the decay of `a[i]` just before the
-    /// place is worked out, and taken by the subscript.
-    one_past: Option<ExprId>,
+    /// lets go one past the end. Set by `&a[i]`, with where its `&` is, and by the decay of
+    /// `a[i]` just before the place is worked out, and taken by the subscript.
+    one_past: Option<(ExprId, Option<BytePos>)>,
     /// The arrays a subscript is about to decay, each with the pointer the array was reached
     /// through once the decay has found it. A subscript of a member reached through a pointer is
     /// checked as an access to the member, so the decay passes the pointer on rather than
@@ -4006,7 +4025,13 @@ impl<'u> Body<'_, 'u> {
                 self.discard(expr);
                 Vec::new()
             }
-            Pass::Direct => self.eval(expr).into_iter().collect(),
+            Pass::Direct => {
+                let value = self.eval(expr);
+                if let Some(value) = value {
+                    self.check_nonnull_return(value, expr, span);
+                }
+                value.into_iter().collect()
+            }
             Pass::Pieces(_) => {
                 let ty = self.tast()[expr].ty;
                 let (addr, align) = match repr::value_type(self.types(), self.target(), ty) {
@@ -5004,8 +5029,9 @@ impl<'u> Body<'_, 'u> {
             }
             ExprKind::Member { base, field } => self.member(base, field, ty, span),
             ExprKind::Subscript { base, index } => {
-                let past = self.one_past.take() == Some(expr);
-                let checked = self.sanitize.null.is_on() || self.sanitize.alignment.is_on();
+                let taken = self.one_past.take().filter(|&(past, _)| past == expr);
+                let past = taken.is_some();
+                let checked = self.checks_access();
                 let decayed = match self.tast()[base].kind {
                     ExprKind::Convert { kind: Conversion::ArrayDecay, operand } if checked => {
                         Some(operand)
@@ -5015,7 +5041,8 @@ impl<'u> Body<'_, 'u> {
                 if let Some(array) = decayed {
                     self.indexed.insert(array, None);
                 }
-                let addr = self.element(base, index, ty, past, span);
+                let addr =
+                    self.element((base, index), ty, (past, taken.and_then(|(_, at)| at)), span);
                 let inner = decayed.and_then(|array| self.indexed.remove(&array).flatten());
                 let pointed = if checked {
                     self.indexed_pointed((base, index), addr, ty, inner, span)
@@ -6942,7 +6969,9 @@ impl<'u> Body<'_, 'u> {
     fn member(&mut self, holder: ExprId, field: u32, ty: TypeId, span: Span) -> Place {
         let place = self.place(holder);
         let pointed = self.member_pointed(place.pointed, holder, span);
-        Place { pointed, ..self.member_at(place, holder, field, ty, span) }
+        let member = self.member_at(place, holder, field, ty, span);
+        self.check_member_step((place, member), holder, span);
+        Place { pointed, ..member }
     }
 
     /// Member `field` of the object at `place`, which `holder` names. Kept apart from
@@ -7248,10 +7277,9 @@ impl<'u> Body<'_, 'u> {
     /// `-fsanitize=bounds-strict` lets the index be the length of the array.
     fn element(
         &mut self,
-        base: ExprId,
-        index: ExprId,
+        (base, index): (ExprId, ExprId),
         ty: TypeId,
-        past: bool,
+        (past, taken): (bool, Option<BytePos>),
         span: Span,
     ) -> Value {
         if self.sanitize.bounds.is_on() {
@@ -7269,7 +7297,7 @@ impl<'u> Body<'_, 'u> {
         let steps = self.value(index);
         let size = self.stride(ty, span);
         let signed = repr::is_signed(self.types(), self.target(), self.tast()[index].ty);
-        self.step(pointer, steps, signed, size, false, span)
+        self.element_step((base, index), (pointer, steps), (signed, size), taken, span)
     }
 
     /// The address of a place, which every object except a variable in a register has.
@@ -8400,7 +8428,7 @@ impl<'u> Body<'_, 'u> {
                 self.read(place, span)
             }
             Conversion::ArrayDecay | Conversion::FunctionDecay => {
-                self.one_past = Some(operand);
+                self.one_past = Some((operand, None));
                 let place = self.place(operand);
                 self.check_decayed(operand, place, span);
                 Some(self.taken(place, span))
@@ -8600,7 +8628,7 @@ impl<'u> Body<'_, 'u> {
                 self.read(place, span)
             }
             UnaryOp::AddrOf => {
-                self.one_past = Some(operand);
+                self.one_past = Some((operand, Some(span.lo)));
                 let place = self.place(operand);
                 self.check_taken(place, span);
                 Some(self.taken(place, span))
@@ -8688,7 +8716,9 @@ impl<'u> Body<'_, 'u> {
             let size = self.stride(pointee, span);
             let address = self.address;
             let one = self.build(span).iconst(address, 1);
-            self.step(old, one, false, size, !up, span)
+            let postfix = matches!(op, UnaryOp::PostInc | UnaryOp::PostDec);
+            let at = self.stepped_at(operand, postfix, span);
+            self.checked_step((old, one), (false, size), !up, at, span)
         } else if out.lane().is_float() {
             let format = repr::float_format_of(self.types(), self.target(), ty);
             let one = format.map_or(0, |format| Real::from_signed(1, format).0.to_bits());
@@ -8867,7 +8897,9 @@ impl<'u> Body<'_, 'u> {
         let amount = self.value(steps);
         let size = self.stride(self.pointee(ty), span);
         let signed = repr::is_signed(self.types(), self.target(), index);
-        let moved = self.step(base, amount, signed, size, op == BinaryOp::Sub, span);
+        let at = self.stepped_by((lhs, rhs), span);
+        let moved =
+            self.checked_step((base, amount), (signed, size), op == BinaryOp::Sub, at, span);
         // gcc folds a count written as a constant expression before its early object size pass
         // and nothing else, and that pass answers about a member differently for the two.
         if !self.integer_constant(steps) {
@@ -9527,6 +9559,9 @@ impl<'u> Body<'_, 'u> {
     fn bit_count(&mut self, operand: ExprId, count: BitCount, into: Type, span: Span) -> Value {
         let value = self.value(operand);
         let ty = self.func[value].ty;
+        if matches!(count, BitCount::Leading | BitCount::Trailing) {
+            self.check_builtin(value, count == BitCount::Leading, span);
+        }
         let counted = match count {
             BitCount::Leading => self.build(span).unary(Opcode::Ctlz, value, ty),
             BitCount::Trailing => self.build(span).unary(Opcode::Cttz, value, ty),
@@ -10843,7 +10878,7 @@ impl<'u> Body<'_, 'u> {
             let index = self.tast()[rhs].ty;
             let size = self.stride(self.pointee(computation), span);
             let signed = repr::is_signed(self.types(), self.target(), index);
-            self.step(old, right, signed, size, op == BinaryOp::Sub, span)
+            self.checked_step((old, right), (signed, size), op == BinaryOp::Sub, at, span)
         } else {
             let count = self.tast()[rhs].ty;
             self.check_arithmetic(
@@ -12042,6 +12077,7 @@ impl<'u> Body<'_, 'u> {
         // Where each argument's values start, so that a call the inliner may forward the anonymous
         // arguments of can say which values were one argument. See [`Func::set_arg_groups`].
         let mut starts = Vec::with_capacity(count + 1);
+        let mut nonnull = Vec::new();
         for index in 0..count {
             starts.push(values.len());
             let arg = tast[args][index];
@@ -12053,6 +12089,9 @@ impl<'u> Body<'_, 'u> {
                 }
                 Pass::Direct => {
                     let value = self.value(arg);
+                    if self.checks_nonnull_arg(named, index + 1) {
+                        nonnull.push((index + 1, value));
+                    }
                     values.push(value);
                 }
                 // A scalar that travels as the bits of something else, which is a floating point
@@ -12136,6 +12175,7 @@ impl<'u> Body<'_, 'u> {
             }
         }
 
+        self.check_nonnull_args(&nonnull, span);
         let direct = self.direct(callee, &plan, &actual, span);
         if let Some((symbol, _)) = &direct {
             if let Some(made) = self.small_bulk(callee, *symbol, &values, &plan, destination, span)

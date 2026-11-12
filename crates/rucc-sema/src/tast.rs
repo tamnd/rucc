@@ -274,6 +274,7 @@ pub struct Tast {
     sections: Map<DeclId, StrId>,
     function_names: Set<StrId>,
     alloc_sizes: Map<DeclId, AllocSize>,
+    nonnull: Map<DeclId, Vec<usize>>,
     patchable: Map<DeclId, (u32, u32)>,
     wasm_names: Map<DeclId, WasmNames>,
     ifuncs: Set<DeclId>,
@@ -670,6 +671,27 @@ impl Tast {
     /// of the declaration in sight at the call.
     pub fn record_alloc_size(&mut self, decl: DeclId, alloc: AllocSize) {
         self.alloc_sizes.insert(decl, alloc);
+    }
+
+    /// Records an argument that `__attribute__((nonnull))` said must not be null, counted from
+    /// one, or zero for a `nonnull` with no numbers, which says it of every pointer argument.
+    ///
+    /// A map beside the tree for the reason [`Tast::record_section`] is one. The checker warns
+    /// from its own copy, and `-fsanitize=nonnull-attribute` reads this one.
+    pub fn record_nonnull(&mut self, decl: DeclId, number: usize) {
+        let numbers = self.nonnull.entry(decl).or_default();
+        if !numbers.contains(&number) {
+            numbers.push(number);
+        }
+    }
+
+    /// Whether a `nonnull` attribute on this function says that its argument `number`, counted
+    /// from one, must not be null.
+    #[must_use]
+    pub fn is_nonnull_arg(&self, decl: DeclId, number: usize) -> bool {
+        self.nonnull
+            .get(&decl)
+            .is_some_and(|numbers| numbers.contains(&0) || numbers.contains(&number))
     }
 
     /// Records the room `__attribute__((patchable_function_entry(N, M)))` asked a function to open

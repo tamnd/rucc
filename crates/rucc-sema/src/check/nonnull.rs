@@ -77,6 +77,7 @@ impl Checker<'_> {
                 let args = &ast[attr.args];
                 if args.is_empty() {
                     self.advice.nonnull.entry(decl).or_default().every = true;
+                    self.tast.record_nonnull(decl, 0);
                     continue;
                 }
                 for &arg in args {
@@ -89,6 +90,7 @@ impl Checker<'_> {
                     };
                     if let Some(number) = number {
                         self.advice.nonnull.entry(decl).or_default().named.push(number);
+                        self.tast.record_nonnull(decl, number);
                     }
                 }
             }

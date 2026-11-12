@@ -578,6 +578,26 @@ impl DeclFlags {
     /// The same for `alignment`.
     pub const NO_UBSAN_ALIGNMENT: Self = Self(1 << 55);
 
+    /// The same for `object-size`.
+    pub const NO_UBSAN_OBJECT_SIZE: Self = Self(1 << 56);
+
+    /// The same for `pointer-overflow`.
+    pub const NO_UBSAN_POINTER_OVERFLOW: Self = Self(1 << 57);
+
+    /// The same for `nonnull-attribute`.
+    pub const NO_UBSAN_NONNULL_ATTRIBUTE: Self = Self(1 << 58);
+
+    /// The same for `returns-nonnull-attribute`.
+    pub const NO_UBSAN_RETURNS_NONNULL: Self = Self(1 << 59);
+
+    /// The same for `builtin`.
+    pub const NO_UBSAN_BUILTIN: Self = Self(1 << 60);
+
+    /// `returns_nonnull` was written on a declaration of this function, so a null pointer it
+    /// returns is what `-fsanitize=returns-nonnull-attribute` reports. Merged the way
+    /// [`Self::NO_INSTRUMENT`] is.
+    pub const RETURNS_NONNULL: Self = Self(1 << 61);
+
     /// `no_sanitize_address`, `no_address_safety_analysis`, or `no_sanitize` naming `address` or
     /// `kernel-address`, was written on a declaration of this function, so its accesses are not
     /// checked against the shadow. The kernel's `noinstr` says it. Merged the way
