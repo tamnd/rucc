@@ -31,6 +31,8 @@ _mm_popcnt_u32(unsigned int __X)
   return (int)__R;
 }
 
+/* x86-64 only, as in gcc's copy: `popcntq` is a sixty four bit instruction. */
+#ifdef __x86_64__
 static __inline__ long long __attribute__((__always_inline__, __target__("popcnt")))
 _mm_popcnt_u64(unsigned long long __X)
 {
@@ -38,5 +40,6 @@ _mm_popcnt_u64(unsigned long long __X)
   __asm__("popcntq %1, %0" : "=r"(__R) : "rm"(__X) : "cc");
   return (long long)__R;
 }
+#endif
 
 #endif /* __RUCC_POPCNTINTRIN_H */

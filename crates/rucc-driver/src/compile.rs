@@ -4553,6 +4553,43 @@ mod tests {
         assert!(said.contains(refusal), "{said}");
     }
 
+    /// The five intrinsics whose value is a sixty four bit general register are x86-64's alone, as
+    /// in gcc's headers. FreeBSD's aesni_ghash.c defines `_mm_insert_epi64` itself on i386, and the
+    /// shipped copy made that a redefinition. tamnd/rucc#4466.
+    #[test]
+    fn the_sixty_four_bit_intrinsics_are_left_out_on_i386() {
+        let source = concat!(
+            "#include <immintrin.h>\n",
+            "#include <popcntintrin.h>\n",
+            "#ifdef __x86_64__\n",
+            "__m128i i(__m128i a) { return _mm_insert_epi64(a, 1, 0); }\n",
+            "long long e(__m128i a) { return _mm_extract_epi64(a, 1); }\n",
+            "unsigned long long c(unsigned long long a) { return _mm_crc32_u64(a, 1); }\n",
+            "long long p(unsigned long long a) { return _mm_popcnt_u64(a); }\n",
+            "__m64 s(long long a) { return _mm_set_pi64x(a); }\n",
+            "#else\n",
+            "static inline __m128i _mm_insert_epi64(__m128i a, long long b, const int n) {\n",
+            "  return n ? _mm_insert_epi32(_mm_insert_epi32(a, b, 2), b >> 32, 3)\n",
+            "           : _mm_insert_epi32(_mm_insert_epi32(a, b, 0), b >> 32, 1);\n",
+            "}\n",
+            "__m128i i(__m128i a) { return _mm_insert_epi64(a, 1, 0); }\n",
+            "#ifdef _mm_extract_epi64\n",
+            "#error the macro is x86-64's\n",
+            "#endif\n",
+            "int _mm_extract_epi64, _mm_crc32_u64, _mm_popcnt_u64, _mm_set_pi64x;\n",
+            "#endif\n",
+        );
+        for triple in ["x86_64-unknown-freebsd", "i486--netbsdelf"] {
+            let mut opts = freestanding();
+            opts.target = triple.parse::<Triple>().unwrap();
+            let mut choices = rucc_target::Choices::new();
+            choices.read("sse4.2").expect("gcc knows sse4.2");
+            opts.isa = choices.over(opts.isa);
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "{triple}");
+        }
+    }
+
     /// libsodium's configure passes `-maes -mpclmul` and then includes `<wmmintrin.h>` by name,
     /// under the two pragmas. Each step is one instruction at `-O0` and at `-O2`. Without the flags
     /// the call is refused the way gcc refuses it, so the probe says no.

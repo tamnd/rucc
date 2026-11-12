@@ -634,10 +634,13 @@ _mm_set_pi32(int __d1, int __d0)
   return (__m64)(__v2si){ __d0, __d1 };
 }
 
+/* x86-64 only, as in gcc's copy. */
+#ifdef __x86_64__
 static __inline__ __m64 __attribute__((__always_inline__)) _mm_set_pi64x(long long __q)
 {
   return (__m64)(__v1di){ __q };
 }
+#endif
 
 static __inline__ __m64 __attribute__((__always_inline__))
 _mm_setr_pi8(char __b0, char __b1, char __b2, char __b3, char __b4, char __b5, char __b6,

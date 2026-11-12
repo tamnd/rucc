@@ -413,6 +413,9 @@ _mm_insert_epi32(__m128i __D, int __S, const int __N)
   return __R;
 }
 
+/* Only on x86-64, as in gcc's copy: i386 has no sixty four bit general register to hold the value,
+ * and code built for it, such as FreeBSD's aesni_ghash.c, defines the name itself. */
+#ifdef __x86_64__
 static __inline__ __m128i __attribute__((__always_inline__, __target__("sse4.1")))
 _mm_insert_epi64(__m128i __D, long long __S, const int __N)
 {
@@ -423,6 +426,7 @@ _mm_insert_epi64(__m128i __D, long long __S, const int __N)
           : "xmm0", "memory");
   return __R;
 }
+#endif
 
 static __inline__ int __attribute__((__always_inline__, __target__("sse4.1")))
 _mm_extract_epi8(__m128i __X, const int __N)
@@ -446,6 +450,7 @@ _mm_extract_epi32(__m128i __X, const int __N)
   return __R;
 }
 
+#ifdef __x86_64__
 static __inline__ long long __attribute__((__always_inline__, __target__("sse4.1")))
 _mm_extract_epi64(__m128i __X, const int __N)
 {
@@ -456,6 +461,7 @@ _mm_extract_epi64(__m128i __X, const int __N)
                        : "xmm0", "memory");
   return __R;
 }
+#endif
 
 /* ## The rest of SSE4.1
  *
@@ -852,17 +858,21 @@ _mm_crc32_u32(unsigned int __C, unsigned int __V)
 
 /* The only one whose running value is sixty four bits wide, because the instruction's is: the
  * sixty four bit form writes a whole register whose top half is always zero, and gcc's copy
- * hands that back as the `unsigned long long` it is. */
+ * hands that back as the `unsigned long long` it is. x86-64 only, as in gcc's copy. */
+#ifdef __x86_64__
 static __inline__ unsigned long long __attribute__((__always_inline__, __target__("crc32")))
 _mm_crc32_u64(unsigned long long __C, unsigned long long __V)
 {
   __asm__("crc32q %1, %0" : "+r"(__C) : "rm"(__V));
   return __C;
 }
+#endif
 
 /* SSE4.1's `pextrq`, the 64 bit lane N of X. Written as a lane read, which is what the instruction
  * does, since the vector is in memory here and the lane is one load away. A macro because N has to
  * be a constant, as it does for gcc. */
+#ifdef __x86_64__
 #define _mm_extract_epi64(X, N) ((long long)((__v2di)(__m128i)(X))[(N) & 1])
+#endif
 
 #endif /* __RUCC_SMMINTRIN_H */
