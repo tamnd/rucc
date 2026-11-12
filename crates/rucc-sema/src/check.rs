@@ -553,21 +553,10 @@ impl<'a> Checker<'a> {
             let Some(name) = self.cx.names.find(name) else { continue };
             let ty = match shape {
                 TypeName::Vector(lane, lanes) => {
-                    let elem = match lane {
-                        Lane::I8 => self.types.int(IntKind::SChar),
-                        Lane::U8 | Lane::P8 => self.types.int(IntKind::UChar),
-                        Lane::I16 => self.types.int(IntKind::Short),
-                        Lane::U16 | Lane::P16 => self.types.int(IntKind::UShort),
-                        Lane::I32 => self.types.int(IntKind::Int),
-                        Lane::U32 => self.types.int(IntKind::UInt),
-                        Lane::I64 => self.types.int(IntKind::Long),
-                        Lane::U64 | Lane::P64 => self.types.int(IntKind::ULong),
-                        Lane::F16 => self.types.float(FloatKind::Float16),
-                        Lane::F32 => self.types.float(FloatKind::Float),
-                        Lane::F64 => self.types.float(FloatKind::Double),
-                    };
+                    let elem = self.lane_type(lane);
                     self.types.vector(elem, u32::from(lanes))
                 }
+                TypeName::Scalar(lane) => self.lane_type(lane),
                 TypeName::Sizeless => {
                     let id = self.types.declare_record(RecordKind::Struct, Some(name));
                     self.types.record(id)
@@ -583,6 +572,23 @@ impl<'a> Checker<'a> {
                 }),
             };
             self.scopes.declare(name, Binding::Typedef(ty));
+        }
+    }
+
+    /// The C type one lane of a builtin vector is read as.
+    fn lane_type(&mut self, lane: Lane) -> TypeId {
+        match lane {
+            Lane::I8 => self.types.int(IntKind::SChar),
+            Lane::U8 | Lane::P8 => self.types.int(IntKind::UChar),
+            Lane::I16 => self.types.int(IntKind::Short),
+            Lane::U16 | Lane::P16 => self.types.int(IntKind::UShort),
+            Lane::I32 => self.types.int(IntKind::Int),
+            Lane::U32 => self.types.int(IntKind::UInt),
+            Lane::I64 => self.types.int(IntKind::Long),
+            Lane::U64 | Lane::P64 => self.types.int(IntKind::ULong),
+            Lane::F16 => self.types.float(FloatKind::Float16),
+            Lane::F32 => self.types.float(FloatKind::Float),
+            Lane::F64 => self.types.float(FloatKind::Double),
         }
     }
 

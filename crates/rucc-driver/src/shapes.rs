@@ -1417,6 +1417,7 @@ impl Walk<'_> {
         let fits = match builtin {
             TypeName::Vector(..) => matches!(kind, TypeKind::Vector { .. }),
             TypeName::Poly(_) => matches!(kind, TypeKind::Int(_)),
+            TypeName::Scalar(_) => matches!(kind, TypeKind::Int(_) | TypeKind::Float(_)),
             TypeName::Sizeless | TypeName::Float128 | TypeName::Fp16 | TypeName::BFloat16 => false,
         };
         fits.then_some(builtin)
@@ -1444,6 +1445,16 @@ impl Walk<'_> {
             }
             (TypeName::Poly(_), _) => {
                 Some(self.base_named(&spelled, Encoding::Unsigned, self.size(of)?))
+            }
+            // gcc makes each of these an integer or floating type of its own under the name, so
+            // the name is a base type in its debug information.
+            (TypeName::Scalar(lane), _) => {
+                let encoding = match lane {
+                    Lane::F16 | Lane::F32 | Lane::F64 => Encoding::Float,
+                    Lane::I8 | Lane::I16 | Lane::I32 | Lane::I64 => Encoding::Signed,
+                    _ => Encoding::Unsigned,
+                };
+                Some(self.base_named(&spelled, encoding, self.size(of)?))
             }
             _ => None,
         }

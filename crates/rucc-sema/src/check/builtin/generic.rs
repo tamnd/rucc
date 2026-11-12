@@ -324,6 +324,11 @@ impl Checker<'_> {
         if let Some(answer) = self.sse_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // The AArch64 Advanced SIMD builtins that NetBSD's `<arm_neon.h>` calls in place of
+        // gcc's header. In `check/builtin/neon.rs`.
+        if let Some(answer) = self.neon_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         // An operation on each lane of a vector, from clang. In `check/builtin/elementwise.rs`.
         if let Some(answer) = self.elementwise_builtin_call(name, args, span) {
             return Some(answer);
@@ -871,6 +876,7 @@ mod tests {
                 || crate::check::builtin::tgmath::is_family(feature.name)
                 || crate::check::builtin::shuffle::is_family(feature.name)
                 || crate::check::builtin::sse::is_family(feature.name)
+                || crate::check::builtin::neon::is_family(feature.name)
                 || crate::check::builtin::elementwise::is_family(feature.name)
                 || crate::check::builtin::apply::is_family(feature.name)
                 || crate::check::annotate::is_family(feature.name)
