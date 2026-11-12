@@ -1921,7 +1921,7 @@ pub fn compile_recording(
     // may come between one and its call. i386 at -Os and -Oz only, as gcc, and not with the
     // debugging information, which counts the frame from the stack pointer. See [`crate::pushes`].
     if std::ptr::eq(machine.shapes, &x86::MACHINE) && flags.goal == Goal::Size && !flags.debug {
-        pushes::arguments(
+        let pushed = pushes::arguments(
             &mut func,
             &stack.passing,
             machine.insts,
@@ -1929,6 +1929,22 @@ pub fn compile_recording(
             machine.conv,
             names,
         );
+        // A frame that was the outgoing area and nothing else is not wanted once the arguments
+        // are pushes. Not with a tail call, whose jump gives the frame back the way the epilogue
+        // does, not with the rows `wrapped` writes later, and not with a frame pointer, whose
+        // epilogue gives the frame back from it. See [`pushes::unframed`].
+        if pushed.calls > 0 && tails.is_empty() && wrapped.is_none() && !frame.frame_pointer() {
+            pushes::unframed(
+                &mut func,
+                frame.size(),
+                frame.outgoing(),
+                &pushed,
+                machine.insts,
+                machine.shapes,
+                machine.conv,
+                names,
+            );
+        }
     }
 
     // Once the blocks will not move again, since a head is a block a jump runs backwards to and
