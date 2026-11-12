@@ -5752,9 +5752,14 @@ impl Reader {
                     // from the end of the instruction they are the last of.
                     let addend = residue.constant + fixup.at as i64 - offset;
                     // A static name defined here needs no stub whichever section it is in, and
-                    // gas says so by asking for the plain distance to it rather than a call.
+                    // gas says so by asking for the plain distance to it rather than a call. An
+                    // ifunc is the exception: a call to one must go through the stub the linker
+                    // makes for it, and `ld` refuses the plain distance to one in position
+                    // independent code on i386. FreeBSD's lib32 `__vdso_gettc.c` calls a static
+                    // ifunc with `@PLT`.
                     let near = self.known.get(name).is_some_and(|&sym| {
                         self.syms[sym].binding == Binding::Local
+                            && self.syms[sym].sort != Sort::Ifunc
                             && matches!(self.syms[sym].at, Held::In { .. })
                     });
                     // The table less a label is a distance and not somewhere to go, in an address
@@ -10798,6 +10803,21 @@ nop
                 (11, "puts", Reference::Data, -4),
                 (16, "puts", Reference::Call, -4),
             ]
+        );
+    }
+
+    /// A static function is reached in place, but a static ifunc that a call asks the stub of
+    /// keeps the stub, as gas writes it. `ld` refuses `R_386_PC32` to an ifunc in a shared
+    /// library, and gcc writes `call f@PLT` for a call to one.
+    #[test]
+    fn an_i386_call_to_a_static_ifunc_keeps_the_stub() {
+        let read = i386(
+            "\t.text\nr:\tret\n\t.type f,@gnu_indirect_function\n\t.set f,r\n\
+             \tcall f@PLT\n\tcall f\n\tcall r@PLT\n",
+        );
+        assert_eq!(
+            relocs(&read, ".text"),
+            [(2, "f", Reference::Call, -4), (7, "f", Reference::Data, -4)]
         );
     }
 

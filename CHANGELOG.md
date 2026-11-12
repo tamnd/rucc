@@ -62,6 +62,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- On i386 a call with `@PLT` to a static ifunc now writes `R_386_PLT32`, as gas does. It wrote `R_386_PC32`, and `ld` refuses that with "unsupported non-PIC call to IFUNC" when it links a shared library. This stopped the lib32 `libsys.so` of the FreeBSD world, whose `__vdso_gettc.c` calls `__vdso_gettc_rdtsc` this way. (Part of tamnd/rucc-bsd#3)
 - On i386, the shipped headers no longer define `_mm_insert_epi64`, `_mm_extract_epi64`, `_mm_crc32_u64`, `_mm_popcnt_u64` and `_mm_set_pi64x`, as in gcc, which defines them only on x86-64. FreeBSD's aesni_ghash.c defines `_mm_insert_epi64` itself on i386, and failed with a redefinition (#4466)
 - On i386, the retpoline thunks of `-mindirect-branch=thunk`, `-mfunction-return=thunk` and their `thunk-inline` forms now use `%esp`, and the return thunk takes 4 bytes off the stack, as gcc's do. Before, they named `%rsp`, and the assembler refused them. 1503 units of the NetBSD i386 GENERIC kernel failed (#4465)
 - A `static` function that only the bound of a variable length array calls is now emitted. The bound is part of the type of the declaration, and the walk that finds the `static` functions a file uses did not look in types, so the object called the function and did not define it. FreeBSD's `mmcspi.c` declares `uint8_t txbuf[max(MMCSPI_POLL_LEN, 2)]`, and the aarch64 and riscv64 GENERIC kernels did not link for an undefined `max`. (Part of #4088)
