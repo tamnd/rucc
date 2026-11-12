@@ -2982,6 +2982,10 @@ pub struct Options {
     /// Whether a function is described to an unwinder at every instruction, from
     /// `-fasynchronous-unwind-tables` and `-fno-asynchronous-unwind-tables`.
     ///
+    /// The driver sets it to false for 32 bit x86 on a BSD, where gcc is configured with
+    /// `--enable-frame-pointer` and writes no table unless the line asks for one. Elsewhere it is
+    /// true.
+    ///
     /// True is the default, which is gcc's wherever anything reads the table, and the reason is
     /// that the programs that read it are not the ones being compiled. C++ exceptions,
     /// `backtrace`, a profiler sampling a stack and a crash handler printing one all walk frames

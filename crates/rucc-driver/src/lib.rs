@@ -1198,6 +1198,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut x87 = true;
     let mut fp_ret_in_387 = true;
     let mut x87_floats: Option<bool> = None;
+    // What `-fasynchronous-unwind-tables` and `-fno-asynchronous-unwind-tables` last said, if either
+    // was written. The default depends on the target, which the loop can still change.
+    let mut async_unwind_tables: Option<bool> = None;
     // Where the stack protector's canary is, which is put together after the loop because the
     // four flags that say it may come in any order and gcc lets the later one win for each.
     let mut guard_global: Option<bool> = None;
@@ -1912,8 +1915,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // whether either of them is standing. gcc arranges it the same way: the asynchronous
             // one is the default here and it implies the other, and a line that asks for a table
             // and against an asynchronous one gets a table.
-            "-fasynchronous-unwind-tables" => opts.async_unwind_tables = true,
-            "-fno-asynchronous-unwind-tables" => opts.async_unwind_tables = false,
+            "-fasynchronous-unwind-tables" => async_unwind_tables = Some(true),
+            "-fno-asynchronous-unwind-tables" => async_unwind_tables = Some(false),
             "-funwind-tables" => opts.unwind_tables = true,
             "-fno-unwind-tables" => opts.unwind_tables = false,
             // The other direction, which is a request rather than a description: the output is
@@ -4184,6 +4187,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         ));
     }
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
+    // After the loop, since `-m32` and `--target=` may come after the flag. gcc's config.gcc
+    // configures 32 bit x86 with `--enable-frame-pointer` on every system but GNU/Linux, Solaris,
+    // Cygwin, MinGW and Darwin, and that sets `USE_IX86_FRAME_POINTER`. A 32 bit unit then gets no
+    // asynchronous table unless the line asks for one. So the BSD gcc writes no FDE for a C
+    // function under `-m32` or on i386, and a library of only such units has no `.eh_frame_hdr`
+    // and no `PT_GNU_EH_FRAME`. 64 bit x86 and the other machines keep the table.
+    let i386_bsd = bsd && opts.target.arch == rucc_target::Arch::X86;
+    opts.async_unwind_tables = async_unwind_tables.unwrap_or(!i386_bsd);
     // After the loop, since whether `--64` or `-march=` is true of the target is a question about
     // the last `--target=`.
     let assembler = assembler_words(&asm_words, opts.target)?;
@@ -7359,6 +7370,37 @@ mod tests {
         let (opts, _) =
             compile(&["-c", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables", "a.c"]);
         assert!(!opts.unwinds(), "both were turned off and one stayed on");
+    }
+
+    /// The BSD gcc writes no asynchronous table for a 32 bit x86 unit, so a C library of FreeBSD's
+    /// lib32 has no `PT_GNU_EH_FRAME` (RR run 43194337450, 227 libraries).
+    #[test]
+    fn a_bsd_32_bit_unit_gets_no_table_unless_the_line_asks_for_one() {
+        let unit = |more: &[&str]| compile(&[&["-c", "a.c"], more].concat()).0;
+        for target in [
+            &["--target=x86_64-unknown-freebsd15.1", "-m32"][..],
+            &["--target=x86_64-unknown-netbsd", "-m32"],
+            &["--target=i486--netbsdelf"],
+            &["--target=i386-unknown-freebsd14.5"],
+        ] {
+            assert!(!unit(target).unwinds(), "{target:?}");
+            for ask in ["-fasynchronous-unwind-tables", "-funwind-tables", "-fexceptions"] {
+                assert!(unit(&[target, &[ask]].concat()).unwinds(), "{target:?} {ask}");
+            }
+            // The last of the pair wins, also when the target comes after it.
+            let line =
+                [&["-fno-asynchronous-unwind-tables", "-fasynchronous-unwind-tables"], target];
+            assert!(unit(&line.concat()).unwinds(), "{target:?}");
+        }
+        for target in [
+            &["--target=x86_64-unknown-freebsd15.1"][..],
+            &["--target=x86_64-unknown-netbsd"],
+            &["--target=aarch64-unknown-freebsd"],
+            &["--target=x86_64-linux-gnu", "-m32"],
+            &["--target=i686-linux-gnu"],
+        ] {
+            assert!(unit(target).unwinds(), "{target:?}");
+        }
     }
 
     #[test]
