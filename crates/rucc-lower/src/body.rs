@@ -12245,6 +12245,23 @@ impl<'u> Body<'_, 'u> {
             into
         };
 
+        // The callee is worked out before the arguments, as gcc does. C does not order the two,
+        // but the order decides where a pointer to call through is kept. An argument that is a
+        // call, as in the NetBSD `PHY_READ`, makes gcc keep the pointer in a register the call
+        // does not change, and the indirect branch thunk is named after that register. A call by
+        // name works out nothing but what is written before the name: `(enter(s), f)(x)` calls
+        // `enter` first.
+        let direct = self.direct(callee, &plan, &actual, span);
+        let target = match direct {
+            Some(_) => {
+                for effect in self.named_callee(callee).0 {
+                    self.discard(effect);
+                }
+                None
+            }
+            None => Some(self.value(callee)),
+        };
+
         // Where each argument's values start, so that a call the inliner may forward the anonymous
         // arguments of can say which values were one argument. See [`Func::set_arg_groups`].
         let mut starts = Vec::with_capacity(count + 1);
@@ -12347,7 +12364,6 @@ impl<'u> Body<'_, 'u> {
         }
 
         self.check_nonnull_args(&nonnull, span);
-        let direct = self.direct(callee, &plan, &actual, span);
         if let Some((symbol, _)) = &direct {
             if let Some(made) = self.small_bulk(callee, *symbol, &values, &plan, destination, span)
             {
@@ -12356,11 +12372,6 @@ impl<'u> Body<'_, 'u> {
         }
         let inst = match direct {
             Some((mut symbol, mut settled)) => {
-                // `(enter(s), f)(x)` still calls `enter`, after the arguments as the pointer
-                // would have been, and then `f` by name.
-                for effect in self.named_callee(callee).0 {
-                    self.discard(effect);
-                }
                 // The one call this rewrites rather than builds. A checking function handed an
                 // object size that says nothing is known is the function it guards with an
                 // argument nobody reads, so the argument goes and the plain name takes its place.
@@ -12406,7 +12417,7 @@ impl<'u> Body<'_, 'u> {
                 inst
             }
             None => {
-                let addr = self.value(callee);
+                let addr = target.expect("a call that is not direct has worked out its pointer");
                 let untracked = self.unit.untracked(ty);
                 let mut build = self.build(span);
                 let sig = build.func().add_signature(plan.signature.clone());

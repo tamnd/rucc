@@ -311,3 +311,43 @@ int say(struct ops *o, int x) { return o->log(\"x\", x); }
     assert!(lines.contains(&"jmp\t__x86_indirect_thunk_rdx"), "{text}");
     assert!(!text.contains("__x86_indirect_thunk_rcx"), "{text}");
 }
+
+/// A call through a pointer works out the pointer before the arguments, as gcc does. When an
+/// argument is a call, the pointer then has to live across that call, so it is kept in a
+/// register the call saves and the thunk is named for that register. This is the NetBSD
+/// `PHY_READ`, and the thunks of the `mii` drivers were the ones of `%r8` in rucc's objects and
+/// of `%r12` to `%r15` in gcc's.
+#[test]
+fn the_pointer_of_a_call_is_worked_out_before_an_argument_that_is_a_call() {
+    let source = "\
+struct ops { int (*read)(void *, int, int); };
+struct sc { struct ops *ops; void *dev; int phy; };
+void *parent(void *);
+int status(struct sc *sc, int r) { return sc->ops->read(parent(sc->dev), sc->phy, r) + 1; }
+";
+    let text = asm(&["-mindirect-branch=thunk-extern", "-mindirect-branch-register"], source);
+    let lines = insts(&text);
+    let call = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("call\t__x86_indirect_thunk_"))
+        .unwrap_or_else(|| panic!("no call through a thunk:\n{text}"));
+    assert!(["rbx", "r12", "r13", "r14", "r15"].contains(&call), "{text}");
+}
+
+/// The side effects of the callee come before the ones of the arguments, as gcc orders them.
+#[test]
+fn the_callee_is_worked_out_before_the_arguments() {
+    let source = "\
+struct ops { int (*f)(int); };
+struct ops *get(void); int arg(void); void enter(int); int named(int);
+int through(void) { return get()->f(arg()) + 1; }
+int comma(void) { return (enter(1), named)(arg()) + 1; }
+";
+    let text = asm(&[], source);
+    let calls: Vec<&str> = insts(&text)
+        .into_iter()
+        .filter_map(|line| line.strip_prefix("call\t"))
+        .filter(|name| ["get", "arg", "enter"].contains(name))
+        .collect();
+    assert_eq!(calls, ["get", "arg", "enter", "arg"], "{text}");
+}
