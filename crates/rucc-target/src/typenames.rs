@@ -85,6 +85,9 @@ pub enum TypeName {
     Sizeless,
     /// `_Float128`, under the name gcc had for it before the ISO one.
     Float128,
+    /// One of the scalars gcc registers for the AArch64 builtins to take pointers to, such as
+    /// `__builtin_aarch64_simd_si`, which C reads as the integer or floating type of the lane.
+    Scalar(Lane),
     /// `__fp16`, half precision that the promotions make a `float`.
     Fp16,
     /// `__bf16`, the brain float.
@@ -96,8 +99,9 @@ pub enum TypeName {
 
 /// The Advanced SIMD vectors under the names gcc gives them in `aarch64-simd-builtin-types.def`,
 /// which `arm_neon.h` builds `float32x4_t` and the rest out of, and then SVE's, and then the
-/// polynomial scalars `poly8_t` and the rest are built out of. The `__Bfloat16` ones are left out
-/// until `__bf16` is a type here.
+/// polynomial scalars `poly8_t` and the rest are built out of, and then the scalars of the
+/// builtins, which NetBSD's `<arm_neon.h>` casts a pointer to before it calls
+/// `__builtin_aarch64_ld1v4si`. The `__Bfloat16` ones are left out until `__bf16` is a type here.
 const AARCH64: &[(&str, TypeName)] = &[
     ("__Int8x8_t", TypeName::Vector(Lane::I8, 8)),
     ("__Int16x4_t", TypeName::Vector(Lane::I16, 4)),
@@ -144,6 +148,16 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__Poly16_t", TypeName::Poly(16)),
     ("__Poly64_t", TypeName::Poly(64)),
     ("__Poly128_t", TypeName::Poly(128)),
+    ("__builtin_aarch64_simd_qi", TypeName::Scalar(Lane::I8)),
+    ("__builtin_aarch64_simd_hi", TypeName::Scalar(Lane::I16)),
+    ("__builtin_aarch64_simd_si", TypeName::Scalar(Lane::I32)),
+    ("__builtin_aarch64_simd_di", TypeName::Scalar(Lane::I64)),
+    ("__builtin_aarch64_simd_uqi", TypeName::Scalar(Lane::U8)),
+    ("__builtin_aarch64_simd_uhi", TypeName::Scalar(Lane::U16)),
+    ("__builtin_aarch64_simd_usi", TypeName::Scalar(Lane::U32)),
+    ("__builtin_aarch64_simd_udi", TypeName::Scalar(Lane::U64)),
+    ("__builtin_aarch64_simd_sf", TypeName::Scalar(Lane::F32)),
+    ("__builtin_aarch64_simd_df", TypeName::Scalar(Lane::F64)),
     ("__fp16", TypeName::Fp16),
     ("__bf16", TypeName::BFloat16),
 ];

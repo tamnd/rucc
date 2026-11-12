@@ -136,7 +136,7 @@ impl Op {
 
 /// Whether reading this operand a second time reads the same value and does nothing else: a
 /// name, a constant, or a cast of one.
-fn plain(ast: &ast::Ast, expr: ast::ExprId) -> bool {
+pub(super) fn plain(ast: &ast::Ast, expr: ast::ExprId) -> bool {
     match ast[expr] {
         ast::Expr::Name(_) | ast::Expr::Int(_) | ast::Expr::Char(_) => true,
         ast::Expr::Cast { operand, .. } => plain(ast, operand),
@@ -239,7 +239,13 @@ impl Checker<'_> {
     }
 
     /// A vector operand read as the type the builtin takes.
-    fn sse_operand(&mut self, value: ExprId, ty: TypeId, name: &str, at: usize) -> Option<ExprId> {
+    pub(super) fn sse_operand(
+        &mut self,
+        value: ExprId,
+        ty: TypeId,
+        name: &str,
+        at: usize,
+    ) -> Option<ExprId> {
         let from = self.types.unqualified(self.tast[value].ty);
         let size = layout(&self.types, from, self.cx.target).map_or(0, |layout| layout.size);
         if !rucc_types::is_vector(&self.types, from) || size != 16 {
@@ -251,7 +257,7 @@ impl Checker<'_> {
     }
 
     /// The same bytes read as another vector type, which is a cast in C.
-    fn sse_as(&mut self, value: ExprId, ty: TypeId) -> ExprId {
+    pub(super) fn sse_as(&mut self, value: ExprId, ty: TypeId) -> ExprId {
         let from = self.types.unqualified(self.tast[value].ty);
         if compatible(&self.types, from, ty) {
             return value;
@@ -262,7 +268,7 @@ impl Checker<'_> {
 
     /// A vector of this type with every lane zero: two `long long` zeros, read as the type. All
     /// bits zero is zero in a lane of each type here.
-    fn sse_zero(&mut self, ty: TypeId, span: Span) -> ExprId {
+    pub(super) fn sse_zero(&mut self, ty: TypeId, span: Span) -> ExprId {
         let wide = self.types.int(IntKind::LongLong);
         let zero = self.constant(Const::Int(0), wide, span);
         let two = self.types.vector(wide, 2);
@@ -440,7 +446,7 @@ impl Checker<'_> {
     }
 
     /// The refusal of an operand that would have to be read twice and is not plain.
-    fn sse_read_twice(&mut self, name: &str, at: usize, span: Span) -> ExprId {
+    pub(super) fn sse_read_twice(&mut self, name: &str, at: usize, span: Span) -> ExprId {
         let what = format!(
             "argument {at} of '{name}' must be a name, a constant, or a cast of one when it is \
              not a constant"

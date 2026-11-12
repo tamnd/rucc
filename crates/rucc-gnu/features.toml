@@ -4756,6 +4756,128 @@ used_by = ["netbsd"]
 tests = ["rucc-sema::every_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_sse_builtins_give_the_lanes_of_the_instructions"]
 notes = "The two operands laid end to end, the second one low, shifted right by a count of bits that is a multiple of 8, and the low 16 bytes kept, as `_mm_alignr_epi8`."
 
+# The AArch64 Advanced SIMD builtins that NetBSD's `<crypto/arch/arm/arm_neon.h>` calls when the compiler says it is gcc, because the kernel builds with `-nostdinc` and cannot use the compiler's `<arm_neon.h>`. No signature, because each is answered with a read, a write, a shift or a mask, and not called. The vector operands are any vectors of 16 bytes, read as the type the builtin takes. The pointer of `ld1` and `st1` is read through as a vector that may alias anything and is aligned to one lane, and is cast from `__builtin_aarch64_simd_si` or `__builtin_aarch64_simd_qi`, which are type names on AArch64.
+[[feature]]
+name = "__builtin_aarch64_ld1v4si"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "Four `int` lanes read through the pointer, which may point at anything and need be aligned only to 4, as `vld1q_s32`."
+
+[[feature]]
+name = "__builtin_aarch64_ld1v16qi"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "Sixteen `signed char` lanes read through the pointer, which may point at anything and need not be aligned, as `vld1q_s8`."
+
+[[feature]]
+name = "__builtin_aarch64_st1v4si"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "Four `int` lanes written through the pointer, which may point at anything and need be aligned only to 4, as `vst1q_s32`. No value."
+
+[[feature]]
+name = "__builtin_aarch64_st1v16qi"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "Sixteen `signed char` lanes written through the pointer, which may point at anything and need not be aligned, as `vst1q_s8`. No value."
+
+[[feature]]
+name = "__builtin_aarch64_ashlv4si"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `int` lane shifted left by a count from 0 to 31, as `vshlq_n_s32`. A constant count out of that range is refused."
+
+[[feature]]
+name = "__builtin_aarch64_lshrv4si"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `int` lane shifted right with zeros in, by a count from 1 to 32, as `vshrq_n_u32`. A count of 32 gives zero. A constant count out of that range is refused."
+
+[[feature]]
+name = "__builtin_aarch64_lshrv16qi"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "Each `signed char` lane shifted right with zeros in, by a count from 1 to 8, as `vshrq_n_u8`. A count of 8 gives zero. A constant count out of that range is refused."
+
+[[feature]]
+name = "__builtin_aarch64_lshrv4si_uus"
+kind = "builtin"
+gcc_version = "12"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "gcc 12's unsigned form of `__builtin_aarch64_lshrv4si`, which takes and gives four `unsigned int` lanes."
+
+[[feature]]
+name = "__builtin_aarch64_lshrv16qi_uus"
+kind = "builtin"
+gcc_version = "12"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "gcc 12's unsigned form of `__builtin_aarch64_lshrv16qi`, which takes and gives sixteen `unsigned char` lanes."
+
+[[feature]]
+name = "__builtin_aarch64_ssli_nv4si"
+kind = "builtin"
+gcc_version = "4.8"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "The second operand's `int` lanes shifted left by a count from 0 to 31, with the low bits the shift emptied kept from the first, as `vsliq_n_s32`. A count that is not a constant is read twice, so it is a name, a constant or a cast of one."
+
+[[feature]]
+name = "__builtin_aarch64_usri_nv4si_uuus"
+kind = "builtin"
+gcc_version = "12"
+status = "implemented"
+signature = ""
+targets = ["aarch64"]
+used_by = ["netbsd"]
+tests = ["rucc-sema::every_neon_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::netbsd_neon_builtins_give_the_lanes_of_the_instructions"]
+notes = "The second operand's `unsigned int` lanes shifted right by a count from 1 to 32, with the high bits the shift emptied kept from the first, as `vsriq_n_u32`. A count that is not a constant is read twice, so it is a name, a constant or a cast of one."
+
 # The `__builtin_elementwise_*` builtins of clang that do an integer operation on each lane. No
 # signature, because the type of the answer is the type of the operands. clang 23 refuses an
 # operand that is not an integer or a vector of integers, and two operands of different types.

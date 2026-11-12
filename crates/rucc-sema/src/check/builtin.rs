@@ -78,6 +78,7 @@ mod generic;
 mod jump;
 mod math;
 mod msvc;
+mod neon;
 mod overflow;
 mod pack;
 mod parts;
