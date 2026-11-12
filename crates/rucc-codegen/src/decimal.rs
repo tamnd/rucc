@@ -24,7 +24,7 @@ use rucc_base::Interner;
 use rucc_ir::{Extra, Float, FloatPred, Func, Imm, Inst, InstData, IntPred, Opcode, Type};
 use rucc_target::AbiDescription;
 
-use crate::quad::{ahead_const, becomes, call, flipped, into_call, written};
+use crate::quad::{ahead_const, becomes, call, flipped, into_call, sign_flipped, written};
 
 /// The width the comparison routines answer in, and the narrower of the two integer widths the
 /// conversion routines take.
@@ -34,14 +34,14 @@ const NARROW: u32 = 32;
 ///
 /// The instructions are collected before any of them is touched, for the reason [`crate::quad`]
 /// gives: a rewrite puts instructions in front of the one it replaces.
-pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription) {
+pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, word: u32) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
             Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv => {
                 arithmetic(func, names, abi, inst);
             }
-            Opcode::FNeg => negate(func, names, abi, inst),
+            Opcode::FNeg => negate(func, inst, word),
             Opcode::FCmp => compare(func, names, abi, inst),
             Opcode::FPExt | Opcode::FPTrunc => convert(func, names, abi, inst),
             Opcode::SIToFP | Opcode::UIToFP => from_integer(func, names, abi, inst),
@@ -97,17 +97,15 @@ fn arithmetic(func: &mut Func, names: &mut Interner, abi: &'static AbiDescriptio
 /// The negation, which is only the sign bit at every width.
 ///
 /// At thirty two and sixty four bits that is [`crate::expand::floats`]'s exclusive or, which reads
-/// the bits by width and so is right for a decimal as it stands. At a hundred and twenty eight there
-/// is no register to do it in, and `__negtf2` is a routine that flips bit one hundred and twenty
-/// seven and reads nothing else, in libgcc's soft float and in compiler-rt alike, which is the whole
-/// of a decimal negation too.
-fn negate(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
+/// the bits by width and so is right for a decimal as it stands. At a hundred and twenty eight bits
+/// it is the same bit turned over in the frame, as [`crate::quad`] does for a binary float, and no
+/// call: compiler-rt has no `__negtf2`.
+fn negate(func: &mut Func, inst: Inst, word: u32) {
     let Some(ty) = produced(func, inst) else { return };
-    let Some(&arg) = func[func[inst].args].first() else { return };
     if decimal(ty) != Some("td") {
         return;
     }
-    into_call(func, names, abi, inst, "__negtf2", &[arg]);
+    sign_flipped(func, inst, word);
 }
 
 /// A comparison, as the call that answers it and the test of that answer against zero.
@@ -290,7 +288,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let made = make(&mut build, &args);
         build.ret(&[made]);
-        calls(&mut func, &mut names, x86_64::SYSV.abi);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, 8);
         printed(&func, &mut names)
     }
 
@@ -308,6 +306,18 @@ mod tests {
             assert!(text.contains(name), "{text}");
             assert!(!text.contains("fadd"), "{text}");
         }
+    }
+
+    /// A `_Decimal128` negation is its sign bit turned over and no call, since compiler-rt has no
+    /// `__negtf2`.
+    #[test]
+    fn a_wide_negation_is_the_sign_bit_turned_over() {
+        let ty = Type::float(Float::D128);
+        let text = after(&[ty], ty, |build, args| build.unary(Opcode::FNeg, args[0], ty));
+        assert!(!text.contains("call"), "{text}");
+        assert!(!text.contains("fneg"), "{text}");
+        assert!(text.contains("= xor "), "{text}");
+        assert!(text.contains("iconst.i64 -9223372036854775808"), "{text}");
     }
 
     #[test]

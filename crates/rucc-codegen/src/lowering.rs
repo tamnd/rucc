@@ -411,7 +411,7 @@ impl Step {
             }
             Self::Overflows => expand::overflows(func, conv.word * 8),
             Self::BrainFloats => brain::floats(func),
-            Self::Decimals => decimal::calls(func, names, conv.abi),
+            Self::Decimals => decimal::calls(func, names, conv.abi, conv.word),
             Self::HalfFloats => half::calls(func, names, conv.abi, built.converts),
             Self::Halves => return wide::halves(func, names, conv),
             Self::Widths => return widths::integers(func, conv),

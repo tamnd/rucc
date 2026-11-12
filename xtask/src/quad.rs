@@ -43,20 +43,19 @@ use crate::{Result, root};
 const TASK: &str = "quad";
 
 /// The routines an operation at this format becomes a call to, which is every operation the format
-/// has.
+/// has but the negation. That one is the sign bit turned over, as gcc and clang write it.
 ///
-/// The arithmetic and the negation are five, the comparisons are seven, the conversions against the
-/// two narrower floats are four, and the conversions against an integer are twelve, a signed and an
+/// The arithmetic is four, the comparisons are seven, the conversions against the two narrower
+/// floats are four, and the conversions against an integer are twelve, a signed and an
 /// unsigned one at thirty two bits, at sixty four and at a hundred and twenty eight in each
 /// direction. The fixture reaches all of them, which for the seventh comparison takes
 /// `__builtin_isunordered`: no operator C has asks only whether two values can be ordered, because
 /// each of the six has an answer for an unordered pair built into which routine it calls.
-const ROUTINES: [&str; 28] = [
+const ROUTINES: [&str; 27] = [
     "__addtf3",
     "__subtf3",
     "__multf3",
     "__divtf3",
-    "__negtf2",
     "__eqtf2",
     "__netf2",
     "__lttf2",

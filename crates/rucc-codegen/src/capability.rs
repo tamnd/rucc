@@ -384,7 +384,6 @@ pub static LIBCALLS: &[(Opcode, &str, &str)] = &[
     (Opcode::FSub, "f128", "__subtf3"),
     (Opcode::FMul, "f128", "__multf3"),
     (Opcode::FDiv, "f128", "__divtf3"),
-    (Opcode::FNeg, "f128", "__negtf2"),
     // A comparison is one call per predicate and a test of the integer it gives back, which is why
     // the pass keeps the integer predicate beside the name and this list holds only the name.
     (Opcode::FCmp, "oeq.f128", "__eqtf2"),
