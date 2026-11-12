@@ -27,6 +27,7 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 /// Each of the six at widths of 8, 16, 32, 37, 64 and 128 bits, read through `volatile` so that
 /// the count is made when the program runs, and a few that must fold where a constant is wanted.
 const PROGRAM: &str = r#"
@@ -73,6 +74,7 @@ int main(void) {
 }
 "#;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 /// What gcc 15 prints for [`PROGRAM`], at every level.
 const PRINTED: &str = "7\n14\n24\n23\n27\n125\n35\n-7\n0\n100\n0\n99\n1\n8\n2\n0\n0\n2\n1\n0\n1\n\
                        6\n127\n14\n34\n127\n91\n29 1\n";

@@ -52,7 +52,13 @@ fn compile(source: &str, name: &str, out: &str) -> std::process::Output {
     let path = dir.join("one.c");
     std::fs::write(&path, source).expect("the fixture can be written");
     let mut command = Command::new(env!("CARGO_BIN_EXE_rucc"));
-    command.args(["--target=i486--netbsdelf", "-ffreestanding", "-Os"]);
+    // An i386 unit on a BSD writes no asynchronous unwind table unless it is asked for one.
+    command.args([
+        "--target=i486--netbsdelf",
+        "-ffreestanding",
+        "-Os",
+        "-fasynchronous-unwind-tables",
+    ]);
     if out == "-" {
         command.args(["-S", "-o", "-"]);
     } else {

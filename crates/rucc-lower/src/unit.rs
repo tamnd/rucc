@@ -382,7 +382,7 @@ pub struct Context<'a> {
     ///
     /// The driver says no under `-pg` and `-finstrument-functions`, which hand a hook the function
     /// and its caller. gcc says no under `-pg` without `-mfentry`. The rest of the question is
-    /// asked here, for each function. See [`Unit::takes_registers`].
+    /// asked here, for each function, by `Unit::takes_registers`.
     pub local_registers: bool,
     /// The extensions the command line builds for, which a function's own `target` attribute
     /// stands in place of.
