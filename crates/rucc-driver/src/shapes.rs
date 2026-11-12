@@ -997,7 +997,14 @@ impl Walk<'_> {
         let shape = match ty.kind {
             TypeKind::Pointer(to) => {
                 let size = self.size(id)?;
-                Shape::Pointer { to: self.over_or_void(to, name, of)?, size }
+                let to = match self.decayed(to, base) {
+                    Some(extra) => match self.element_of(name, of) {
+                        Some(elem) => Some(self.qualify(elem, extra)),
+                        None => self.over_or_void(to, name, of)?,
+                    },
+                    None => self.over_or_void(to, name, of)?,
+                };
+                Shape::Pointer { to, size }
             }
             TypeKind::Array { elem, len } => {
                 let count = match len {
@@ -1019,6 +1026,48 @@ impl Walk<'_> {
         let at = self.out.len();
         self.out.push(shape);
         Some(at)
+    }
+
+    /// The qualifiers a pointer's target has over the elements of `base`, where `base` is an array
+    /// and the target is its element, and nothing where it is not.
+    ///
+    /// That is a parameter written with a typedef name for an array, which C makes a pointer to
+    /// the element: `resp_t r` for `typedef u32 resp_t[4]` is a `u32 *`.
+    fn decayed(&self, to: TypeId, base: Type) -> Option<Qualifiers> {
+        let TypeKind::Array { elem, .. } = base.kind else { return None };
+        let (to, elem) = (spaceless(self.types.get(to)), spaceless(self.types.get(elem)));
+        (to.kind == elem.kind && to.quals.has(elem.quals)).then(|| to.quals.without(elem.quals))
+    }
+
+    /// The entry for the elements of the array a typedef name stands for, which is what gcc points
+    /// a parameter written with the name at once C has made a pointer of it. So `resp_t r` is a
+    /// pointer to the `u32` entry the name's array is of, and not to `unsigned int`.
+    fn element_of(&mut self, name: Symbol, of: TypeId) -> Option<usize> {
+        let mut at = self.alias(name, of)?;
+        loop {
+            match self.out[at] {
+                Shape::Alias { of: Some(of), .. } => at = of,
+                Shape::Array { of, .. } => return Some(of),
+                _ => return None,
+            }
+        }
+    }
+
+    /// An entry with these qualifiers over it, `const` outermost, the order [`Walk::layered`]
+    /// writes them in.
+    fn qualify(&mut self, at: usize, quals: Qualifiers) -> usize {
+        let mut at = at;
+        for (mask, which) in [
+            (Qualifiers::RESTRICT, Qualifier::Restrict),
+            (Qualifiers::VOLATILE, Qualifier::Volatile),
+            (Qualifiers::CONST, Qualifier::Const),
+        ] {
+            if quals.has(mask) {
+                self.out.push(Shape::Qualified { which, of: Some(at) });
+                at = self.out.len() - 1;
+            }
+        }
+        at
     }
 
     /// Whether `ty` is the function `base` under another calling convention, as
