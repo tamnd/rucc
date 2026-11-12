@@ -52,8 +52,8 @@ fn listing_of(source: &str, name: &str, extra: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .args(["--target=i386-unknown-freebsd15.1", "-ffreestanding"])
         .args(BOOT)
-        .args(extra)
         .args(["-fno-asynchronous-unwind-tables", "-S", "-o", "-"])
+        .args(extra)
         .arg(&path)
         .output()
         .expect("the compiler is built before its own tests run");
@@ -259,4 +259,118 @@ fn minus_one_is_an_or_into_the_register_at_os() {
     let text = listing_of(MINUS, "minus-o2", &["-O2"]);
     let fail = body(&text, "fail");
     assert!(fail.contains(&"movl\t$-1, %eax"), "the move reads nothing at -O2\n{text}");
+}
+
+/// A local in the frame across a call whose arguments are pushed, which is a frame with more in it
+/// than the outgoing area and a local a debugger finds from the call frame address.
+const LOCAL: &str = "\
+int read(int, char *, int);
+int sum(int n) {
+  char buf[16];
+  int s = 0;
+  for (int i = 0; i < n; i++) {
+    read(i, buf, n);
+    s += buf[i & 15];
+  }
+  return s;
+}
+";
+
+/// A store to a static that nothing reads, as `boot2` does with its `dmadat`. The store goes, and
+/// the negation that only it read must go with it under `-g` too.
+const UNREAD: &str = "\
+extern unsigned int base;
+static char *at;
+void start(void) { at = (char *)(0 - base); }
+";
+
+/// That source built into an object with `boot2`'s flags and those.
+fn object_of(source: &str, name: &str, extra: &[&str]) -> Vec<u8> {
+    let dir =
+        std::env::temp_dir().join(format!("rucc-i386-boot-object-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, source).expect("the fixture can be written");
+    let object = dir.join("one.o");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=i386-unknown-freebsd15.1", "-ffreestanding"])
+        .args(BOOT)
+        .args(["-fno-asynchronous-unwind-tables", "-ffunction-sections", "-c", "-o"])
+        .arg(&object)
+        .args(extra)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let read = std::fs::read(&object);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+    read.expect("the object was written")
+}
+
+/// The name and the bytes of each code section of a 32-bit ELF object, in the order of its
+/// section headers. `e_shoff` is at 0x20, `e_shentsize`, `e_shnum` and `e_shstrndx` follow at
+/// 0x2e, and a section header has its name at 0, its offset at 16 and its size at 20.
+fn code_of(object: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let two = |at: usize| usize::from(u16::from_le_bytes([object[at], object[at + 1]]));
+    let four = |at: usize| {
+        let bytes = object[at..at + 4].try_into().expect("four bytes");
+        usize::try_from(u32::from_le_bytes(bytes)).expect("a 32-bit offset fits")
+    };
+    let (start, size, count, names) = (four(0x20), two(0x2e), two(0x30), two(0x32));
+    let strings = four(start + names * size + 16);
+    (0..count)
+        .map(|which| start + which * size)
+        .filter_map(|header| {
+            let name = &object[strings + four(header)..];
+            let end = name.iter().position(|&byte| byte == 0).expect("a name ends");
+            let name = String::from_utf8_lossy(&name[..end]).into_owned();
+            let bytes = object[four(header + 16)..][..four(header + 20)].to_vec();
+            (name == ".text" || name.starts_with(".text.")).then_some((name, bytes))
+        })
+        .collect()
+}
+
+#[test]
+fn the_code_is_the_same_with_the_debugging_information_at_os() {
+    let fixtures = [
+        ("spare", SOURCE),
+        ("branches", BRANCHES),
+        ("unlikely", UNLIKELY),
+        ("passed", PASSED),
+        ("minus", MINUS),
+        ("local", LOCAL),
+        ("unread", UNREAD),
+    ];
+    for (name, source) in fixtures {
+        let plain = code_of(&object_of(source, &format!("{name}-plain"), &[]));
+        let debug = code_of(&object_of(source, &format!("{name}-g"), &["-g"]));
+        assert!(!plain.is_empty(), "{name}: the object has code");
+        assert_eq!(plain, debug, "{name}: -g changed the code");
+    }
+}
+
+/// With `-g` the pushes run, so the unwind table gets a row for each push and one for the way
+/// back. Asked for, since i386 FreeBSD has no asynchronous table by default, and without a table
+/// a unit has no rows (tamnd/rucc#4519).
+#[test]
+fn the_unwind_rows_follow_each_push_and_the_way_back_with_g_at_os() {
+    let text = listing_of(PASSED, "pushed-g", &["-g", "-fasynchronous-unwind-tables"]);
+    let say = body(&text, "say");
+    let pushes: Vec<usize> = say
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("pushl"))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(pushes.len(), 3, "the format and both numbers are pushed\n{text}");
+    for (count, &at) in pushes.iter().enumerate() {
+        let row = format!(".cfi_def_cfa_offset {}", 8 + 4 * count);
+        assert_eq!(say.get(at + 1), Some(&row.as_str()), "a row behind each push\n{text}");
+    }
+    let add = say.iter().position(|&line| line == "addl\t$12, %esp").expect("the add is there");
+    assert_eq!(
+        say.get(add + 1),
+        Some(&".cfi_def_cfa_offset 4"),
+        "and one for the way back\n{text}"
+    );
 }
