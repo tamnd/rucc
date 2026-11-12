@@ -1982,7 +1982,22 @@ impl Writer<'_> {
                 let failed = self.func.create_block();
                 let call = self.opcode(self.insts.call);
                 let symbol = self.names.intern(protect.guard.fail);
-                self.func.build(failed, call).symbol(symbol).finish();
+                // A call through the procedure linkage table wants the table's address in
+                // `%ebx`. The block does not come back, so it puts it there itself, as gcc's
+                // NetBSD code does with the register the function already has it in.
+                let linked = protect.guard.linked.then_some(self.insts.table).flatten();
+                if let Some(table) = linked {
+                    let opcode = self.opcode(x86_64::TEMPLATE);
+                    let text = self.names.intern(&table(x86_64::RBX));
+                    let inst = self.func.build(failed, opcode).symbol(text);
+                    inst.operand(Operand::write(Reg::physical(x86_64::RBX), class)).finish();
+                }
+                let inst = self.func.build(failed, call).symbol(symbol);
+                if linked.is_some() {
+                    inst.flags(Flags::PLT).finish();
+                } else {
+                    inst.finish();
+                }
                 self.func.set_weight(failed, Weight::NEVER);
                 self.failed = Some(failed);
                 failed
@@ -3420,7 +3435,15 @@ mod tests {
         // to the symbol from the instruction, like gcc's `%gs:__ref_stack_chk_guard(%rip)`. The
         // check compares with it there.
         assert_eq!(
-            reads(Guard { segment, symbol, table: false, system: false, at: 0, fail }),
+            reads(Guard {
+                segment,
+                symbol,
+                table: false,
+                system: false,
+                at: 0,
+                fail,
+                linked: false
+            }),
             [
                 "$r11 = x64.mov_rm_64 [$rsp + 16]",
                 "$r11 = x64.cmp_set_ne_rm_64 $r11, [gs:@__ref_stack_chk_guard]"
@@ -3430,7 +3453,15 @@ mod tests {
         // table first and the load through the segment is from the register, so the check reads
         // the word into the second register and compares the two.
         assert_eq!(
-            reads(Guard { segment, symbol, table: true, system: false, at: 0, fail }),
+            reads(Guard {
+                segment,
+                symbol,
+                table: true,
+                system: false,
+                at: 0,
+                fail,
+                linked: false
+            }),
             [
                 "$r11 = x64.mov_rm_64 [got @__ref_stack_chk_guard]",
                 "$r11 = x64.mov_rm_64 [gs:$r11]",
