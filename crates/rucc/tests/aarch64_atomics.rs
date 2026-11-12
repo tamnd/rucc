@@ -79,6 +79,10 @@ void store32(volatile u32 *p, u32 v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST);
 void store64(volatile u64 *p, u64 v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
 u32 acquire32(volatile u32 *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
 void release32(volatile u32 *p, u32 v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+_Bool load_bool(volatile _Bool *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+void store_bool(volatile _Bool *p, _Bool v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+_Bool read_flag(_Atomic _Bool *p) { return *p; }
+void set_flag(_Atomic _Bool *p) { *p = 1; }
 int buffered(volatile int *mine, volatile int *theirs) { __sync_fetch_and_add(mine, 1); return *theirs; }
 ";
 
@@ -120,6 +124,11 @@ const EXPECTED: &[(&str, &[&str])] = &[
     ("store64", &["stlr x"]),
     ("acquire32", &["ldar w"]),
     ("release32", &["stlr w"]),
+    // A `_Bool` is a byte, in memory and in the register.
+    ("load_bool", &["ldarb w"]),
+    ("store_bool", &["stlrb w"]),
+    ("read_flag", &["ldarb w"]),
+    ("set_flag", &["stlrb w"]),
     ("buffered", &["ldaxr w", "stlxr w", "dmb ish"]),
 ];
 
