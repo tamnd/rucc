@@ -1608,6 +1608,7 @@ impl Walk<'_> {
                 (Opcode::Load | Opcode::ObjectSize, 0)
                 | (Opcode::Memcpy | Opcode::Memmove, 1)
                 | (Opcode::LifetimeEnd | Opcode::ICmp, _) => {}
+                (Opcode::Call, 1) if self.fill(inst) == Some(true) => {}
                 // A step to another part of the local, whose uses are looked at in turn.
                 (Opcode::PtrAdd, 0)
                     if data.first_result.is_some_and(|step| {
@@ -1626,6 +1627,12 @@ impl Walk<'_> {
                 // walk cannot read, and it is fine for as long as a later one is the one the
                 // load sees.
                 (Opcode::Memset, 0) => stores.push((inst, from)),
+                // A fortified header writes a fill or a copy as a call to its `_chk` form, which
+                // is still a call when this runs. FreeBSD's `recvmsg` clears its `msghdr` with
+                // `__memset_chk` before it sets `msg_name`, and gcc reads that store through the
+                // call. The address the call gives back is a step of none into the local, so its
+                // uses are looked at as well.
+                (Opcode::Call, 0) if self.fill(inst).is_some() => stores.push((inst, from)),
                 _ => away.push(inst),
             }
         }
@@ -1781,6 +1788,13 @@ impl Walk<'_> {
                 let args = &self.func[data.args];
                 let place = match data.opcode {
                     Opcode::Alloca if args.is_empty() => (value, 0),
+                    Opcode::Call if self.fill(inst).is_some() => {
+                        let Some(&place) = args.first().and_then(|base| places.within.get(base))
+                        else {
+                            continue;
+                        };
+                        place
+                    }
                     Opcode::PtrAdd => {
                         let Some(&(local, from)) =
                             args.first().and_then(|base| places.within.get(base))
@@ -2303,22 +2317,8 @@ impl Walk<'_> {
     /// they wrote. `strchr (s, 0)` gives back the end of `s`. A `strchr` for any other character
     /// may give back a null pointer, and gcc does not follow it either.
     fn into(&self, call: Inst) -> Option<Value> {
-        let library = self.library?;
-        let data = &self.func[call];
-        let Extra::Call(info) = data.extra else { return None };
-        let callee = self.func[info].callee?;
-        // The front end calls a `_chk` function that a fortified header names without declaring
-        // it, so the module has nothing for that name.
-        let spelled = match self.module.lookup(callee) {
-            Some(SymbolRef::Func(id)) => self.module[id].spelled.unwrap_or(callee),
-            None => callee,
-            Some(_) => return None,
-        };
-        let name = self.names.resolve(spelled);
-        if library.iter().any(|it| it == name) {
-            return None;
-        }
-        let args = &self.func[data.args];
+        let name = self.standard(call)?;
+        let args = &self.func[self.func[call].args];
         match name {
             "memcpy" | "memmove" | "memset" | "mempcpy" | "strcpy" | "stpcpy" | "strncpy"
             | "stpncpy" | "strcat" | "strncat" | "__memcpy_chk" | "__memmove_chk"
@@ -2330,6 +2330,33 @@ impl Walk<'_> {
                 let (imm, _) = self.number(*args.get(1)?, NUMBER)?;
                 (imm.unsigned() == 0).then_some(args[0])
             }
+            _ => None,
+        }
+    }
+
+    /// The name of the standard function a call is read as, where it calls one by name that
+    /// `-fno-builtin` did not take away.
+    fn standard(&self, call: Inst) -> Option<&str> {
+        let library = self.library?;
+        let Extra::Call(info) = self.func[call].extra else { return None };
+        let callee = self.func[info].callee?;
+        // The front end calls a `_chk` function that a fortified header names without declaring
+        // it, so the module has nothing for that name.
+        let spelled = match self.module.lookup(callee) {
+            Some(SymbolRef::Func(id)) => self.module[id].spelled.unwrap_or(callee),
+            None => callee,
+            Some(_) => return None,
+        };
+        let name = self.names.resolve(spelled);
+        (!library.iter().any(|it| it == name)).then_some(name)
+    }
+
+    /// For a call to a library fill or copy, which writes what its first argument points at and
+    /// gives that address back, whether it also reads what its second argument points at.
+    fn fill(&self, call: Inst) -> Option<bool> {
+        match self.standard(call)? {
+            "memset" | "__memset_chk" => Some(false),
+            "memcpy" | "memmove" | "__memcpy_chk" | "__memmove_chk" => Some(true),
             _ => None,
         }
     }
@@ -2773,6 +2800,42 @@ block5(%17: ptr):
             )
         };
         assert_eq!(answers(&body("16"), true), [16, 768]);
+    }
+
+    /// FreeBSD's fortified `recvmsg` clears its `msghdr` with `__memset_chk`, sets `msg_name`, and
+    /// asks how large `msg_name` is. The clearing call writes the local and gives its address
+    /// back, and the load still reads the store after it. Where the address the call gives back
+    /// goes to another call before the load, that call may write the local, and the answer is
+    /// not known.
+    #[test]
+    fn a_load_reads_the_store_after_a_fortified_clearing_call() {
+        let body = |between: &str| {
+            format!(
+                "
+func @malloc(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+
+func @f(), linkage(external) {{
+block0:
+    %0 = alloca, size 16, align 8
+    %1 = iconst.i32 0
+    %2 = iconst.i64 16
+    %3 = call @__memset_chk(%0, %1, %2, %2) : (ptr, i32, i64, i64) -> ptr
+    %4 = iconst.i64 8
+    %5 = ptr_add %0, %4
+    %6 = iconst.i64 24
+    %7 = call @malloc(%6) : (i64) -> ptr
+    store %7 -> %5, align 8
+    {between}
+    %8 = load.ptr %5, align 8
+    %9 = object_size.i64 %8, kind 0
+    call @use(%9) : (i64)
+    return
+}}
+"
+            )
+        };
+        assert_eq!(answers(&body(""), true), [24, 24]);
+        assert_eq!(answers(&body("call @keep(%3) : (ptr)"), true), [24, -1]);
     }
 
     /// A pointer chosen by a branch between a local and a global has the larger of what the two
