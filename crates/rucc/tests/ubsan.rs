@@ -741,6 +741,7 @@ int main(void) {
 /// What gcc 13 tells the runtime for [`POINTED`]: the line and the column, the alignment as a
 /// power of two, what the access is, what the descriptor says, the type and whether the pointer
 /// was passed.
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
 const POINTED_GCC: &str = "load
 13:27 2 0 ffff 'int' 1
 store
