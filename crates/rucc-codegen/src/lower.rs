@@ -4651,8 +4651,8 @@ impl<'a> Lowering<'a> {
             .at(span)
             .symbol(text)
             .operand(mir::Operand::write(reg, gpr).with(Constraint::Fixed(returned)));
-        for &at in conv.int_order {
-            if !conv.preserves_int(at) && at != returned {
+        for at in conv.int_clobbered() {
+            if at != returned {
                 build = build.operand(mir::Operand::write(mir::Reg::physical(at), conv.int_class));
             }
         }
@@ -8691,14 +8691,14 @@ impl<'a> Lowering<'a> {
     /// statement calls is an ordinary function of the platform.
     fn lost(&self, list: &[AsmOperand<'_>]) -> Vec<(PhysReg, RegClass, Option<usize>)> {
         let conv = self.conv.under(Convention::Target).unwrap_or(self.conv);
-        let ints = conv.int_order.iter().filter(|&&reg| !conv.preserves_int(reg));
+        let ints = conv.int_clobbered();
         let sses = conv.sse_order.iter().filter(|&&reg| !conv.preserves_sse(reg));
         let written = |reg, class| {
             list.iter().position(|operand| {
                 operand.result.is_some() && self.pinned_here(operand) == Some((reg, class))
             })
         };
-        ints.map(|&reg| (reg, conv.int_class, written(reg, conv.int_class)))
+        ints.map(|reg| (reg, conv.int_class, written(reg, conv.int_class)))
             .chain(sses.map(|&reg| (reg, conv.sse_class, written(reg, conv.sse_class))))
             .collect()
     }

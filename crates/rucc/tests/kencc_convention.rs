@@ -105,6 +105,39 @@ fn no_function_keeps_a_frame_pointer() {
     }
 }
 
+/// `fmtfmt` in the `libc` of 9front read its verb out of `rbp` after a call of `_fmtlock`, and so
+/// every verb of `print` came out as `%s%` in each program that rucc built.
+#[test]
+fn a_call_writes_rbp_so_an_argument_that_arrived_there_is_not_read_from_it_after() {
+    let source = "extern void g(void);\nextern int h(int);\nint tab[] = {1, 2, 3, 0};\n\
+                  int f(int c) { g(); return c; }\n\
+                  int k(int c) { int *p; g(); for(p = tab; *p; p++) if(*p == c) return h(*p); \
+                  return -1; }\n";
+    for level in ["-O0", "-O1", "-O2"] {
+        let (ok, asm, err) = compile("clobber", level, source);
+        assert!(ok, "{level}: {err}");
+        for name in ["f", "k"] {
+            let lines = body(&asm, name);
+            let call = lines.iter().position(|line| *line == "call\tg").expect("f and k call g");
+            let after = &lines[call + 1..];
+            let read = after.iter().position(|line| {
+                let mut operands = line.split_once('\t').map_or("", |(_, rest)| rest).split(", ");
+                operands
+                    .next()
+                    .is_some_and(|first| first.contains("%rbp") || first.contains("%ebp"))
+                    || operands.next().is_some_and(|second| second.contains("(%rbp)"))
+            });
+            let written = after.iter().position(|line| {
+                line.split_once('\t')
+                    .is_some_and(|(_, rest)| rest.ends_with(", %rbp") || rest.ends_with(", %ebp"))
+            });
+            if let Some(read) = read {
+                assert!(written.is_some_and(|written| written < read), "{level} {name}: {asm}");
+            }
+        }
+    }
+}
+
 #[test]
 fn a_frame_only_a_frame_pointer_reaches_is_refused() {
     let source = "extern void use(void *);\nint vla(int n) { int a[n]; use(a); return a[0]; }\n";
