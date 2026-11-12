@@ -5321,16 +5321,33 @@ impl Reader {
     }
 
     /// The type and size a name set to another name takes from it, where it was not given its own.
+    ///
+    /// The target can itself be a name set to another name, and the file can set the first name
+    /// before the second. NetBSD's `s_scalbn.S` for i386 sets `scalbn` to `_scalbn`, then
+    /// `_scalbn` to `scalbln`, then `scalbln` to the function `_scalbln`, and gas gives each the
+    /// type and size of the function. So the copies are made again until no name takes anything
+    /// more, which is at most once for each name in the chain.
     fn copy_attributes(&mut self) {
-        for (sym, target) in std::mem::take(&mut self.copies) {
-            let Some(&target) = self.known.get(&target) else { continue };
-            let (sort, size) = (self.syms[target].sort, self.syms[target].size);
-            let alias = &mut self.syms[sym];
-            if alias.sort == Sort::Untyped {
-                alias.sort = sort;
+        let copies: Vec<(usize, usize)> = std::mem::take(&mut self.copies)
+            .into_iter()
+            .filter_map(|(sym, target)| Some((sym, *self.known.get(&target)?)))
+            .collect();
+        for _ in 0..copies.len() {
+            let mut changed = false;
+            for &(sym, target) in &copies {
+                let (sort, size) = (self.syms[target].sort, self.syms[target].size);
+                let alias = &mut self.syms[sym];
+                if alias.sort == Sort::Untyped && sort != Sort::Untyped {
+                    alias.sort = sort;
+                    changed = true;
+                }
+                if alias.size == 0 && size != 0 {
+                    alias.size = size;
+                    changed = true;
+                }
             }
-            if alias.size == 0 {
-                alias.size = size;
+            if !changed {
+                break;
             }
         }
     }
@@ -9398,6 +9415,25 @@ _tls$tlv$init:
         );
         assert_eq!((name(&out, "g").sort, name(&out, "g").size), (Sort::Func, 3));
         assert_eq!((name(&out, "h").sort, name(&out, "h").size), (Sort::Untyped, 0));
+    }
+
+    #[test]
+    fn a_name_set_to_a_name_set_to_a_function_is_a_function_of_the_same_size() {
+        // NetBSD's i386 `s_scalbn.S`, where each name is set before the one it names. In libm.so
+        // `scalbn` and `ldexpf` came out NOTYPE with no size, and so did `pthread_join` in libc.so
+        // through two `__weak_alias` lines of `thread-stub.c`.
+        let out = assembled(
+            "\t.weak scalbn\n\tscalbn = _scalbn\n\t.globl _scalbn\n\t_scalbn = scalbln\n\t.weak \
+             scalbln\n\tscalbln = _scalbln\n\t.text\n\t.globl _scalbln\n\t.type _scalbln, \
+             @function\n_scalbln:\n\t.byte 0,0,0,0\n\t.size _scalbln, .-_scalbln\n",
+        );
+        for alias in ["scalbn", "_scalbn", "scalbln"] {
+            assert_eq!(
+                (name(&out, alias).sort, name(&out, alias).size),
+                (Sort::Func, 4),
+                "{alias}"
+            );
+        }
     }
 
     #[test]
