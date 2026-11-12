@@ -1201,6 +1201,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // What `-fasynchronous-unwind-tables` and `-fno-asynchronous-unwind-tables` last said, if either
     // was written. The default depends on the target, which the loop can still change.
     let mut async_unwind_tables: Option<bool> = None;
+    let mut unwind_tables: Option<bool> = None;
     // Where the stack protector's canary is, which is put together after the loop because the
     // four flags that say it may come in any order and gcc lets the later one win for each.
     let mut guard_global: Option<bool> = None;
@@ -1917,8 +1918,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // and against an asynchronous one gets a table.
             "-fasynchronous-unwind-tables" => async_unwind_tables = Some(true),
             "-fno-asynchronous-unwind-tables" => async_unwind_tables = Some(false),
-            "-funwind-tables" => opts.unwind_tables = true,
-            "-fno-unwind-tables" => opts.unwind_tables = false,
+            "-funwind-tables" => unwind_tables = Some(true),
+            "-fno-unwind-tables" => unwind_tables = Some(false),
             // The other direction, which is a request rather than a description: the output is
             // linked where it runs, as a kernel and a `-no-pie` executable are, and nothing is to
             // be reached through a global offset table. The capital spellings are gcc's too, and
@@ -4200,6 +4201,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // and no `PT_GNU_EH_FRAME`. 64 bit x86 and the other machines keep the table.
     let i386_bsd = bsd && opts.target.arch == rucc_target::Arch::X86;
     opts.async_unwind_tables = async_unwind_tables.unwrap_or(!i386_bsd);
+    // NetBSD's gcc is the exception. Its `netbsd-elf.h` sets `TARGET_UNWIND_TABLES_DEFAULT` to
+    // true, so `-funwind-tables` is on unless the line turns it off, as the boot code and the
+    // kernel modules do. Each i386 library of the NetBSD sets from gcc has `PT_GNU_EH_FRAME`
+    // (tamnd/rucc-bsd run 43294969270).
+    opts.unwind_tables = unwind_tables.unwrap_or(opts.target.os == rucc_target::Os::NetBsd);
     // After the loop, since whether `--64` or `-march=` is true of the target is a question about
     // the last `--target=`.
     let assembler = assembler_words(&asm_words, opts.target)?;
@@ -7391,14 +7397,14 @@ mod tests {
     }
 
     /// The BSD gcc writes no asynchronous table for a 32 bit x86 unit, so a C library of FreeBSD's
-    /// lib32 has no `PT_GNU_EH_FRAME` (RR run 43194337450, 227 libraries).
+    /// lib32 has no `PT_GNU_EH_FRAME` (RR run 43194337450, 227 libraries). NetBSD's gcc writes the
+    /// table all the same, because its `-funwind-tables` is on by default (tamnd/rucc-bsd run
+    /// 43294969270).
     #[test]
     fn a_bsd_32_bit_unit_gets_no_table_unless_the_line_asks_for_one() {
         let unit = |more: &[&str]| compile(&[&["-c", "a.c"], more].concat()).0;
         for target in [
             &["--target=x86_64-unknown-freebsd15.1", "-m32"][..],
-            &["--target=x86_64-unknown-netbsd", "-m32"],
-            &["--target=i486--netbsdelf"],
             &["--target=i386-unknown-freebsd14.5"],
         ] {
             assert!(!unit(target).unwinds(), "{target:?}");
@@ -7418,6 +7424,15 @@ mod tests {
             &["--target=i686-linux-gnu"],
         ] {
             assert!(unit(target).unwinds(), "{target:?}");
+        }
+        for target in
+            [&["--target=x86_64-unknown-netbsd", "-m32"][..], &["--target=i486--netbsdelf"]]
+        {
+            assert!(unit(target).unwinds(), "{target:?}");
+            // NetBSD's i386 boot code turns both off.
+            let off = ["-fno-unwind-tables", "-fno-asynchronous-unwind-tables"];
+            assert!(!unit(&[target, &off].concat()).unwinds(), "{target:?}");
+            assert!(!unit(&[target, &off[..1]].concat()).unwinds(), "{target:?}");
         }
     }
 
