@@ -668,6 +668,10 @@ const O3: &[&str] = &[
 /// divisions in `x / s->n + x / s->n`, and only a second run sees one. Removing a computation never
 /// makes the code larger. `fsread` in `boot2` works out the cylinder group of an inode, which is
 /// `inode / fs_ipg`, twice in one block for the UFS1 start of the group and divided twice.
+///
+/// `step-sink` runs last, when nothing after it will move an instruction in a block again. It puts
+/// `p + 1` after the last read of `p`, so the two share a register, and the copy loop of `boot2`
+/// lost three copies on its back edge.
 const OS: &[&str] = &[
     "expect",
     "fold",
@@ -714,6 +718,7 @@ const OS: &[&str] = &[
     "dce",
     "loop-delete",
     "adce",
+    "step-sink",
 ];
 
 /// `-Oz`. `-Os` and additionally the outliner, with instruction selection preferring the smaller
@@ -724,8 +729,8 @@ const OS: &[&str] = &[
 /// rather have the branch than the bytes, and every reason to want the do-while form here is a
 /// speed reason.
 ///
-/// `thread` and `rangetest` run again after `phiopt`, and `number` after `load-forward`, as at
-/// `-Os`.
+/// `thread` and `rangetest` run again after `phiopt`, `number` after `load-forward`, and `step-sink`
+/// runs last, as at `-Os`.
 const OZ: &[&str] = &[
     "expect",
     "fold",
@@ -767,6 +772,7 @@ const OZ: &[&str] = &[
     "loop-idiom",
     "dce",
     "loop-delete",
+    "step-sink",
 ];
 
 /// The passes this level runs, before the command line adds to or removes from them.
