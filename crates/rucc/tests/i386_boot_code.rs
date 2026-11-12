@@ -111,6 +111,26 @@ fn position_independent_code_keeps_the_address_from_the_table() {
     assert!(!text.contains("$buf") && !text.contains("$table"), "{text}");
 }
 
+/// A count and an offset kept in names and changed in place, as `fsread` changes `fs_off`.
+const COUNTED: &str = "\
+static unsigned char meta;
+unsigned off;
+int read(int);
+int step(int n) { if (read(n)) return -1; meta++; off += n; return 0; }
+";
+
+#[test]
+fn a_name_changed_in_place_is_written_into_the_instruction_at_os() {
+    let text = listing_of(COUNTED, "counted", &[]);
+    let step = body(&text, "step");
+    assert!(step.contains(&"addb\t$1, meta"), "{text}");
+    assert!(
+        step.iter().any(|line| line.starts_with("addl\t%") && line.ends_with(", off")),
+        "{text}"
+    );
+    assert!(!step.iter().any(|line| line.contains("$meta") || line.contains("$off")), "{text}");
+}
+
 /// A `long long` shift by a register, as `fsread` has four of, and the test of a UFS1 or UFS2
 /// magic number it makes with `||` and `&&`.
 const BRANCHES: &str = "\

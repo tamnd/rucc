@@ -1172,11 +1172,12 @@ pub fn compile_recording(
     if absolute {
         fold::absolute_sums(&mut func, machine.insts, machine.shapes, names);
     }
-    fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending, absolute);
+    let size = flags.goal == Goal::Size;
+    fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending, absolute, size);
     // Where the address of a name is a number, the names the first run left behind a sum it
     // folded, see `fold::names`.
     if absolute {
-        fold::names(&mut func, machine.insts, machine.shapes, names, &mut pending);
+        fold::names(&mut func, machine.insts, machine.shapes, names, &mut pending, size);
     }
 
     // After that fold rather than before it, because what this puts inside an arithmetic
@@ -1189,6 +1190,13 @@ pub fn compile_recording(
     // the same run written a second way.
     combine::stores(&mut func, machine.shapes, machine.flags, names, &mut pending);
     combine::loads(&mut func, machine.shapes, names, &mut pending);
+    // Those two can leave the address of a name with a reader that reads and writes memory, as
+    // `addb $1, (%eax)`, so on i386 at `-Os` and `-Oz` the folds run once more. See
+    // `fold::addresses`.
+    if absolute && size && std::ptr::eq(machine.shapes, &x86::MACHINE) {
+        fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending, true, true);
+        fold::names(&mut func, machine.insts, machine.shapes, names, &mut pending, true);
+    }
     // After both, which may have taken a read of an argument into the instruction that wanted it.
     // Not at `-O0`, whose arguments are all stored to their slots and so all read.
     if flags.reloads {
