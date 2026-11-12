@@ -16249,6 +16249,39 @@ block2:
         assert!(text.contains("\tcall\t__addtf3"), "{text}");
     }
 
+    /// tamnd/rucc#4523. NetBSD's AES and ChaCha code for SSE2 is built for i386 with
+    /// `-msoft-float -msse -msse2`, and `_mm_shuffle_ps` and `_mm_load1_ps` move a `float` lane
+    /// without working on it. gcc keeps it in an xmm register. Arithmetic on one is still refused,
+    /// since gcc would call the library for it, and so is a `float` given back, whose place is the
+    /// x87 stack.
+    #[test]
+    fn a_float_that_is_only_moved_on_i386_without_the_x87_stack_is_kept_in_sse() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "i486--netbsdelf".parse::<Triple>().unwrap();
+        opts.opt_level = rucc_session::OptLevel::O2;
+        opts.x87 = false;
+        opts.x87_floats = false;
+        let source = "typedef float v4sf __attribute__((vector_size(16)));\n\
+                      typedef long long v2di __attribute__((vector_size(16)));\n\
+                      v2di shuf(v2di a, v2di b) {\n\
+                        return (v2di)__builtin_ia32_shufps((v4sf)a, (v4sf)b, 0x88);\n\
+                      }\n\
+                      v4sf load1(const float *p) { return (v4sf){ *p, *p, *p, *p }; }\n\
+                      v4sf zero(void) { return (v4sf){ 0, 0, 0, 0 }; }\n\
+                      void copy(float *d, const float *s) { *d = *s; }\n";
+        let ran = run(&opts, source);
+        assert_eq!(ran.messages, Vec::<String>::new());
+        let text = ran.text();
+        assert!(!text.contains("fld") && !text.contains("fstp"), "{text}");
+        let ran = run(&opts, "void add(float *a, const float *b) { *a += *b; }\n");
+        assert!(ran.failed());
+        assert!(ran.messages[0].contains("a `f32` is kept in the x87 registers"), "{ran:?}");
+        let ran = run(&opts, "float get(const float *p) { return *p; }\n");
+        assert!(ran.failed());
+        assert!(ran.messages[0].contains("x87 registers"), "{ran:?}");
+    }
+
     /// On i386 the two words libgcc fills in are where they are on x86-64, so
     /// `__builtin_cpu_supports` and `__builtin_cpu_is` read them the same way. libgfortran's
     /// matmul files call both on NetBSD/i386. In position independent code the object is reached
