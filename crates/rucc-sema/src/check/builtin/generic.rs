@@ -299,6 +299,11 @@ impl Checker<'_> {
         if let Some(answer) = self.sign_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // The bit counts that count at the width of their argument, which has no one type to
+        // declare them with. In `check/builtin/count.rs`, beside the spellings that have one.
+        if let Some(answer) = self.generic_count_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         // A complex value made of two halves with no arithmetic in between, which is what
         // `complex.h` spells `CMPLX`. In `check/builtin/parts.rs`.
         if let Some(answer) = self.parts_builtin_call(name, args, span) {
@@ -871,6 +876,7 @@ mod tests {
                 || is_sized(feature.name)
                 || crate::check::builtin::classify::is_family(feature.name)
                 || crate::check::builtin::sign::is_family(feature.name)
+                || crate::check::builtin::count::is_family(feature.name)
                 || crate::check::builtin::parts::is_family(feature.name)
                 || crate::check::builtin::speculation::is_family(feature.name)
                 || crate::check::builtin::tgmath::is_family(feature.name)

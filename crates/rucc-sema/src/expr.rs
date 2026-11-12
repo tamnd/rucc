@@ -388,6 +388,9 @@ pub enum ExprKind {
         operand: ExprId,
         /// Which of the six questions this asks.
         count: BitCount,
+        /// The answer for a zero, an `int`, which only the type generic `__builtin_clzg` and
+        /// `__builtin_ctzg` are given. It is evaluated whether or not the operand is zero.
+        zero: Option<ExprId>,
     },
     /// The overflow checking builtins, which do the arithmetic exactly and say whether it fit.
     ///

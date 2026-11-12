@@ -566,9 +566,10 @@ impl Reach<'_> {
             | ExprKind::Eflags { value: Some(base) }
             | ExprKind::Speculation { value: base }
             | ExprKind::ByteSwap { operand: base }
-            | ExprKind::BitCount { operand: base, .. }
+            | ExprKind::BitCount { operand: base, zero: None, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
-            ExprKind::Subscript { base: lhs, index: rhs }
+            ExprKind::BitCount { operand: lhs, zero: Some(rhs), .. }
+            | ExprKind::Subscript { base: lhs, index: rhs }
             | ExprKind::Binary { lhs, rhs, .. }
             | ExprKind::Assign { lhs, rhs, .. }
             | ExprKind::VaCopy { dst: lhs, src: rhs }

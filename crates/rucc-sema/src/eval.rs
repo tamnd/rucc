@@ -321,7 +321,9 @@ impl<'a> Eval<'a> {
             ExprKind::Complex { real, imag } => self.complex(expr, real, imag),
             ExprKind::Overflow { op, args, stores: false, .. } => self.overflows(expr, op, args),
             ExprKind::ByteSwap { operand } => self.byte_swap(expr, operand),
-            ExprKind::BitCount { operand, count } => self.bit_count(expr, operand, count),
+            ExprKind::BitCount { operand, count, zero } => {
+                self.bit_count(expr, operand, count, zero)
+            }
             // `__builtin_constant_p` of something that is not a constant yet. Where a constant is
             // needed, which is the only place this is asked, the answer is no, and gcc gives the
             // same one: `__builtin_choose_expr (__builtin_constant_p (n), a, b)` is `b`.
@@ -534,21 +536,33 @@ impl<'a> Eval<'a> {
     /// `__builtin_clz` and `__builtin_ctz` of zero are undefined when the program runs, and gcc
     /// folds them to the width when it does not, which is what this does too, since a constant
     /// that folded to one thing here and to another in gcc is a program that differs between them.
+    /// The type generic spellings may say what a zero answers instead, and then that is the answer.
+    ///
+    /// The width is the width of the value and not of the object, which is the same thing for the
+    /// fixed spellings and not for a `_BitInt(37)` given to a generic one.
     fn bit_count(
         &mut self,
         expr: ExprId,
         operand: ExprId,
         count: BitCount,
+        zero: Option<ExprId>,
     ) -> Result<Const, NotConstant> {
         let Const::Int(value) = self.eval(operand)? else {
             return Err(self.stop(expr));
         };
-        let bits = self.size_of(self.tast[operand].ty) * 8;
-        if bits == 0 || bits > 64 {
+        let Some(info) = integer_info(self.types, self.tast[operand].ty, self.target) else {
+            return Err(self.stop(expr));
+        };
+        let width = info.width;
+        if width == 0 || width > 128 {
             return Err(self.stop(expr));
         }
-        let value = (value as u128) & low(bits);
-        let width = u32::try_from(bits).expect("at most 64");
+        let value = (value as u128) & low(u64::from(width));
+        if value == 0 {
+            if let Some(zero) = zero {
+                return self.eval(zero);
+            }
+        }
         let leading = |value: u128| value.leading_zeros() - (128 - width);
         let answer = match count {
             BitCount::Leading => leading(value),
@@ -563,8 +577,8 @@ impl<'a> Eval<'a> {
                 }
             }
             BitCount::RedundantSign => {
-                let negative = value >> (bits - 1) & 1 == 1;
-                leading(if negative { !value & low(bits) } else { value }) - 1
+                let negative = value >> (width - 1) & 1 == 1;
+                leading(if negative { !value & low(u64::from(width)) } else { value }) - 1
             }
         };
         Ok(Const::Int(i128::from(answer)))
@@ -1990,7 +2004,7 @@ pub(crate) fn overflows(value: Const, info: IntegerInfo) -> bool {
 
 /// The low `bits` bits set, for a width of 1 to 64.
 fn low(bits: u64) -> u128 {
-    (1u128 << bits) - 1
+    if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 }
 }
 
 #[cfg(test)]
