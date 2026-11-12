@@ -310,6 +310,7 @@ pub struct Tast {
     asm_operands: Vec<AsmOperand>,
 
     top_level: Vec<DeclId>,
+    placed: Map<DeclId, (usize, usize)>,
 }
 
 impl Tast {
@@ -341,6 +342,28 @@ impl Tast {
     /// Adds a declaration at file scope.
     pub fn add_top_level(&mut self, decl: DeclId) {
         self.top_level.push(decl);
+    }
+
+    /// Records that a name first declared without a definition is defined here, below the
+    /// declarations at file scope that are already in [`Tast::top_level`].
+    ///
+    /// gcc makes the entry for an object in its symbol table at the first declaration that
+    /// defines it, tentatively or with an initializer, and an `extern` one before it does not
+    /// count. The same is true of a function and its body. The table is the order the variables
+    /// are laid out in, so the place is kept for the lowering. Only the first one counts, since
+    /// a second definition does not move the entry again.
+    pub fn record_placed(&mut self, decl: DeclId) {
+        let at = (self.top_level.len(), self.placed.len());
+        self.placed.entry(decl).or_insert(at);
+    }
+
+    /// How many declarations at file scope came before the one that defined a name first
+    /// declared without a definition, and how many such names were defined before it, which
+    /// orders two defined below the same declaration. Nothing for a name whose first declaration
+    /// defined it. See [`Tast::record_placed`].
+    #[must_use]
+    pub fn placed(&self, decl: DeclId) -> Option<(usize, usize)> {
+        self.placed.get(&decl).copied()
     }
 
     /// The `asm` written at file scope, in the order they were written.

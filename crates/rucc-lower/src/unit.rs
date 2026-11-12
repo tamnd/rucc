@@ -532,6 +532,12 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
     let module = Module::new(names.intern(name), target);
     let (reachable, named) = reach::reachable(reach::Decide::new(tast, types, target, names));
     let live = reach::live(reach::Decide::new(tast, types, target, names));
+    let analyzed = if reorder {
+        let order = reach::analyzed(reach::Decide::new(tast, types, target, names));
+        order.into_iter().enumerate().map(|(rank, decl)| (decl, rank)).collect()
+    } else {
+        Map::default()
+    };
     // gcc's i386 rule, `ix86_function_regparm`: a local function takes three words in registers
     // when the unit has fewer. Not on Windows, whose descriptions here have no such convention,
     // and not in a file that keeps a register variable, which may be one of the three.
@@ -598,6 +604,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         renamed: Map::default(),
         reachable,
         live,
+        analyzed,
         named,
         called_only,
         used: Set::default(),
@@ -766,6 +773,9 @@ pub(crate) struct Unit<'a> {
     /// What something the file has to keep reaches, which is what decides whether a `used`
     /// object in a function body is kept. See [`reach::live`].
     live: Set<DeclId>,
+    /// Where gcc makes the entry for each `static` in a function body among the others, when
+    /// [`Self::reorder`] lays the objects out its way. See [`reach::analyzed`].
+    analyzed: Map<DeclId, usize>,
     /// What an expression in something reached names, which is what a use of a name is. Only a
     /// weakref asks this directly, since whether its target stays weak is whether anything uses
     /// it by name. The rest ask [`Unit::used`].
@@ -819,6 +829,8 @@ impl Unit<'_> {
         self.find_aliased();
         self.find_renamed();
         self.find_used();
+        // Where each object goes in gcc's list of them, oldest first. See `Self::placed`.
+        let mut places = Vec::new();
         for index in 0..self.tast.top_level().len() {
             let decl = self.tast.top_level()[index];
             if !self.done.insert(decl) {
@@ -832,6 +844,14 @@ impl Unit<'_> {
                 // for one.
                 DeclKind::Type => {}
             }
+            let place = match (self.tast[decl].kind, self.tast.placed(decl)) {
+                (DeclKind::Object, Some((at, nth))) => (0, (2 * at).saturating_sub(1), nth),
+                _ => (0, 2 * index, 0),
+            };
+            places.resize(self.module.globals().count() - written, place);
+        }
+        if self.reorder {
+            self.placed(written, places);
         }
         self.bodies.sort_by_key(|&(body, _)| body.index());
         for index in 0..self.bodies.len() {
@@ -868,6 +888,32 @@ impl Unit<'_> {
         }
         self.startups();
         self.mismatched_calls();
+    }
+
+    /// Puts the objects made from `written` on in the order gcc makes its entries for them, which
+    /// is the order [`Module::reverse_globals`] then turns around.
+    ///
+    /// `places` has a place for each object the walk over the declarations at file scope made.
+    /// An object declared `extern` first goes where the first declaration that defines it is,
+    /// since gcc makes no entry for an `extern` one. A `static` in a function body goes after
+    /// every object at file scope, in the order of [`reach::analyzed`], since gcc makes the entry
+    /// for one when it analyzes the body, and it does that when the whole file has been read.
+    /// What was made after the walk stays at the end, and the rest keep the order they were
+    /// made in.
+    fn placed(&mut self, written: usize, mut places: Vec<(u8, usize, usize)>) {
+        let count = self.module.globals().count() - written;
+        places.resize(count, (2, 0, 0));
+        // A compound literal with static storage is in the same table under no name, and gcc
+        // makes its entry where it reads it, which is where the walk made it here too.
+        for (&decl, &symbol) in &self.statics {
+            if self.tast[decl].name.is_none() {
+                continue;
+            }
+            let Some(SymbolRef::Global(id)) = self.module.lookup(symbol) else { continue };
+            let Some(at) = id.index().checked_sub(written) else { continue };
+            places[at] = (1, self.analyzed.get(&decl).copied().unwrap_or(usize::MAX), 0);
+        }
+        self.module.order_globals(written, &places);
     }
 
     /// A call by a name the file defines with another signature, made a call through its address.

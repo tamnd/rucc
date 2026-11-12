@@ -43,7 +43,7 @@
 
 use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Interner;
-use rucc_base::hash::Set;
+use rucc_base::hash::{Map, Set};
 use rucc_sema::{
     Const, Conversion, Decl, DeclFlags, DeclId, DeclKind, Definition, Eval, ExprId, ExprKind,
     InitList, Linkage, Stmt, StmtId, StorageDuration, StrId, Tast,
@@ -87,7 +87,7 @@ pub(crate) fn live(decide: Decide<'_>) -> Set<DeclId> {
 /// follows a statement control never comes out of. See [`Reach::pruned`]. `objects` is whether
 /// every object with static storage is a root.
 fn walk(decide: Decide<'_>, pruned: bool, objects: bool) -> (Set<DeclId>, Set<DeclId>) {
-    let walk = run(decide, pruned, objects);
+    let walk = run(decide, pruned, objects, false);
     (walk.seen, walk.named)
 }
 
@@ -102,7 +102,7 @@ fn walk(decide: Decide<'_>, pruned: bool, objects: bool) -> (Set<DeclId>, Set<De
 /// not converted to what the function takes. And a function whose body saves its argument
 /// registers with `__builtin_apply_args` reads them where the target's convention puts them.
 pub(crate) fn called_only(decide: Decide<'_>) -> Set<DeclId> {
-    let mut walk = run(decide, false, true);
+    let mut walk = run(decide, false, true, false);
     let escaped = std::mem::take(&mut walk.escaped);
     let seen = std::mem::take(&mut walk.seen);
     let mut called = std::mem::take(&mut walk.called);
@@ -110,8 +110,117 @@ pub(crate) fn called_only(decide: Decide<'_>) -> Set<DeclId> {
     called
 }
 
+/// The objects with static storage declared in a function body, in the order gcc makes its
+/// entries for them.
+///
+/// gcc lays the variables of a unit it optimizes out newest first, and it makes the entry for a
+/// `static` in a body only when it analyzes the body, after it has read the whole file. So these
+/// come after every object at file scope, and among themselves in the order its walk over the
+/// call graph reaches them. That walk is `analyze_functions`, and this is the same walk over the
+/// same graph:
+///
+/// - The queue starts with what the unit has to emit anyway, the definitions with external
+///   linkage and the ones an attribute keeps, the oldest first.
+/// - A function analyzed makes an entry for each `static` its body names, in the order it names
+///   them, and then for the ones it declares and never names, the last one first.
+/// - Then it puts what it calls in front of the queue, by the last call to each, and in front of
+///   those what else it names, the last one named first. An object puts what its initializer
+///   names there the same way.
+///
+/// The walk is the one [`referred`] makes, which leaves out what gcc throws away before it builds
+/// the graph.
+#[must_use]
+pub(crate) fn analyzed(decide: Decide<'_>) -> Vec<DeclId> {
+    let tast = decide.tast;
+    let walk = run(decide, true, false, true);
+    let defined = |decl: DeclId| {
+        let node = &tast[decl];
+        match node.kind {
+            DeclKind::Function => node.body.is_some(),
+            DeclKind::Object => {
+                node.duration != StorageDuration::Automatic
+                    && (node.state != Definition::Declared || node.linkage == Linkage::None)
+            }
+            DeclKind::Type => false,
+        }
+    };
+    let local = |decl: DeclId| {
+        let node = &tast[decl];
+        node.kind == DeclKind::Object
+            && node.linkage == Linkage::None
+            && node.duration != StorageDuration::Automatic
+    };
+    // The age of a symbol is where it was defined, which for one first declared without a
+    // definition is the place `Tast::placed` keeps.
+    let mut roots: Vec<((usize, usize), DeclId)> = Vec::new();
+    for (index, &decl) in tast.top_level().iter().enumerate() {
+        let node = &tast[decl];
+        let needed = node.flags.contains(DeclFlags::RETAINED)
+            || (node.linkage == Linkage::External && node.inline.emits());
+        if needed && defined(decl) {
+            let age = tast
+                .placed(decl)
+                .map_or((2 * index, 0), |(at, nth)| ((2 * at).saturating_sub(1), nth));
+            roots.push((age, decl));
+        }
+    }
+    roots.sort_by_key(|&(age, _)| age);
+    // The queue is a stack whose top is the front, so the oldest is pushed last.
+    let mut queue: Vec<DeclId> = roots.iter().rev().map(|&(_, decl)| decl).collect();
+    let mut queued: Set<DeclId> = queue.iter().copied().collect();
+    let mut made = Vec::new();
+    let mut have = Set::default();
+    while let Some(node) = queue.pop() {
+        let mut named = Vec::new();
+        let mut inside = Set::default();
+        flatten(&walk.events, node, &mut named, &mut inside);
+        if tast[node].kind == DeclKind::Function {
+            for &(decl, event) in &named {
+                if matches!(event, Event::Ref | Event::Call) && local(decl) && have.insert(decl) {
+                    made.push(decl);
+                }
+            }
+            for &(decl, event) in named.iter().rev() {
+                if event == Event::Declared && local(decl) && have.insert(decl) {
+                    made.push(decl);
+                }
+            }
+        }
+        for &(decl, event) in named.iter().rev() {
+            if event == Event::Call && defined(decl) && queued.insert(decl) {
+                queue.push(decl);
+            }
+        }
+        for &(decl, event) in &named {
+            if event == Event::Ref && defined(decl) && queued.insert(decl) {
+                queue.push(decl);
+            }
+        }
+    }
+    made
+}
+
+/// What a declaration names, with what the declarations with automatic storage in its body name
+/// put where they are declared. `inside` is what has been put in already.
+fn flatten(
+    events: &Map<DeclId, Vec<(DeclId, Event)>>,
+    decl: DeclId,
+    out: &mut Vec<(DeclId, Event)>,
+    inside: &mut Set<DeclId>,
+) {
+    if !inside.insert(decl) {
+        return;
+    }
+    for &(named, event) in events.get(&decl).map_or(&[][..], Vec::as_slice) {
+        match event {
+            Event::Inline => flatten(events, named, out, inside),
+            _ => out.push((named, event)),
+        }
+    }
+}
+
 /// The walk itself, handed back whole for the sets each question reads.
-fn run(decide: Decide<'_>, pruned: bool, objects: bool) -> Reach<'_> {
+fn run(decide: Decide<'_>, pruned: bool, objects: bool, record: bool) -> Reach<'_> {
     let tast = decide.tast;
     let mut walk = Reach {
         tast,
@@ -125,6 +234,9 @@ fn run(decide: Decide<'_>, pruned: bool, objects: bool) -> Reach<'_> {
         called: Set::default(),
         escaped: Set::default(),
         current: None,
+        record,
+        within: None,
+        events: Map::default(),
     };
     for index in 0..tast.top_level().len() {
         let decl = tast.top_level()[index];
@@ -287,6 +399,27 @@ struct Reach<'a> {
     escaped: Set<DeclId>,
     /// The function whose body the walk is in.
     current: Option<DeclId>,
+    /// Whether to keep [`Reach::events`], which only [`analyzed`] reads.
+    record: bool,
+    /// The declaration whose initializer or body the walk is in.
+    within: Option<DeclId>,
+    /// What each declaration walked names, in the order it names it. See [`Event`].
+    events: Map<DeclId, Vec<(DeclId, Event)>>,
+}
+
+/// How a declaration walked names another, which is what [`analyzed`] needs to know to follow
+/// gcc's walk over its call graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Event {
+    /// A call to the function by name.
+    Call,
+    /// Any other reference, which is a read, a write or an address.
+    Ref,
+    /// A declaration of a `static` in the body.
+    Declared,
+    /// A declaration with automatic storage in the body, whose initializer and sizes were walked
+    /// on their own and are part of the body all the same.
+    Inline,
 }
 
 impl Reach<'_> {
@@ -306,6 +439,7 @@ impl Reach<'_> {
     /// nothing else in the file names it, and a call this walk has not seen is a call to a
     /// definition the file did not emit.
     fn decl(&mut self, decl: DeclId) {
+        let within = self.within.replace(decl);
         let node = &self.tast[decl];
         let (init, body, cleanup) = (node.init, node.body, node.cleanup);
         if node.kind != DeclKind::Function {
@@ -322,7 +456,16 @@ impl Reach<'_> {
         if let Some(handler) = cleanup {
             self.named.insert(handler);
             self.escaped.insert(handler);
+            self.note(handler, Event::Call);
             self.mark(handler);
+        }
+        self.within = within;
+    }
+
+    /// Keeps what the declaration being walked names, when the walk keeps it at all.
+    fn note(&mut self, decl: DeclId, event: Event) {
+        if let (true, Some(within)) = (self.record, self.within) {
+            self.events.entry(within).or_default().push((decl, event));
         }
     }
 
@@ -409,16 +552,19 @@ impl Reach<'_> {
             Stmt::Decls(decls) => {
                 for index in 0..self.tast[decls].len() {
                     let decl = self.tast[decls][index];
+                    let automatic = self.tast[decl].duration == StorageDuration::Automatic;
                     if !self.unlowered {
+                        self.note(decl, if automatic { Event::Inline } else { Event::Declared });
                         self.mark(decl);
                         continue;
                     }
                     let node = &self.tast[decl];
-                    if node.duration == StorageDuration::Automatic {
+                    if automatic {
                         if let Some(init) = node.init {
                             self.init(init);
                         }
                     } else if node.flags.contains(DeclFlags::RETAINED) {
+                        self.note(decl, Event::Declared);
                         self.mark(decl);
                     }
                 }
@@ -522,6 +668,9 @@ impl Reach<'_> {
             ExprKind::Decl(decl) | ExprKind::CompoundLiteral(decl) => {
                 self.named.insert(decl);
                 self.escaped.insert(decl);
+                let inline = matches!(self.tast[id].kind, ExprKind::CompoundLiteral(_))
+                    && self.tast[decl].duration == StorageDuration::Automatic;
+                self.note(decl, if inline { Event::Inline } else { Event::Ref });
                 self.mark(decl);
             }
             ExprKind::StmtExpr(body) => {
@@ -589,6 +738,7 @@ impl Reach<'_> {
                         }
                         self.named.insert(decl);
                         self.called.insert(decl);
+                        self.note(decl, Event::Call);
                         self.mark(decl);
                     }
                     _ => self.expr(callee),
