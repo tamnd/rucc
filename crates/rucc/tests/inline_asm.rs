@@ -1569,6 +1569,33 @@ int zero(int *v) {
     assert!(!ok && said.contains("flag output"), "{said}");
 }
 
+/// A branch on whether a flag output is zero jumps on the flags the template left, as gcc does.
+/// FreeBSD's `mtx_unlock` is `if (!atomic_cmpset_rel_ptr(...))` over `"=@cce"` into a `u_char`,
+/// and rucc wrote `sete`, `testb` and `je` there where gcc writes `jne`.
+#[test]
+fn a_branch_on_a_flag_output_compared_with_zero_is_a_jump_on_the_flags() {
+    let source = "\
+static inline int cmpset(volatile unsigned *dst, unsigned expect, unsigned src) {
+    unsigned char res;
+    __asm __volatile(\"lock; cmpxchgl %3,%1\" : \"=@cce\" (res), \"+m\" (*dst), \"+a\" (expect)
+                     : \"r\" (src) : \"memory\", \"cc\");
+    return res;
+}
+void slow(void);
+void unlock(volatile unsigned *p) { if (!cmpset(p, 5, 0)) slow(); }
+void held(volatile unsigned *p) { if (cmpset(p, 0, 5)) slow(); }
+";
+    let (ok, text, said) = run_with("flag-branch", source, &["-O2"]);
+    assert!(ok, "{said}");
+    for name in ["unlock", "held"] {
+        let body = body(&text, name);
+        assert!(body.contains("cmpxchgl"), "{name}: {body}");
+        assert!(!body.contains("sete"), "{name}: {body}");
+        assert!(!body.contains("testb"), "{name}: {body}");
+        assert!(body.contains("\tjne\t") || body.contains("\tje\t"), "{name}: {body}");
+    }
+}
+
 /// A template kept as text that names two operands in memory, which lib/raid6 writes to load one
 /// block and fetch the next in the same statement. One is the instruction's own memory operand and
 /// the other is read through the register its address is in.

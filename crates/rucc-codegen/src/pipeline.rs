@@ -1365,6 +1365,7 @@ pub fn compile_recording(
     // front of its branch, and before allocation, for the same reason that question is. Not at
     // `-O0`, for the reason the reloads are not.
     if flags.reloads {
+        layout::through(&mut func, machine.branch, &fused, names);
         layout::sink(&mut func, machine.branch, &fused, machine.flags, names);
     }
 
