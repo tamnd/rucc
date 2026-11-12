@@ -494,7 +494,8 @@ static NAMED: &[(Flags, &str)] = &[
 ];
 
 /// The maths functions that [`Flags::LIBRARY`] is about, each with its `float` form. A
-/// target that has an instruction for one writes the instruction in place of the call.
+/// target that has an instruction for one writes the instruction in place of the call. A call to
+/// `sin` and one to `cos` of the same operand may become one call to `sincos`.
 pub const MATH_BUILTINS: &[&str] = &[
     "sqrt",
     "sqrtf",
@@ -514,6 +515,10 @@ pub const MATH_BUILTINS: &[&str] = &[
     "copysignf",
     "fma",
     "fmaf",
+    "sin",
+    "sinf",
+    "cos",
+    "cosf",
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
