@@ -908,6 +908,17 @@ fn the_bytes_of_a_long_are_turned_round_in_the_register_that_holds_it() {
 }
 
 #[test]
+fn the_high_byte_written_first_is_the_same_exchange() {
+    // DragonFly's `machine/endian.h` swaps the bytes of a sixteen bit number with the high byte
+    // first, and every file that includes `<sys/types.h>` has it. An exchange is the same
+    // instruction in both orders.
+    let source = "unsigned short f(unsigned short x) { unsigned short X = x; \
+                  __asm (\"xchgb %h0, %b0\" : \"+Q\" (X)); return X; }\n";
+    let body = body(&asm("byte-swap-high-first", source), "f");
+    assert!(body.contains("xchgb\t%al, %ah"), "the exchange never reached the listing:\n{body}");
+}
+
+#[test]
 fn a_high_byte_of_one_word_and_a_low_byte_of_another_is_refused() {
     // There is no instruction here that exchanges a byte of one register with a byte of another, so
     // a template asking for one is told rather than being read as the exchange within a register
