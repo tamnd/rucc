@@ -102,6 +102,9 @@ pub struct ShortInsts {
     /// Every instruction that puts a constant in a register and has a shorter way of putting zero
     /// there.
     pub zeroing: &'static [Zeroed],
+    /// Every instruction that puts a constant in a register and has a shorter way of putting minus
+    /// one there, which reads the register as well. See [`Filled`].
+    pub filling: &'static [Filled],
     /// Every instruction that ands a register with a constant that clears its low byte and keeps
     /// the rest, and has a shorter way of clearing that byte alone. Empty on a machine where some
     /// register has no low byte to name, for the reason [`ShortInsts::byte_testing`] is.
@@ -144,6 +147,12 @@ impl ShortInsts {
     #[must_use]
     pub fn zeroed(&self, name: &str) -> Option<&'static str> {
         self.zeroing.iter().find(|entry| entry.name == name).map(|entry| entry.into)
+    }
+
+    /// The shorter way of writing minus one into a register, for the instruction of that name.
+    #[must_use]
+    pub fn filled(&self, name: &str) -> Option<&'static str> {
+        self.filling.iter().find(|entry| entry.name == name).map(|entry| entry.into)
     }
 
     /// The shorter way of clearing the low byte of a register, for the instruction of that name
@@ -227,6 +236,21 @@ pub struct Zeroed {
     /// The opcode that writes zero into the one register the first one wrote, reading that same
     /// register twice. It writes the condition state, which is the whole of why this is a
     /// description and not a rewrite anyone could do without looking around.
+    pub into: &'static str,
+}
+
+/// One instruction that puts a constant in a register, and the one that puts minus one there in
+/// fewer bytes.
+///
+/// The second one ors the register with minus one, which it carries in a byte, and that reads the
+/// register: the processor waits for whatever wrote it last, where the move has nothing to wait
+/// for. So this is a trade of time for bytes, which the move of zero is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Filled {
+    /// The opcode that takes the constant.
+    pub name: &'static str,
+    /// The opcode that ors minus one into the one register the first one wrote, writing the
+    /// condition state.
     pub into: &'static str,
 }
 

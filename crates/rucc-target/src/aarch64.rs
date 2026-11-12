@@ -534,6 +534,7 @@ pub static FLAGS: FlagInsts = FlagInsts {
 pub static SHORT: ShortInsts = ShortInsts {
     prefix: "a64.",
     zeroing: &[],
+    filling: &[],
     clearing: &[],
     narrowing: &[],
     whole: &[],
