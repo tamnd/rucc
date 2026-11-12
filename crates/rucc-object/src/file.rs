@@ -628,8 +628,27 @@ pub fn write(
     // that wants one lands in the same one. The rest come back from `section_id`, which already
     // answers with the section it made the first time it was asked.
     let mut named = Map::default();
-    for object in &data.objects {
-        let (section, offset) = put(&mut obj, object, &mut named, sections, flavour);
+    // A zero filled `static` that is in `.bss` itself goes after every other variable there. gcc
+    // writes one as `.local` and `.comm`, and gas puts that in subsection one of `.bss`, which is
+    // after all that subsection zero holds wherever in the file the line was. The rest of what is
+    // said about it, its name included, stays where it was written. One with a redzone is not, as
+    // gcc never writes a variable it guards that way.
+    let last = |object: &Object| {
+        flavour == Flavour::Elf
+            && !sections.data
+            && object.place == Place::Zero
+            && object.binding == Binding::Local
+            && object.redzone == 0
+    };
+    let mut homes = vec![(SymbolSection::Undefined, 0); data.objects.len()];
+    for late in [false, true] {
+        for (index, object) in data.objects.iter().enumerate() {
+            if last(object) == late {
+                homes[index] = put(&mut obj, object, &mut named, sections, flavour);
+            }
+        }
+    }
+    for (object, &(section, offset)) in data.objects.iter().zip(&homes) {
         // COFF says which section a group is with the section's own symbol, which carries the
         // selection, and takes the first symbol after it in the table as the one the group is
         // keyed on. So a pointer's section gets its symbol here, before the pointer's own name.
@@ -2799,6 +2818,45 @@ mod tests {
         // had already used four. Getting this wrong is a variable at an address it said it would
         // never be at, which nothing downstream would notice until an aligned load faulted.
         assert_eq!(second.address(), 16);
+    }
+
+    #[test]
+    fn a_zero_filled_static_goes_after_the_rest_of_bss_as_gas_puts_a_local_common() {
+        let zero = |name, binding| Object { binding, ..variable(name, Place::Zero) };
+        let data = Data {
+            apart: Vec::new(),
+            exports: Vec::new(),
+            weak: Vec::new(),
+            unseen: Vec::new(),
+            objects: vec![
+                zero("c", Binding::Local),
+                zero("s", Binding::Local),
+                zero("g", Binding::Global),
+                zero("e", Binding::Global),
+            ],
+        };
+        let at = |output: Output| {
+            let bytes = write(&Text::default(), &data, &[], &target(), output, &Info::default())
+                .expect("an object");
+            let file = object::File::parse(&bytes[..]).expect("a readable object");
+            let mut names: Vec<(u64, String)> = file
+                .symbols()
+                .filter(|s| s.kind() == SymbolKind::Data)
+                .map(|s| (s.address(), s.name().expect("a name").to_owned()))
+                .collect();
+            let order: Vec<String> = names.iter().map(|(_, name)| name.clone()).collect();
+            names.sort();
+            (order, names.into_iter().map(|(_, name)| name).collect::<Vec<_>>())
+        };
+        // The names stay in the order they were written, and only the places move.
+        let (order, laid) = at(Output::default());
+        assert_eq!(order, ["c", "s", "g", "e"]);
+        assert_eq!(laid, ["g", "e", "c", "s"]);
+        // Each in a section of its own is each at the start of it, which is what gcc does too, as
+        // it writes no `.comm` for one.
+        let sections = Sections { functions: false, data: true };
+        let (_, laid) = at(Output { sections, ..Output::default() });
+        assert_eq!(laid, ["c", "e", "g", "s"]);
     }
 
     #[test]
