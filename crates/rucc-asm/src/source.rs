@@ -5642,20 +5642,22 @@ impl Reader {
                 [] => {
                     // A distance a branch carries is signed and nothing else, so a byte of it
                     // reaches a hundred and twenty seven forwards and a hundred and twenty eight
-                    // back. A number a directive writes down is counted both ways, because a byte
-                    // holds two hundred and fifty five as well as minus one and a file writing
-                    // either means it. Either way what does not fit is refused: a branch out of
-                    // reach cut down to its low byte goes somewhere nobody wrote, and so does a
-                    // table of offsets whose entries were quietly truncated.
-                    // Eight bytes hold every number there is, and the bounds of them would not
-                    // fit in one.
+                    // back. A number a directive writes down is counted both ways, as gas counts
+                    // it: a byte takes anything whose size is under two hundred and fifty six, so
+                    // two hundred and fifty five and minus two hundred and fifty five both go in.
+                    // NetBSD's i386 locore.S writes the checksum of its Multiboot2 header as
+                    // `.long -(MAGIC + (end - start))`, which is below minus two to the thirty one
+                    // and above minus two to the thirty two. Either way what does not fit is
+                    // refused: a branch out of reach cut down to its low byte goes somewhere
+                    // nobody wrote, and so does a table of offsets whose entries were quietly
+                    // truncated. Eight bytes hold every number there is, and the bounds of them
+                    // would not fit in one.
                     let width = fixup.width as usize;
                     let room = 8 * width.min(7) as u32;
-                    let low = -(1i64 << (room - 1));
-                    let high = if matches!(fixup.reach, Reach::Branch | Reach::Plain) {
-                        (1i64 << (room - 1)) - 1
+                    let (low, high) = if matches!(fixup.reach, Reach::Branch | Reach::Plain) {
+                        (-(1i64 << (room - 1)), (1i64 << (room - 1)) - 1)
                     } else {
-                        (1i64 << room) - 1
+                        (-((1i64 << room) - 1), (1i64 << room) - 1)
                     };
                     if width < 8 && (residue.constant < low || residue.constant > high) {
                         return Err(bad(format!(
@@ -9859,12 +9861,29 @@ _tls$tlv$init:
     fn a_number_too_big_for_the_bytes_it_is_written_into_is_refused() {
         // Not about instructions at all, and found on the way to the two above: a distance between
         // two labels written into a `.byte` was being cut down to its low eight bits. Counted both
-        // ways, so a byte takes anything from minus a hundred and twenty eight to two hundred and
-        // fifty five and refuses what is outside that.
+        // ways, as gas counts it, so a byte takes anything from minus two hundred and fifty five to
+        // two hundred and fifty five and refuses what is outside that.
         let out = assembled("\t.data\nhere:\n\t.zero 200\nthere:\n\t.byte there - here\n");
         assert_eq!(bytes(&out, ".data")[200], 200);
+        let out = assembled("\t.data\nhere:\n\t.zero 200\nthere:\n\t.byte here - there\n");
+        assert_eq!(bytes(&out, ".data")[200], 56);
+        let out = assembled("\t.data\nhere:\n\t.zero 4\nthere:\n\t.byte -259 + (there - here)\n");
+        assert_eq!(bytes(&out, ".data")[4], 1);
         let why = refused("\t.data\nhere:\n\t.zero 300\nthere:\n\t.byte there - here\n");
         assert!(why.why.contains("does not reach"), "{why}");
+        let why = refused("\t.data\nhere:\n\t.zero 4\nthere:\n\t.byte -260 + (there - here)\n");
+        assert!(why.why.contains("does not reach"), "{why}");
+    }
+
+    #[test]
+    fn a_checksum_below_minus_two_to_the_thirty_one_goes_into_a_long() {
+        // NetBSD's i386 locore.S, from the Multiboot2 header: the magic, the architecture and the
+        // length add to 0xe852510e, and gas writes its negation into four bytes. tamnd/rucc#4476.
+        let text = "\t.text\nstart:\n\t.zero 52\n\t.long -(0xe85250d6 + 0 + (end - start))\nend:\n";
+        let out = assembled(text);
+        assert_eq!(bytes(&out, ".text")[52..], 0x17ad_aef2u32.to_le_bytes());
+        let out = i386(text);
+        assert_eq!(bytes(&out, ".text")[52..], 0x17ad_aef2u32.to_le_bytes());
     }
 
     #[test]
