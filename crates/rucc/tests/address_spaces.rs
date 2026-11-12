@@ -96,7 +96,9 @@ fn a_narrowed_read_keeps_its_segment() {
          void set(struct vnode *vp) { vp->cpu = GET(cpuid); }\n\
          int same(struct vnode *vp) { return vp->cpu == (short)GET(cpuid); }\n",
     );
-    assert_eq!(out.matches("%gs:60(").count(), 2, "both reads go through %gs:\n{out}");
+    // With the null pointer folded, the read is `%gs:60` with no base register.
+    assert_eq!(out.matches("%gs:60").count(), 2, "both reads go through %gs:\n{out}");
+    assert!(!out.contains("\t60"), "no read of the flat address:\n{out}");
 }
 
 #[test]
@@ -109,6 +111,23 @@ fn an_asm_memory_operand_carries_its_segment() {
     );
     assert!(out.contains("incq\t%gs:(%rdi)"), "{out}");
     assert!(out.contains("%gs:gs(%rip)"), "{out}");
+}
+
+/// FreeBSD reads its per-CPU data through a null pointer into `__seg_gs`, which is a `static`
+/// that nothing writes. gcc folds the pointer to zero, so the CPU number is `%gs:56`. rucc loaded
+/// the pointer from `.rodata` first, in each `PCPU_GET` of the kernel.
+#[test]
+fn a_null_pointer_into_a_segment_is_the_offset_alone() {
+    let out = listing(
+        "pcpu",
+        "struct pcpu { long pad[7]; int pc_cpuid; };\n\
+         int cpuid(void) { static struct pcpu __seg_gs *__pc = 0; return __pc->pc_cpuid; }\n\
+         static const char *none;\n\
+         int unset(void) { return none == 0; }\n",
+    );
+    assert!(out.contains("movl\t%gs:56, %eax"), "{out}");
+    assert!(!out.contains("__pc"), "{out}");
+    assert!(!out.contains("none"), "the static goes once nothing reads it: {out}");
 }
 
 /// The object keeps its space and its address does not: `&gs` is the offset, and what it points
