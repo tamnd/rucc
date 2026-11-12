@@ -300,7 +300,11 @@ fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: 
 /// under the kernel code model and in i386 code that is not position independent. Elsewhere a name
 /// is reached from the instruction pointer and a reader's index has nowhere to go.
 ///
-/// Run after lowering and before allocation, and run once. Running it twice can find more than
+/// `size` is whether the build asked for small code. On i386 outside position independent code the
+/// address of a name read at several offsets then goes into every reader when that is fewer bytes,
+/// which [`fewer_bytes`] works out, where otherwise one reader is the most it goes into.
+///
+/// Run after lowering and before allocation. Running it twice at that point can find more than
 /// running it once in principle: folding a `lea` into a second `lea` leaves that second one foldable
 /// in turn, and the walk below takes those in the one pass since it goes forwards, but it does not
 /// take the other order, where the second `lea` has a reader of its own and goes before the first
@@ -311,6 +315,12 @@ fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: 
 /// allocator taking a different tie break somewhere rather than a fold. So the pipeline runs it once
 /// and this note is here so the next person to notice the same thing does not have to build it to
 /// find out.
+///
+/// The second run in the pipeline is a different thing. On i386 at `-Os` and `-Oz` this runs again
+/// after [`crate::combine::stores`] and [`crate::combine::loads`]. They turn a load, an arithmetic
+/// instruction and a store of a name into one instruction that reads and writes memory, as
+/// `addb $1, (%eax)`, and the address of the name in `%eax` then has a reader the first run did not
+/// see.
 pub fn addresses(
     func: &mut mir::Func,
     insts: &FrameInsts,
@@ -318,8 +328,9 @@ pub fn addresses(
     names: &mut Interner,
     pending: &mut Pending<'_>,
     absolute: bool,
+    size: bool,
 ) -> usize {
-    folds(func, insts, machine, names, pending, absolute, false)
+    folds(func, insts, machine, names, pending, absolute, false, size)
 }
 
 /// Folds the address of a name into the one memory operand that reads it, where the address of a
@@ -339,11 +350,13 @@ pub fn names(
     machine: &MachineInsts,
     names: &mut Interner,
     pending: &mut Pending<'_>,
+    size: bool,
 ) -> usize {
-    folds(func, insts, machine, names, pending, true, true)
+    folds(func, insts, machine, names, pending, true, true, size)
 }
 
 /// The fold of [`addresses`] and of [`names`], the second when `named` is set.
+#[allow(clippy::too_many_arguments)]
 fn folds(
     func: &mut mir::Func,
     insts: &FrameInsts,
@@ -352,6 +365,7 @@ fn folds(
     pending: &mut Pending<'_>,
     absolute: bool,
     named: bool,
+    size: bool,
 ) -> usize {
     let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
     let sum = mir::Opcode::new(names.join(insts.prefix, insts.sum));
@@ -361,6 +375,8 @@ fn folds(
     // number above `i32::MAX` is still one address there, and x86-64 sign extends the field.
     let i386 = std::ptr::eq(machine, &rucc_target::x86::MACHINE);
     let numbers = i386 || std::ptr::eq(machine, &rucc_target::x86_64::MACHINE);
+    // A name read at several offsets is priced rather than turned down, see [`fewer_bytes`].
+    let priced = size && i386 && absolute;
     let mut reads = Reads::of(func);
     let mut held = pending.held();
     // The moves are kept here and made once at the end, since nothing reads the lists before then
@@ -394,7 +410,10 @@ fn folds(
                     }
                 }
             }
-            if let Some(ready) = offer(func, &mut open, inst, absolute) {
+            let ready = offer(func, &mut open, inst, absolute).filter(|ready| {
+                ready.wanted == 1 || fits_every_reader(ready.address) || fewer_bytes(func, ready)
+            });
+            if let Some(ready) = ready {
                 // The set is the whole of what this fold is: every reader takes the address and
                 // the address computation goes, and a set that is missing either half is one that
                 // works the address out twice. So it is proposed together and the target is asked
@@ -446,7 +465,10 @@ fn folds(
                 }
                 match folding_def(func, &reads, inst) {
                     Some((reg, wanted))
-                        if wanted <= room && (wanted == 1 || fits_every_reader(address)) =>
+                        if wanted <= room
+                            && (wanted == 1
+                                || fits_every_reader(address)
+                                || priced && named_alone(address)) =>
                     {
                         open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
                     }
@@ -726,6 +748,34 @@ fn summed_numbers(
 /// written once either way and what goes is the whole `lea`.
 fn fits_every_reader(address: mir::Amode) -> bool {
     address.symbol.is_none()
+}
+
+/// Whether handing the address of a name to every one of its readers is fewer bytes than the
+/// `movl $name` they read it through, on i386 outside position independent code.
+///
+/// `fits_every_reader` gives the reason a name is not handed to several readers at `-O2`: each
+/// reader then carries the address word. What it costs is the word less the displacement the
+/// reader had, which is nothing for a reader whose displacement was a word already. FreeBSD's
+/// `boot2` reads the members of its superblock past the first 128 bytes, `movl $fs, %eax` and then
+/// `0xbc(%eax)` and `0xb8(%eax)`, and gcc writes `fs+0xbc` and `fs+0xb8` and has no move. So the
+/// set is taken when the words the readers grow by come to no more than the five bytes of the move,
+/// which is when a register goes and the code is no longer.
+fn fewer_bytes(func: &mir::Func, ready: &Open) -> bool {
+    /// The bytes of `movl $name, %reg`.
+    const MOVE: usize = 5;
+    /// The bytes of the address word a reader carries once it names the symbol.
+    const WORD: usize = 4;
+    let field = |disp: i32| match disp {
+        0 => 0,
+        _ if i8::try_from(disp).is_ok() => 1,
+        _ => WORD,
+    };
+    let had: usize = ready
+        .folds
+        .iter()
+        .map(|fold| func[fold.into].mem.map_or(0, |mem| field(func[mem].disp)))
+        .sum();
+    WORD * ready.folds.len() <= MOVE + had
 }
 
 /// How many of an instruction's operands read that register.
@@ -1841,6 +1891,7 @@ mod tests {
                 dynamic: &mut growable,
             },
             model == CodeModel::Kernel,
+            false,
         )
     }
 
@@ -2770,7 +2821,10 @@ mod tests {
         let (mut locals, mut arguments, mut growable) = (vec![(local, 3)], Vec::new(), Vec::new());
         let mut pending =
             Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
-        assert_eq!(addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, false), 1);
+        assert_eq!(
+            addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, false, false),
+            1
+        );
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
@@ -2807,7 +2861,7 @@ mod tests {
         let (mut locals, mut arguments, mut growable) = (Vec::new(), vec![(local, 7)], Vec::new());
         let mut pending =
             Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
-        let folded = addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, false);
+        let folded = addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, false, false);
         assert!(locals.is_empty(), "an argument is owed off the other list");
         (folded, func.insts(block).collect(), arguments)
     }
@@ -3195,12 +3249,64 @@ mod tests {
                 dynamic: &mut growable,
             },
             true,
+            false,
         );
 
         assert_eq!(folded, 1);
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].1.disp, i32::from_ne_bytes(0xfee0_0020_u32.to_ne_bytes()));
+    }
+
+    /// A name read through `movl $name` at two offsets on i386, folded at `-Os`, and how many
+    /// instructions are left.
+    fn named_twice_for_size(offsets: [i32; 2], size: bool) -> (usize, usize) {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let block = func.create_block();
+        let gpr = rucc_target::x86::GPR;
+        let address = func.new_vreg(gpr);
+        let lea = op(&mut names, rucc_target::x86::FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let fs = names.intern("fs");
+        func.build(block, lea).def(address, gpr).mem(mir::Mem::of(fs)).finish();
+        for offset in offsets {
+            let value = func.new_vreg(gpr);
+            func.build(block, load)
+                .def(value, gpr)
+                .mem(mir::Mem::at(mir::Operand::read(address, gpr)).plus(offset))
+                .finish();
+        }
+        let (mut locals, mut arguments, mut growable) = (Vec::new(), Vec::new(), Vec::new());
+        let folded = addresses(
+            &mut func,
+            &rucc_target::x86::FRAME,
+            &rucc_target::x86::MACHINE,
+            &mut names,
+            &mut Pending {
+                addresses: &mut locals,
+                arguments: &mut arguments,
+                dynamic: &mut growable,
+            },
+            true,
+            size,
+        );
+        (folded, func.insts(block).count())
+    }
+
+    /// FreeBSD's `boot2` reads two members of its superblock past the first 128 bytes, which is a
+    /// four byte displacement either way, so at `-Os` the name goes into both and the move goes.
+    #[test]
+    fn a_name_read_at_two_far_offsets_goes_into_both_readers_for_size_on_i386() {
+        assert_eq!(named_twice_for_size([0xbc, 0xb8], true), (2, 2));
+        assert_eq!(named_twice_for_size([0xbc, 0xb8], false), (0, 3));
+    }
+
+    /// Two near offsets are a byte each through the register, and six bytes more as two words than
+    /// the five of the move, so the move stays at `-Os` as well.
+    #[test]
+    fn a_name_read_at_two_near_offsets_keeps_its_move_for_size() {
+        assert_eq!(named_twice_for_size([4, 8], true), (0, 3));
     }
 
     /// The pass that moves a constant into the displacement, run on its own.
