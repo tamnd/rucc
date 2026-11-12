@@ -4600,8 +4600,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     }
     // Once, here, rather than as each directory is pushed. A `-I` that names a system
     // directory has to lose to the system entry and the system entry is added last, so the
-    // question cannot be answered until the whole path is known.
-    opts.search.remove_duplicates();
+    // question cannot be answered until the whole path is known. Each directory is resolved on
+    // the file system, as GCC compares the device and the inode, so that a `..` or a symlink
+    // does not make one directory two. A directory that is not there keeps its text.
+    opts.search.remove_duplicates_by(|dir| {
+        std::fs::canonicalize(dir).unwrap_or_else(|_| rucc_session::path_key(dir))
+    });
     // A Plan 9 program names files in the name space of the target, such as `-I/sys/src/cmd`
     // and `#include "/amd64/include/ureg.h"` in libmach. With a sysroot, these are in the tree
     // that it names.
@@ -7254,6 +7258,24 @@ mod tests {
         assert_eq!(dirs, [root.join("usr/include"), PathBuf::from(runtime::DIR)]);
         assert_eq!(opts.search.missing_system(), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// NetBSD's tools/ctfdump passes each osnet directory twice, as `-I<dir>` and as
+    /// `-I<tool>/../../<dir>`. gcc keeps the first one only, so the `#include_next` of osnet's
+    /// `sys/types.h` gets the C library's header and not osnet's again.
+    #[test]
+    fn one_directory_under_two_spellings_is_searched_once() {
+        let root = std::env::temp_dir().join(format!("rucc-two-spellings-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("osnet/sys")).expect("a tree");
+        std::fs::create_dir_all(root.join("tools/ctfdump")).expect("a tree");
+        let plain = root.join("osnet");
+        let other = root.join("tools/ctfdump/../../osnet");
+        let lines = [format!("-I{}", plain.display()), format!("-I{}", other.display())];
+        let (opts, _) = compile(&[&lines[0], &lines[1], "-c", "a.c"]);
+        let dirs: Vec<_> = opts.search.dirs().iter().map(|d| d.path.clone()).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(dirs.contains(&plain), "{dirs:?}");
+        assert!(!dirs.contains(&other), "{dirs:?}");
     }
 
     /// NetBSD's GCC writes DWARF 4 by default, because the kernel build runs every object

@@ -141,11 +141,6 @@ pub fn path_key(path: &Path) -> PathBuf {
     path.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect()
 }
 
-/// Whether two spellings name the same directory, as far as text can say.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    path_key(a) == path_key(b)
-}
-
 /// A header that was found.
 #[derive(Debug, Clone)]
 pub struct Found {
@@ -325,17 +320,28 @@ impl SearchPath {
     /// move a system directory up the order and take the system treatment off the headers in
     /// it, so the `-I` is the one that goes.
     ///
-    /// Two names for one directory are two directories here, where GCC compares the device and
-    /// the inode and sees through a symlink. That wants a file system that can answer the
-    /// question and this one deliberately only reads.
+    /// Here two names for one directory are two directories, where GCC compares the device and
+    /// the inode and sees through a symlink and a `..`. That wants a file system that can answer
+    /// the question, and [`SearchPath::remove_duplicates_by`] is the form for a caller that has
+    /// one.
     pub fn remove_duplicates(&mut self) {
+        self.remove_duplicates_by(path_key);
+    }
+
+    /// [`SearchPath::remove_duplicates`] with `key` to say which directory a spelling names. Two
+    /// entries with one key are one directory. The driver resolves each directory on the real
+    /// file system, so that `-Idir` and `-Iother/../dir` are one entry, as in GCC. NetBSD's
+    /// tools/ctfdump passes the osnet directories in both spellings, and its `sys/types.h` does
+    /// `#include_next <sys/types.h>`, which must get the C library's header and not itself.
+    pub fn remove_duplicates_by(&mut self, key: impl Fn(&Path) -> PathBuf) {
+        let keys: Vec<PathBuf> = self.dirs.iter().map(|dir| key(&dir.path)).collect();
         let mut keep = vec![true; self.dirs.len()];
         for i in 0..self.dirs.len() {
             for j in i + 1..self.dirs.len() {
                 if !keep[i] {
                     break;
                 }
-                if !keep[j] || !same_dir(&self.dirs[i].path, &self.dirs[j].path) {
+                if !keep[j] || keys[i] != keys[j] {
                     continue;
                 }
                 if self.dirs[j].is_system && !self.dirs[i].is_system {
@@ -653,6 +659,27 @@ mod tests {
         search.remove_duplicates();
         let first = search.resolve(&fs, "a.h", IncludeForm::Angled, None, 0).unwrap();
         assert!(search.resolve(&fs, "a.h", IncludeForm::Angled, None, first.next).is_none());
+    }
+
+    #[test]
+    fn a_key_that_sees_through_two_spellings_makes_them_one_directory() {
+        // What the driver passes: the two spellings resolve to one directory, so the second
+        // entry goes and an `#include_next` in the first one finds nothing below itself.
+        let fs = fs_with(&["/osnet/sys/types.h"]);
+        let mut search = SearchPath::new();
+        search.push_bracket("/osnet");
+        search.push_bracket("/tools/ctfdump/../../osnet");
+        search.remove_duplicates();
+        assert_eq!(search.dirs().len(), 2);
+        search.remove_duplicates_by(|dir| {
+            if dir.ends_with("../../osnet") { PathBuf::from("/osnet") } else { path_key(dir) }
+        });
+        let order: Vec<_> = search.dirs().iter().map(|d| norm(&d.path.to_string_lossy())).collect();
+        assert_eq!(order, ["/osnet"]);
+        let first = search.resolve(&fs, "sys/types.h", IncludeForm::Angled, None, 0).unwrap();
+        assert!(
+            search.resolve(&fs, "sys/types.h", IncludeForm::Angled, None, first.next).is_none()
+        );
     }
 
     #[test]
