@@ -63,6 +63,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- On i386 NetBSD, which keeps the stack pointer on four bytes, a function whose frame grows with `alloca` or a variable length array and spills a `__float128` or a vector now compiles. The spill slot is on four bytes and the spill and reload use `movups`. It stopped with E0653 before, which is libquadmath's printf_fp.c (#4449)
 - An `asm` constraint with alternatives, such as the `"r,Z"` and `"rI,r"` of GMP's `sub_ddmmss` on AArch64, compiles. The statement takes one alternative for every operand: the first in which no operand must be a constant. Before, every target refused it, which failed 14 units of GMP and MPFR in the NetBSD aarch64 world.
 - On AArch64 a general purpose register in an `asm` template with no modifier is `x` whatever the width of its type, as gcc and clang name it. It was `w` for a type narrower than 64 bits, so libgcc's `mrs %0, ctr_el0` and `mrs %0, fpsr` into an `unsigned int` did not assemble.
 - The AArch64 assembler reads an immediate that is an expression of numbers with no `#`, such as the `ushr v0.4s, v12.4s, 32-2` of OpenSSL's `vpsm4-armv8.S`.

@@ -1,10 +1,11 @@
 //! A frame that grows with `alloca` and spills a `__float128` on i386 NetBSD.
 //!
 //! NetBSD keeps the i386 stack pointer on four bytes, and a `__float128` lives in a vector
-//! register that is spilled with an aligned move into a slot of sixteen. A frame that both grows
-//! and forces an alignment needs a second base register, which nothing here keeps, so the compile
-//! stops with a diagnostic. It stopped with a panic before (libquadmath's `printf_fp.c`,
-//! tamnd/rucc-bsd#3). The same function on i386 Linux, which keeps sixteen bytes, compiles.
+//! register. A frame that both grows and forces an alignment needs a second base register, which
+//! nothing here keeps, so the spill slot stays on four bytes and the spill and reload are `movups`,
+//! which takes any address. It stopped with a panic first and with E0653 after that (libquadmath's
+//! `printf_fp.c`, tamnd/rucc#4449). The same function on i386 Linux, which keeps sixteen bytes,
+//! keeps the aligned move.
 
 use std::process::Command;
 
@@ -37,13 +38,16 @@ fn compile(target: &str) -> std::process::Output {
 }
 
 #[test]
-fn a_spilled_quad_in_a_growing_netbsd_i386_frame_is_a_diagnostic_and_not_a_panic() {
+fn a_spilled_quad_in_a_growing_netbsd_i386_frame_is_moved_unaligned() {
     let out = compile("i486--netbsdelf");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(!stderr.contains("panicked"), "{stderr}");
-    assert!(stderr.contains("[E0653]"), "{stderr}");
-    assert!(stderr.contains("spills a value to a slot wanting more alignment"), "{stderr}");
+    assert!(out.status.success(), "{stderr}");
+    let asm = String::from_utf8_lossy(&out.stdout);
+    assert!(asm.contains("movups"), "{asm}");
+    // No aligned vector move reaches a slot, which a frame that grows counts from `%ebp`, and
+    // nothing forces the stack pointer onto sixteen.
+    assert!(!asm.lines().any(|line| line.contains("movaps") && line.contains("(%ebp)")), "{asm}");
+    assert!(!asm.contains("$-16"), "{asm}");
 }
 
 #[test]

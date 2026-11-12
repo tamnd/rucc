@@ -1521,11 +1521,23 @@ pub fn compile_recording(
     // aligned to its width, so on a machine that keeps the stack pointer on less than a vector
     // register a spilled vector is a frame that is both forced and grown. See `Growing` in
     // [`crate::frame`].
+    //
+    // Except on i386, which has a move for a vector that takes any address. There the slots go on
+    // what the stack pointer is on and the spills and reloads are that move, so the frame is only
+    // grown. Every cell over that alignment is a spill slot, since a local over it was refused
+    // above. NetBSD is the convention this is for (libquadmath's `printf_fp.c`, tamnd/rucc#4449).
+    let mut share = share;
+    let mut insts = machine.insts;
     if let Some(inst) = stack.grown_at {
         if share.cells().iter().any(|cell| cell.align > machine.conv.stack_align) {
-            return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Spilled });
+            if !std::ptr::eq(machine.insts, &x86::FRAME) {
+                return Err(Unsupported::Dynamic { inst, growing: lower::Growing::Spilled });
+            }
+            share.cap(machine.conv.stack_align);
+            insts = &x86::FRAME_UNALIGNED;
         }
     }
+    let share = share;
     let mut layout = Layout { share: Some(&share), ..layout };
     let mut frame = Frame::of(&func, &allocation, &layout);
     // A frame bigger than a page is taken by calling the platform's routine for it, and on a
@@ -1689,7 +1701,7 @@ pub fn compile_recording(
             && std::ptr::eq(machine.insts, &x86::FRAME),
         sign: flags.branch.sign,
         wrap: wraps.then_some((machine.shapes, &fusable)),
-        ..Convention::new(machine.conv, machine.insts)
+        ..Convention::new(machine.conv, insts)
     };
     let (moves, loops, checks, wrapped, renamed) =
         finish(&mut func, &allocation, &frame, &stack, convention, names);

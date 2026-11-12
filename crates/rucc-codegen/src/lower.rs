@@ -1351,10 +1351,11 @@ pub enum Growing {
     /// that wants more alignment than a call leaves the stack pointer with.
     ///
     /// The same frame as [`Growing::Aligned`], arrived at after allocation rather than before it.
-    /// On i386 NetBSD the stack pointer is kept on four bytes, and a `__float128` or a vector kept
-    /// in a vector register is spilled with an aligned move into sixteen. libquadmath's
-    /// `printf_fp.c` has both with `alloca` (tamnd/rucc-bsd#3). gcc keeps a second base register
-    /// for it, and nothing here holds one, so this is a refusal and not wrong code.
+    /// gcc keeps a second base register for it, and nothing here holds one, so this is a refusal
+    /// and not wrong code. i386 does not get here: on NetBSD, which keeps the stack pointer on four
+    /// bytes, a spilled `__float128` or vector goes into a slot on four with an unaligned move
+    /// (libquadmath's `printf_fp.c`, tamnd/rucc#4449). No other target this crate has a back end
+    /// for keeps the stack pointer on less than its vector registers, so this is for one that does.
     Spilled,
     /// A variable length array in a function written without a prologue.
     ///
