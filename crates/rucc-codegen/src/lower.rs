@@ -6700,18 +6700,25 @@ impl<'a> Lowering<'a> {
     /// stronger for a load and release or stronger for a store. `ldar` and `stlr` are also
     /// sequentially consistent with each other, which is why the strongest ordering needs no fence
     /// on either side, and is what gcc 16.2.0 writes for all of them.
+    ///
+    /// A `_Bool` is the byte form, `ldarb` and `stlrb`, for the reason its plain load and store
+    /// are the byte ones in the rules: the object is a byte holding a zero or a one, and so is the
+    /// register. jemalloc and BIND read and write their atomic flags this way.
     fn ordered(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let args: Vec<Value> = self.source[self.source[inst].args].to_vec();
+        let bits = |this: &Self, ty: Type| {
+            if ty == Type::I1 { Ok(8) } else { this.atomic_bits(inst, ty) }
+        };
         if self.source[inst].opcode == Opcode::AtomicLoad {
             let [addr] = args[..] else { return Err(self.unsupported(inst)) };
             let result = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
-            let bits = self.atomic_bits(inst, self.source[result].ty)?;
+            let bits = bits(self, self.source[result].ty)?;
             let base = self.reg_of(addr)?;
             let got = self.new_reg(result);
             return self.written_as(inst, &format!("ldar_{bits}"), &[got, base]);
         }
         let [value, addr] = args[..] else { return Err(self.unsupported(inst)) };
-        let bits = self.atomic_bits(inst, self.source[value].ty)?;
+        let bits = bits(self, self.source[value].ty)?;
         let put = self.reg_of(value)?;
         let base = self.reg_of(addr)?;
         self.written_as(inst, &format!("stlr_{bits}"), &[put, base])
