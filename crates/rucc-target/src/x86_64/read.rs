@@ -862,7 +862,7 @@ fn instruction(
     };
     let mnemonic = mnemonic.as_ref();
 
-    let given: Vec<Given> =
+    let mut given: Vec<Given> =
         arguments(rest).iter().map(|text| given(text, memory)).collect::<Option<_>>()?;
     let shapes: Vec<Shape> = given.iter().map(Given::shape).collect();
     let opcode = match machine(mnemonic, &shapes) {
@@ -870,6 +870,16 @@ fn instruction(
         None => machine(&suffixed(mnemonic, &given, widths)?, &shapes)?,
     };
     let [only] = written(opcode)? else { return None };
+    // The one instruction that names a half exchanges the two bytes of one word, so its arguments
+    // may come in either order: `xchgb %h0, %b0` is the same instruction as `xchgb %b0, %h0`, and
+    // DragonFly's `machine/endian.h` writes it that way round. Its spelling names the low byte
+    // first, so the high byte written first is put second, and the arms below then check what
+    // they check for the other order. Two high bytes, or two low ones, are not turned round.
+    if matches!(only.args, [Arg::Low(_), Arg::High(_)])
+        && matches!(given.as_slice(), [Given::High(_), Given::Operand(_, Some(Width::Byte))])
+    {
+        given.swap(0, 1);
+    }
 
     // The opcode's own order, which is not the order the arguments were written in: AT&T puts the
     // source first and an instruction may name one operand twice. Which argument goes where is
@@ -1524,6 +1534,22 @@ mod tests {
             vec![whole, whole],
             "the word coming out and the word going in"
         );
+    }
+
+    /// The same exchange with the high byte written first, which is how DragonFly's
+    /// `machine/endian.h` turns a sixteen bit number round. An exchange is the same instruction in
+    /// both orders, so it is the same line, and the high byte of one operand with the low byte of
+    /// another is still not it.
+    #[test]
+    fn the_high_byte_may_come_first() {
+        let lines =
+            plain("xchgb %h0, %b0", &[Some(Width::Word)]).expect("the swap DragonFly writes");
+        assert_eq!(lines, plain("xchgb %b0,%h0", &[Some(Width::Word)]).expect("the other order"));
+        assert!(
+            plain("xchgb %h0, %b1", &[Some(Width::Word), Some(Width::Word)]).is_none(),
+            "the high byte of one word and the low byte of another"
+        );
+        assert!(plain("xchgb %h0, %h0", &[Some(Width::Word)]).is_none(), "two high bytes");
     }
 
     /// A number in front of an operand in memory is a distance past the object, and in front of
