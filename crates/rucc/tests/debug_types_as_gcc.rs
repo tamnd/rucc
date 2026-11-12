@@ -1230,3 +1230,26 @@ void f_vec(m128 q[4]) { q[0] = q[1]; }
     assert_eq!(pointee("f_carr"), (vec![DW_TAG_CONST], DW_TAG_TYPEDEF, typedef("u32")));
     assert_eq!(pointee("f_vec"), (vec![], DW_TAG_TYPEDEF, typedef("m128")));
 }
+
+/// A function that returns a typedef name with `may_alias` returns that name. The attribute makes
+/// the name a type of its own, and the signature the function was checked against is the one it
+/// stands for, so the return type was read from the declaration's own type rather than from that
+/// one. gcc's BTF has `__m128i` for what the NetBSD kernel's `aes_sse2_enc1` returns.
+/// tamnd/rucc#4482.
+#[test]
+fn a_return_type_with_may_alias_keeps_its_name() {
+    let source = "\
+typedef long long m128 __attribute__((__vector_size__(16), __may_alias__));
+typedef int word __attribute__((__may_alias__));
+m128 add(m128 a, m128 b) { return a + b; }
+word same(word a) { return a; }
+";
+    let all = entries(&build_for("--target=x86_64-unknown-linux-gnu", "may-alias-return", source));
+    let returns = |name: &str| {
+        let function = named(&all, DW_TAG_SUBPROGRAM, name).expect("it is described");
+        let ty = at(&all, function.ty.expect("it returns a value"));
+        (ty.tag, ty.name.clone())
+    };
+    assert_eq!(returns("add"), (DW_TAG_TYPEDEF, Some("m128".to_owned())));
+    assert_eq!(returns("same"), (DW_TAG_TYPEDEF, Some("word".to_owned())));
+}
