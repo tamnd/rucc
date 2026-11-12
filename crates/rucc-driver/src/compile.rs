@@ -16090,6 +16090,35 @@ block2:
         assert!(said.contains("read-only variable 'g' used as 'asm' output"), "{said}");
     }
 
+    /// The retpoline thunks on i386 write the return address at `(%esp)` and the return thunk
+    /// takes four bytes off the stack, as gcc's do. They named `%rsp` before, which the assembler
+    /// refused, and 1503 units of the NetBSD i386 GENERIC kernel, built with
+    /// `-mindirect-branch=thunk`, failed. tamnd/rucc#4465.
+    #[test]
+    fn the_i386_retpoline_thunks_use_the_thirty_two_bit_stack_pointer() {
+        use rucc_target::{Speculation, Thunk};
+        let source = "void (*f)(void);\nvoid (*g)(int);\n\
+                      void a(void) { f(); }\n\
+                      int b(void) { g(1); f(); return 2; }\n";
+        for how in [Thunk::Comdat, Thunk::Inline] {
+            let mut opts = options();
+            opts.target = "i486--netbsdelf".parse::<Triple>().unwrap();
+            opts.opt_level = rucc_session::OptLevel::O2;
+            opts.speculation =
+                Speculation { indirect: how, returns: how, ..Speculation::default() };
+            opts.emit = EmitKind::Asm;
+            let ran = run(&opts, source);
+            assert_eq!(ran.messages, Vec::<String>::new(), "{how:?}");
+            let text = ran.text();
+            assert!(text.contains("mov %eax, (%esp)"), "{how:?}: {text}");
+            assert!(text.contains("lea 4(%esp), %esp"), "{how:?}: {text}");
+            assert!(!text.contains("%rsp"), "{how:?}: {text}");
+            opts.emit = EmitKind::Object;
+            let ran = run(&opts, source);
+            assert_eq!(ran.messages, Vec::<String>::new(), "{how:?}");
+        }
+    }
+
     /// A `__float128` constant is written into the frame a word at a time and read back. On i386
     /// the word is four bytes, and libquadmath's tanq.c and x2y2m1q.c on NetBSD/i386 stopped at
     /// "no rule lowers `store.i64`" before.

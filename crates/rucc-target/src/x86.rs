@@ -631,7 +631,31 @@ pub fn table_base(reg: PhysReg) -> String {
 /// The names are x86-64's with the thirty two bit register on the end, which is what the kernel's
 /// `arch/x86/lib/retpoline.S` defines when it is built for this machine. No register takes a REX
 /// byte here, so none of the calls needs the override that pads one.
-pub static THUNKS: Thunks = Thunks { regs: &GPR_NAMES, padded_from: 8, ..crate::x86_64::THUNKS };
+///
+/// The thunks' own instructions are x86-64's with the thirty two bit stack pointer, and the return
+/// thunk takes four bytes off the stack rather than eight. gcc writes them that way, and a `%rsp`
+/// is a register this machine does not have.
+pub static THUNKS: Thunks = Thunks {
+    regs: &GPR_NAMES,
+    padded_from: 8,
+    through: thunk_through,
+    around: thunk_around,
+    back: THUNK_BACK,
+    ..crate::x86_64::THUNKS
+};
+
+/// The retpoline for a jump through `reg`, which writes the address over the one the call pushed.
+fn thunk_through(reg: &str) -> String {
+    crate::x86_64::retpoline(&format!("mov {reg}, (%esp)"))
+}
+
+/// The same for a call, which jumps over a copy of [`thunk_through`] and calls it.
+fn thunk_around(reg: &str) -> String {
+    crate::x86_64::jumped_over(&thunk_through(reg))
+}
+
+/// The return thunk, which takes the pushed address of the loop back off the stack.
+const THUNK_BACK: &str = "call 1f\n0:\npause\nlfence\njmp 0b\n1:\nlea 4(%esp), %esp\nret";
 
 /// What an i386 instruction has to look like for this machine to have one.
 ///
@@ -1110,6 +1134,22 @@ mod tests {
         }
         for name in names {
             assert!(form_here(name).is_some(), "{name} is not an i386 instruction");
+        }
+    }
+
+    /// The thunks name the thirty two bit stack pointer, as gcc's do, and no sixty four bit
+    /// register at all.
+    #[test]
+    fn the_thunks_use_the_thirty_two_bit_stack_pointer() {
+        let thunks = FRAME.thunks.expect("the frame has thunks");
+        let through = (thunks.through)("%eax");
+        assert!(through.ends_with("\n1:\nmov %eax, (%esp)\nret"), "{through}");
+        let around = (thunks.around)("%ecx");
+        assert!(around.starts_with("jmp 3f\n2:\ncall 1f"), "{around}");
+        assert!(around.contains("mov %ecx, (%esp)"), "{around}");
+        assert!(thunks.back.ends_with("\n1:\nlea 4(%esp), %esp\nret"), "{}", thunks.back);
+        for text in [&through, &around, thunks.back] {
+            assert!(!text.contains("%r"), "{text}");
         }
     }
 
