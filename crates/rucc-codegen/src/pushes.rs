@@ -186,12 +186,25 @@ pub fn unframed(
             !matches!(op, mir::CfiOp::DefCfa { .. } | mir::CfiOp::DefCfaRegister(_))
         });
         let Some(frame) = frame.filter(|_| counted) else { return false };
+        let remembers = func.cfi_after(prologue).any(|op| op == mir::CfiOp::RememberState);
         func.cfi.retain(|(inst, _)| *inst != prologue && !epilogues.contains(inst));
+        // The body's rules, which each epilogue that is not the last one puts back after its
+        // `ret`, were remembered on the `subl`. They are now the rules the instruction in front
+        // of it leaves, so they are remembered there. With nothing in front, the body runs under
+        // the rules every function starts with, which a `ret` leaves too, and nothing is kept.
+        if remembers {
+            match func.insts(entry).take_while(|&inst| inst != prologue).last() {
+                Some(before) => func.cfi.push((before, mir::CfiOp::RememberState)),
+                None => func.cfi.retain(|(_, op)| {
+                    !matches!(op, mir::CfiOp::RememberState | mir::CfiOp::RestoreState)
+                }),
+            }
+        }
         for (_, op) in &mut func.cfi {
-            if let mir::CfiOp::DefCfaOffset(offset) = op
-                && *offset >= frame
-            {
-                *offset -= bytes;
+            if let mir::CfiOp::DefCfaOffset(offset) = op {
+                if *offset >= frame {
+                    *offset -= bytes;
+                }
             }
         }
     }
@@ -317,10 +330,10 @@ fn plan(
         func[next].opcode == ops.sub
             && func[func[next].operands].iter().any(|op| op.role.is_def() && op.reg == sp)
     });
-    if let Some(sub) = popped
-        && (func[sub].imm.map(|imm| func[imm].0) != Some(i64::from(area))
-            || func.cfi_after(sub).next().is_some())
-    {
+    if popped.is_some_and(|sub| {
+        func[sub].imm.map(|imm| func[imm].0) != Some(i64::from(area))
+            || func.cfi_after(sub).next().is_some()
+    }) {
         return None;
     }
     let before: usize = stores.iter().map(|&store| stored_bytes(func, store, ops)).sum();
@@ -396,10 +409,14 @@ fn arith_bytes(area: u32) -> usize {
 /// The rows are read in the order the instructions are laid out, which is the order the unwinder
 /// reads them in, from what every function starts with: the frame is the return address above the
 /// stack pointer.
+///
+/// The state the prologue remembers is kept too, because the block after a `ret` starts from it
+/// and not from where the epilogue left the frame.
 fn cfa(func: &mir::Func, call: mir::Inst, conv: &CallRegs) -> Option<i32> {
     let sp = conv.dwarf(conv.int_class, conv.stack_pointer)?;
     let mut reg = sp;
     let mut offset = i32::try_from(conv.return_address).ok()?;
+    let mut remembered = Vec::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
             if inst == call {
@@ -410,6 +427,12 @@ fn cfa(func: &mir::Func, call: mir::Inst, conv: &CallRegs) -> Option<i32> {
                     mir::CfiOp::DefCfa { reg: to, offset: by } => (reg, offset) = (to, by),
                     mir::CfiOp::DefCfaOffset(by) => offset = by,
                     mir::CfiOp::DefCfaRegister(to) => reg = to,
+                    mir::CfiOp::RememberState => remembered.push((reg, offset)),
+                    mir::CfiOp::RestoreState => {
+                        if let Some(state) = remembered.pop() {
+                            (reg, offset) = state;
+                        }
+                    }
                     _ => {}
                 }
             }
