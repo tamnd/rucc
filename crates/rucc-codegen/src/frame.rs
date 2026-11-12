@@ -20,7 +20,8 @@
 //!   saved general purpose regs    pushed, one word each
 //!   saved vector registers        stored rather than pushed, since no machine here pushes one
 //!   stack protector canary        when the function has one, above everything a local reaches
-//!   locals                        what an alloca becomes, widest alignment first
+//!   locals                        what an alloca becomes, widest alignment first, or from the
+//!                                 canary down with character arrays nearest it when there is one
 //!   spill slots                   one for every value the allocator ran out of registers for
 //!   outgoing argument area        at the bottom, because a call reads its stack arguments from
 //!                                 the stack pointer upward
@@ -199,6 +200,11 @@ pub struct Layout<'a> {
     pub moves: &'a [ClassMoves],
     /// The memory the function asked for itself, in the order it wants it reported back.
     pub locals: &'a [Local],
+    /// Which of those locals go right below the canary in a protected frame, by their place in
+    /// `locals`, which is what gcc does with a character array so that a write that runs off its
+    /// end changes the canary with its first byte. Nothing in a frame with no canary. See
+    /// [`Frame::of`].
+    pub near: &'a [usize],
     /// How many bytes the widest call in the function needs for arguments it passes on the stack.
     pub outgoing: u32,
     /// Whether the function calls nothing, which is what the alignment and the red zone turn on.
@@ -341,6 +347,7 @@ impl<'a> Layout<'a> {
             file,
             moves: &[],
             locals: &[],
+            near: &[],
             outgoing: 0,
             leaf: true,
             frame_pointer: false,
@@ -484,16 +491,53 @@ impl Frame {
             (std::cmp::Reverse(align), size % align != 0)
         });
         cells.resize(plan.cells().len(), 0);
-        for cell in order {
-            let Cell { size, align: want } = plan.cells()[cell];
+        for &cell in &order {
+            let want = plan.cells()[cell].align;
             assert!(
                 want.is_power_of_two(),
                 "a local aligned to something that is not a power of 2"
             );
             align = align.max(want);
-            top = top.next_multiple_of(want);
-            cells[cell] = offset(top);
-            top += size;
+        }
+
+        // The canary goes above everything the function can reach through a local, which is the
+        // whole point of it. A write that runs off the end of an array in this frame passes the
+        // canary before it reaches the saved registers and the return address, so the check at the
+        // end of the function sees a word that changed rather than a return that has already been
+        // taken.
+        //
+        // In a frame with one the cells are placed from it downward, which is the order gcc gives
+        // them on a stack that grows down. The ones [`Layout::near`] names go first, the largest
+        // nearest, so that the first byte past the end of the top one is the canary's. The rest
+        // follow in the order above, so the widest is next and the narrowest is lowest. A program
+        // that writes a pointer through the address of an `int`, which FreeBSD's `shutdown_dgram`
+        // test does with what `pthread_join` hands back, then changes the local below it as it
+        // does under gcc rather than the canary. The canary goes on the first word that leaves room
+        // for all of them above what was placed before the locals.
+        let mut canary = None;
+        if layout.protect {
+            let mut near: Vec<usize> =
+                layout.near.iter().filter_map(|&local| plan.local(local)).collect();
+            near.sort_unstable();
+            near.dedup();
+            near.sort_by_key(|&cell| std::cmp::Reverse(plan.cells()[cell].size));
+            let rest = order.iter().copied().filter(|cell| !near.contains(cell));
+            let down_order: Vec<usize> = near.iter().copied().chain(rest).collect();
+            let mut at = (top + plan.cells().iter().map(|cell| cell.size).sum::<u32>())
+                .next_multiple_of(word);
+            while !down(plan.cells(), &down_order, at, top, &mut cells) {
+                at += word;
+            }
+            top = at;
+            canary = Some(offset(top));
+            top += word;
+        } else {
+            for cell in order {
+                let Cell { size, align: want } = plan.cells()[cell];
+                top = top.next_multiple_of(want);
+                cells[cell] = offset(top);
+                top += size;
+            }
         }
 
         // Read back out to the two lists the rest of the compiler asks its questions in. A cell
@@ -504,17 +548,6 @@ impl Frame {
         let mut slots: Vec<i32> = (0..allocation.assignment.slots().len())
             .map(|slot| placed(plan.slot(u32::try_from(slot).expect("a frame"))))
             .collect();
-
-        // Above everything the function can reach through a local, which is the whole point of it.
-        // A write that runs off the end of an array in this frame passes the canary before it
-        // reaches the saved registers and the return address, so the check at the end of the
-        // function sees a word that changed rather than a return that has already been taken.
-        let mut canary = None;
-        if layout.protect {
-            top = top.next_multiple_of(word);
-            canary = Some(offset(top));
-            top += word;
-        }
         let framed = top - start;
         if last {
             top = top.next_multiple_of(vector);
@@ -1218,6 +1251,29 @@ fn wrap(align: u32, value: u32) -> u32 {
 }
 
 /// A distance in a frame, as the signed number every offset out of here is.
+/// Places `order` from `at` downward, each cell ending where the one placed before it starts or
+/// as near to that as its alignment allows, and says whether all of them stay at or above `floor`.
+/// The offsets are written only when they do.
+fn down(all: &[Cell], order: &[usize], at: u32, floor: u32, cells: &mut [i32]) -> bool {
+    let mut end = at;
+    let mut placed = Vec::with_capacity(order.len());
+    for &cell in order {
+        let Cell { size, align } = all[cell];
+        let Some(start) = end.checked_sub(size).map(|start| start / align * align) else {
+            return false;
+        };
+        if start < floor {
+            return false;
+        }
+        placed.push((cell, start));
+        end = start;
+    }
+    for (cell, start) in placed {
+        cells[cell] = offset(start);
+    }
+    true
+}
+
 fn offset(bytes: u32) -> i32 {
     i32::try_from(bytes).expect("a frame under two gigabytes")
 }
@@ -1519,18 +1575,74 @@ mod tests {
         let there = Layout { leaf: false, locals: &locals, protect: true, ..base };
         let frame = Frame::of(&func, &allocation, &there);
 
-        // Two spill slots at the bottom, then the two locals, then the canary above all four. That
-        // order is the whole mechanism: a write that runs off the end of either local passes the
+        // The canary above all four, and the four placed down from it, the widest nearest. That
+        // order is the whole mechanism: a write that runs off the end of any local passes the
         // canary before it reaches the saved registers and the return address.
         let canary = frame.canary().expect("a protected frame has a slot");
         for below in [frame.slot(0), frame.slot(1), frame.local(0), frame.local(1)] {
             assert!(below.expect("a slot that was asked for") < canary);
         }
-        assert_eq!(canary, 40);
-        // Forty eight bytes of areas, and then the eight that put the stack pointer back where a
-        // call wants it, because the arm the check fails on makes one.
+        assert_eq!(frame.local(0), Some(32));
+        // The sixteen byte local is on a multiple of sixteen right below the canary, so the canary
+        // goes at 48 rather than at 40 and the eight bytes at the bottom are padding.
+        assert_eq!(canary, 48);
+        // Fifty six bytes of areas, which already put the stack pointer back where a call wants
+        // it, as the arm the check fails on makes one.
         assert_eq!(frame.size(), 56);
         assert_eq!((frame.size() + SYSV.return_address) % SYSV.stack_align, 0);
+    }
+
+    #[test]
+    fn a_character_array_ends_where_the_canary_starts() {
+        let (func, allocation) = pressure(&SYSV, 4, 2);
+        let locals = [
+            Local { size: 10, align: 1 },
+            Local { size: 4, align: 4 },
+            Local { size: 3, align: 1 },
+            Local { size: 16, align: 16 },
+        ];
+        let base = Layout::new(&SYSV, REGS);
+        let there = Layout { leaf: false, locals: &locals, near: &[0, 2], protect: true, ..base };
+        let frame = Frame::of(&func, &allocation, &there);
+
+        // gcc's `char b[10]` sits at 14 under a canary at 24, so writing `b[10]` changes the
+        // canary. The smaller array goes right below the larger one, and the other locals and the
+        // spill slots below both.
+        let canary = frame.canary().expect("a protected frame has a slot");
+        let large = frame.local(0).expect("a local that was asked for");
+        let small = frame.local(2).expect("a local that was asked for");
+        assert_eq!(large + 10, canary);
+        assert_eq!(small + 3, large);
+        assert_eq!(canary % 8, 0);
+        for below in [frame.slot(0), frame.slot(1), frame.local(1), frame.local(3)] {
+            assert!(below.expect("a slot that was asked for") + 4 <= small);
+        }
+    }
+
+    #[test]
+    fn an_aligned_array_by_the_canary_ends_as_near_to_it_as_its_alignment_lets_it() {
+        let (func, allocation) = pressure(&SYSV, 4, 2);
+        let locals = [Local { size: 20, align: 16 }, Local { size: 8, align: 8 }];
+        let base = Layout::new(&SYSV, REGS);
+        let there = Layout { leaf: false, locals: &locals, near: &[0], protect: true, ..base };
+        let frame = Frame::of(&func, &allocation, &there);
+
+        let canary = frame.canary().expect("a protected frame has a slot");
+        let array = frame.local(0).expect("a local that was asked for");
+        assert_eq!(array % 16, 0);
+        assert!(array + 20 <= canary && canary - (array + 20) < 16);
+        assert!(frame.local(1).expect("a local that was asked for") + 8 <= array);
+    }
+
+    #[test]
+    fn a_frame_with_no_canary_places_a_character_array_like_any_other_local() {
+        let (func, allocation) = pressure(&SYSV, 4, 2);
+        let locals = [Local { size: 10, align: 1 }, Local { size: 8, align: 8 }];
+        let base = Layout::new(&SYSV, REGS);
+        let plain = Layout { leaf: false, locals: &locals, ..base };
+        let near = Layout { near: &[0], ..plain };
+
+        assert_eq!(Frame::of(&func, &allocation, &near), Frame::of(&func, &allocation, &plain));
     }
 
     #[test]
