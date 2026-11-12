@@ -70,6 +70,7 @@ use crate::pads;
 use crate::pairs;
 use crate::pressure::{Cost, Pressure};
 use crate::product;
+use crate::pushes;
 use crate::quotient;
 use crate::scaled;
 use crate::schedule;
@@ -1914,6 +1915,20 @@ pub fn compile_recording(
     // [`crate::bytes`].
     if std::ptr::eq(machine.selector, &select::x86::SELECTOR) {
         bytes::reach(&mut func, machine.insts.prefix, machine.conv.int_class, names);
+    }
+
+    // After every pass that moves an instruction, since a push moves the stack pointer and nothing
+    // may come between one and its call. i386 at -Os and -Oz only, as gcc, and not with the
+    // debugging information, which counts the frame from the stack pointer. See [`crate::pushes`].
+    if std::ptr::eq(machine.shapes, &x86::MACHINE) && flags.goal == Goal::Size && !flags.debug {
+        pushes::arguments(
+            &mut func,
+            &stack.passing,
+            machine.insts,
+            machine.shapes,
+            machine.conv,
+            names,
+        );
     }
 
     // Once the blocks will not move again, since a head is a block a jump runs backwards to and

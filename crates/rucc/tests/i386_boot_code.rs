@@ -176,3 +176,36 @@ fn a_block_not_expected_to_run_goes_after_the_return_at_o2() {
     let b = h.iter().position(|line| line.ends_with("\tb")).expect("b is called");
     assert!(b < a, "the traces put the call of a at the end\n{text}");
 }
+
+/// A `printf` of two numbers, and a call of a function that takes its own five arguments off the
+/// stack under `-mrtd`, the last two of which go there under `-mregparm=3`.
+const PASSED: &str = "\
+int printf(const char *, ...);
+void say(int a, int b) { printf(\"%d %d\\n\", a, b); }
+int h(int, int, int, int, int);
+int five(int a) { return h(a, 1, 2, 3, a) + 1; }
+";
+
+#[test]
+fn the_arguments_a_call_passes_on_the_stack_are_pushed_at_os() {
+    let text = listing_of(PASSED, "pushed", &[]);
+    let say = body(&text, "say");
+    let pushes = say.iter().filter(|line| line.starts_with("pushl")).count();
+    assert_eq!(pushes, 3, "the format and both numbers are pushed\n{text}");
+    assert!(say.contains(&"addl\t$12, %esp"), "the caller takes them off again\n{text}");
+    assert!(!say.iter().any(|line| line.contains("(%esp)")), "nothing is stored\n{text}");
+    let five = body(&text, "five");
+    assert!(!five.iter().any(|line| line.contains("(%esp)")), "both words are pushed\n{text}");
+    let call = five.iter().position(|line| line.ends_with("\th")).expect("h is called");
+    assert!(
+        !five[call..].iter().any(|line| line.starts_with("subl")),
+        "a callee that takes its arguments off leaves the stack pointer where it was\n{text}"
+    );
+}
+
+#[test]
+fn the_arguments_a_call_passes_on_the_stack_are_stored_at_o2() {
+    let text = listing_of(PASSED, "stored", &["-O2"]);
+    let say = body(&text, "say");
+    assert!(!say.iter().any(|line| line.starts_with("pushl\t$")), "{text}");
+}

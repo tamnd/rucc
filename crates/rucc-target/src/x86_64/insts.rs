@@ -49,11 +49,11 @@ use Form::{
     CmpSetX87StatusBoth, CmpXchg, CmpXchgFlags, Convert, ConvertFromVec, ConvertToVec, ConvertVec,
     CpuId, CtrlX87, DivQuo, DivRem, DivWide, EhReturn, Exchange, FusedVec, Jcc, Jmp, JmpAway,
     JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulRi,
-    MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec,
-    RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble, ShiftDoubleCl, ShiftRi, ShiftVec,
-    ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
-    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template, Test,
-    TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    MulWide, Nop, Pop, PopX87, Prefetch, Push, PushImm, PushX87, Ret, RetPop, RetVal, RetVal2,
+    RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble, ShiftDoubleCl, ShiftRi,
+    ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad,
+    StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template,
+    Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -575,6 +575,11 @@ pub enum Form {
     Move,
     /// A register put on the stack, which is how a prologue saves one the convention preserves.
     Push,
+    /// A number put on the stack, or the address of a name, which is how an i386 call that is
+    /// shorter than its stores passes an argument that is a constant. See `crate::pushes` in the
+    /// code generator. It has no operand: the number is the immediate and the stack pointer it
+    /// moves is no register anything allocates.
+    PushImm,
     /// A register taken off it, which is how the epilogue gives it back.
     Pop,
     /// Leaving, which is the instruction a lowering rule cannot select for the reason
@@ -1382,9 +1387,8 @@ impl Form {
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
-            Ret | RetPop | Barrier | Landing | Nop | Spin | Trap | Align | Literal | Template => {
-                &LEAVE
-            }
+            Ret | RetPop | PushImm | Barrier | Landing | Nop | Spin | Trap | Align | Literal
+            | Template => &LEAVE,
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
             CmpXchgFlags => &CMPXCHG_FLAGS,
@@ -1431,6 +1435,7 @@ impl Form {
                 | TestRi
                 | StoreImm
                 | RetPop
+                | PushImm
                 | ShuffleVec
                 | ShiftVec
         )
@@ -1510,6 +1515,7 @@ impl Form {
                 | Rmw
                 | Prefetch
                 | Push
+                | PushImm
                 | Pop
                 | Ret
                 | RetPop
@@ -2416,6 +2422,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("mov_rr_32", Move),
     ("push_32", Push),
     ("pop_32", Pop),
+    // A constant or the address of a name pushed, which i386 passes an argument with where that is
+    // shorter than storing it. Only `crate::x86::FRAME`'s machine writes it.
+    ("push_i_32", PushImm),
     ("ret", Ret),
     // A return that takes that many bytes of arguments with it, which only i386 writes: its
     // callee takes the address a result goes back through off the stack.
@@ -2829,7 +2838,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 842);
+        assert_eq!(described, 843);
     }
 
     #[test]
@@ -2888,6 +2897,7 @@ mod tests {
                             | JmpReg
                             | JmpMem
                             | Push
+                            | PushImm
                             | Ret
                             | RetPop
                             | StoreVec
@@ -3087,6 +3097,7 @@ mod tests {
                             | JmpMem
                             | Ret
                             | RetPop
+                            | PushImm
                             | Barrier
                             | AluMi
                             | UnaryM
