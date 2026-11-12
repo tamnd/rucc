@@ -84,6 +84,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     let mut body = Body {
         sanitize,
         one_past: None,
+        indexed: Map::default(),
         unit,
         func,
         ssa: Ssa::new(address),
@@ -397,6 +398,12 @@ fn sanitized(asked: Sanitize, flags: DeclFlags) -> Sanitize {
     }
     if flags.contains(DeclFlags::NO_UBSAN_VLA_BOUND) {
         sanitize.vla_bound = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_NULL) {
+        sanitize.null = Check::Off;
+    }
+    if flags.contains(DeclFlags::NO_UBSAN_ALIGNMENT) {
+        sanitize.alignment = Check::Off;
     }
     if flags.contains(DeclFlags::NO_ASAN) || flags.contains(DeclFlags::NAKED) {
         sanitize.address = false;
@@ -719,6 +726,9 @@ struct Place {
     /// record has no instruction of its own until its address is taken, which is where
     /// [`Body::taken`] writes one.
     first: Option<Extra>,
+    /// The pointer this place was reached through, for the checks of `-fsanitize=null` and
+    /// `-fsanitize=alignment`, which [`Body::check_pointed`] makes before an access to it.
+    pointed: Option<ubsan::Pointed>,
 }
 
 impl Place {
@@ -733,6 +743,7 @@ impl Place {
             restrict: Restrict::NONE,
             reverse: false,
             first: None,
+            pointed: None,
         }
     }
 }
@@ -1007,6 +1018,11 @@ struct Body<'a, 'u> {
     /// lets go one past the end. Set by `&a[i]` and by the decay of `a[i]` just before the
     /// place is worked out, and taken by the subscript.
     one_past: Option<ExprId>,
+    /// The arrays a subscript is about to decay, each with the pointer the array was reached
+    /// through once the decay has found it. A subscript of a member reached through a pointer is
+    /// checked as an access to the member, so the decay passes the pointer on rather than
+    /// checking it. See [`Body::check_pointed`].
+    indexed: Map<ExprId, Option<ubsan::Pointed>>,
 }
 
 /// What one function of a tree of nested ones has in hand to find the things it reaches.
@@ -4007,6 +4023,7 @@ impl<'u> Body<'_, 'u> {
                     }
                     None => {
                         let place = self.place(expr);
+                        self.check_load(place, span);
                         let align = self.place_align(place);
                         (self.address_of(place, span), align)
                     }
@@ -4030,6 +4047,7 @@ impl<'u> Body<'_, 'u> {
                     }
                     None => {
                         let place = self.place(expr);
+                        self.check_load(place, span);
                         // The smaller of the two ends, since one number covers both of them and
                         // the object being read may be less aligned than the one being written.
                         let align = travel.align.min(self.place_align(place));
@@ -4763,6 +4781,7 @@ impl<'u> Body<'_, 'u> {
             // `struct p = (struct point){ 1, 2 };`. It is a copy rather than a store, because
             // an aggregate is not a value the IR can hold.
             let source = self.place(value);
+            self.check_load(source, span);
             let source = self.address_of(source, span);
             self.copy_bytes(addr, source, ty, span);
             return;
@@ -4973,7 +4992,9 @@ impl<'u> Body<'_, 'u> {
                 let addr = self.global_addr(symbol, span);
                 Place::new(Where::Addr(addr), ty)
             }
-            ExprKind::Unary { op: UnaryOp::Deref, operand } => self.place_of_deref(operand, ty),
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => {
+                self.place_of_deref(operand, ty, span.lo)
+            }
             // `__real__ z` and `__imag__ z`, which name the two halves of whatever object `z`
             // names. Only a complex operand arrives here, because the checking makes one of
             // these an lvalue only for a complex operand and nothing else asks where a value is.
@@ -4984,12 +5005,28 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Member { base, field } => self.member(base, field, ty, span),
             ExprKind::Subscript { base, index } => {
                 let past = self.one_past.take() == Some(expr);
+                let checked = self.sanitize.null.is_on() || self.sanitize.alignment.is_on();
+                let decayed = match self.tast()[base].kind {
+                    ExprKind::Convert { kind: Conversion::ArrayDecay, operand } if checked => {
+                        Some(operand)
+                    }
+                    _ => None,
+                };
+                if let Some(array) = decayed {
+                    self.indexed.insert(array, None);
+                }
                 let addr = self.element(base, index, ty, past, span);
+                let inner = decayed.and_then(|array| self.indexed.remove(&array).flatten());
+                let pointed = if checked {
+                    self.indexed_pointed((base, index), addr, ty, inner, span)
+                } else {
+                    None
+                };
                 let through = self.through(base);
                 // An array is not a type the attribute can be written on, so an element of one
                 // is stored the way the record the array is a member of stores everything.
                 let reverse = rucc_sema::reverse_ordered(self.tast(), self.types(), expr);
-                Place { restrict: through, reverse, ..Place::new(Where::Addr(addr), ty) }
+                Place { restrict: through, reverse, pointed, ..Place::new(Where::Addr(addr), ty) }
             }
             // An aggregate is read by address rather than by value, so the conversion that
             // reads one is the identity and the place under it is the answer. Unless the object
@@ -5078,7 +5115,8 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Assign { op: None, lhs, rhs, .. } => {
                 let ty = self.tast()[lhs].ty;
                 let into = self.place(lhs);
-                self.copy(into, rhs, ty, span);
+                let at = self.assigned_at((lhs, rhs), span);
+                self.copy(Self::stored_at(into, at), rhs, ty, (at, span));
                 into
             }
             // A vector that is not already an object, which is what every operator over one
@@ -6903,7 +6941,8 @@ impl<'u> Body<'_, 'u> {
     /// `base.field`, which is the base's address plus the member's offset.
     fn member(&mut self, holder: ExprId, field: u32, ty: TypeId, span: Span) -> Place {
         let place = self.place(holder);
-        self.member_at(place, holder, field, ty, span)
+        let pointed = self.member_pointed(place.pointed, holder, span);
+        Place { pointed, ..self.member_at(place, holder, field, ty, span) }
     }
 
     /// Member `field` of the object at `place`, which `holder` names. Kept apart from
@@ -7401,6 +7440,7 @@ impl<'u> Body<'_, 'u> {
     /// Reads a place.
     fn read(&mut self, place: Place, span: Span) -> Option<Value> {
         let ty = repr::value_type(self.types(), self.target(), place.ty)?;
+        self.check_load(place, span);
         let ordered = self.atomic_access(place.ty);
         match place.at {
             Where::Var(var) => {
@@ -7470,6 +7510,7 @@ impl<'u> Body<'_, 'u> {
     /// A bit-field is the one place where what was written is not what a read gives back, and
     /// [`Self::write_back`] is what turns those bits into the value that does.
     fn write(&mut self, place: Place, value: Value, span: Span) -> Option<Value> {
+        self.check_store(place, span);
         let ordered = self.atomic_access(place.ty);
         match place.at {
             Where::Var(var) => {
@@ -8361,6 +8402,7 @@ impl<'u> Body<'_, 'u> {
             Conversion::ArrayDecay | Conversion::FunctionDecay => {
                 self.one_past = Some(operand);
                 let place = self.place(operand);
+                self.check_decayed(operand, place, span);
                 Some(self.taken(place, span))
             }
             Conversion::Arithmetic | Conversion::Pointer | Conversion::Excess => {
@@ -8554,12 +8596,13 @@ impl<'u> Body<'_, 'u> {
                 Some(build.binary(Opcode::Xor, value, ones, Flags::NONE))
             }
             UnaryOp::Deref => {
-                let place = self.place_of_deref(operand, ty);
+                let place = self.place_of_deref(operand, ty, span.lo);
                 self.read(place, span)
             }
             UnaryOp::AddrOf => {
                 self.one_past = Some(operand);
                 let place = self.place(operand);
+                self.check_taken(place, span);
                 Some(self.taken(place, span))
             }
             UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec => {
@@ -8585,11 +8628,12 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// The place `*p` names.
-    fn place_of_deref(&mut self, operand: ExprId, ty: TypeId) -> Place {
+    /// The place `*p` names, where `at` is the `*`.
+    fn place_of_deref(&mut self, operand: ExprId, ty: TypeId, at: BytePos) -> Place {
         let addr = self.value(operand);
         let through = self.through(operand);
-        Place { restrict: through, ..Place::new(Where::Addr(addr), ty) }
+        let pointed = self.pointing(addr, ty, at);
+        Place { restrict: through, pointed, ..Place::new(Where::Addr(addr), ty) }
     }
 
     /// The `restrict` scope a pointer this access is about to go through came from.
@@ -8685,7 +8729,8 @@ impl<'u> Body<'_, 'u> {
         // What a prefix one is worth is the value in the object afterwards, which in a
         // bit-field is what fits in it: `++b` on a five bit field holding 31 is 0. A postfix
         // one is worth what was there before and has no use for it.
-        let new = self.write_back(place, new, !op.is_postfix(), span);
+        let at = self.stepped_at(operand, op.is_postfix(), span);
+        let new = self.write_back(Self::stored_at(place, at), new, !op.is_postfix(), span);
         Some(if op.is_postfix() { old } else { new })
     }
 
@@ -10747,12 +10792,16 @@ impl<'u> Body<'_, 'u> {
             }
         }
         let place = self.place(lhs);
+        // A store through a pointer is said to be at the operator, and the read of `a op= b`
+        // where the object is named.
+        let at = self.assigned_at((lhs, rhs), span);
+        let into = Self::stored_at(place, at);
         let Some(op) = op else {
             if repr::value_type(self.types(), self.target(), ty).is_none() {
-                return self.copy(place, rhs, ty, span);
+                return self.copy(into, rhs, ty, (at, span));
             }
             let value = self.eval(rhs)?;
-            return Some(self.write_back(place, value, want, span));
+            return Some(self.write_back(into, value, want, span));
         };
 
         // `a op= b` is not `a = a op b` with the conversions left out: the operation happens in
@@ -10807,7 +10856,7 @@ impl<'u> Body<'_, 'u> {
             self.arithmetic(op, old, right, computation, span)
         };
         let value = self.coerce(value, computation, ty, span);
-        Some(self.write_back(place, value, want, span))
+        Some(self.write_back(into, value, want, span))
     }
 
     /// `a op= b` where the object has the qualifier on it.
@@ -11517,7 +11566,16 @@ impl<'u> Body<'_, 'u> {
     /// over it is where that happens. So `a = b` with both of them atomic is two ordered copies
     /// through a temporary and never one lock held across the other, which is what would deadlock
     /// a table that hashes two objects onto one entry.
-    fn copy(&mut self, place: Place, rhs: ExprId, ty: TypeId, span: Span) -> Option<Value> {
+    ///
+    /// `at` is the `=`, which is where gcc says both the store and the load are.
+    fn copy(
+        &mut self,
+        place: Place,
+        rhs: ExprId,
+        ty: TypeId,
+        (at, span): (BytePos, Span),
+    ) -> Option<Value> {
+        self.check_store(place, span);
         // A literal that reads nothing is written straight into the object, for the reason
         // [`Self::literal_in_place`] gives. Its initializer cannot see what the object holds, so
         // what the object holds afterwards is the same as with a copy out of a slot of its own.
@@ -11559,6 +11617,7 @@ impl<'u> Body<'_, 'u> {
             return None;
         }
         let source = self.place(rhs);
+        self.check_load_at(source, at, span);
         let source = self.address_of(source, span);
         let space = self.space(place.ty);
         let destination = self.address_of(place, span);
@@ -12008,6 +12067,8 @@ impl<'u> Body<'_, 'u> {
                 }
                 Pass::Pieces(_) => {
                     let place = self.place(arg);
+                    // gcc says a read of an argument is where the call starts.
+                    self.check_load_at(place, span.lo, span);
                     let align = self.place_align(place);
                     let addr = self.address_of(place, span);
                     let slots = self.load_slots(addr, align, travel, span);
@@ -12023,6 +12084,8 @@ impl<'u> Body<'_, 'u> {
                         let length = self.size_value(ty, span);
                         let copy = self.dynamic(length, travel.align, span);
                         let place = self.place(arg);
+                        // gcc says a read of an argument is where the call starts.
+                        self.check_load_at(place, span.lo, span);
                         let from = self.address_of(place, span);
                         self.copy_bytes(copy, from, ty, span);
                         values.push(copy);
@@ -12041,6 +12104,8 @@ impl<'u> Body<'_, 'u> {
                         }
                         None => {
                             let place = self.place(arg);
+                            // gcc says a read of an argument is where the call starts.
+                            self.check_load_at(place, span.lo, span);
                             let from = self.address_of(place, span);
                             self.memcpy(copy, from, travel.size, travel.align, span);
                         }
@@ -12063,6 +12128,8 @@ impl<'u> Body<'_, 'u> {
                         continue;
                     }
                     let place = self.place(arg);
+                    // gcc says a read of an argument is where the call starts.
+                    self.check_load_at(place, span.lo, span);
                     let addr = self.address_of(place, span);
                     values.push(addr);
                 }

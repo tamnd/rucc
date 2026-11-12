@@ -358,6 +358,11 @@ pub struct Sanitize {
     pub bounds: Check,
     /// `vla-bound`: a variable length array whose length is zero or negative.
     pub vla_bound: Check,
+    /// `null`: a load, a store or a member access through a null pointer.
+    pub null: Check,
+    /// `alignment`: a load, a store or a member access through a pointer that is not aligned
+    /// to what its type asks for.
+    pub alignment: Check,
     /// `unreachable`: control that reaches a `__builtin_unreachable()`. gcc has no routine that
     /// comes back for this one, so a report and an abort are the same call.
     pub unreachable: Check,
@@ -373,7 +378,7 @@ pub struct Sanitize {
 
 impl Sanitize {
     /// The names `-fsanitize=` takes that this compiler generates, in gcc's spelling.
-    pub const NAMES: [&'static str; 12] = [
+    pub const NAMES: [&'static str; 14] = [
         "integer-divide-by-zero",
         "shift-exponent",
         "shift-base",
@@ -382,6 +387,8 @@ impl Sanitize {
         "bounds-strict",
         "bounds",
         "vla-bound",
+        "null",
+        "alignment",
         "unreachable",
         "signed-integer-overflow",
         "return",
@@ -399,6 +406,8 @@ impl Sanitize {
             self.bounds_strict,
             self.bounds,
             self.vla_bound,
+            self.null,
+            self.alignment,
             self.unreachable,
             self.signed_overflow,
             self.returns,
@@ -419,6 +428,8 @@ impl Sanitize {
             "bounds-strict" => Some(&mut self.bounds_strict),
             "bounds" => Some(&mut self.bounds),
             "vla-bound" => Some(&mut self.vla_bound),
+            "null" => Some(&mut self.null),
+            "alignment" => Some(&mut self.alignment),
             "unreachable" => Some(&mut self.unreachable),
             "signed-integer-overflow" => Some(&mut self.signed_overflow),
             "return" => Some(&mut self.returns),

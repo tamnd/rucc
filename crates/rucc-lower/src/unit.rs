@@ -183,6 +183,10 @@ pub struct Sanitize {
     pub trailing: bool,
     /// `-fsanitize=vla-bound`.
     pub vla_bound: Check,
+    /// `-fsanitize=null`.
+    pub null: Check,
+    /// `-fsanitize=alignment`.
+    pub alignment: Check,
     /// `-fsanitize=unreachable`.
     pub unreachable: Check,
     /// `-fsanitize=signed-integer-overflow`.

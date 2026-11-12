@@ -16,7 +16,9 @@ use rucc_ir::{
 };
 use rucc_sema::{Const, Conversion, ExprId, ExprKind};
 use rucc_tuple::Arch;
-use rucc_types::{ArrayLen, FloatKind, IntKind, RecordId, RecordKind, TypeId, TypeKind, VlaId};
+use rucc_types::{
+    ArrayLen, FloatKind, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, VlaId,
+};
 
 use super::{Body, MemInfo, Ordered, Place, Where};
 use crate::repr;
@@ -27,6 +29,33 @@ use crate::unit::{Check, Unit};
 pub(super) struct Operand {
     pub(super) value: Value,
     pub(super) ty: TypeId,
+}
+
+/// The pointer an access goes through, as the checks of `-fsanitize=null` and
+/// `-fsanitize=alignment` see it.
+///
+/// gcc checks the pointer that the object an access names is reached through: `p` for `*p`, the
+/// address of the element for `p[i]`, and the address of the whole record for `p->m`, `p[i].m`
+/// and `p->a[i]`, which it calls a member access. The type is the type of what the pointer
+/// points at, which is what the alignment is taken from and what the runtime is told.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Pointed {
+    /// The pointer that is checked.
+    pointer: Value,
+    /// The type it points at.
+    ty: TypeId,
+    /// Whether the access is to a member of the record the pointer points at.
+    member: bool,
+    /// Where gcc says the access is: the `*`, the `[`, the `->` or the `.` of the expression
+    /// that names the object, and the assignment operator for a store.
+    at: BytePos,
+}
+
+/// What the runtime is told an access through a pointer was.
+#[derive(Clone, Copy)]
+enum Access {
+    Load,
+    Store,
 }
 
 /// How the length a subscript is checked against is found.
@@ -266,6 +295,13 @@ impl Body<'_, '_> {
     /// Where the operator after `operand` is, which is the first byte after it that is not a space
     /// or a closing parenthesis, and where `span` starts when that is in another file.
     fn after(&self, operand: ExprId, span: Span) -> BytePos {
+        self.next_of(operand, b"+-", span)
+    }
+
+    /// Where the first byte after `operand` that is not a space or a closing parenthesis is, when
+    /// it is one of `starts`, and where `span` starts when it is not or when it is in another
+    /// file.
+    fn next_of(&self, operand: ExprId, starts: &[u8], span: Span) -> BytePos {
         let sources = self.unit.sources;
         let from = sources.real(self.tast().expr_span(operand).hi);
         let Some(id) = sources.lookup_file(from) else { return span.lo };
@@ -276,9 +312,195 @@ impl Body<'_, '_> {
             after.iter().position(|&byte| !byte.is_ascii_whitespace() && byte != b')')
         });
         match found {
-            Some(at) if matches!(bytes[start + at], b'+' | b'-') => from + at as u32,
+            Some(at) if starts.contains(&bytes[start + at]) => from + at as u32,
             _ => span.lo,
         }
+    }
+
+    /// What an access through `pointer` to an object of type `ty` is checked as, which is
+    /// [`None`] when neither check is on.
+    pub(super) fn pointing(&self, pointer: Value, ty: TypeId, at: BytePos) -> Option<Pointed> {
+        let on = self.sanitize.null.is_on() || self.sanitize.alignment.is_on();
+        on.then_some(Pointed { pointer, ty, member: false, at })
+    }
+
+    /// What an access to `base[index]` at `addr` is checked as, where `inner` is what the array
+    /// that `base` decays from was reached through.
+    ///
+    /// An element of a member is a part of the member, so it is the record that is checked, at
+    /// the `[`. An element of an array that a pointer points at, as in `(*q)[i]`, and an element
+    /// that a pointer is stepped to are checked as themselves. An element of an array that is a
+    /// variable is not checked, which is what gcc does too.
+    pub(super) fn indexed_pointed(
+        &self,
+        (base, index): (ExprId, ExprId),
+        addr: Value,
+        ty: TypeId,
+        inner: Option<Pointed>,
+        span: Span,
+    ) -> Option<Pointed> {
+        let through = match inner {
+            Some(inner) => !inner.member,
+            None => {
+                let base_ty = self.types().canonical(self.tast()[base].ty);
+                matches!(self.types().kind(base_ty), TypeKind::Pointer(_))
+            }
+        };
+        let at = |body: &Self| body.bracket(base, index, span);
+        match inner {
+            Some(inner) if inner.member => Some(Pointed { at: at(self), ..inner }),
+            _ if through => self.pointing(addr, ty, at(self)),
+            _ => None,
+        }
+    }
+
+    /// What an access to a member of the object at `holder` is checked as, where `pointed` is
+    /// what that object was reached through. `span` is the member expression, and the access is
+    /// said to be at its `->` or `.`.
+    pub(super) fn member_pointed(
+        &self,
+        pointed: Option<Pointed>,
+        holder: ExprId,
+        span: Span,
+    ) -> Option<Pointed> {
+        let pointed = pointed?;
+        // `p->m` is `(*p).m` with a `*p` that the checking made, and that has the span of the
+        // whole of `p->m`, so the operator is the one after `p`.
+        let tast = self.tast();
+        let before = match tast[holder].kind {
+            ExprKind::Unary { op: UnaryOp::Deref, operand } if tast.expr_span(holder) == span => {
+                operand
+            }
+            _ => holder,
+        };
+        let at = self.next_of(before, b"-.", span);
+        Some(Pointed { member: true, at, ..pointed })
+    }
+
+    /// The decay of the array `operand` names, at `place`. When a subscript is about to use it,
+    /// what the array was reached through is handed to the subscript, and otherwise the decay of
+    /// a member is checked as an access to it, where the expression starts, as gcc does.
+    pub(super) fn check_decayed(&mut self, operand: ExprId, place: Place, span: Span) {
+        if let Some(slot) = self.indexed.get_mut(&operand) {
+            *slot = place.pointed;
+            return;
+        }
+        if let Some(pointed) = place.pointed.filter(|pointed| pointed.member) {
+            self.check_pointed(pointed, Access::Load, span.lo, span);
+        }
+    }
+
+    /// `&` of the object at `place`, which is checked when it is a member reached through a
+    /// pointer, at the `&`. gcc folds `&*p` and `&p[i]` to the pointer, so those are not.
+    pub(super) fn check_taken(&mut self, place: Place, span: Span) {
+        if let Some(pointed) = place.pointed.filter(|pointed| pointed.member) {
+            self.check_pointed(pointed, Access::Load, span.lo, span);
+        }
+    }
+
+    /// The check of a load from `place`, where the expression that names it says.
+    pub(super) fn check_load(&mut self, place: Place, span: Span) {
+        if let Some(pointed) = place.pointed {
+            self.check_pointed(pointed, Access::Load, pointed.at, span);
+        }
+    }
+
+    /// The check of a load from `place` that gcc says is at `at`, which is the start of a call
+    /// for an argument and the assignment operator for the source of a copy.
+    pub(super) fn check_load_at(&mut self, place: Place, at: BytePos, span: Span) {
+        if let Some(pointed) = place.pointed {
+            self.check_pointed(pointed, Access::Load, at, span);
+        }
+    }
+
+    /// The check of a store to `place`.
+    pub(super) fn check_store(&mut self, place: Place, span: Span) {
+        if let Some(pointed) = place.pointed {
+            self.check_pointed(pointed, Access::Store, pointed.at, span);
+        }
+    }
+
+    /// `place` with a store to it said to be at `at`, the operator of the assignment or of the
+    /// step that stores.
+    pub(super) fn stored_at(place: Place, at: BytePos) -> Place {
+        let pointed = place.pointed.map(|pointed| Pointed { at, ..pointed });
+        Place { pointed, ..place }
+    }
+
+    /// Where the operator of `lhs = rhs` or `lhs op= rhs` is.
+    pub(super) fn assigned_at(&self, operands: (ExprId, ExprId), span: Span) -> BytePos {
+        self.operator(operands, span)
+    }
+
+    /// Where the `++` or `--` of a step of `operand` is.
+    pub(super) fn stepped_at(&self, operand: ExprId, postfix: bool, span: Span) -> BytePos {
+        if postfix { self.after(operand, span) } else { span.lo }
+    }
+
+    /// The check of `-fsanitize=null` and `-fsanitize=alignment` on an access through `pointed`.
+    ///
+    /// gcc calls `__ubsan_handle_type_mismatch_v1` with a record of where the access is, the type
+    /// the pointer points at, the alignment of that type as a power of two and what the access
+    /// was, which is 0 for a load, 1 for a store and 3 for a member access, and with the pointer.
+    /// The alignment is checked only when the type asks for more than one byte, and when it is
+    /// not checked the record says a power of zero and the pointer is passed as zero. When the
+    /// two checks are asked for in different ways, a trap is made if either asks for one, and a
+    /// report if either can go on after one.
+    fn check_pointed(&mut self, pointed: Pointed, access: Access, at: BytePos, span: Span) {
+        if self.at.is_none() {
+            return;
+        }
+        let null = self.sanitize.null;
+        let alignment = self.sanitize.alignment;
+        let align = if alignment.is_on() {
+            repr::align_of(self.types(), self.target(), pointed.ty)
+        } else {
+            0
+        };
+        let align = if align > 1 { align } else { 0 };
+        if align == 0 && !null.is_on() {
+            return;
+        }
+        let checks = [null.is_on().then_some(null), (align != 0).then_some(alignment)];
+        let check = if checks.contains(&Some(Check::Trap)) {
+            Check::Trap
+        } else if checks.contains(&Some(Check::Report)) {
+            Check::Report
+        } else {
+            Check::Abort
+        };
+        let address = self.address;
+        let (fires, handed) = {
+            let mut build = self.build(span);
+            let number = build.unary(Opcode::PtrToInt, pointed.pointer, address);
+            let zero = build.iconst(address, 0);
+            let null_fires = null.is_on().then(|| build.icmp(IntPred::Eq, number, zero));
+            let misaligned = (align != 0).then(|| {
+                let mask = build.iconst(address, i128::from(align) - 1);
+                let low = build.binary(Opcode::And, number, mask, Flags::NONE);
+                build.icmp(IntPred::Ne, low, zero)
+            });
+            let fires = match (null_fires, misaligned) {
+                (Some(null), Some(misaligned)) => {
+                    build.binary(Opcode::Or, null, misaligned, Flags::NONE)
+                }
+                (Some(one), None) | (None, Some(one)) => one,
+                (None, None) => return,
+            };
+            (fires, if align == 0 { zero } else { number })
+        };
+        let kind = match access {
+            _ if pointed.member => 3,
+            Access::Load => 0,
+            Access::Store => 1,
+        };
+        let data = {
+            let ty = self.unit.pointee_type(pointed.ty);
+            let log = if align == 0 { 0 } else { align.trailing_zeros() as u8 };
+            self.unit.ubsan_record(at, &[ty], &[log, kind])
+        };
+        let operand = Operand { value: handed, ty: pointed.ty };
+        self.fire(fires, check, "__ubsan_handle_type_mismatch_v1", data, &[operand], span);
     }
 
     /// Reads a `bool` in memory with the check of `-fsanitize=bool`, and [`None`] when the read is
@@ -306,6 +528,7 @@ impl Body<'_, '_> {
         {
             return None;
         }
+        self.check_load(place, span);
         let info = MemInfo { owns: 0, ..self.info_of(place) };
         let flags = self.flags(place.ty);
         let (byte, fires) = {
@@ -465,11 +688,13 @@ impl Body<'_, '_> {
         let (pointer, bound) = match length {
             Length::Fixed(count) => {
                 let place = self.place(object);
+                self.check_decayed(object, place, span);
                 let pointer = self.taken(place, span);
                 (pointer, self.build(span).iconst(address, i128::from(count + extra)))
             }
             Length::Variable(vla) => {
                 let place = self.place(object);
+                self.check_decayed(object, place, span);
                 let pointer = self.taken(place, span);
                 let count = self.count(vla);
                 let ty = self.tast()[self.tast().vla_size(vla)].ty;
@@ -479,7 +704,15 @@ impl Body<'_, '_> {
             Length::Counted(counted) => {
                 let holder = self.place(counted.holder);
                 let at = self.member_at(holder, counted.holder, counted.field, object_ty, span);
-                let pointer = if decayed { self.taken(at, span) } else { self.read(at, span)? };
+                let object_span = self.tast().expr_span(object);
+                let pointed = self.member_pointed(holder.pointed, counted.holder, object_span);
+                let at = Place { pointed, ..at };
+                let pointer = if decayed {
+                    self.check_decayed(object, at, span);
+                    self.taken(at, span)
+                } else {
+                    self.read(at, span)?
+                };
                 let at = match counted.counter[..] {
                     [index] => self.member_at(holder, counted.holder, index, counted.ty, span),
                     _ => self.nested_member(
@@ -772,6 +1005,13 @@ impl Unit<'_> {
     /// pointer to each descriptor. It is writable and in `.data` for the reason gcc gives, which
     /// is that the runtime writes into the location to say it has reported it already.
     pub(super) fn ubsan_data(&mut self, at: BytePos, types: &[Symbol]) -> Symbol {
+        self.ubsan_record(at, types, &[])
+    }
+
+    /// The record of [`Self::ubsan_data`] with `tail` after the descriptors, one byte each, and
+    /// padded to a whole number of words, as gcc lays out a record with fields of one byte at the
+    /// end.
+    fn ubsan_record(&mut self, at: BytePos, types: &[Symbol], tail: &[u8]) -> Symbol {
         let (file, line, column) = match self.sources.presumed(at) {
             Some(loc) => (loc.name.to_owned(), loc.line, loc.column),
             None => (String::new(), 0, 0),
@@ -791,7 +1031,15 @@ impl Unit<'_> {
         for &symbol in types {
             data.push(Datum::Addr(self.module.add_reloc(Reloc { symbol, addend: 0, size: word })));
         }
-        let size = u64::from(word) * (1 + types.len() as u64) + 8;
+        for &byte in tail {
+            let value = self.module.add_imm(Imm::int(i128::from(byte), Type::int(8)));
+            data.push(Datum::Scalar { ty: Type::int(8), value });
+        }
+        let used = u64::from(word) * (1 + types.len() as u64) + 8 + tail.len() as u64;
+        let size = used.next_multiple_of(u64::from(word));
+        if size > used {
+            data.push(Datum::Zero(size - used));
+        }
         let symbol = self.names.intern(&format!(".Lubsan_data.{}", self.checks));
         self.checks += 1;
         let mut global = Global::new(symbol, size, word);
@@ -886,6 +1134,72 @@ impl Unit<'_> {
         self.ubsan_type(&name, kind, info)
     }
 
+    /// The descriptor of the type a pointer points at, named the way gcc names one for a check
+    /// of an access through a pointer: the qualifiers, `struct` or `union` for a record, the name,
+    /// and a star for each pointer it is. An array is named as its element, and the descriptor
+    /// says nothing more about the type, since gcc describes the pointer and not what it points
+    /// at.
+    fn pointee_type(&mut self, ty: TypeId) -> Symbol {
+        let types = self.types;
+        let mut element = ty;
+        let mut stars = String::new();
+        // The pointers come off first and the arrays after, as in gcc, which names a pointer
+        // that is left inside an array as a type it does not know.
+        for array in [false, true] {
+            loop {
+                match types.kind(element) {
+                    TypeKind::Typedef { underlying, .. } => {
+                        let below = types.kind(types.canonical(underlying));
+                        if matches!(below, TypeKind::Array { .. }) != array
+                            || !matches!(below, TypeKind::Array { .. } | TypeKind::Pointer(_))
+                        {
+                            break;
+                        }
+                        element = underlying;
+                    }
+                    TypeKind::Pointer(pointee) if !array => {
+                        stars.push('*');
+                        element = pointee;
+                    }
+                    TypeKind::Array { elem, .. } if array => element = elem,
+                    _ => break,
+                }
+            }
+        }
+        let canonical = types.canonical(element);
+        let quals = types.quals(element).with(types.quals(canonical));
+        let mut name = String::from("'");
+        for (qual, word) in [
+            (Qualifiers::VOLATILE, "volatile "),
+            (Qualifiers::CONST, "const "),
+            (Qualifiers::RESTRICT, "restrict "),
+        ] {
+            if quals.has(qual) {
+                name.push_str(word);
+            }
+        }
+        let inner = match types.kind(canonical) {
+            TypeKind::Atomic(inner) => {
+                name.push_str("_Atomic ");
+                types.canonical(inner)
+            }
+            _ => canonical,
+        };
+        if let TypeKind::Record(id) = types.kind(inner) {
+            name.push_str(match types.record_info(id).kind {
+                RecordKind::Union => "union ",
+                _ => "struct ",
+            });
+        }
+        name.push_str(&self.gnu_type_name(element));
+        if !stars.is_empty() {
+            name.push(' ');
+            name.push_str(&stars);
+        }
+        name.push('\'');
+        self.ubsan_type(&name, 0xffff, 0)
+    }
+
     /// The name gcc gives a type that is not an array or a pointer in what a check is handed.
     fn gnu_type_name(&self, ty: TypeId) -> String {
         let types = self.types;
@@ -918,8 +1232,10 @@ impl Unit<'_> {
     /// is the name gcc prints for the type and not the one the program wrote: `size_t` is
     /// `'long unsigned int'`.
     fn ubsan_type(&mut self, name: &str, kind: u32, info: u32) -> Symbol {
-        let name = name.to_owned();
-        if let Some(&symbol) = self.checked_types.get(&name) {
+        // The same name can be on two descriptors, `'int'` of an integer and of a pointer's
+        // target, so the key has what the descriptor says as well.
+        let key = format!("{kind} {info} {name}");
+        if let Some(&symbol) = self.checked_types.get(&key) {
             return symbol;
         }
         let mut data = Vec::new();
@@ -927,7 +1243,7 @@ impl Unit<'_> {
             let value = self.module.add_imm(Imm::int(i128::from(number), Type::int(16)));
             data.push(Datum::Scalar { ty: Type::int(16), value });
         }
-        let mut bytes = name.clone().into_bytes();
+        let mut bytes = name.as_bytes().to_vec();
         bytes.push(0);
         let size = 4 + bytes.len() as u64;
         data.push(Datum::Bytes(self.module.push_bytes(&bytes)));
@@ -937,7 +1253,7 @@ impl Unit<'_> {
         global.droppable = true;
         global.init = Some(self.module.push_data(&data));
         self.module.add_global(global);
-        self.checked_types.insert(name, symbol);
+        self.checked_types.insert(key, symbol);
         symbol
     }
 }
