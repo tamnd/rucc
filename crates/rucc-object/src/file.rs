@@ -1489,9 +1489,9 @@ pub(crate) fn relocate(
         // An address is four bytes on i386 and wraps there, so taking up to four gigabytes off a
         // name lands on the same address as adding what is left. The kernel's `__pa` of a static
         // is the name less `PAGE_OFFSET`, which is 0xC0000000, and that is how doublefault_32.c
-        // fills `cr3`. A narrower field takes what is added to a name only if it fits, as gas has
-        // it.
-        let least = if width == 4 { -(1i64 << bits) } else { -(1i64 << (bits - 1)) };
+        // fills `cr3`. A narrower field takes any number whose size fits in it, with either sign,
+        // as gas has it. NetBSD's mbr.S takes 58280 off a name in a two byte operand.
+        let least = if width == 4 { -(1i64 << bits) } else { 1 - (1i64 << bits) };
         if addend < least || addend >= 1i64 << bits {
             let why =
                 format!("{addend} added to a name, and there are {width} bytes to keep it in");
@@ -3798,6 +3798,42 @@ mod tests {
         let refused =
             write(&Text::default(), &data, &[], &i386(), Output::default(), &Info::default());
         assert!(refused.is_err(), "two bytes cannot hold a name less three gigabytes");
+    }
+
+    /// A two byte field takes a name less up to 65535 and wraps it, as gas does. NetBSD's mbr.S
+    /// writes `mov %bp, ptn_list - 58280(%si)` with `-DBOOTSEL`. A name less 65536 does not fit.
+    #[test]
+    fn an_i386_two_byte_field_takes_a_name_less_any_sixteen_bit_number() {
+        let object = |addend: i64| Object {
+            name: "ptn".to_owned(),
+            bytes: vec![0; 2],
+            size: 2,
+            align: 2,
+            place: Place::Written,
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            redzone: 0,
+            relocs: vec![Reloc {
+                at: 0,
+                symbol: "ptn_list".to_owned(),
+                kind: Reference::Address { bytes: 2 },
+                addend,
+                after: 0,
+            }],
+        };
+        let written = |addend: i64| {
+            let data = Data { objects: vec![object(addend)], ..Data::default() };
+            write(&Text::default(), &data, &[], &i386(), Output::default(), &Info::default())
+        };
+        for (addend, want) in [(-58280, 0x1c58u16), (-65535, 1), (65535, 0xffff), (-1, 0xffff)] {
+            let bytes = written(addend).expect("an object");
+            let file =
+                object::read::elf::ElfFile32::<Endianness>::parse(&bytes[..]).expect("readable");
+            let variable = file.section_by_name(".data").expect("a data section");
+            assert_eq!(variable.data().expect("the bytes"), &want.to_le_bytes(), "{addend}");
+        }
+        assert!(written(-65536).is_err(), "two bytes cannot hold a name less 65536");
+        assert!(written(65536).is_err(), "nor a name plus 65536");
     }
 
     /// The debug sections of an i386 file are not compressed even when `-gz` asks, since the addend
