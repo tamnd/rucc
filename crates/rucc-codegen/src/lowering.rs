@@ -418,7 +418,9 @@ impl Step {
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func, conv.byte_swaps),
             Self::Counts => expand::counts(func, counts),
-            Self::Maths => maths::calls(func, names, conv.abi, built.fused, built.roots),
+            Self::Maths => {
+                maths::calls(func, names, conv.abi, built.fused, built.roots, built.sines);
+            }
             Self::Quads => quad::calls(func, names, conv.abi, conv.word),
             Self::Pairs => return quad::pairs(func, names, conv),
             Self::Floats => expand::floats(func, conv.word),
@@ -617,6 +619,9 @@ pub struct Built {
     pub converts: bool,
     /// What a call to the library's `sqrt` or `sqrtf` becomes. See [`maths::Roots`].
     pub roots: maths::Roots,
+    /// Whether a call to `sin` and a call to `cos` of one operand become one call to `sincos`.
+    /// See [`maths::calls`].
+    pub sines: bool,
 }
 
 /// Runs the whole group over one function, in the order [`Step::GROUP`] gives.

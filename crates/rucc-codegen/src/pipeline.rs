@@ -697,6 +697,10 @@ pub struct Flags {
     /// Whether a function of the maths library is taken to set `errno`, from `-fmath-errno`, which
     /// is on by default.
     pub math_errno: bool,
+    /// Whether a call to `sin` and a call to `cos` of one operand may become one call to `sincos`,
+    /// which the driver asks for when the level optimizes and the C library has the routine. See
+    /// [`crate::maths::calls`].
+    pub sincos: bool,
 }
 
 impl Default for Flags {
@@ -750,6 +754,7 @@ impl Default for Flags {
             trailing: false,
             roots: false,
             math_errno: true,
+            sincos: false,
         }
     }
 }
@@ -998,7 +1003,7 @@ pub fn compile_recording(
     } else {
         maths::Roots::Bare
     };
-    let built = lowering::Built { fused, pairs, converts, roots };
+    let built = lowering::Built { fused, pairs, converts, roots, sines: flags.sincos };
     let ran = lowering::group(source, names, conv, switching, &counts, built, counting);
     // AArch64 has the conditional compare, which is what gcc keeps the and for. See [`jumps`].
     if flags.jumps && !std::ptr::eq(machine.shapes, &aarch64::MACHINE) {

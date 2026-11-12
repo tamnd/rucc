@@ -1744,6 +1744,11 @@ fn generate(
         // On at every level above `-O0`, where gcc writes `sqrt` as the instruction.
         roots: opts.opt_level.runs_optimizer(),
         math_errno: opts.math.errno,
+        // gcc writes `sin` and `cos` of one operand as `sincos` from `-O1` up where the C library
+        // has it. glibc, musl and the FreeBSD libm all do.
+        sincos: opts.opt_level.runs_optimizer()
+            && matches!(target.tuple.arch(), Arch::X86_64 | Arch::Aarch64)
+            && matches!(target.tuple.os(), rucc_tuple::Os::Linux | rucc_tuple::Os::FreeBsd),
     };
 
     // The checks become calls here rather than beside the insertion, because the id each one

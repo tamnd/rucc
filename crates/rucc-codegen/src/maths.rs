@@ -34,6 +34,12 @@
 //! routine sets nothing for them. Under `-fno-math-errno` the instruction is the whole answer.
 //! See `roots`.
 //!
+//! # The sine and the cosine
+//!
+//! A call to the library's `sin` and a call to its `cos` of the same operand in one block are one
+//! call to `sincos` when the level optimizes and the C library has the routine, as gcc writes
+//! them. See `sines`.
+//!
 //! # What is left alone
 //!
 //! The half float, the eighty bit format and the decimal floats. A half reaching here would be the
@@ -46,8 +52,8 @@
 
 use rucc_base::Interner;
 use rucc_ir::{
-    AsmInfo, BlockCallList, Builder, Extra, Flags, Float, FloatPred, Func, Inst, InstData, Opcode,
-    Type, Value,
+    AsmInfo, Block, BlockCallList, Builder, CallInfo, Extra, Flags, Float, FloatPred, Func, Inst,
+    InstData, MemInfo, MemOrder, Opcode, Restrict, Signature, Type, Value,
 };
 use rucc_target::AbiDescription;
 
@@ -78,15 +84,22 @@ pub enum Roots {
 /// walk would otherwise see them.
 ///
 /// `roots` says what a call to the library's `sqrt` or `sqrtf` becomes. See [`Roots`].
+///
+/// When `sines` is true, the C library has `sincos` and the level optimizes, so a call to `sin`
+/// and a call to `cos` of the same operand become one call to `sincos`. See `sines`.
 pub fn calls(
     func: &mut Func,
     names: &mut Interner,
     abi: &'static AbiDescription,
     fused: bool,
     roots: Roots,
+    sines: bool,
 ) {
     if fused {
         fuse(func, names);
+    }
+    if sines {
+        self::sines(func, names);
     }
     if roots != Roots::Calls {
         self::roots(func, names, roots);
@@ -140,6 +153,101 @@ fn fuse(func: &mut Func, names: &Interner) {
         data.opcode = Opcode::Fma;
         data.extra = Extra::None;
         data.flags = data.flags.intersection(Flags::legal_on(Opcode::Fma));
+    }
+}
+
+/// Rewrites a call to `sin` and a call to `cos` of the same operand into one call to `sincos`.
+///
+/// gcc 16 does this from `-O1` up where the C library has `sincos`, which is glibc, musl and
+/// FreeBSD. The routine gives the two answers that the two calls give, and it costs little more
+/// than one of them, since the reduction of the operand is the slow part and it does it once.
+///
+/// The two calls must be in one block and both have [`Flags::LIBRARY`], the type of the routine
+/// and no unwind edge. The call to `sincos` goes where the first of the two was. It writes the
+/// two answers to two slots of the frame, and each of the old calls becomes the load of its own
+/// slot, so every reader of an answer reads the same value as before. The same is done for
+/// `sinf` and `cosf` with `sincosf`.
+fn sines(func: &mut Func, names: &mut Interner) {
+    let blocks: Vec<Block> = func.blocks().collect();
+    for block in blocks {
+        // The calls of the block not yet paired, with their operand and whether each is `cos`.
+        let mut open: Vec<(Inst, Value, bool)> = Vec::new();
+        let found: Vec<Inst> = func.insts(block).collect();
+        for inst in found {
+            let Some((operand, cosine, format)) = sine(func, names, inst) else { continue };
+            // The operand has the type of the routine, so one operand is one format.
+            let pair =
+                open.iter().position(|&(_, value, other)| value == operand && other != cosine);
+            let Some(index) = pair else {
+                open.push((inst, operand, cosine));
+                continue;
+            };
+            let (first, _, _) = open.remove(index);
+            let (sin, cos) = if cosine { (first, inst) } else { (inst, first) };
+            paired(func, names, (sin, cos, first), operand, format);
+        }
+    }
+}
+
+/// The operand of a call to `sin`, `cos`, `sinf` or `cosf` that means the library's routine and
+/// has its shape, whether it is the cosine, and the format of the routine.
+fn sine(func: &Func, names: &Interner, inst: Inst) -> Option<(Value, bool, Float)> {
+    let data = &func[inst];
+    let Extra::Call(info) = data.extra else { return None };
+    if data.opcode != Opcode::Call || !data.flags.contains(Flags::LIBRARY) {
+        return None;
+    }
+    let (cosine, format) = match names.resolve(func[info].callee?) {
+        "sin" => (false, Float::F64),
+        "cos" => (true, Float::F64),
+        "sinf" => (false, Float::F32),
+        "cosf" => (true, Float::F32),
+        _ => return None,
+    };
+    let ty = Type::float(format);
+    let [operand] = func[data.args] else { return None };
+    let shaped = func[operand].ty == ty && data.results().map(|value| func[value].ty).eq([ty]);
+    (shaped && !func.unwinds_to_pad(inst)).then_some((operand, cosine, format))
+}
+
+/// Writes the call to `sincos` or `sincosf` in front of `first`, which is `sin` or `cos`, and
+/// turns both calls into the loads of the answers the routine wrote.
+fn paired(
+    func: &mut Func,
+    names: &mut Interner,
+    (sin, cos, first): (Inst, Inst, Inst),
+    operand: Value,
+    format: Float,
+) {
+    let ty = Type::float(format);
+    let bytes = ty.bits() / 8;
+    let info = MemInfo {
+        size: u64::from(bytes),
+        align: bytes,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    };
+    let span = func.span(first);
+    let slots = [sin, cos].map(|_| {
+        let extra = Extra::Mem(func.add_mem(info));
+        let data = InstData { extra, ..InstData::new(Opcode::Alloca) };
+        let made = func.create_inst(data, &[Type::PTR], span);
+        func.insert_before(made, first);
+        func[made].first_result.expect("one result was asked for")
+    });
+    let routine = if format == Float::F32 { "sincosf" } else { "sincos" };
+    let signature = func.add_signature(Signature::new().with_params(&[ty, Type::PTR, Type::PTR]));
+    let callee = Some(names.intern(routine));
+    let varargs = func.push_abis(&[]);
+    let extra = Extra::Call(func.add_call(CallInfo { callee, signature, varargs }));
+    let args = func.push_values(&[operand, slots[0], slots[1]]);
+    let call = func.create_inst(InstData { args, extra, ..InstData::new(Opcode::Call) }, &[], span);
+    func.insert_before(call, first);
+    for (inst, slot) in [sin, cos].into_iter().zip(slots) {
+        let extra = Extra::Mem(func.add_mem(info));
+        quad::becomes(func, inst, Opcode::Load, extra, &[slot]);
     }
 }
 
@@ -280,7 +388,7 @@ mod tests {
         if library {
             func[call].flags |= Flags::LIBRARY;
         }
-        calls(&mut func, &mut names, x86_64::SYSV.abi, fused, Roots::Calls);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, fused, Roots::Calls, false);
         let module = Module::new(names.intern("m.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the function is valid IR");
         printed(&func, &mut names)
@@ -322,7 +430,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         let answer = build.binary(Opcode::FRem, params[0], params[1], Flags::NONE);
         build.ret(&[answer]);
-        calls(&mut func, &mut names, x86_64::SYSV.abi, false, Roots::Calls);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, false, Roots::Calls, false);
         let module = Module::new(names.intern("m.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the call is valid IR");
         printed(&func, &mut names)
@@ -337,7 +445,7 @@ mod tests {
         let args = build.func().push_values(&params);
         let answer = build.value(InstData { args, ..InstData::new(Opcode::Fma) }, ty);
         build.ret(&[answer]);
-        calls(&mut func, &mut names, x86_64::SYSV.abi, false, Roots::Calls);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, false, Roots::Calls, false);
         let module = Module::new(names.intern("m.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the call is valid IR");
         printed(&func, &mut names)
@@ -404,7 +512,7 @@ mod tests {
         let args = build.func().push_values(&params);
         let answer = build.value(InstData { args, ..InstData::new(Opcode::Fma) }, ty);
         build.ret(&[answer]);
-        calls(&mut func, &mut names, x86_64::SYSV.abi, true, Roots::Calls);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, true, Roots::Calls, false);
         let text = printed(&func, &mut names);
         assert!(words(&text).contains(&"@fmaf128"), "{text}");
     }
@@ -434,7 +542,7 @@ mod tests {
         if library {
             func[call].flags |= Flags::LIBRARY;
         }
-        calls(&mut func, &mut names, x86_64::SYSV.abi, false, roots);
+        calls(&mut func, &mut names, x86_64::SYSV.abi, false, roots, false);
         let module = Module::new(names.intern("m.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the function is valid IR");
         printed(&func, &mut names)
