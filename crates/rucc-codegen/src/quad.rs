@@ -102,7 +102,7 @@ pub fn calls(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription
             Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv => {
                 arithmetic(func, names, abi, inst);
             }
-            Opcode::FNeg => negate(func, names, abi, inst),
+            Opcode::FNeg => negate(func, inst, word),
             Opcode::FCmp => compare(func, names, abi, inst),
             Opcode::FConst => constant(func, inst, word),
             Opcode::FPExt => widen(func, names, abi, inst),
@@ -275,19 +275,46 @@ fn arithmetic(func: &mut Func, names: &mut Interner, abi: &'static AbiDescriptio
     into_call(func, names, abi, inst, routine, &[a, b]);
 }
 
-/// The negation, which is a call here and an exclusive or at the two narrower formats.
+/// The negation, which is the sign bit turned over and no call.
 ///
-/// [`crate::expand::floats`] flips the sign bit of a narrower float in a general purpose register,
-/// and the exchange that makes that worth doing runs out at this width twice over: the integer that
-/// would hold the bits has no register either, and the mask would want a constant pool that nothing
-/// else in this back end needs. libgcc has the routine, so the routine is what this is.
-fn negate(func: &mut Func, names: &mut Interner, abi: &'static AbiDescription, inst: Inst) {
+/// GCC and LLVM flip bit one hundred and twenty seven and call nothing, so compiler-rt has no
+/// `__negtf2`. FreeBSD's `libgcc_s` is compiler-rt, and a `libgcc_s.so` that called `__negtf2` did
+/// not link.
+fn negate(func: &mut Func, inst: Inst, word: u32) {
     let Some(ty) = produced(func, inst) else { return };
-    let Some(&arg) = func[func[inst].args].first() else { return };
     if !quad(ty) {
         return;
     }
-    into_call(func, names, abi, inst, routine(Opcode::FNeg, MODE), &[arg]);
+    sign_flipped(func, inst, word);
+}
+
+/// A negation of a sixteen byte float, as the word holding its sign flipped where it lies.
+///
+/// No register holds the value as an integer, so it goes into a frame slot. The top word comes
+/// out, has its sign bit flipped and goes back, and the instruction becomes the read of the whole
+/// value. The top word is at the higher address, which is this machine's order, as for
+/// [`constant`]. The word is the machine's, since this runs after [`crate::wide`] has split every
+/// wider integer. A `_Decimal128` keeps its sign in the same bit, so [`crate::decimal`] uses this
+/// too.
+pub(crate) fn sign_flipped(func: &mut Func, inst: Inst, word: u32) {
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let slot = slot(func, inst);
+    write(func, inst, arg, slot, whole());
+    let bytes = word.clamp(4, 8);
+    let int = Type::int(bytes * 8);
+    let up = ahead_const(func, inst, Imm::int(i128::from(BITS / 8 - bytes), int), int);
+    let args = func.push_values(&[slot, up]);
+    let top = written(func, inst, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+    let part = MemInfo { size: u64::from(bytes), align: bytes, ..whole() };
+    let extra = Extra::Mem(func.add_mem(part));
+    let args = func.push_values(&[top]);
+    let high = written(func, inst, InstData { args, extra, ..InstData::new(Opcode::Load) }, int);
+    let sign = ahead_const(func, inst, Imm::int(1i128 << (bytes * 8 - 1), int), int);
+    let args = func.push_values(&[high, sign]);
+    let turned = written(func, inst, InstData { args, ..InstData::new(Opcode::Xor) }, int);
+    write(func, inst, turned, top, part);
+    let extra = Extra::Mem(func.add_mem(whole()));
+    becomes(func, inst, Opcode::Load, extra, &[slot]);
 }
 
 /// A comparison, as the call that answers it and the test of that answer against zero.
@@ -858,17 +885,24 @@ mod tests {
         }
     }
 
+    /// compiler-rt has no `__negtf2`, so a negation is the sign bit of the top word turned over in
+    /// a frame slot, at the machine's word.
     #[test]
-    fn a_negation_is_the_routine_rather_than_a_sign_flip() {
-        let mut names = Interner::new();
-        let (mut func, entry, params) = shell(&mut names, &[quad()], &[quad()]);
-        let mut build = Builder::new(&mut func, entry);
-        let answer = build.unary(Opcode::FNeg, params[0], quad());
-        build.ret(&[answer]);
-        calls(&mut func, &mut names, sysv(), 8);
-        let text = printed(&func, &mut names);
-        assert!(text.contains("@__negtf2"), "{text}");
-        assert!(!text.contains("xor"), "no sign flip in a register: {text}");
+    fn a_negation_is_a_sign_flip_rather_than_a_routine() {
+        let signs = [(8, "iconst.i64 -9223372036854775808"), (4, "iconst.i32 -2147483648")];
+        for (word, sign) in signs {
+            let mut names = Interner::new();
+            let (mut func, entry, params) = shell(&mut names, &[quad()], &[quad()]);
+            let mut build = Builder::new(&mut func, entry);
+            let answer = build.unary(Opcode::FNeg, params[0], quad());
+            build.ret(&[answer]);
+            calls(&mut func, &mut names, sysv(), word);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("call"), "no routine: {text}");
+            assert!(!text.contains("fneg"), "no negation left: {text}");
+            assert!(text.contains("= xor "), "{text}");
+            assert!(text.contains(sign), "{text}");
+        }
     }
 
     /// The six ordered predicates, each the routine of its name and the test its answer is read
