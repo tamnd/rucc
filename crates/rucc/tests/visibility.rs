@@ -250,6 +250,32 @@ int get(void) { called(); return used + marked + plain; }
     }
 }
 
+/// A `static` table that nothing reads is dropped at `-O2`, and so are the functions only it
+/// named. The names it held are then neither defined nor referred to, so no directive is written
+/// for them. jemalloc's `ctl.c` has such tables under `-fvisibility=hidden`, and a hidden
+/// undefined name stopped the link of NetBSD's i386 libc.so (tamnd/rucc-bsd#5).
+#[test]
+fn a_dropped_static_table_leaves_no_hidden_names() {
+    let text = asm(
+        "dropped",
+        &["-fvisibility=hidden", "-O2"],
+        "\
+static const _Bool enabled = 0;
+static int leaf(int);
+static int (*const table[])(int) = { leaf };
+static int (*const *pick(void))(int) { return enabled ? table : 0; }
+static int (*const *(*const roots[])(void))(int) = { pick };
+const void *root(void) { return roots; }
+static int leaf(int x) { return x + 1; }
+",
+    );
+
+    assert!(text.contains("\t.hidden\troot\n"), "{text}");
+    for name in ["leaf", "table"] {
+        assert!(!text.contains(&format!("\t.hidden\t{name}\n")), "{name}: {text}");
+    }
+}
+
 /// A `gnu_inline` body is for the inliner, and the name is still the one in the C library. This
 /// is how glibc writes each `_FORTIFY_SOURCE` wrapper, so the flag must not make the call that is
 /// left hidden. If it does, the link cannot find `strcpy`.
