@@ -62,6 +62,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- On FreeBSD i386, with no frame flag, a unit now keeps the frame pointer above `-O0`, except at `-Os` and `-Oz`, and has no unwind table, as FreeBSD's gcc does. Before, rucc omitted the frame pointer and wrote `.eh_frame`. The FreeBSD i386 kernel gives no frame flag, so DDB could not walk its stack (#4471)
 - On i386, the shipped headers no longer define `_mm_insert_epi64`, `_mm_extract_epi64`, `_mm_crc32_u64`, `_mm_popcnt_u64` and `_mm_set_pi64x`, as in gcc, which defines them only on x86-64. FreeBSD's aesni_ghash.c defines `_mm_insert_epi64` itself on i386, and failed with a redefinition (#4466)
 - On i386, the retpoline thunks of `-mindirect-branch=thunk`, `-mfunction-return=thunk` and their `thunk-inline` forms now use `%esp`, and the return thunk takes 4 bytes off the stack, as gcc's do. Before, they named `%rsp`, and the assembler refused them. 1503 units of the NetBSD i386 GENERIC kernel failed (#4465)
 - A `static` function that only the bound of a variable length array calls is now emitted. The bound is part of the type of the declaration, and the walk that finds the `static` functions a file uses did not look in types, so the object called the function and did not define it. FreeBSD's `mmcspi.c` declares `uint8_t txbuf[max(MMCSPI_POLL_LEN, 2)]`, and the aarch64 and riscv64 GENERIC kernels did not link for an undefined `max`. (Part of #4088)

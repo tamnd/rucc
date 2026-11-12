@@ -4151,6 +4151,27 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         ));
     }
     opts.exceptions = exceptions.unwrap_or(opts.non_call_exceptions);
+    // FreeBSD's gcc is configured with the frame pointer on, as gcc is for each target OS that is
+    // not Linux, GNU, Darwin, Cygwin or MinGW. For a 32 bit target, `i386-options.cc` then keeps
+    // the frame pointer above `-O0`, except at the two size levels, and writes no unwind table.
+    // The FreeBSD i386 kernel gives no frame flag and has DDB walk the `%ebp` chain. NetBSD's own
+    // gcc is configured the other way, and its i386 objects have `.eh_frame`.
+    if opts.target.arch == rucc_target::Arch::X86
+        && matches!(opts.target.os, rucc_target::Os::FreeBsd(_))
+    {
+        let unwind_given = args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-fasynchronous-unwind-tables" | "-fno-asynchronous-unwind-tables"
+            )
+        });
+        if !unwind_given {
+            opts.async_unwind_tables = false;
+        }
+        if opts.frame_pointer.is_none() && !opts.opt_level.is_size() {
+            opts.frame_pointer = Some(true);
+        }
+    }
     // After the loop, since whether `--64` or `-march=` is true of the target is a question about
     // the last `--target=`.
     let assembler = assembler_words(&asm_words, opts.target)?;
@@ -8905,6 +8926,35 @@ mod tests {
         assert_eq!(opts.frame_pointer, Some(false), "the last one wins, as it does in gcc");
         assert!(!opts.keeps_frame_pointer(), "and it wins over the level too");
         assert!(opts.red_zone);
+    }
+
+    /// FreeBSD's gcc for i386 keeps the frame pointer above `-O0` and writes no unwind table,
+    /// because it is configured with the frame pointer on. NetBSD's gcc is not. See
+    /// tamnd/rucc#4471.
+    #[test]
+    fn freebsd_i386_keeps_the_frame_pointer_and_writes_no_unwind_table() {
+        for target in ["--target=i686-unknown-freebsd15.1", "--target=x86_64-unknown-freebsd15.1"] {
+            let (opts, _) = compile(&[target, "-m32", "-O2", "-c", "a.c"]);
+            assert!(opts.keeps_frame_pointer(), "{target}: gcc keeps it at -O2");
+            assert!(!opts.unwinds(), "{target}: gcc writes no table");
+        }
+        let (opts, _) = compile(&["--target=i686-unknown-freebsd15.1", "-Os", "-c", "a.c"]);
+        assert!(!opts.keeps_frame_pointer(), "gcc omits it at -Os");
+        assert!(!opts.unwinds());
+        let (opts, _) = compile(&[
+            "--target=i686-unknown-freebsd15.1",
+            "-O2",
+            "-fomit-frame-pointer",
+            "-fasynchronous-unwind-tables",
+            "-c",
+            "a.c",
+        ]);
+        assert!(!opts.keeps_frame_pointer(), "the command line wins");
+        assert!(opts.unwinds(), "the command line wins");
+        let (opts, _) = compile(&["--target=x86_64-unknown-freebsd15.1", "-O2", "-c", "a.c"]);
+        assert!(!opts.keeps_frame_pointer() && opts.unwinds(), "amd64 is not changed");
+        let (opts, _) = compile(&["--target=i486--netbsdelf", "-O2", "-c", "a.c"]);
+        assert!(!opts.keeps_frame_pointer() && opts.unwinds(), "NetBSD's gcc is not changed");
     }
 
     /// The Fedora line passes `-mtls-dialect=gnu2` on x86-64. Each target takes the values that
