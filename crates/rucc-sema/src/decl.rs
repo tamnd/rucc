@@ -572,6 +572,12 @@ impl DeclFlags {
     /// The same for `vla-bound`.
     pub const NO_UBSAN_VLA_BOUND: Self = Self(1 << 53);
 
+    /// The same for `null`.
+    pub const NO_UBSAN_NULL: Self = Self(1 << 54);
+
+    /// The same for `alignment`.
+    pub const NO_UBSAN_ALIGNMENT: Self = Self(1 << 55);
+
     /// `no_sanitize_address`, `no_address_safety_analysis`, or `no_sanitize` naming `address` or
     /// `kernel-address`, was written on a declaration of this function, so its accesses are not
     /// checked against the shadow. The kernel's `noinstr` says it. Merged the way

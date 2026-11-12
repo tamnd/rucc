@@ -233,6 +233,12 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_UBSAN_VLA_BOUND) {
             head.push_str(" no_sanitize(vla-bound)");
         }
+        if node.flags.contains(DeclFlags::NO_UBSAN_NULL) {
+            head.push_str(" no_sanitize(null)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_ALIGNMENT) {
+            head.push_str(" no_sanitize(alignment)");
+        }
         if node.flags.contains(DeclFlags::NO_ASAN) {
             head.push_str(" no_sanitize_address");
         }

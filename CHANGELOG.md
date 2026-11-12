@@ -65,6 +65,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `-fsanitize=null` and `-fsanitize=alignment` now make gcc's checks, where they were refused. A read or a write through a pointer that is null or not aligned for its type calls `__ubsan_handle_type_mismatch_v1`, with the same record that gcc makes. The `-fsanitize=undefined` group in `no_sanitize` now has both checks (#4391).
 - `-fsanitize=vla-bound` and `-fsanitize=bounds` now make gcc's checks, where they were refused. A variable length array whose length is zero or negative calls `__ubsan_handle_vla_bound_not_positive`. `bounds` is `bounds-strict`, except that an array at the end of a structure that a pointer points at is not checked. The `-fsanitize=undefined` group now has `bounds` in place of `bounds-strict`, as in gcc. NetBSD's t_ubsan.c asks for both checks (#4391).
 - On AArch64 the machine mode `__libgcc_cmp_return__` is 32 bits, as gcc makes it, where it was the word. compiler-rt's `fp_compare_impl.inc` asserts the size, which stopped FreeBSD's aarch64 world.
 - On i386 NetBSD, which keeps the stack pointer on four bytes, a function whose frame grows with `alloca` or a variable length array and spills a `__float128` or a vector now compiles. The spill slot is on four bytes and the spill and reload use `movups`. It stopped with E0653 before, which is libquadmath's printf_fp.c (#4449)

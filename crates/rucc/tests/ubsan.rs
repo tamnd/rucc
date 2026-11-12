@@ -1,6 +1,6 @@
 //! `-fsanitize=integer-divide-by-zero`, `-fsanitize=shift`, `-fsanitize=bool`, `-fsanitize=enum`,
-//! `-fsanitize=bounds-strict`, `-fsanitize=bounds`, `-fsanitize=vla-bound` and
-//! `-fsanitize=signed-integer-overflow`, which the kernel's `CONFIG_UBSAN` puts on every unit that does
+//! `-fsanitize=bounds-strict`, `-fsanitize=bounds`, `-fsanitize=vla-bound`,
+//! `-fsanitize=signed-integer-overflow`, `-fsanitize=null` and `-fsanitize=alignment`, which the kernel's `CONFIG_UBSAN` puts on every unit that does
 //! not opt out. The calls carry gcc's names, the record each one is
 //! handed is laid out the way gcc lays it out, and a function marked `no_sanitize` makes none.
 
@@ -162,7 +162,8 @@ fn the_flags_that_say_what_a_check_does_are_read() {
 #[test]
 fn the_checks_the_compiler_does_not_have_are_still_refused() {
     let dir = std::env::temp_dir().join(format!("rucc-ubsan-refused-{}", std::process::id()));
-    for asked in ["-fsanitize=undefined", "-fsanitize=alignment", "-fsanitize=shift,null"] {
+    for asked in ["-fsanitize=undefined", "-fsanitize=pointer-overflow", "-fsanitize=shift,builtin"]
+    {
         let out = compile(&dir, SOURCE, &[asked, "-S", "-o", "-"]);
         assert!(!out.status.success(), "{asked} is refused");
         let said = String::from_utf8_lossy(&out.stderr);
@@ -646,6 +647,201 @@ int main(int argc, char **argv) {
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
         let status = Command::new(&program).status().expect("the program runs");
         assert_eq!(status.code(), Some(0), "{level}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Loads, stores and member accesses through pointers, each in a function of its own, a runtime
+/// that prints what it is told, and a `main` that makes each access through a pointer that is
+/// not aligned. `ch` reads a `char`, which has no alignment to check.
+const POINTED: &str = r#"struct loc { const char *file; unsigned line, column; };
+struct type { unsigned short kind, info; char name[]; };
+struct data { struct loc loc; struct type *type; unsigned char align, kind; };
+int printf(const char *, ...);
+void *memcpy(void *, const void *, unsigned long);
+void __ubsan_handle_type_mismatch_v1(struct data *d, unsigned long p) {
+    printf("%u:%u %u %u %x %s %d\n", d->loc.line, d->loc.column, d->align, d->kind,
+           d->type->kind, d->type->name, p != 0);
+}
+struct S { int a; long b; char c[4]; struct { int x; } in; };
+typedef struct S T;
+union U { int i; float f; };
+int load(int *p) { return *p; }
+void store(int *p, int v) { *p = v; }
+long member(struct S *s) { return s->b; }
+void mstore(struct S *s) { s->b = 1; }
+int elem(int *p, int i) { return p[i]; }
+char arr(struct S *s, int i) { return s->c[i]; }
+void copy(struct S *d, struct S *s) { *d = *s; }
+int *addr(struct S *s) { return &s->a; }
+char ch(char *p) { return *p; }
+int cv(const volatile int *p) { return *p; }
+int pp(int **p) { return **p; }
+char *dec(struct S *s) { return s->c; }
+void cas(int *p) { *p += 3; }
+void inc(int *p) { (*p)++; }
+long td(T *t) { return t->b; }
+int un(union U *u) { return u->i; }
+int idx(struct S *s, int i) { return s[i].a; }
+char *ea(struct S *s, int i) { return &s->c[i]; }
+int ar(int (*q)[4], int i) { return (*q)[i]; }
+int nload(struct S *s) { return s->in.x; }
+void cstore(struct S *s, int i) { s->c[i] = 3; }
+struct S ret(struct S *s) { return *s; }
+void take(struct S s) { (void)s; }
+void arg(struct S *s) { take(*s); }
+void pre(int *p) { ++*p; }
+__attribute__((no_sanitize("null", "alignment"))) int quiet(int *p) { return *p; }
+int main(void) {
+    static long buf[32];
+    char *odd = (char *)buf + 1;
+    void *inner = odd + 64;
+    memcpy(odd, &inner, sizeof inner);
+    printf("load\n"); load((int *)odd);
+    printf("store\n"); store((int *)odd, 1);
+    printf("member\n"); member((struct S *)odd);
+    printf("mstore\n"); mstore((struct S *)odd);
+    printf("elem\n"); elem((int *)odd, 2);
+    printf("arr\n"); arr((struct S *)odd, 1);
+    printf("copy\n"); copy((struct S *)(odd + 128), (struct S *)odd);
+    printf("addr\n"); addr((struct S *)odd);
+    printf("ch\n"); ch(odd);
+    printf("cv\n"); cv((int *)odd);
+    memcpy(odd, &inner, sizeof inner);
+    printf("pp\n"); pp((int **)odd);
+    printf("dec\n"); dec((struct S *)odd);
+    printf("cas\n"); cas((int *)odd);
+    printf("inc\n"); inc((int *)odd);
+    printf("td\n"); td((T *)odd);
+    printf("un\n"); un((union U *)odd);
+    printf("idx\n"); idx((struct S *)odd, 0);
+    printf("ea\n"); ea((struct S *)odd, 1);
+    printf("ar\n"); ar((int (*)[4])odd, 1);
+    printf("nload\n"); nload((struct S *)odd);
+    printf("cstore\n"); cstore((struct S *)odd, 1);
+    printf("ret\n"); ret((struct S *)odd);
+    printf("arg\n"); arg((struct S *)odd);
+    printf("pre\n"); pre((int *)odd);
+    printf("quiet\n"); quiet((int *)odd);
+    return 0;
+}
+"#;
+
+/// What gcc 13 tells the runtime for [`POINTED`]: the line and the column, the alignment as a
+/// power of two, what the access is, what the descriptor says, the type and whether the pointer
+/// was passed.
+const POINTED_GCC: &str = "load
+13:27 2 0 ffff 'int' 1
+store
+14:32 2 1 ffff 'int' 1
+member
+15:36 3 3 ffff 'struct S' 1
+mstore
+16:33 3 3 ffff 'struct S' 1
+elem
+17:35 2 0 ffff 'int' 1
+arr
+18:43 3 3 ffff 'struct S' 1
+copy
+19:42 3 1 ffff 'struct S' 1
+19:42 3 0 ffff 'struct S' 1
+addr
+20:33 3 3 ffff 'struct S' 1
+ch
+cv
+22:40 2 0 ffff 'volatile const int' 1
+pp
+23:27 3 0 ffff 'int *' 1
+23:26 2 0 ffff 'int' 1
+dec
+24:33 3 3 ffff 'struct S' 1
+cas
+25:20 2 0 ffff 'int' 1
+25:23 2 1 ffff 'int' 1
+inc
+26:21 2 0 ffff 'int' 1
+26:24 2 1 ffff 'int' 1
+td
+27:25 3 3 ffff 'struct T' 1
+un
+28:30 2 3 ffff 'union U' 1
+idx
+29:42 3 3 ffff 'struct S' 1
+ea
+30:39 3 3 ffff 'struct S' 1
+ar
+31:41 2 0 ffff 'int' 1
+nload
+32:38 3 3 ffff 'struct S' 1
+cstore
+33:43 3 3 ffff 'struct S' 1
+ret
+34:36 3 0 ffff 'struct S' 1
+arg
+36:25 3 0 ffff 'struct S' 1
+pre
+37:22 2 0 ffff 'int' 1
+37:20 2 1 ffff 'int' 1
+quiet
+";
+
+fn pointed(args: &[&str]) -> String {
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir = std::env::temp_dir().join(format!("rucc-ubsan-pointed-{}{tag}", std::process::id()));
+    let mut all = vec!["--target=x86_64-unknown-linux-gnu", "-S", "-o", "-"];
+    all.extend(args);
+    let out = compile(&dir, POINTED, &all);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).expect("a listing is text")
+}
+
+#[test]
+fn an_access_through_a_pointer_is_checked_for_null_and_alignment() {
+    let calls =
+        |text: &str, name| body(text, name).matches("__ubsan_handle_type_mismatch_v1").count();
+    for level in ["-O0", "-O2"] {
+        let both = pointed(&[level, "-fsanitize=null,alignment"]);
+        let null = pointed(&[level, "-fsanitize=null"]);
+        let alignment = pointed(&[level, "-fsanitize=alignment"]);
+        for (name, wanted) in [("load", 1), ("copy", 2), ("pp", 2), ("cas", 2), ("arg", 1)] {
+            assert_eq!(calls(&both, name), wanted, "{level} {name}:\n{both}");
+        }
+        assert_eq!(calls(&null, "ch"), 1, "{level}:\n{null}");
+        assert_eq!(calls(&alignment, "ch"), 0, "{level}:\n{alignment}");
+        assert_eq!(calls(&alignment, "load"), 1, "{level}:\n{alignment}");
+        for text in [&both, &null, &alignment] {
+            assert_eq!(calls(text, "quiet"), 0, "{level}:\n{text}");
+            assert!(!text.contains("_abort"), "{level}:\n{text}");
+        }
+    }
+    // The handler is the one that returns when either check asked for goes on, as in gcc.
+    let text = pointed(&["-fsanitize=null,alignment", "-fno-sanitize-recover=alignment"]);
+    assert!(!text.contains("__ubsan_handle_type_mismatch_v1_abort"), "{text}");
+    let text = pointed(&["-fsanitize=null,alignment", "-fno-sanitize-recover=null,alignment"]);
+    assert!(text.contains("__ubsan_handle_type_mismatch_v1_abort"), "{text}");
+    let text = pointed(&["-O2", "-fsanitize=null,alignment", "-fsanitize-trap=null"]);
+    assert_eq!(calls(&text, "load"), 0, "{text}");
+    assert!(body(&text, "load").contains("ud2"), "{text}");
+}
+
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
+#[test]
+fn the_runtime_is_told_what_gcc_tells_it_about_an_access_through_a_pointer() {
+    for level in ["-O0", "-O2"] {
+        let dir = std::env::temp_dir()
+            .join(format!("rucc-ubsan-pointed-run-{}{level}", std::process::id()));
+        let program = dir.join("one");
+        let program_text = program.to_str().expect("a temporary path is text");
+        let args = [level, "-fsanitize=null,alignment", "-o", program_text];
+        let out = compile(&dir, POINTED, &args);
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new(&program).output().expect("the program runs");
+        assert_eq!(out.status.code(), Some(0), "{level}");
+        // A plain typedef keeps no name of its own here, so `T *` names the record by its tag
+        // where gcc writes `'struct T'`. That is the one difference.
+        let wanted = POINTED_GCC.replace("'struct T'", "'struct S'");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), wanted, "{level}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

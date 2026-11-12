@@ -591,6 +591,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 ),
                                 trailing: opts.sanitize.bounds_strict == rucc_session::Check::Off,
                                 vla_bound: lower_check(opts.sanitize.vla_bound),
+                                null: lower_check(opts.sanitize.null),
+                                alignment: lower_check(opts.sanitize.alignment),
                                 unreachable: lower_check(opts.sanitize.unreachable),
                                 signed_overflow: lower_check(opts.sanitize.signed_overflow),
                                 address: opts.kasan.on,
