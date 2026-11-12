@@ -2196,6 +2196,16 @@ impl Checker<'_> {
             startup: node.startup.or(declared.startup),
             ..node
         };
+        // A name declared first without a definition takes its place among the symbols here,
+        // at the first declaration that defines it, which is where gcc puts it in the list the
+        // layout of its variables follows. See `Tast::record_placed`.
+        if node.kind != DeclKind::Type
+            && node.state == Definition::Declared
+            && declared.state != Definition::Declared
+            && self.scopes.at_file_scope()
+        {
+            self.tast.record_placed(previous);
+        }
         self.tast.set_decl(previous, merged);
         self.scopes.declare(declared.name, Binding::Decl(previous));
         previous

@@ -983,6 +983,27 @@ impl Module {
         }
     }
 
+    /// Sorts the globals from `from` on by the key each has in `keys`, keeping the order they
+    /// were added in among those with the same key.
+    ///
+    /// The lowering adds a global where it meets the first declaration of it, and gcc's order is
+    /// where it met the first definition. This is how the one is made the other before
+    /// [`Module::reverse_globals`] turns it around.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `keys` does not have one key for each global from `from` on.
+    pub fn order_globals<K: Ord>(&mut self, from: usize, keys: &[K]) {
+        assert_eq!(keys.len(), self.globals.len() - from, "one key for each global");
+        let mut moved: Vec<(usize, Global)> = self.globals.drain(from..).enumerate().collect();
+        moved.sort_by(|a, b| keys[a.0].cmp(&keys[b.0]));
+        self.globals.extend(moved.into_iter().map(|(_, global)| global));
+        for index in from..self.globals.len() {
+            let name = self.globals[index].name;
+            self.symbols.insert(name, SymbolRef::Global(Idx::from_usize(index)));
+        }
+    }
+
     /// Every alias, in the order they were added.
     pub fn aliases(&self) -> impl Iterator<Item = AliasId> + use<> {
         (0..self.aliases.len()).map(Idx::from_usize)
