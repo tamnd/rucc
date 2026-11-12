@@ -47,18 +47,21 @@ void f(int c)
 ";
 
 fn compile(source: &str, name: &str, out: &str) -> std::process::Output {
+    compile_with(source, name, out, &[])
+}
+
+/// The same with those flags too.
+fn compile_with(source: &str, name: &str, out: &str, extra: &[&str]) -> std::process::Output {
     let dir = std::env::temp_dir().join(format!("rucc-unframed-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, source).expect("the fixture can be written");
     let mut command = Command::new(env!("CARGO_BIN_EXE_rucc"));
-    // An i386 unit on a BSD writes no asynchronous unwind table unless it is asked for one.
-    command.args([
-        "--target=i486--netbsdelf",
-        "-ffreestanding",
-        "-Os",
-        "-fasynchronous-unwind-tables",
-    ]);
+    // With the unwind table asked for, since a 32 bit x86 unit on a BSD has none by default
+    // (#4513), and without one there are no rows to check. A unit that asks for one, or that is
+    // built with `-fexceptions`, still has the rows this is about.
+    command.args(["--target=i486--netbsdelf", "-ffreestanding", "-Os"]);
+    command.arg("-fasynchronous-unwind-tables").args(extra);
     if out == "-" {
         command.args(["-S", "-o", "-"]);
     } else {
@@ -72,7 +75,12 @@ fn compile(source: &str, name: &str, out: &str) -> std::process::Output {
 
 /// The listing, and that each `.cfi_restore_state` in it has a state remembered in front of it.
 fn listing(source: &str, name: &str) -> String {
-    let out = compile(source, name, "-");
+    listing_with(source, name, &[])
+}
+
+/// The same with those flags too.
+fn listing_with(source: &str, name: &str, extra: &[&str]) -> String {
+    let out = compile_with(source, name, "-", extra);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let asm = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut depth = 0_u32;
@@ -123,4 +131,23 @@ fn the_saved_register_is_remembered_after_its_push() {
         [".cfi_def_cfa_offset 8", ".cfi_offset 3, -8", ".cfi_remember_state"],
         "{asm}"
     );
+}
+
+/// With `-g` the pushes run too, and the rows are the same ones, with each state put back
+/// remembered first.
+#[test]
+fn the_rows_are_the_same_with_the_debugging_information() {
+    let rows = |asm: &str| -> Vec<String> {
+        (asm.lines().map(str::trim))
+            .filter(|line| line.starts_with(".cfi_") && !line.starts_with(".cfi_sections"))
+            .map(str::to_owned)
+            .collect()
+    };
+    for (name, source) in [("bare", BARE), ("saved", SAVED)] {
+        let plain = listing(source, &format!("{name}-plain"));
+        let debug = listing_with(source, &format!("{name}-g"), &["-g"]);
+        assert_eq!(rows(&plain), rows(&debug), "{name}\n{debug}");
+        let out = compile_with(source, &format!("{name}-g-object"), "one.o", &["-g"]);
+        assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+    }
 }

@@ -1949,9 +1949,12 @@ pub fn compile_recording(
     }
 
     // After every pass that moves an instruction, since a push moves the stack pointer and nothing
-    // may come between one and its call. i386 at -Os and -Oz only, as gcc, and not with the
-    // debugging information, which counts the frame from the stack pointer. See [`crate::pushes`].
-    if std::ptr::eq(machine.shapes, &x86::MACHINE) && flags.goal == Goal::Size && !flags.debug {
+    // may come between one and its call. i386 at -Os and -Oz only, as gcc. With the debugging
+    // information as well, since `-g` must not change the code. A local in the frame is a
+    // `DW_OP_fbreg` from the call frame address, which is read from the unwind rows, and those get
+    // a row for each push and one for the way back. A unit with no table of those rows gives such a
+    // local no location at all. See [`crate::pushes`].
+    if std::ptr::eq(machine.shapes, &x86::MACHINE) && flags.goal == Goal::Size {
         let pushed = pushes::arguments(
             &mut func,
             &stack.passing,

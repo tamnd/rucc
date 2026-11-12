@@ -2218,12 +2218,11 @@ impl<'a> Lowering<'a> {
     /// `movq $pv_ops, %rax; addq $8, %rax` in front of it was a register nothing read. Over and
     /// over, because taking out the `addq` is what leaves the `movq` unread.
     ///
-    /// Only when there is no debug information, since a declaration's location names registers
-    /// and machine instructions this does not look at.
+    /// With the debugging information too, since `-g` must not change the code, which is what gcc
+    /// promises and what FreeBSD's `boot2` is measured with. The instruction a declaration starts
+    /// at is kept, see `marked` below. A declaration whose register a group here wrote then has no
+    /// place over that stretch, and a debugger says it was optimized out, as it does for gcc.
     fn unread(&mut self) {
-        if self.debug {
-            return;
-        }
         loop {
             // By number, because the registers here are virtual ones numbered from zero and only
             // a virtual one is ever asked about below.
@@ -11565,12 +11564,14 @@ mod tests {
         let i32 = Type::int(32);
         let (mut names, mut func, block, args) = blank(&[i32, i32]);
         let mut build = Builder::new(&mut func, block);
-        build.binary(Opcode::Add, args[0], args[1], Flags::default());
+        let sum = build.binary(Opcode::Add, args[0], args[1], Flags::default());
+        build.ret(&[sum]);
 
         assert_eq!(
             lower(&mut names, &func),
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
-             %1:gpr($rsi) = x64.arg_val_32\n    %2:gpr(reuse 1) = x64.add_rr_32 %0, %1\n}\n"
+             %1:gpr($rsi) = x64.arg_val_32\n    %2:gpr(reuse 1) = x64.add_rr_32 %0, %1\n    \
+             x64.ret_val_32 %2($rax)\n}\n"
         );
     }
 
@@ -11580,14 +11581,15 @@ mod tests {
         let (mut names, mut func, block, args) = blank(&[i32]);
         let mut build = Builder::new(&mut func, block);
         let seven = build.iconst(i32, 7);
-        build.binary(Opcode::Add, args[0], seven, Flags::default());
+        let sum = build.binary(Opcode::Add, args[0], seven, Flags::default());
+        build.ret(&[sum]);
 
         // The constant is in the instruction and nothing was written to hold it, which is what
         // materializing one where a register for it is wanted buys.
         assert_eq!(
             lower(&mut names, &func),
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
-             %1:gpr(reuse 1) = x64.add_ri_32 %0, 7\n}\n"
+             %1:gpr(reuse 1) = x64.add_ri_32 %0, 7\n    x64.ret_val_32 %1($rax)\n}\n"
         );
     }
 
@@ -11597,7 +11599,8 @@ mod tests {
         let (mut names, mut func, block, args) = blank(&[i64]);
         let mut build = Builder::new(&mut func, block);
         let big = build.iconst(i64, i128::from(i32::MAX) + 1);
-        build.binary(Opcode::Add, args[0], big, Flags::default());
+        let sum = build.binary(Opcode::Add, args[0], big, Flags::default());
+        build.ret(&[sum]);
 
         // Nobody wrote this fallback down. The rule that takes an immediate has a guard that
         // turns a number this wide down, so it does not fire, and the next way of showing the
@@ -11605,7 +11608,8 @@ mod tests {
         assert_eq!(
             lower(&mut names, &func),
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
-             %1:gpr = x64.mov_ri_64 2147483648\n    %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n}\n"
+             %1:gpr = x64.mov_ri_64 2147483648\n    %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n    \
+             x64.ret_val_64 %2($rax)\n}\n"
         );
     }
 
@@ -11616,14 +11620,16 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let four = build.iconst(i64, 4);
         let scaled = build.binary(Opcode::Mul, args[1], four, Flags::default());
-        build.binary(Opcode::Add, args[0], scaled, Flags::default());
+        let sum = build.binary(Opcode::Add, args[0], scaled, Flags::default());
+        build.ret(&[sum]);
 
         // Three IR instructions and one machine instruction. The multiply is gone because the
         // rule that matched reached down and took it.
         assert_eq!(
             lower(&mut names, &func),
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
-             %1:gpr($rsi) = x64.arg_val_64\n    %2:gpr = x64.lea_64 [%0 + %1*4]\n}\n"
+             %1:gpr($rsi) = x64.arg_val_64\n    %2:gpr = x64.lea_64 [%0 + %1*4]\n    \
+             x64.ret_val_64 %2($rax)\n}\n"
         );
     }
 
@@ -11635,7 +11641,8 @@ mod tests {
         let four = build.iconst(i64, 4);
         let scaled = build.binary(Opcode::Mul, args[1], four, Flags::default());
         let first = build.binary(Opcode::Add, args[0], scaled, Flags::default());
-        build.binary(Opcode::Add, first, scaled, Flags::default());
+        let second = build.binary(Opcode::Add, first, scaled, Flags::default());
+        build.ret(&[second]);
 
         // Both readers have room for a scaled index, so both of them take it and nothing is left
         // to read the multiply. Three IR instructions become two machine ones, where refusing to
@@ -11644,7 +11651,7 @@ mod tests {
             lower(&mut names, &func),
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
              %1:gpr($rsi) = x64.arg_val_64\n    %2:gpr = x64.lea_64 [%0 + %1*4]\n    \
-             %3:gpr = x64.lea_64 [%2 + %1*4]\n}\n"
+             %3:gpr = x64.lea_64 [%2 + %1*4]\n    x64.ret_val_64 %3($rax)\n}\n"
         );
     }
 
@@ -11655,8 +11662,9 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let four = build.iconst(i64, 4);
         let scaled = build.binary(Opcode::Mul, args[1], four, Flags::default());
-        build.binary(Opcode::Add, args[0], scaled, Flags::default());
+        let sum = build.binary(Opcode::Add, args[0], scaled, Flags::default());
         build.store(scaled, args[0], plain(), Flags::default());
+        build.ret(&[sum]);
 
         // The addition has room for the multiply and the store does not: what a store writes is
         // a register, and no rule reaches through it. Folding into the addition alone would
@@ -11672,7 +11680,8 @@ mod tests {
         let i32 = Type::int(32);
         let (mut names, mut func, block, args) = blank(&[i32, i32]);
         let mut build = Builder::new(&mut func, block);
-        build.binary(Opcode::Shl, args[0], args[1], Flags::default());
+        let shifted = build.binary(Opcode::Shl, args[0], args[1], Flags::default());
+        build.ret(&[shifted]);
 
         // The fixed register is not in the rule. It is what the target says the instruction does
         // with its operands, and the allocator is what will act on it.
@@ -11685,7 +11694,8 @@ mod tests {
         let i32 = Type::int(32);
         let (mut names, mut func, block, args) = blank(&[i32, i32]);
         let mut build = Builder::new(&mut func, block);
-        build.binary(Opcode::SDiv, args[0], args[1], Flags::default());
+        let quotient = build.binary(Opcode::SDiv, args[0], args[1], Flags::default());
+        build.ret(&[quotient]);
 
         // Two definitions, because a division writes the remainder whether anybody wanted it or
         // not, and the second one is early because it is destroyed before the operands are read.
@@ -11770,7 +11780,8 @@ mod tests {
         let five = build.iconst(i64, 5);
         let zero = build.iconst(i64, 0);
         let moved = build.binary(Opcode::Add, args[0], less, Flags::default());
-        build.icmp(IntPred::Eq, moved, zero);
+        let equal = build.icmp(IntPred::Eq, moved, zero);
+        build.ret(&[equal]);
 
         // Extracted as an addition of minus five, which the comparison has no rule to take, so
         // the addition is written and compared against zero.
