@@ -1229,6 +1229,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("mov_rr_32", &[spell("movl", &[Reg(1, Long), Reg(0, Long)])]),
     ("push_32", &[spell("pushl", &[Reg(0, Long)])]),
     ("pop_32", &[spell("popl", &[Reg(0, Long)])]),
+    ("push_i_32", &[spell("pushl", &[Imm])]),
     ("ret", &[spell("ret", &[])]),
     ("ret_pop", &[spell("ret", &[Imm])]),
     ("iret", &[spell("iretq", &[])]),

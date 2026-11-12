@@ -1619,6 +1619,10 @@ pub struct Stack {
     /// How many bytes of argument area the caller gave the function, which is where a `musttail`
     /// call that passes arguments on the stack writes them. See [`abi::Arrived::area`].
     pub incoming: u32,
+    /// Each call that passes arguments in the outgoing area, with how many bytes of it they take,
+    /// which [`crate::pushes`] needs to know a call's stores are all of them. Not a call that
+    /// forwards, whose stores wait for the frame.
+    pub passing: Vec<(mir::Inst, u32)>,
     /// Whether the function saves every register a callee keeps, which a `__builtin_unwind_init`
     /// in it asks for. See [`crate::frame::Layout::saves_kept`].
     pub saves_kept: bool,
@@ -3017,6 +3021,10 @@ impl<'a> Lowering<'a> {
         let made = abi::call(&mut self.out, block, &what, conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
         self.crossed += 1;
+        if made.area > 0 && made.forwarded.is_none() {
+            let call = self.out.terminator(block).expect("the call just built");
+            self.stack.passing.push((call, made.area));
+        }
         self.passed_late(&late);
         // Through a pointer to a function without a landing pad, which the processor is told not
         // to check with the `notrack` prefix. A target that has the prefix names the call with it

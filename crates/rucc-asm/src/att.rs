@@ -2561,6 +2561,19 @@ mod tests {
     }
 
     #[test]
+    fn an_i386_push_of_a_number_or_an_address_is_pushl_of_the_immediate() {
+        let text = write_i386(|func, names| {
+            let block = func.create_block();
+            let push = Opcode::new(names.intern("x64.push_i_32"));
+            let format = names.intern("format");
+            func.build(block, push).imm(10).finish();
+            func.build(block, push).imm(4).symbol(format).finish();
+        })
+        .expect("an i386 function");
+        assert_eq!(body(&text), ["pushl\t$10", "pushl\t$format+4"]);
+    }
+
+    #[test]
     fn an_i386_address_with_nothing_but_a_symbol_in_it_is_the_symbol() {
         use rucc_target::x86::{EAX, EBX};
         let text = write_i386(|func, names| {

@@ -1073,6 +1073,7 @@ fn writes_flags(name: &str) -> bool {
             | Form::StoreImm
             | Form::LoadImm
             | Form::Push
+            | Form::PushImm
             | Form::Pop
             | Form::Set
             | Form::Cmov

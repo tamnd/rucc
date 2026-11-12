@@ -177,7 +177,7 @@ fn plain(form: Form) -> Timing {
         Store | StoreImm => (1, Unit::Store),
         // The stack. A push is a store, a pop is a load, and neither is any cheaper than the
         // ordinary one because the address it uses is an ordinary address.
-        Push => (1, Unit::Store),
+        Push | PushImm => (1, Unit::Store),
         Pop => (LOAD, Unit::Load),
         // Control flow. A jump the machine predicts costs about nothing and a jump it does not
         // costs about fifteen, and which one it is is not something a schedule changes, so the
