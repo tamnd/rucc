@@ -2104,6 +2104,7 @@ impl Checker<'_> {
                 }
                 "retain" => flags |= DeclFlags::RETAIN,
                 "cold" => flags |= DeclFlags::COLD,
+                "returns_nonnull" => flags |= DeclFlags::RETURNS_NONNULL,
                 "hot" => flags |= DeclFlags::HOT,
                 // Only `keep` changes anything. The other values ask for a thunk on a function
                 // the command line left alone, which the kernel never writes.
@@ -3714,6 +3715,11 @@ fn unsanitized(name: &str) -> DeclFlags {
         "vla-bound" => DeclFlags::NO_UBSAN_VLA_BOUND,
         "null" => DeclFlags::NO_UBSAN_NULL,
         "alignment" => DeclFlags::NO_UBSAN_ALIGNMENT,
+        "object-size" => DeclFlags::NO_UBSAN_OBJECT_SIZE,
+        "pointer-overflow" => DeclFlags::NO_UBSAN_POINTER_OVERFLOW,
+        "nonnull-attribute" => DeclFlags::NO_UBSAN_NONNULL_ATTRIBUTE,
+        "returns-nonnull-attribute" => DeclFlags::NO_UBSAN_RETURNS_NONNULL,
+        "builtin" => DeclFlags::NO_UBSAN_BUILTIN,
         "address" | "kernel-address" => DeclFlags::NO_ASAN,
         "undefined" => {
             DeclFlags::NO_UBSAN_DIVIDE
@@ -3726,6 +3732,11 @@ fn unsanitized(name: &str) -> DeclFlags {
                 | DeclFlags::NO_UBSAN_VLA_BOUND
                 | DeclFlags::NO_UBSAN_NULL
                 | DeclFlags::NO_UBSAN_ALIGNMENT
+                | DeclFlags::NO_UBSAN_OBJECT_SIZE
+                | DeclFlags::NO_UBSAN_POINTER_OVERFLOW
+                | DeclFlags::NO_UBSAN_NONNULL_ATTRIBUTE
+                | DeclFlags::NO_UBSAN_RETURNS_NONNULL
+                | DeclFlags::NO_UBSAN_BUILTIN
         }
         _ => DeclFlags::NONE,
     }

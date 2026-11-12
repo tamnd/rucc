@@ -363,6 +363,20 @@ pub struct Sanitize {
     /// `alignment`: a load, a store or a member access through a pointer that is not aligned
     /// to what its type asks for.
     pub alignment: Check,
+    /// `object-size`: a load or a store through a pointer past the end of the object that the
+    /// optimizer can see the pointer is into. gcc makes it only when it optimizes.
+    pub object_size: Check,
+    /// `pointer-overflow`: pointer arithmetic whose answer wraps around the address space.
+    pub pointer_overflow: Check,
+    /// `nonnull-attribute`: a null pointer passed where the callee's `nonnull` asks for one that
+    /// is not.
+    pub nonnull_attribute: Check,
+    /// `returns-nonnull-attribute`: a null pointer returned from a function that is marked
+    /// `returns_nonnull`.
+    pub returns_nonnull_attribute: Check,
+    /// `builtin`: a zero passed to `__builtin_clz` or `__builtin_ctz`, or to one of their wider
+    /// forms.
+    pub builtin: Check,
     /// `unreachable`: control that reaches a `__builtin_unreachable()`. gcc has no routine that
     /// comes back for this one, so a report and an abort are the same call.
     pub unreachable: Check,
@@ -378,7 +392,7 @@ pub struct Sanitize {
 
 impl Sanitize {
     /// The names `-fsanitize=` takes that this compiler generates, in gcc's spelling.
-    pub const NAMES: [&'static str; 14] = [
+    pub const NAMES: [&'static str; 19] = [
         "integer-divide-by-zero",
         "shift-exponent",
         "shift-base",
@@ -389,6 +403,11 @@ impl Sanitize {
         "vla-bound",
         "null",
         "alignment",
+        "object-size",
+        "pointer-overflow",
+        "nonnull-attribute",
+        "returns-nonnull-attribute",
+        "builtin",
         "unreachable",
         "signed-integer-overflow",
         "return",
@@ -408,6 +427,11 @@ impl Sanitize {
             self.vla_bound,
             self.null,
             self.alignment,
+            self.object_size,
+            self.pointer_overflow,
+            self.nonnull_attribute,
+            self.returns_nonnull_attribute,
+            self.builtin,
             self.unreachable,
             self.signed_overflow,
             self.returns,
@@ -430,6 +454,11 @@ impl Sanitize {
             "vla-bound" => Some(&mut self.vla_bound),
             "null" => Some(&mut self.null),
             "alignment" => Some(&mut self.alignment),
+            "object-size" => Some(&mut self.object_size),
+            "pointer-overflow" => Some(&mut self.pointer_overflow),
+            "nonnull-attribute" => Some(&mut self.nonnull_attribute),
+            "returns-nonnull-attribute" => Some(&mut self.returns_nonnull_attribute),
+            "builtin" => Some(&mut self.builtin),
             "unreachable" => Some(&mut self.unreachable),
             "signed-integer-overflow" => Some(&mut self.signed_overflow),
             "return" => Some(&mut self.returns),

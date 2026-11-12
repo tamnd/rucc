@@ -239,6 +239,24 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_UBSAN_ALIGNMENT) {
             head.push_str(" no_sanitize(alignment)");
         }
+        if node.flags.contains(DeclFlags::NO_UBSAN_OBJECT_SIZE) {
+            head.push_str(" no_sanitize(object-size)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_POINTER_OVERFLOW) {
+            head.push_str(" no_sanitize(pointer-overflow)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_NONNULL_ATTRIBUTE) {
+            head.push_str(" no_sanitize(nonnull-attribute)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_RETURNS_NONNULL) {
+            head.push_str(" no_sanitize(returns-nonnull-attribute)");
+        }
+        if node.flags.contains(DeclFlags::NO_UBSAN_BUILTIN) {
+            head.push_str(" no_sanitize(builtin)");
+        }
+        if node.flags.contains(DeclFlags::RETURNS_NONNULL) {
+            head.push_str(" returns_nonnull");
+        }
         if node.flags.contains(DeclFlags::NO_ASAN) {
             head.push_str(" no_sanitize_address");
         }

@@ -11,16 +11,16 @@ use rucc_ast::{BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_diag::{BytePos, Span};
 use rucc_ir::{
-    Datum, Flags, Global, Imm, InstData, IntPred, Linkage as IrLinkage, Opcode, Reloc, Signature,
-    Type, Value,
+    Datum, Extra, Flags, Global, Imm, InstData, IntPred, Linkage as IrLinkage, Opcode, Reloc,
+    Signature, Type, Value,
 };
-use rucc_sema::{Const, Conversion, ExprId, ExprKind};
+use rucc_sema::{Const, Conversion, DeclId, ExprId, ExprKind};
 use rucc_tuple::Arch;
 use rucc_types::{
     ArrayLen, FloatKind, IntKind, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, VlaId,
 };
 
-use super::{Body, MemInfo, Ordered, Place, Where};
+use super::{Body, MemInfo, Ordered, Place, Stride, Where};
 use crate::repr;
 use crate::unit::{Check, Unit};
 
@@ -76,6 +76,21 @@ struct Counted {
     field: u32,
     counter: Vec<u32>,
     ty: TypeId,
+}
+
+/// One field of the record a check hands the runtime.
+#[derive(Clone, Copy)]
+enum Field {
+    /// A place in the source: a pointer to the name of the file, then the line and the column
+    /// as two numbers of four bytes. [`None`] is a place gcc does not know, which is a null
+    /// name and two zeros.
+    Loc(Option<BytePos>),
+    /// A pointer to the descriptor of a type.
+    Type(Symbol),
+    /// One byte.
+    Byte(u8),
+    /// A number of four bytes.
+    Int(u32),
 }
 
 impl Body<'_, '_> {
@@ -318,10 +333,16 @@ impl Body<'_, '_> {
     }
 
     /// What an access through `pointer` to an object of type `ty` is checked as, which is
-    /// [`None`] when neither check is on.
+    /// [`None`] when no check of an access is on.
     pub(super) fn pointing(&self, pointer: Value, ty: TypeId, at: BytePos) -> Option<Pointed> {
-        let on = self.sanitize.null.is_on() || self.sanitize.alignment.is_on();
-        on.then_some(Pointed { pointer, ty, member: false, at })
+        self.checks_access().then_some(Pointed { pointer, ty, member: false, at })
+    }
+
+    /// Whether a check of what an access goes through is on, which is `-fsanitize=null`,
+    /// `-fsanitize=alignment` or `-fsanitize=object-size`.
+    pub(super) fn checks_access(&self) -> bool {
+        let sanitize = &self.sanitize;
+        sanitize.null.is_on() || sanitize.alignment.is_on() || sanitize.object_size.is_on()
     }
 
     /// What an access to `base[index]` at `addr` is checked as, where `inner` is what the array
@@ -375,6 +396,30 @@ impl Body<'_, '_> {
         };
         let at = self.next_of(before, b"-.", span);
         Some(Pointed { member: true, at, ..pointed })
+    }
+
+    /// The check of `-fsanitize=pointer-overflow` on the step from the record at `record` to
+    /// its member at `member`, when `holder` names a record that a pointer points at, as in
+    /// `p->m`. The member is further on, so the step wraps when it ends below the record. gcc
+    /// says it is at the `->` or the `.`.
+    pub(super) fn check_member_step(
+        &mut self,
+        (record, member): (Place, Place),
+        holder: ExprId,
+        span: Span,
+    ) {
+        if !self.sanitize.pointer_overflow.is_on() || self.at.is_none() {
+            return;
+        }
+        let tast = self.tast();
+        let ExprKind::Unary { op: UnaryOp::Deref, operand } = tast[holder].kind else { return };
+        let (Where::Addr(from), Where::Addr(to)) = (record.at, member.at) else { return };
+        if from == to {
+            return;
+        }
+        let before = if tast.expr_span(holder) == span { operand } else { holder };
+        let at = self.next_of(before, b"-.", span);
+        self.check_wrap((from, to), None, at, span);
     }
 
     /// The decay of the array `operand` names, at `place`. When a subscript is about to use it,
@@ -447,6 +492,13 @@ impl Body<'_, '_> {
     /// two checks are asked for in different ways, a trap is made if either asks for one, and a
     /// report if either can go on after one.
     fn check_pointed(&mut self, pointed: Pointed, access: Access, at: BytePos, span: Span) {
+        self.check_null_aligned(pointed, access, at, span);
+        self.check_object_size(pointed, access, at, span);
+    }
+
+    /// The check of `-fsanitize=null` and `-fsanitize=alignment` that [`Self::check_pointed`]
+    /// puts first.
+    fn check_null_aligned(&mut self, pointed: Pointed, access: Access, at: BytePos, span: Span) {
         if self.at.is_none() {
             return;
         }
@@ -501,6 +553,226 @@ impl Body<'_, '_> {
         };
         let operand = Operand { value: handed, ty: pointed.ty };
         self.fire(fires, check, "__ubsan_handle_type_mismatch_v1", data, &[operand], span);
+    }
+
+    /// The check of `-fsanitize=object-size` on an access through `pointed`, which fires when
+    /// the object the pointer points into has fewer bytes left from it than the access reads or
+    /// writes.
+    ///
+    /// gcc calls `__ubsan_handle_type_mismatch_v1` with the record [`Self::check_pointed`] makes,
+    /// with a power of zero, and with the pointer. How many bytes are left is the question that
+    /// `__builtin_object_size` asks with a zero, which the optimizer answers when it can see the
+    /// object and answers as the largest number when it cannot, and that never fires. A member is
+    /// left out, because what is checked there is the record, and the record a program reaches
+    /// one member of can be shorter than its type.
+    fn check_object_size(&mut self, pointed: Pointed, access: Access, at: BytePos, span: Span) {
+        let check = self.sanitize.object_size;
+        if !check.is_on() || pointed.member || self.at.is_none() {
+            return;
+        }
+        if repr::is_variable_length(self.types(), pointed.ty) {
+            return;
+        }
+        let size = repr::size_of(self.types(), self.target(), pointed.ty);
+        if size == 0 {
+            return;
+        }
+        let address = self.address;
+        let (fires, number) = {
+            let args = self.func.push_values(&[pointed.pointer]);
+            let data =
+                InstData { args, extra: Extra::Question(0), ..InstData::new(Opcode::ObjectSize) };
+            let mut build = self.build(span);
+            let left = build.value(data, address);
+            let wanted = build.iconst(address, i128::from(size));
+            let fires = build.icmp(IntPred::Ugt, wanted, left);
+            (fires, build.unary(Opcode::PtrToInt, pointed.pointer, address))
+        };
+        let kind = match access {
+            Access::Load => 0,
+            Access::Store => 1,
+        };
+        let data = {
+            let ty = self.unit.pointee_type(pointed.ty);
+            self.unit.ubsan_record(at, &[ty], &[0, kind])
+        };
+        let operand = Operand { value: number, ty: pointed.ty };
+        self.fire(fires, check, "__ubsan_handle_type_mismatch_v1", data, &[operand], span);
+    }
+
+    /// The check of `-fsanitize=builtin` on `__builtin_clz` or `__builtin_ctz` of `value`, whose
+    /// answer C leaves undefined for a zero.
+    ///
+    /// gcc calls `__ubsan_handle_invalid_builtin` with a record of where the call starts and a
+    /// byte that is 1 for `clz` and 0 for `ctz`. An operand that is a constant other than zero
+    /// has no check.
+    pub(super) fn check_builtin(&mut self, value: Value, leading: bool, span: Span) {
+        let check = self.sanitize.builtin;
+        if !check.is_on() || self.at.is_none() || self.bits_of(value).is_some_and(|bits| bits != 0)
+        {
+            return;
+        }
+        let ty = self.func[value].ty;
+        let fires = {
+            let mut build = self.build(span);
+            let zero = build.iconst(ty, 0);
+            build.icmp(IntPred::Eq, value, zero)
+        };
+        let fields = [Field::Loc(Some(span.lo)), Field::Byte(u8::from(leading))];
+        let data = self.unit.ubsan_fields(&fields);
+        self.fire(fires, check, "__ubsan_handle_invalid_builtin", data, &[], span);
+    }
+
+    /// Whether `-fsanitize=nonnull-attribute` checks the argument `number`, counted from one, of
+    /// a call to `callee`, which is when a `nonnull` attribute on the function names it.
+    pub(super) fn checks_nonnull_arg(&self, callee: Option<DeclId>, number: usize) -> bool {
+        self.sanitize.nonnull_attribute.is_on()
+            && callee.is_some_and(|decl| self.tast().is_nonnull_arg(decl, number))
+    }
+
+    /// The check of `-fsanitize=nonnull-attribute` on the pointer arguments of a call that a
+    /// `nonnull` attribute names, each with its number counted from one, after every argument
+    /// is worked out.
+    ///
+    /// gcc calls `__ubsan_handle_nonnull_arg` with a record of where the call starts, where the
+    /// attribute is, which gcc does not know either, and the number of the argument.
+    pub(super) fn check_nonnull_args(&mut self, args: &[(usize, Value)], span: Span) {
+        let check = self.sanitize.nonnull_attribute;
+        for &(number, value) in args {
+            if self.at.is_none() || !self.func[value].ty.is_ptr() {
+                continue;
+            }
+            let fires = self.is_null(value, span);
+            let number = u32::try_from(number).unwrap_or(u32::MAX);
+            let fields = [Field::Loc(Some(span.lo)), Field::Loc(None), Field::Int(number)];
+            let data = self.unit.ubsan_fields(&fields);
+            self.fire(fires, check, "__ubsan_handle_nonnull_arg", data, &[], span);
+        }
+    }
+
+    /// The check of `-fsanitize=returns-nonnull-attribute` on `value`, which a function that
+    /// `returns_nonnull` says never answers with a null pointer is about to answer with.
+    /// `expr` is the expression it was written as.
+    ///
+    /// gcc calls `__ubsan_handle_nonnull_return_v1` with a record of where the attribute is,
+    /// which it does not know, and a second record of where the expression starts.
+    pub(super) fn check_nonnull_return(&mut self, value: Value, expr: ExprId, span: Span) {
+        let check = self.sanitize.returns_nonnull_attribute;
+        if !check.is_on() || self.at.is_none() || !self.func[value].ty.is_ptr() {
+            return;
+        }
+        let fires = self.is_null(value, span);
+        let data = self.unit.ubsan_fields(&[Field::Loc(None)]);
+        let at = self.tast().expr_span(expr).lo;
+        let place = self.unit.ubsan_fields(&[Field::Loc(Some(at))]);
+        let routine = "__ubsan_handle_nonnull_return_v1";
+        self.fire_with(fires, check, routine, data, span, |body| {
+            vec![body.global_addr(place, span)]
+        });
+    }
+
+    /// Whether `pointer` is null.
+    fn is_null(&mut self, pointer: Value, span: Span) -> Value {
+        let address = self.address;
+        let mut build = self.build(span);
+        let number = build.unary(Opcode::PtrToInt, pointer, address);
+        let zero = build.iconst(address, 0);
+        build.icmp(IntPred::Eq, number, zero)
+    }
+
+    /// `base[index]` at `pointer`, which is what the array decays to or the pointer, stepped
+    /// `steps` elements of `size` with the check of `-fsanitize=pointer-overflow`. `taken` is
+    /// where the `&` of `&base[index]` is.
+    ///
+    /// gcc says the step is at the `[`, and at the `&` when the address is taken. An element of
+    /// an array that is not reached through a pointer, at an index that is a constant, is not
+    /// checked, which is what gcc leaves out as well.
+    pub(super) fn element_step(
+        &mut self,
+        (base, index): (ExprId, ExprId),
+        (pointer, steps): (Value, Value),
+        (signed, size): (bool, Stride),
+        taken: Option<BytePos>,
+        span: Span,
+    ) -> Value {
+        let tast = self.tast();
+        let named = match tast[base].kind {
+            ExprKind::Convert { kind: Conversion::ArrayDecay, operand } => !self.pointed(operand),
+            _ => false,
+        };
+        if !self.sanitize.pointer_overflow.is_on() || named && self.bits_of(steps).is_some() {
+            return self.step(pointer, steps, signed, size, false, span);
+        }
+        let at = taken.unwrap_or_else(|| self.bracket(base, index, span));
+        self.checked_step((pointer, steps), (signed, size), false, at, span)
+    }
+
+    /// `addr` stepped `steps` elements of `size`, back when `back` says so, with the check of
+    /// `-fsanitize=pointer-overflow` said to be at `at`.
+    ///
+    /// gcc calls `__ubsan_handle_pointer_overflow` with a record of where the operator is, the
+    /// address and the address it stepped to. It fires when a step forward ends below where it
+    /// started or a step back ends above it, which is the address wrapping. A step of a constant
+    /// zero has no check.
+    pub(super) fn checked_step(
+        &mut self,
+        (addr, steps): (Value, Value),
+        (signed, size): (bool, Stride),
+        back: bool,
+        at: BytePos,
+        span: Span,
+    ) -> Value {
+        if !self.sanitize.pointer_overflow.is_on()
+            || self.at.is_none()
+            || self.bits_of(steps) == Some(0)
+        {
+            return self.step(addr, steps, signed, size, back, span);
+        }
+        // The bytes are worked out here, since their sign is what says which way is a wrap.
+        let amount = self.scaled(steps, signed, size, back, span);
+        let moved = self.step(addr, amount, true, Stride::Bytes(1), false, span);
+        self.check_wrap((addr, moved), Some(amount), at, span);
+        moved
+    }
+
+    /// The check of `-fsanitize=pointer-overflow` on a step from `from` to `to` by `amount`
+    /// bytes, or by a number of bytes that is known not to be negative when there is no
+    /// `amount`. It fires when a step forward ends below where it started or a step back ends
+    /// above it. A step of zero bytes ends where it started and is neither.
+    fn check_wrap(
+        &mut self,
+        (from, to): (Value, Value),
+        amount: Option<Value>,
+        at: BytePos,
+        span: Span,
+    ) {
+        let check = self.sanitize.pointer_overflow;
+        let address = self.address;
+        let (fires, from, to) = {
+            let mut build = self.build(span);
+            let from = build.unary(Opcode::PtrToInt, from, address);
+            let to = build.unary(Opcode::PtrToInt, to, address);
+            let below = build.icmp(IntPred::Ult, to, from);
+            // A step that is not zero moves the address, so it ends either below or above where
+            // it started, and a step back wraps exactly when it does not end below.
+            let fires = match amount {
+                Some(amount) => {
+                    let zero = build.iconst(address, 0);
+                    let backward = build.icmp(IntPred::Slt, amount, zero);
+                    build.binary(Opcode::Xor, below, backward, Flags::NONE)
+                }
+                None => below,
+            };
+            (fires, from, to)
+        };
+        let data = self.unit.ubsan_fields(&[Field::Loc(Some(at))]);
+        let routine = "__ubsan_handle_pointer_overflow";
+        self.fire_with(fires, check, routine, data, span, |_| vec![from, to]);
+    }
+
+    /// Where the operator of `lhs op rhs` is, for a step of a pointer.
+    pub(super) fn stepped_by(&self, operands: (ExprId, ExprId), span: Span) -> BytePos {
+        self.operator(operands, span)
     }
 
     /// Reads a `bool` in memory with the check of `-fsanitize=bool`, and [`None`] when the read is
@@ -760,7 +1032,7 @@ impl Body<'_, '_> {
         let operand = Operand { value: steps, ty: index_ty };
         self.fire(fires, check, "__ubsan_handle_out_of_bounds", data, &[operand], span);
         let size = self.stride(ty, span);
-        Some(self.step(pointer, steps, signed, size, false, span))
+        Some(self.checked_step((pointer, steps), (signed, size), false, at, span))
     }
 
     /// Whether `object` is an array that `-fsanitize=bounds` does not check, which is how gcc's
@@ -921,6 +1193,22 @@ impl Body<'_, '_> {
         operands: &[Operand],
         span: Span,
     ) {
+        self.fire_with(fires, check, routine, data, span, |body| {
+            operands.iter().map(|&operand| body.handle(operand, span)).collect()
+        });
+    }
+
+    /// [`Self::fire`] with the operands made by `operands` in the block that reports, for an
+    /// operand that is not a value the way [`Self::handle`] passes one.
+    fn fire_with(
+        &mut self,
+        fires: Value,
+        check: Check,
+        routine: &str,
+        data: Symbol,
+        span: Span,
+        operands: impl FnOnce(&mut Self) -> Vec<Value>,
+    ) {
         let report = self.new_block();
         let after = self.new_block();
         self.br_if(fires, report, after, span);
@@ -935,9 +1223,7 @@ impl Body<'_, '_> {
                 if check == Check::Abort { format!("{routine}_abort") } else { routine.into() };
             let callee = self.unit.names.intern(&name);
             let mut args = vec![self.global_addr(data, span)];
-            for &operand in operands {
-                args.push(self.handle(operand, span));
-            }
+            args.extend(operands(self));
             let params: Vec<Type> = args.iter().map(|&arg| self.func[arg].ty).collect();
             let signature = self.func.add_signature(Signature::new().with_params(&params));
             self.build(span).call(callee, signature, &args);
@@ -1012,37 +1298,80 @@ impl Unit<'_> {
     /// padded to a whole number of words, as gcc lays out a record with fields of one byte at the
     /// end.
     fn ubsan_record(&mut self, at: BytePos, types: &[Symbol], tail: &[u8]) -> Symbol {
-        let (file, line, column) = match self.sources.presumed(at) {
-            Some(loc) => (loc.name.to_owned(), loc.line, loc.column),
-            None => (String::new(), 0, 0),
-        };
-        let mut bytes = file.into_bytes();
-        bytes.push(0);
-        let name = format!(".Lubsan_file.{}", self.checks);
-        let file = self.literal(bytes, 1, &name);
+        let mut fields = vec![Field::Loc(Some(at))];
+        fields.extend(types.iter().map(|&symbol| Field::Type(symbol)));
+        fields.extend(tail.iter().map(|&byte| Field::Byte(byte)));
+        self.ubsan_fields(&fields)
+    }
 
-        let word = self.target.pointer_width / 8;
-        let mut data =
-            vec![Datum::Addr(self.module.add_reloc(Reloc { symbol: file, addend: 0, size: word }))];
-        for number in [line, column] {
-            let value = self.module.add_imm(Imm::int(i128::from(number), Type::int(32)));
-            data.push(Datum::Scalar { ty: Type::int(32), value });
+    /// A record of `fields` in the order given, each at the alignment it has in C, and padded
+    /// to a whole number of words, which is how gcc lays out the records of its checks.
+    fn ubsan_fields(&mut self, fields: &[Field]) -> Symbol {
+        let width = self.target.pointer_width / 8;
+        let word = u64::from(width);
+        let mut data = Vec::new();
+        let mut used = 0;
+        let pad = |data: &mut Vec<Datum>, used: &mut u64, align: u64| {
+            let to = used.next_multiple_of(align);
+            if to > *used {
+                data.push(Datum::Zero(to - *used));
+                *used = to;
+            }
+        };
+        let mut places = 0;
+        for &field in fields {
+            match field {
+                Field::Loc(None) => {
+                    pad(&mut data, &mut used, word);
+                    data.push(Datum::Zero(word + 8));
+                    used += word + 8;
+                }
+                Field::Loc(Some(at)) => {
+                    pad(&mut data, &mut used, word);
+                    let (file, line, column) = match self.sources.presumed(at) {
+                        Some(loc) => (loc.name.to_owned(), loc.line, loc.column),
+                        None => (String::new(), 0, 0),
+                    };
+                    let mut bytes = file.into_bytes();
+                    bytes.push(0);
+                    let name = match places {
+                        0 => format!(".Lubsan_file.{}", self.checks),
+                        n => format!(".Lubsan_file.{}.{n}", self.checks),
+                    };
+                    places += 1;
+                    let file = self.literal(bytes, 1, &name);
+                    let reloc = Reloc { symbol: file, addend: 0, size: width };
+                    data.push(Datum::Addr(self.module.add_reloc(reloc)));
+                    for number in [line, column] {
+                        let value =
+                            self.module.add_imm(Imm::int(i128::from(number), Type::int(32)));
+                        data.push(Datum::Scalar { ty: Type::int(32), value });
+                    }
+                    used += word + 8;
+                }
+                Field::Type(symbol) => {
+                    pad(&mut data, &mut used, word);
+                    let reloc = Reloc { symbol, addend: 0, size: width };
+                    data.push(Datum::Addr(self.module.add_reloc(reloc)));
+                    used += word;
+                }
+                Field::Byte(byte) => {
+                    let value = self.module.add_imm(Imm::int(i128::from(byte), Type::int(8)));
+                    data.push(Datum::Scalar { ty: Type::int(8), value });
+                    used += 1;
+                }
+                Field::Int(number) => {
+                    pad(&mut data, &mut used, 4);
+                    let value = self.module.add_imm(Imm::int(i128::from(number), Type::int(32)));
+                    data.push(Datum::Scalar { ty: Type::int(32), value });
+                    used += 4;
+                }
+            }
         }
-        for &symbol in types {
-            data.push(Datum::Addr(self.module.add_reloc(Reloc { symbol, addend: 0, size: word })));
-        }
-        for &byte in tail {
-            let value = self.module.add_imm(Imm::int(i128::from(byte), Type::int(8)));
-            data.push(Datum::Scalar { ty: Type::int(8), value });
-        }
-        let used = u64::from(word) * (1 + types.len() as u64) + 8 + tail.len() as u64;
-        let size = used.next_multiple_of(u64::from(word));
-        if size > used {
-            data.push(Datum::Zero(size - used));
-        }
+        pad(&mut data, &mut used, word);
         let symbol = self.names.intern(&format!(".Lubsan_data.{}", self.checks));
         self.checks += 1;
-        let mut global = Global::new(symbol, size, word);
+        let mut global = Global::new(symbol, used, width);
         global.linkage = IrLinkage::Internal;
         global.droppable = true;
         global.init = Some(self.module.push_data(&data));

@@ -1,6 +1,9 @@
 //! `-fsanitize=integer-divide-by-zero`, `-fsanitize=shift`, `-fsanitize=bool`, `-fsanitize=enum`,
 //! `-fsanitize=bounds-strict`, `-fsanitize=bounds`, `-fsanitize=vla-bound`,
-//! `-fsanitize=signed-integer-overflow`, `-fsanitize=null` and `-fsanitize=alignment`, which the kernel's `CONFIG_UBSAN` puts on every unit that does
+//! `-fsanitize=signed-integer-overflow`, `-fsanitize=null`, `-fsanitize=alignment`,
+//! `-fsanitize=object-size`, `-fsanitize=pointer-overflow`, `-fsanitize=nonnull-attribute`,
+//! `-fsanitize=returns-nonnull-attribute` and `-fsanitize=builtin`, which the kernel's
+//! `CONFIG_UBSAN` and a userland built with `-fsanitize=undefined` put on every unit that does
 //! not opt out. The calls carry gcc's names, the record each one is
 //! handed is laid out the way gcc lays it out, and a function marked `no_sanitize` makes none.
 
@@ -162,8 +165,11 @@ fn the_flags_that_say_what_a_check_does_are_read() {
 #[test]
 fn the_checks_the_compiler_does_not_have_are_still_refused() {
     let dir = std::env::temp_dir().join(format!("rucc-ubsan-refused-{}", std::process::id()));
-    for asked in ["-fsanitize=undefined", "-fsanitize=pointer-overflow", "-fsanitize=shift,builtin"]
-    {
+    for asked in [
+        "-fsanitize=undefined",
+        "-fsanitize=float-cast-overflow",
+        "-fsanitize=shift,float-divide-by-zero",
+    ] {
         let out = compile(&dir, SOURCE, &[asked, "-S", "-o", "-"]);
         assert!(!out.status.success(), "{asked} is refused");
         let said = String::from_utf8_lossy(&out.stderr);
@@ -844,4 +850,151 @@ fn the_runtime_is_told_what_gcc_tells_it_about_an_access_through_a_pointer() {
         assert_eq!(String::from_utf8_lossy(&out.stdout), wanted, "{level}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// One function for each place the checks of `-fsanitize=nonnull-attribute`,
+/// `-fsanitize=returns-nonnull-attribute`, `-fsanitize=pointer-overflow`,
+/// `-fsanitize=builtin` and `-fsanitize=object-size` go, and one beside each that has none.
+const REST: &str = r#"int glob[4] = { 1, 2, 3, 4 };
+__attribute__((nonnull)) void nn(int *a);
+void call(int *p) { nn(p); }
+__attribute__((returns_nonnull)) int *rn(int *p) { return p; }
+int *plain(int *p) { return p; }
+int *step(int *p, long n) { return p + n; }
+int *zero(int *p) { return p + 0; }
+int named(void) { return glob[2]; }
+int clz(unsigned x) { return __builtin_clz(x); }
+int clz8(void) { return __builtin_clz(8); }
+int past(void) { int *p = glob + 5; return *p; }
+__attribute__((no_sanitize("undefined"))) int *quiet(int *p, long n) { nn(p); return p + n; }
+"#;
+
+fn rest(args: &[&str]) -> String {
+    let tag: String = args.concat().chars().filter(char::is_ascii_alphanumeric).collect();
+    let dir = std::env::temp_dir().join(format!("rucc-ubsan-rest-{}{tag}", std::process::id()));
+    let mut all = vec!["--target=x86_64-unknown-linux-gnu", "-S", "-o", "-"];
+    all.extend(args);
+    let out = compile(&dir, REST, &all);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).expect("a listing is text")
+}
+
+#[test]
+fn the_checks_of_attributes_steps_and_builtins_call_the_runtime() {
+    let asked = "-fsanitize=nonnull-attribute,returns-nonnull-attribute,pointer-overflow,builtin";
+    for level in ["-O0", "-O2"] {
+        let text = rest(&[level, asked]);
+        for (name, routine) in [
+            ("call", "__ubsan_handle_nonnull_arg"),
+            ("rn", "__ubsan_handle_nonnull_return_v1"),
+            ("step", "__ubsan_handle_pointer_overflow"),
+            ("clz", "__ubsan_handle_invalid_builtin"),
+        ] {
+            assert!(body(&text, name).contains(routine), "{level} {name}:\n{text}");
+        }
+        for name in ["plain", "zero", "named", "clz8", "quiet"] {
+            assert!(!body(&text, name).contains("__ubsan"), "{level} {name}:\n{text}");
+        }
+        assert!(!text.contains("_abort"), "{level}:\n{text}");
+    }
+    let text = rest(&[asked, "-fno-sanitize-recover=all"]);
+    assert!(body(&text, "call").contains("__ubsan_handle_nonnull_arg_abort"), "{text}");
+    let text = rest(&["-O2", asked, "-fsanitize-trap=all"]);
+    assert!(!body(&text, "step").contains("__ubsan"), "{text}");
+    assert!(body(&text, "step").contains("ud2"), "{text}");
+}
+
+#[test]
+fn object_size_is_checked_where_the_optimizer_sees_the_object() {
+    // gcc answers how much is left of an object from `-O1` up, and so does this.
+    let text = rest(&["-O0", "-fsanitize=object-size"]);
+    assert!(!text.contains("__ubsan"), "{text}");
+    let text = rest(&["-O2", "-fsanitize=object-size"]);
+    assert!(body(&text, "past").contains("__ubsan_handle_type_mismatch_v1"), "{text}");
+    assert!(!body(&text, "named").contains("__ubsan"), "{text}");
+}
+
+/// gcc's own probe of the checks [`REST`] has, with handlers that print what they are told and
+/// a `main` that runs one case for each number it is given. A case may go on to read through
+/// the pointer it was handed and stop there, so each case is a program of its own.
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
+const PROBE: &str = r#"struct loc { const char *file; unsigned line, column; };
+struct type { unsigned short kind, info; char name[]; };
+struct tm { struct loc loc; struct type *type; unsigned char align, kind; };
+struct nna { struct loc loc, attr; int index; };
+struct nnr { struct loc loc; };
+struct po { struct loc loc; };
+struct ib { struct loc loc; unsigned char kind; };
+int printf(const char *, ...); int fflush(void *);
+static void pl(const char *w, struct loc *l) { printf("%s %s %u:%u\n", w, l->file ? "f" : "-", l->line, l->column); }
+void __ubsan_handle_type_mismatch_v1(struct tm *d, unsigned long p) {
+    pl("tm", &d->loc); printf(" %u %u %s %d\n", d->align, d->kind, d->type->name, p != 0); fflush(0);
+}
+void __ubsan_handle_nonnull_arg(struct nna *d) { pl("nna", &d->loc); pl(" attr", &d->attr); printf(" %d size %d\n", d->index, (int)sizeof *d); fflush(0); }
+void __ubsan_handle_nonnull_return_v1(struct nnr *d, struct nnr *d2) { pl("nnr", &d->loc); pl(" at", &d2->loc); fflush(0); }
+void __ubsan_handle_pointer_overflow(struct po *d, unsigned long b, unsigned long r) { pl("po", &d->loc); printf(" %lx %lx\n", b, r); fflush(0); }
+void __ubsan_handle_invalid_builtin(struct ib *d) { pl("ib", &d->loc); printf(" %u\n", d->kind); fflush(0); }
+__attribute__((nonnull)) void nn1(int *a, int *b) { (void)a; (void)b; }
+__attribute__((nonnull(2))) void nn2(int *a, int x, int *b) { (void)a; (void)x; (void)b; }
+__attribute__((returns_nonnull)) int *rn(int *p) { return p; }
+int *padd(int *p, long n) { return p + n; }
+int *psub(int *p, long n) { return p - n; }
+int *pinc(int *p) { p++; return p; }
+int *pcomp(int *p, long n) { p += n; return p; }
+int pidx(int *p, long n) { return p[n]; }
+struct S { int a; long b; int c[4]; };
+long pmem(struct S *s) { return s->b; }
+int pmemi(struct S *s, int i) { return s->c[i]; }
+int *paddr(int *p, int i) { return &p[i]; }
+int bclz(unsigned x) { return __builtin_clz(x); }
+int bctz(unsigned long x) { return __builtin_ctzl(x); }
+int glob[4];
+int gidx(int i) { return glob[i]; }
+int atoi(const char *);
+int main(int argc, char **argv) {
+    static int v[8];
+    switch (atoi(argv[1])) {
+    case 0: nn1(v, 0); nn2(0, 1, 0); printf("rn\n"); fflush(0); rn(0); break;
+    case 1: padd((int *)-16, 8); psub((int *)16, 8); pinc((int *)-4); pcomp((int *)-16, 8); paddr((int *)-16, 8); break;
+    case 2: pidx((int *)-16, 8); break;
+    case 3: pmem((struct S *)-4); break;
+    case 4: pmemi((struct S *)-8, 1); break;
+    case 5: bclz(0); bctz(0); break;
+    }
+    return 0;
+}
+"#;
+
+/// What gcc 13 at `-O0` tells the runtime for each case of [`PROBE`].
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
+const PROBE_GCC: [&str; 6] = [
+    "nna f 37:13\n attr - 0:0\n 2 size 40\nrn\nnnr - 0:0\n at f 19:59\n",
+    "po f 20:38\n fffffffffffffff0 10\npo f 21:38\n 10 fffffffffffffff0\n\
+     po f 22:22\n fffffffffffffffc 0\npo f 23:32\n fffffffffffffff0 10\n\
+     po f 28:36\n fffffffffffffff0 10\n",
+    "po f 24:36\n fffffffffffffff0 10\n",
+    "po f 26:34\n fffffffffffffffc 4\n",
+    "po f 27:44\n fffffffffffffff8 c\n",
+    "ib f 29:31\n 1\nib f 30:36\n 0\n",
+];
+
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", target_os = "linux")))]
+#[test]
+fn the_runtime_is_told_what_gcc_tells_it_about_attributes_steps_and_builtins() {
+    let dir = std::env::temp_dir().join(format!("rucc-ubsan-probe-{}", std::process::id()));
+    let program = dir.join("one");
+    let program_text = program.to_str().expect("a temporary path is text");
+    let asked = "-fsanitize=nonnull-attribute,returns-nonnull-attribute,pointer-overflow,builtin";
+    let out = compile(&dir, PROBE, &["-O0", "-w", asked, "-o", program_text]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    for (case, gcc) in PROBE_GCC.iter().enumerate() {
+        let out = Command::new(&program).arg(case.to_string()).output().expect("the program runs");
+        // gcc checks `s->c[i]` as one step from `s`, at the `[`. This checks the step to the
+        // member at the `->` and the step to the element apart, and the first is the one that
+        // wraps. That is the one difference.
+        let wanted = if case == 4 { "po f 27:41\n fffffffffffffff8 8\n" } else { gcc };
+        assert_eq!(String::from_utf8_lossy(&out.stdout), wanted, "case {case}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

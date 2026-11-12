@@ -187,6 +187,16 @@ pub struct Sanitize {
     pub null: Check,
     /// `-fsanitize=alignment`.
     pub alignment: Check,
+    /// `-fsanitize=object-size`, which is off at `-O0`, where gcc makes none of it either.
+    pub object_size: Check,
+    /// `-fsanitize=pointer-overflow`.
+    pub pointer_overflow: Check,
+    /// `-fsanitize=nonnull-attribute`.
+    pub nonnull_attribute: Check,
+    /// `-fsanitize=returns-nonnull-attribute`.
+    pub returns_nonnull_attribute: Check,
+    /// `-fsanitize=builtin`.
+    pub builtin: Check,
     /// `-fsanitize=unreachable`.
     pub unreachable: Check,
     /// `-fsanitize=signed-integer-overflow`.
