@@ -2341,8 +2341,8 @@ mod tests {
         let mut hidden = var("hidden", Place::Zero, vec![Piece::Zero(4)]);
         hidden.binding = Binding::Local;
         let text = data(vec![hidden], Os::Linux);
-        assert!(text.contains("\t.bss\n"), "{text}");
-        assert!(text.contains("\nhidden:\n\t.space\t4\n"), "{text}");
+        // As gcc writes it, a local common, which gas puts after the rest of `.bss`.
+        assert!(text.contains("\t.local\thidden\n\t.comm\thidden,4,4\n"), "{text}");
         // The whole of what `static` at file scope means, and the one thing a reader would not
         // notice missing until two files each defined their own and the linker took one.
         assert!(!text.contains(".globl"), "{text}");

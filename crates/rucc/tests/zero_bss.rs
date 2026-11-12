@@ -38,7 +38,11 @@ fn listing(what: &str, target: &str, flags: &[&str], source: &str) -> String {
 }
 
 /// The name of the section a label is in, from the last directive in front of it that opened one.
+/// A `static` written as `.local` and `.comm` is in `.bss`, where gas puts it, as gcc writes one.
 fn section<'a>(text: &'a str, label: &str) -> &'a str {
+    if text.contains(&format!("\t.local\t{label}\n\t.comm\t{label},")) {
+        return ".bss";
+    }
     let lines: Vec<&str> = text.lines().collect();
     let at = lines
         .iter()
@@ -55,10 +59,11 @@ fn section<'a>(text: &'a str, label: &str) -> &'a str {
     line.split(',').next().unwrap_or(line)
 }
 
-/// The label a `static` in a function was given, which has the name the program wrote in it.
+/// The label a `static` in a function was given, which has the name the program wrote in it, or
+/// the name a `.local` gives it.
 fn local<'a>(text: &'a str, name: &str) -> &'a str {
     text.lines()
-        .filter_map(|line| line.strip_suffix(':'))
+        .filter_map(|line| line.strip_suffix(':').or_else(|| line.strip_prefix("\t.local\t")))
         .find(|label| !label.starts_with('.') && label.starts_with(name))
         .unwrap_or_else(|| panic!("{name} is in the listing:\n{text}"))
 }

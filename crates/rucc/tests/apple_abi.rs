@@ -266,8 +266,13 @@ fn a_tentative_definition_is_common_on_darwin() {
         !apple.lines().any(|line| line.trim().starts_with(".comm") && line.contains("_hidden")),
         "{apple}"
     );
+    // gcc gives the two globals a place in `.bss` and writes the static as a local common.
     let linux = listing("common-linux", source, LINUX, "-O0");
-    assert!(!linux.contains(".comm"), "{linux}");
+    let comm = |name: &str| {
+        linux.lines().any(|line| line.trim().starts_with(".comm") && line.contains(name))
+    };
+    assert!(!comm("tentative") && !comm("zero"), "{linux}");
+    assert!(linux.contains("\t.local\thidden\n\t.comm\thidden,4,4\n"), "{linux}");
 }
 
 /// A name given with `__asm__` is the name the linker sees, so on Darwin it is written as it was
