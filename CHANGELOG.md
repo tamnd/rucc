@@ -65,6 +65,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- RISC-V 64 code that is not position independent now reads the stack protector word `__stack_chk_guard` from its own address with `lla`, as gcc does. It went through the global offset table on every target. A FreeBSD kernel is linked as an executable whose table nothing fills, so the read found zero and the kernel faulted before its console was up. Position independent code still reads the word through the table.
 - `-fsanitize=undefined` is taken for code now. It is every check of gcc's group, which leaves `bounds-strict` out. Before, it was refused, because some checks of the group were not made. NetBSD builds `t_ubsan.c` with it. (Part of #4391)
 - `-fsanitize=object-size`, `-fsanitize=pointer-overflow`, `-fsanitize=nonnull-attribute`, `-fsanitize=returns-nonnull-attribute` and `-fsanitize=builtin` now make gcc's checks, where they were refused. Each calls the routine of libubsan that gcc calls, with the same record. `object-size` is made from `-O1` up. `returns_nonnull` is now read, and the `-fsanitize=undefined` group in `no_sanitize` now has the five checks (#4391).
 - `-fsanitize=null` and `-fsanitize=alignment` now make gcc's checks, where they were refused. A read or a write through a pointer that is null or not aligned for its type calls `__ubsan_handle_type_mismatch_v1`, with the same record that gcc makes. The `-fsanitize=undefined` group in `no_sanitize` now has both checks (#4391).

@@ -4322,7 +4322,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     }
     // RISC-V reads the canary from the running task under `tls`, which gcc wants the register and
     // the offset for, and the offset is one a load carries in its twelve bits. `global` is the
-    // plain `__stack_chk_guard`, which is also where the canary is with none of the flags.
+    // plain `__stack_chk_guard`, which is also where the canary is with none of the flags. gcc
+    // reads it through the global offset table only in code that may be position independent,
+    // and from its own address otherwise, as AArch64 does. A kernel is linked as an executable
+    // and nothing fills its table, so a read through it finds zero there. See tamnd/rucc-bsd#8.
     if opts.target.arch == rucc_target::Arch::Riscv64 && elf {
         if guard_tls {
             let Some(at) = guard_offset.filter(|_| guard_tp) else {
@@ -4340,6 +4343,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             return Err(err("-mstack-protector-guard=global and \
                  -mstack-protector-guard-offset are not used together"
                 .to_owned()));
+        } else {
+            opts.guard =
+                Some(rucc_target::Guard::global("__stack_chk_guard", opts.pic != Pic::Absolute));
         }
     }
     // i386 position independent code calls the hidden copy of the failure routine that the C

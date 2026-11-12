@@ -391,7 +391,12 @@ int gone(int x) { int n = x; put(&n); return n; }
 
 /// The body of one function in an AArch64 listing, from its label to its `.size`.
 fn arm64(what: &str, flags: &[&str], name: &str) -> Vec<String> {
-    let out = run(what, "aarch64-unknown-linux-gnu", flags, FOUR);
+    body(what, "aarch64-unknown-linux-gnu", flags, name)
+}
+
+/// The body of one function in a listing for `target`, from its label to its `.size`.
+fn body(what: &str, target: &str, flags: &[&str], name: &str) -> Vec<String> {
+    let out = run(what, target, flags, FOUR);
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     text.lines()
@@ -443,4 +448,32 @@ fn arm64_reads_the_kernel_canary_past_sp_el0() {
         assert!(body[at..].iter().any(|line| line.ends_with(&load)), "{body:?}");
     }
     assert!(!body.iter().any(|line| line.contains("__stack_chk_guard")), "{body:?}");
+}
+
+/// RISC-V reads `__stack_chk_guard` through the global offset table only in code that may be
+/// position independent, and from its own address otherwise, which is what gcc writes for both. A
+/// FreeBSD kernel is built with neither flag and linked as an executable whose table nothing fills,
+/// so a read through the table found zero there and the kernel faulted before its console was up.
+/// See tamnd/rucc-bsd#8.
+#[test]
+fn riscv64_reads_the_global_guard_through_the_table_only_in_position_independent_code() {
+    let reads = |target: &str, flags: &[&str]| {
+        let what = format!("riscv64-{}", flags.len());
+        let body = body(&what, target, flags, "buf");
+        let calls = body.iter().filter(|line| *line == "call __stack_chk_fail").count();
+        assert_eq!(calls, 1, "{target} {flags:?}: {body:?}");
+        let reads = body.iter().filter(|line| line.ends_with(", __stack_chk_guard"));
+        reads
+            .map(|line| line.split_whitespace().next().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>()
+    };
+    for target in ["riscv64-unknown-freebsd15.1", "riscv64-unknown-netbsd"] {
+        assert_eq!(reads(target, &["-fstack-protector"]), ["lla", "lla"], "{target}");
+        assert_eq!(reads(target, &["-fstack-protector", "-fno-pic"]), ["lla", "lla"], "{target}");
+        assert_eq!(reads(target, &["-fstack-protector", "-fPIE"]), ["la", "la"], "{target}");
+    }
+    let linux = "riscv64-linux-gnu";
+    assert_eq!(reads(linux, &["-fstack-protector"]), ["la", "la"]);
+    assert_eq!(reads(linux, &["-fstack-protector", "-fno-pic"]), ["lla", "lla"]);
+    assert_eq!(reads(linux, &["-fstack-protector", "-fPIC"]), ["la", "la"]);
 }
