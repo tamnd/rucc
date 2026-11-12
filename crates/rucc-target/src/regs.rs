@@ -312,6 +312,12 @@ pub struct Guard {
     /// The function called when the copy in the frame no longer matches it, which does not come
     /// back.
     pub fail: &'static str,
+    /// Whether `fail` is called through the procedure linkage table. NetBSD's gcc gives
+    /// `__stack_chk_fail_local` the default visibility, where other gcc builds make it hidden
+    /// (`default_hidden_stack_protect_fail` in its `targhooks.cc`), and its C library defines it. So
+    /// i386 position independent code there calls `__stack_chk_fail_local@PLT` with the table's
+    /// address in `%ebx`. A plain call to a name the library exports is a text relocation.
+    pub linked: bool,
 }
 
 impl Guard {
@@ -319,14 +325,30 @@ impl Guard {
     #[must_use]
     pub const fn in_segment(segment: Segment, at: i32) -> Self {
         let fail = "__stack_chk_fail";
-        Self { segment: Some(segment), symbol: None, table: false, system: false, at, fail }
+        Self {
+            segment: Some(segment),
+            symbol: None,
+            table: false,
+            system: false,
+            at,
+            fail,
+            linked: false,
+        }
     }
 
     /// A plain global of that name, read through the global offset table when `table` is set.
     #[must_use]
     pub const fn global(symbol: &'static str, table: bool) -> Self {
         let fail = "__stack_chk_fail";
-        Self { segment: None, symbol: Some(symbol), table, system: false, at: 0, fail }
+        Self {
+            segment: None,
+            symbol: Some(symbol),
+            table,
+            system: false,
+            at: 0,
+            fail,
+            linked: false,
+        }
     }
 
     /// The word that distance past the address in `sp_el0`, which is an arm64 kernel's copy in the
@@ -334,7 +356,7 @@ impl Guard {
     #[must_use]
     pub const fn in_task(at: i32) -> Self {
         let fail = "__stack_chk_fail";
-        Self { segment: None, symbol: None, table: false, system: true, at, fail }
+        Self { segment: None, symbol: None, table: false, system: true, at, fail, linked: false }
     }
 }
 

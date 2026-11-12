@@ -4305,11 +4305,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         } else if let Some(name) = guard_symbol {
             let symbol = Some(&*Box::leak(name.to_owned().into_boxed_str()));
             let table = table && !i386;
-            rucc_target::Guard { segment: Some(reg), symbol, table, system: false, at: 0, fail }
+            rucc_target::Guard {
+                segment: Some(reg),
+                symbol,
+                table,
+                system: false,
+                at: 0,
+                fail,
+                linked: false,
+            }
         } else {
             let at = guard_offset.unwrap_or(if i386 { 20 } else { 40 });
             rucc_target::Guard { fail, ..rucc_target::Guard::in_segment(reg, at) }
         });
+        // NetBSD's C library exports the local copy, and its gcc calls it through the procedure
+        // linkage table. See `rucc_target::Guard::linked`.
+        if let Some(guard) = opts.guard.as_mut() {
+            guard.linked = local && opts.target.os == rucc_target::Os::NetBsd;
+        }
     }
     // AArch64 reads `__stack_chk_guard` through the global offset table in code that may be position
     // independent, since the C library defines it, and from its own page otherwise. A kernel asks
@@ -7910,14 +7923,20 @@ mod tests {
         assert_eq!(moved, Some(Guard::in_segment(Segment::Gs, 40)));
         // i386 position independent code reads the global guard through the table, executable or
         // not, and calls the hidden copy of the failure routine, as gcc does.
-        let local =
-            |table| Some(Guard { fail: "__stack_chk_fail_local", ..global(table).unwrap() });
-        for target in ["--target=i386-freebsd", "--target=i486--netbsdelf"] {
-            assert_eq!(guard(&[target, "-fPIC"]), local(true), "{target}");
-            assert_eq!(guard(&[target, "-fPIE"]), local(true), "{target}");
+        // NetBSD calls it through the procedure linkage table, since its C library exports it.
+        let local = |table, linked| {
+            Some(Guard { fail: "__stack_chk_fail_local", linked, ..global(table).unwrap() })
+        };
+        for (target, linked) in
+            [("--target=i386-freebsd", false), ("--target=i486--netbsdelf", true)]
+        {
+            assert_eq!(guard(&[target, "-fPIC"]), local(true, linked), "{target}");
+            assert_eq!(guard(&[target, "-fPIE"]), local(true, linked), "{target}");
             let asked = guard(&[target, "-fPIC", "-mstack-protector-guard=global"]);
-            assert_eq!(asked, local(true), "{target}");
+            assert_eq!(asked, local(true, linked), "{target}");
         }
+        let m32 = guard(&["--target=x86_64--netbsd", "-m32", "-fPIC"]);
+        assert_eq!(m32, local(true, true));
         assert_eq!(opts(&["--target=i386-freebsd", "-fPIC"]).pic, Pic::Library);
     }
 

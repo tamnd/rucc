@@ -17050,4 +17050,31 @@ away:
         opts.emit = EmitKind::Object;
         assert_eq!(run(&opts, source).messages, Vec::<String>::new());
     }
+
+    /// NetBSD's C library exports `__stack_chk_fail_local`, and its gcc calls it through the
+    /// procedure linkage table. A plain call made a text relocation in each caller of the i386
+    /// `libc.so`, 342 of them in tamnd/rucc-bsd run 43294969270. The failure block puts the
+    /// table's address in `%ebx` itself, since the epilogue has put the caller's back by then.
+    #[test]
+    fn netbsd_i386_position_independent_code_calls_the_local_failure_through_the_table() {
+        let source = "int g(char *); int f(void) { char b[16]; return g(b); }\n";
+        let mut opts = options();
+        opts.target = "i486--netbsdelf".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Asm;
+        opts.pic = Pic::Library;
+        opts.protector = Protector::All;
+        let guard = rucc_target::Guard::global("__stack_chk_guard", true);
+        let fail = "__stack_chk_fail_local";
+        opts.guard = Some(rucc_target::Guard { fail, linked: true, ..guard });
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        let wanted = "\tcall\t__x86.get_pc_thunk.bx\n\taddl\t$_GLOBAL_OFFSET_TABLE_, %ebx\n\tcall\t\
+                      __stack_chk_fail_local@PLT\n";
+        assert!(text.contains(wanted), "no {wanted:?} in:\n{text}");
+        assert!(!text.contains("call\t__stack_chk_fail_local\n"), "{text}");
+        assert!(text.contains("__x86.get_pc_thunk.bx:\nmovl (%esp), %ebx\nret\n"), "{text}");
+        opts.emit = EmitKind::Object;
+        assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
 }
