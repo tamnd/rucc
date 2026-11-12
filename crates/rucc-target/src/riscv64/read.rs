@@ -159,9 +159,17 @@ impl Line {
                     "tprel_hi" => Operator::TprelHi,
                     "tprel_lo" => Operator::TprelLo,
                     "tprel_add" => Operator::TprelAdd,
+                    "pcrel_hi" => Operator::PcrelHi,
+                    "pcrel_lo" => Operator::PcrelLo,
                     _ => return None,
                 };
                 (operator, inner.trim())
+            }
+            // `call foo@plt` is `call foo`, which reaches a function through its PLT entry when
+            // it has to anyway. NetBSD's libc writes the old spelling, and its `profile.h` puts a
+            // space in front of it from a macro: `call mcount @plt`.
+            None if matches!(self.mnemonic.as_str(), "call" | "tail") => {
+                (Operator::Plain, text.strip_suffix("@plt").map_or(text, str::trim_end))
             }
             None => (Operator::Plain, text),
         };
@@ -446,7 +454,30 @@ mod tests {
         assert_eq!(read_ok("addiw a0, a0, %lo(0x89ABCDEF)").values[2], Imm(-0x211));
         assert_eq!(read_ok("lui a0, %hi(0x7ff)").values[1], Imm(0));
         assert!(read("add a0, a1, %tprel_add(t), %lo(u)").is_err());
-        assert!(read("addi a0, a0, %pcrel_lo(x)").is_err());
+        assert!(read("addi a0, a0, %bogus_lo(x)").is_err());
+    }
+
+    /// `rtld_start.S` of NetBSD's ld.elf_so writes the two halves of a distance by hand, the low
+    /// one around the label of the `auipc`, and its libc calls `__errno@plt`.
+    #[test]
+    fn the_halves_of_a_distance_and_a_call_through_the_plt_are_read() {
+        let line = read_ok("auipc gp, %pcrel_hi(_GLOBAL_OFFSET_TABLE_)");
+        assert_eq!(line.values, [Gpr(3), Symbol(Operator::PcrelHi)]);
+        assert_eq!(line.symbol.as_deref(), Some("_GLOBAL_OFFSET_TABLE_"));
+        let line = read_ok("ld t0, %pcrel_lo(.L0)(gp)");
+        let low = Mem(Addr { base: 3, offset: Offset::Symbol(Operator::PcrelLo) });
+        assert_eq!((line.values, line.symbol.as_deref()), (vec![Gpr(5), low], Some(".L0")));
+        let line = read_ok("addi a0, a0, %pcrel_lo(.L1)");
+        assert_eq!(line.values[2], Symbol(Operator::PcrelLo));
+        for (text, name) in [
+            ("call __errno@plt", "__errno"),
+            ("tail _setjmp@plt", "_setjmp"),
+            ("call mcount @plt", "mcount"),
+        ] {
+            let line = read_ok(text);
+            assert_eq!(line.values, [Symbol(Operator::Plain)], "{text}");
+            assert_eq!(line.symbol.as_deref(), Some(name), "{text}");
+        }
     }
 
     #[test]

@@ -34,6 +34,12 @@ pub enum Operator {
     /// The mark on the `add` of the thread pointer, `%tprel_add()`, which only tells the linker
     /// which instruction it is.
     TprelAdd,
+    /// The upper twenty bits of the distance to the symbol from the `auipc` that carries them,
+    /// `%pcrel_hi()`.
+    PcrelHi,
+    /// The low twelve bits of that distance, `%pcrel_lo()`, around the label of the `auipc` and
+    /// not the symbol, since the linker finds the distance through the `auipc`.
+    PcrelLo,
 }
 
 /// What is added to the base register of an address.
@@ -761,14 +767,14 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         out.words.push(i(op, f3, rd, rs, imm));
         return Ok(out);
     }
-    if let Some((op, f3, f7)) = alu(mnemonic) {
-        let [Gpr(rd), Gpr(rs1), Gpr(rs2)] = *values else { return Err(unwritten()) };
-        out.words.push(r(op, f3, f7, rd, rs1, rs2));
+    // An `add` marked `%tprel_add` and an `addi` of the low half of an address are below, with
+    // their fixups.
+    if let (Some((op, f3, f7)), [Gpr(rd), Gpr(rs1), Gpr(rs2)]) = (alu(mnemonic), values) {
+        out.words.push(r(op, f3, f7, *rd, *rs1, *rs2));
         return Ok(out);
     }
-    if let Some((op, f3)) = alu_imm(mnemonic) {
-        let [Gpr(rd), Gpr(rs1), Imm(imm)] = *values else { return Err(unwritten()) };
-        out.words.push(i(op, f3, rd, rs1, twelve(imm)?));
+    if let (Some((op, f3)), [Gpr(rd), Gpr(rs1), Imm(imm)]) = (alu_imm(mnemonic), values) {
+        out.words.push(i(op, f3, *rd, *rs1, twelve(*imm)?));
         return Ok(out);
     }
     if let Some((op, f3, high, bits)) = shift_imm(mnemonic) {
@@ -810,6 +816,10 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
                 out.fixups.push((0, Fixup::TprelLo12I));
                 0
             }
+            Offset::Symbol(Operator::PcrelLo) => {
+                out.fixups.push((0, Fixup::PcrelLo12I));
+                0
+            }
             Offset::Symbol(_) => return Err(unwritten()),
         };
         out.words.push(i(op, f3, rd, addr.base, imm));
@@ -837,6 +847,10 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
             }
             Offset::Symbol(Operator::TprelLo) => {
                 out.fixups.push((0, Fixup::TprelLo12S));
+                0
+            }
+            Offset::Symbol(Operator::PcrelLo) => {
+                out.fixups.push((0, Fixup::PcrelLo12S));
                 0
             }
             Offset::Symbol(_) => return Err(unwritten()),
@@ -1016,6 +1030,10 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
         ("auipc", [Gpr(rd), Imm(imm)]) if (0..1 << 20).contains(imm) => {
             out.words.push(u(0x17, *rd, *imm));
         }
+        ("auipc", [Gpr(rd), Symbol(Operator::PcrelHi)]) => {
+            out.fixups.push((0, Fixup::PcrelHi20));
+            out.words.push(u(0x17, *rd, 0));
+        }
         ("jal", [Gpr(rd), to]) => {
             let imm = distance(to, 21, &mut out, Fixup::Jal).ok_or_else(unwritten)??;
             out.words.push(j(*rd, imm));
@@ -1101,8 +1119,19 @@ pub fn encode(mnemonic: &str, values: &[Value]) -> Result<Encoded, Error> {
             out.fixups.push((0, Fixup::TprelAdd));
             out.words.push(r(0x33, 0, 0, *rd, *rs1, *rs2));
         }
-        ("addi", [Gpr(rd), Gpr(rs1), Symbol(op @ (Operator::Lo | Operator::TprelLo))]) => {
-            let fixup = if *op == Operator::Lo { Fixup::Lo12I } else { Fixup::TprelLo12I };
+        (
+            "addi",
+            [
+                Gpr(rd),
+                Gpr(rs1),
+                Symbol(op @ (Operator::Lo | Operator::TprelLo | Operator::PcrelLo)),
+            ],
+        ) => {
+            let fixup = match op {
+                Operator::Lo => Fixup::Lo12I,
+                Operator::TprelLo => Fixup::TprelLo12I,
+                _ => Fixup::PcrelLo12I,
+            };
             out.fixups.push((0, fixup));
             out.words.push(i(0x13, 0, *rd, *rs1, 0));
         }
@@ -1262,7 +1291,7 @@ pub fn reaches(disp: i64) -> bool {
 ///
 /// # Errors
 ///
-/// When it is not one of `c.li`, `c.nop` and `c.ebreak` with operands it takes.
+/// When it is not one of `c.li`, `c.nop`, `c.ebreak` and `c.unimp` with operands it takes.
 pub fn compressed(mnemonic: &str, values: &[Value]) -> Result<u16, Error> {
     let unwritten = || Error::Unwritten { mnemonic: mnemonic.to_owned(), operands: values.len() };
     Ok(match (mnemonic, values) {
@@ -1272,6 +1301,9 @@ pub fn compressed(mnemonic: &str, values: &[Value]) -> Result<u16, Error> {
         }
         ("c.nop", []) => 0x0001,
         ("c.ebreak", []) => 0x9002,
+        // The two zero bytes that are an illegal instruction, which NetBSD's `PTRACE_ILLEGAL_ASM`
+        // writes to raise `SIGILL`.
+        ("c.unimp", []) => 0x0000,
         _ => return Err(unwritten()),
     })
 }
@@ -1462,6 +1494,7 @@ mod tests {
         assert_eq!(compressed("c.li", &[Gpr(20), Imm(-13)]), Ok(0x5a4d));
         assert_eq!(compressed("c.nop", &[]), Ok(0x0001));
         assert_eq!(compressed("c.ebreak", &[]), Ok(0x9002));
+        assert_eq!(compressed("c.unimp", &[]), Ok(0x0000));
         assert!(compressed("c.li", &[Gpr(0), Imm(1)]).is_err());
         assert!(compressed("c.li", &[Gpr(10), Imm(32)]).is_err());
     }
@@ -1606,6 +1639,26 @@ mod tests {
         assert_eq!((branch.words[0], branch.fixups[0].1.elf()), (0x0005_1063, 16));
         assert_eq!(one("beqz", &[Gpr(10), Imm(8)]), 0x0005_0463);
         assert_eq!(one("j", &[Imm(-4)]), 0xffdf_f06f);
+        // The halves written by hand: `auipc gp, %pcrel_hi(x)`, `ld t0, %pcrel_lo(.L0)(gp)`,
+        // `addi a0, a0, %pcrel_lo(.L1)` and `sd a1, %pcrel_lo(.L2)(a0)`.
+        let hi = encode("auipc", &[Gpr(3), Value::Symbol(Operator::PcrelHi)]).unwrap();
+        assert_eq!((hi.words, hi.fixups), (vec![0x0000_0197], vec![(0, Fixup::PcrelHi20)]));
+        let low = |base| Mem(Addr { base, offset: Offset::Symbol(Operator::PcrelLo) });
+        let ld = encode("ld", &[Gpr(5), low(3)]).unwrap();
+        assert_eq!((ld.words, ld.fixups), (vec![0x0001_b283], vec![(0, Fixup::PcrelLo12I)]));
+        let addi = encode("addi", &[Gpr(10), Gpr(10), Value::Symbol(Operator::PcrelLo)]).unwrap();
+        assert_eq!((addi.words, addi.fixups), (vec![0x0005_0513], vec![(0, Fixup::PcrelLo12I)]));
+        // `addi` was taken as the form with a constant, and `add` as the one of three registers,
+        // before these were reached.
+        for (op, fixup) in [(Operator::Lo, Fixup::Lo12I), (Operator::TprelLo, Fixup::TprelLo12I)] {
+            let addi = encode("addi", &[Gpr(10), Gpr(10), Value::Symbol(op)]).unwrap();
+            assert_eq!((addi.words, addi.fixups), (vec![0x0005_0513], vec![(0, fixup)]));
+        }
+        let add = encode("add", &[Gpr(10), Gpr(10), Gpr(4), Value::Symbol(Operator::TprelAdd)]);
+        let add = add.unwrap();
+        assert_eq!((add.words, add.fixups), (vec![0x0045_0533], vec![(0, Fixup::TprelAdd)]));
+        let sd = encode("sd", &[Gpr(11), low(10)]).unwrap();
+        assert_eq!((sd.words, sd.fixups), (vec![0x00b5_3023], vec![(0, Fixup::PcrelLo12S)]));
     }
 
     #[test]

@@ -2994,11 +2994,23 @@ impl<'u> Body<'_, 'u> {
         // register or the statement reads something the program never wrote. The name is the whole
         // of what the back end needs and the constraint list is what already travels with the
         // statement, which is why it goes there rather than in a list of its own.
+        //
+        // A constraint with alternatives, `"r,Z"`, is cut down to one of them here, the same one
+        // for every operand, so that what travels on is one entry for each operand. See
+        // [`one_alternative`].
         let mut written = Vec::new();
         for list in [node.outputs, node.inputs] {
             for index in 0..tast[list].len() {
+                written.push(self.asm_text(tast[list][index].constraint));
+            }
+        }
+        one_alternative(&mut written);
+        let mut at = 0;
+        for list in [node.outputs, node.inputs] {
+            for index in 0..tast[list].len() {
                 let operand = tast[list][index];
-                let mut text = self.asm_text(operand.constraint);
+                let text = &mut written[at];
+                at += 1;
                 if let Some(register) = self.named_register(operand.value) {
                     // An operand handed over as an address is the address of the object, and an
                     // object in a register has no address. gcc refuses the same pair.
@@ -3012,7 +3024,6 @@ impl<'u> Body<'_, 'u> {
                     text.push_str(&name);
                     text.push('}');
                 }
-                written.push(text);
             }
         }
 
@@ -13426,6 +13437,40 @@ fn suffixed(template: &str, suffixes: &[Option<char>]) -> String {
         }
     }
     text
+}
+
+/// Each constraint cut down to one of its alternatives, when they have more than one.
+///
+/// gcc lets a statement give each operand several constraints at once, separated by commas, and
+/// picks for the whole statement the alternative that costs least: the `n`th constraint of every
+/// operand at once. GMP's `sub_ddmmss` on AArch64 is `"r,Z"` for one operand and `"rI,r"` for
+/// another, so that a zero or a number goes in the instruction. The alternative taken here is the
+/// first in which no operand is held to a constant, since a register takes whatever a constant
+/// would, and the first when every alternative holds one to a constant. What leads the first
+/// alternative, `=`, `+` or `%`, is said once for every one of them and stays in front.
+fn one_alternative(constraints: &mut [String]) {
+    let count = constraints.iter().map(|text| text.matches(',').count() + 1).max().unwrap_or(1);
+    if count == 1 {
+        return;
+    }
+    let lead = |text: &str| text.len() - text.trim_start_matches(['=', '+', '%']).len();
+    let alternative = |text: &str, n: usize| -> String {
+        let body = &text[lead(text)..];
+        body.split(',').nth(n).unwrap_or_else(|| body.split(',').next().unwrap_or("")).to_owned()
+    };
+    // Letters that take only a constant on some machine: `i`, `n`, `s`, `E` and `F` everywhere,
+    // `I` to `P` and the `G`, `H` and `Z` of the machines' own, and x86's `e`.
+    let constant = |entry: &str| {
+        let letters = entry.trim_start_matches(['&', '*', '?', '!']);
+        !letters.is_empty() && letters.chars().all(|c| "insEFGHIJKLMNOPZe".contains(c))
+    };
+    let chosen = (0..count)
+        .find(|&n| constraints.iter().all(|text| !constant(&alternative(text, n))))
+        .unwrap_or(0);
+    for text in constraints.iter_mut() {
+        let front = text[..lead(text)].to_owned();
+        *text = front + &alternative(text, chosen);
+    }
 }
 
 /// An input's constraint with a number tying it to an output after `dropped` counted down by one,
