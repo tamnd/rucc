@@ -296,13 +296,25 @@ pub static THUNKS: Thunks = Thunks {
 /// goes there spins in it until it finds out. The real address is written over the pushed one,
 /// and the return goes to it.
 fn thunk_through(reg: &str) -> String {
-    format!("call 1f\n0:\npause\nlfence\njmp 0b\n1:\nmov {reg}, (%rsp)\nret")
+    retpoline(&format!("mov {reg}, (%rsp)"))
+}
+
+/// The loop a retpoline spins a guessed return in, then `last`, which puts the real return address
+/// where the call put the address of the loop, then the return. Shared with i386, whose stack
+/// pointer is `%esp`.
+pub(crate) fn retpoline(last: &str) -> String {
+    format!("call 1f\n0:\npause\nlfence\njmp 0b\n1:\n{last}\nret")
 }
 
 /// The same for a call, which has to push its own return address first, so the call goes to a
 /// copy of [`thunk_through`] jumped over on the way in.
 fn thunk_around(reg: &str) -> String {
-    format!("jmp 3f\n2:\n{}\n3:\ncall 2b", thunk_through(reg))
+    jumped_over(&thunk_through(reg))
+}
+
+/// A call to a copy of the thunk `through`, with a jump over that copy on the way in.
+pub(crate) fn jumped_over(through: &str) -> String {
+    format!("jmp 3f\n2:\n{through}\n3:\ncall 2b")
 }
 
 /// The return thunk, which is [`thunk_through`] with the pushed address taken back off the stack
