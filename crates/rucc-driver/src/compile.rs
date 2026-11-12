@@ -407,8 +407,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 std: opts.std,
                 gnu: opts.gnu_extensions,
                 pedantic: opts.pedantic,
-                // kencc takes implicit `int` and the rest of what gcc 14 made errors.
-                permissive: opts.permissive || opts.kencc,
+                // kencc takes implicit `int` and the rest of what gcc 14 made errors, and so
+                // does a claim of a gcc before 14, which warned of them, as NetBSD 10 and 11
+                // build with gcc 10.5 and 12.5.
+                permissive: opts.permissive
+                    || opts.kencc
+                    || opts.gnuc_given && opts.gnuc.major < 14,
                 gnu89_inline: opts.gnu89_inline,
                 strict_flex_arrays: opts.strict_flex_arrays,
                 optimizing: opts.opt_level.runs_optimizer(),
@@ -10027,6 +10031,41 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                 }
             }
         }
+    }
+
+    /// gcc 13 warned of each rule gcc 14 made an error, with no `-fpermissive`. That was measured
+    /// with Ubuntu gcc-13 13.3.0 under `-std=gnu17`: all seven files below compile with a warning.
+    /// So a claim of a release before 14 gets the warnings, and a claim of 14 gets the errors.
+    #[test]
+    fn a_claim_of_a_gcc_before_14_warns_of_the_rules_gcc_14_promoted() {
+        let cases = [
+            "static counted;\n",
+            "int f(void) { return g(); }\n",
+            "int f(x) { return x; }\n",
+            "int *p;\nvoid h(void) { p = 1; }\n",
+            "char *q;\nint *r;\nvoid k(void) { r = q; }\n",
+            "int f(void) { return; }\n",
+            "void g(void) { return 1; }\n",
+        ];
+        for source in cases {
+            for (major, wanted) in
+                [(10, "warning"), (12, "warning"), (13, "warning"), (14, "error")]
+            {
+                let mut opts = options();
+                opts.std = Std::C17;
+                opts.gnuc = rucc_session::GnucVersion { major, minor: 5, patch: 0 };
+                opts.gnuc_given = true;
+                let said = run(&opts, source).messages.join("\n");
+                assert!(said.contains(&format!(": {wanted}: ")), "gcc {major}, {source}: `{said}`");
+                assert!(
+                    major >= 14 || !said.contains(": error: "),
+                    "gcc {major}, {source}: `{said}`"
+                );
+            }
+        }
+        // The default claim is the newest release, which has the errors.
+        let said = run(&options(), "int f(void) { return g(); }\n").messages.join("\n");
+        assert!(said.contains(": error: "), "{said}");
     }
 
     /// What the `-W` flags do to the rules of the table above, which gcc raises as errors that
