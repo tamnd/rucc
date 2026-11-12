@@ -6984,6 +6984,60 @@ used_by = []
 tests = ["rucc-sema::all_eighteen_names_are_rows_of_the_table_that_carry_a_signature", "rucc-driver::the_bit_counts_ask_about_the_width_their_name_says"]
 
 [[feature]]
+name = "__builtin_clzg"
+kind = "builtin"
+gcc_version = "14.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-sema::the_type_generic_names_are_rows_without_a_signature", "rucc::a_type_generic_count_counts_at_the_width_of_its_argument"]
+notes = "The leading zero count at the width of an unsigned integer of any type. An optional second argument, an `int`, is the answer for a zero. The argument is not converted, so there is no signature. A `_BitInt` wider than 128 bits is refused."
+
+[[feature]]
+name = "__builtin_ctzg"
+kind = "builtin"
+gcc_version = "14.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-sema::the_type_generic_names_are_rows_without_a_signature", "rucc::a_type_generic_count_counts_at_the_width_of_its_argument"]
+notes = "The trailing zero count at the width of an unsigned integer of any type. An optional second argument, an `int`, is the answer for a zero. The argument is not converted, so there is no signature. A `_BitInt` wider than 128 bits is refused."
+
+[[feature]]
+name = "__builtin_popcountg"
+kind = "builtin"
+gcc_version = "14.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-sema::the_type_generic_names_are_rows_without_a_signature", "rucc::a_type_generic_count_counts_at_the_width_of_its_argument"]
+notes = "The set bit count of an unsigned integer of any type. The argument is not converted, so there is no signature. A `_BitInt` wider than 128 bits is refused."
+
+[[feature]]
+name = "__builtin_parityg"
+kind = "builtin"
+gcc_version = "14.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-sema::the_type_generic_names_are_rows_without_a_signature", "rucc::a_type_generic_count_counts_at_the_width_of_its_argument"]
+notes = "The parity of an unsigned integer of any type. The argument is not converted, so there is no signature. A `_BitInt` wider than 128 bits is refused."
+
+[[feature]]
+name = "__builtin_ffsg"
+kind = "builtin"
+gcc_version = "14.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-sema::the_type_generic_names_are_rows_without_a_signature", "rucc::a_type_generic_count_counts_at_the_width_of_its_argument"]
+notes = "One more than the index of the lowest set bit of a signed integer of any type, and zero for a zero. The argument is not converted, so there is no signature. A `_BitInt` wider than 128 bits is refused."
+
+[[feature]]
+name = "__builtin_clrsbg"
+kind = "builtin"
+gcc_version = "14.0"
+status = "implemented"
+used_by = []
+tests = ["rucc-sema::the_type_generic_names_are_rows_without_a_signature", "rucc::a_type_generic_count_counts_at_the_width_of_its_argument"]
+notes = "The count of the bits below the sign bit that repeat it, at the width of a signed integer of any type. The argument is not converted, so there is no signature. A `_BitInt` wider than 128 bits is refused."
+
+[[feature]]
 name = "__builtin_imaxabs"
 kind = "builtin"
 gcc_version = "3.0"

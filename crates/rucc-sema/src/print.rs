@@ -772,8 +772,12 @@ impl<'a> Printer<'a> {
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::ConstantP { value: base }
             | ExprKind::ByteSwap { operand: base }
-            | ExprKind::BitCount { operand: base, .. }
+            | ExprKind::BitCount { operand: base, zero: None, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),
+            ExprKind::BitCount { operand, zero: Some(zero), .. } => {
+                self.expr(operand);
+                self.expr(zero);
+            }
             ExprKind::Overflow { args, .. } | ExprKind::Atomic { args, .. } => {
                 let args = self.tast[args].to_vec();
                 for arg in args {

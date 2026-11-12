@@ -8006,9 +8006,9 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Expect { value, hint, parts } => Some(self.expect(value, hint, parts, span)),
             // Counted at the operand's width, which is the question, and answered in `int`, which
             // is what C says every one of these is.
-            ExprKind::BitCount { operand, count } => {
+            ExprKind::BitCount { operand, count, zero } => {
                 let into = self.value_type(ty, span);
-                Some(self.bit_count(operand, count, into, span))
+                Some(self.bit_count(operand, count, zero, into, span))
             }
             // Done at the type sema picked, which holds every value all three written types can,
             // and then narrowed to the one being written to. The answer is a bit, and C says the
@@ -9551,18 +9551,54 @@ impl<'u> Body<'_, 'u> {
     /// word with no bits in it at all, which is the one input the leading zero count says nothing
     /// about. Five instructions, no branch, and defined at every value.
     ///
-    /// Everything is built at the operand's width and narrowed once at the end. Counting at the
+    /// Everything is counted in a 32 or a 64 bit word and narrowed once at the end. Counting at the
     /// width the argument has is the whole question: `__builtin_clz` of a value narrowed to
     /// `unsigned int` is a different number from `__builtin_clzll` of the same value, and the
-    /// prototype is what did the narrowing. The answer is an `int` at every width, so what comes
-    /// back is one truncation and never a widening, since no supported width is under `int`.
-    fn bit_count(&mut self, operand: ExprId, count: BitCount, into: Type, span: Span) -> Value {
+    /// prototype is what did the narrowing. For the fixed spellings the argument already is one
+    /// of those words. The type generic spellings of gcc 14 take any width, and a narrower value
+    /// is widened into the word, zero extended except for `__builtin_clrsbg`, which counts copies
+    /// of the sign and so wants it repeated. Only the two that count from the top see the bits
+    /// the widening added, and they take them off again. A value wider than 64 bits is counted
+    /// in halves by [`Body::wide_count`], since the back end counts no wider than a register.
+    ///
+    /// `__builtin_clzg` and `__builtin_ctzg` may say what a zero answers. That answer is evaluated
+    /// whatever the value is, which is what gcc does, and picked when the value is zero, which is
+    /// also why the check `-fsanitize=builtin` makes of a zero is not made for those calls.
+    fn bit_count(
+        &mut self,
+        operand: ExprId,
+        count: BitCount,
+        zero: Option<ExprId>,
+        into: Type,
+        span: Span,
+    ) -> Value {
         let value = self.value(operand);
         let ty = self.func[value].ty;
-        if matches!(count, BitCount::Leading | BitCount::Trailing) {
+        let zero = zero.map(|zero| self.value(zero));
+        if zero.is_none() && matches!(count, BitCount::Leading | BitCount::Trailing) {
             self.check_builtin(value, count == BitCount::Leading, span);
         }
-        let counted = match count {
+        let width = ty.bits();
+        let counted = if width > 64 {
+            self.wide_count(value, count, span)
+        } else {
+            let word = if width <= 32 { Type::int(32) } else { Type::int(64) };
+            let held = self.widen(value, count == BitCount::RedundantSign, word, span);
+            let counted = self.word_count(held, count, span);
+            self.less_above(counted, count, word.bits() - width, span)
+        };
+        let counted = self.widen(counted, false, into, span);
+        let Some(zero) = zero else { return counted };
+        let mut build = self.build(span);
+        let none = build.iconst(ty, 0);
+        let empty = build.icmp(IntPred::Eq, value, none);
+        build.select(empty, zero, counted)
+    }
+
+    /// One of the bit counts of a value that fills a 32 or a 64 bit word, at that width.
+    fn word_count(&mut self, value: Value, count: BitCount, span: Span) -> Value {
+        let ty = self.func[value].ty;
+        match count {
             BitCount::Leading => self.build(span).unary(Opcode::Ctlz, value, ty),
             BitCount::Trailing => self.build(span).unary(Opcode::Cttz, value, ty),
             BitCount::Ones => self.build(span).unary(Opcode::Ctpop, value, ty),
@@ -9574,17 +9610,101 @@ impl<'u> Body<'_, 'u> {
             }
             BitCount::FirstSet => self.first_set(value, ty, span),
             BitCount::RedundantSign => {
+                let filled = self.sign_folded(value, span);
+                self.build(span).unary(Opcode::Ctlz, filled, ty)
+            }
+        }
+    }
+
+    /// The value folded onto its own sign, moved up one and with the low bit set, whose leading
+    /// zero count is the redundant sign bit count of the value. See [`Body::bit_count`].
+    fn sign_folded(&mut self, value: Value, span: Span) -> Value {
+        let ty = self.func[value].ty;
+        let mut build = self.build(span);
+        let top = build.iconst(ty, i128::from(ty.bits()) - 1);
+        let sign = build.binary(Opcode::AShr, value, top, Flags::NONE);
+        let folded = build.binary(Opcode::Xor, value, sign, Flags::NONE);
+        let one = build.iconst(ty, 1);
+        let moved = build.binary(Opcode::Shl, folded, one, Flags::NONE);
+        build.binary(Opcode::Or, moved, one, Flags::NONE)
+    }
+
+    /// A count from the top less the `above` bits a widening put there, which the other counts
+    /// either do not see or, for `__builtin_ffsg` and the trailing count, see only at zero.
+    fn less_above(&mut self, counted: Value, count: BitCount, above: u32, span: Span) -> Value {
+        if above == 0 || !matches!(count, BitCount::Leading | BitCount::RedundantSign) {
+            return counted;
+        }
+        let ty = self.func[counted].ty;
+        let mut build = self.build(span);
+        let above = build.iconst(ty, i128::from(above));
+        build.binary(Opcode::Sub, counted, above, Flags::NONE)
+    }
+
+    /// One of the bit counts of a value of 65 to 128 bits, as two counts of 64 bit halves.
+    ///
+    /// The value is widened to 128 bits the way [`Body::bit_count`] widens a narrow one and split.
+    /// A count from the top is the count of the high half, or 64 more than the count of the low
+    /// one when the high half is empty, and a count from the bottom is the same the other way up.
+    /// Both counts are made and one is picked, so a count of an empty half is made and thrown
+    /// away, which is fine because what it is undefined to do is answer, not to run. The set bit
+    /// count is the sum of the two. Every answer is a 64 bit one.
+    fn wide_count(&mut self, value: Value, count: BitCount, span: Span) -> Value {
+        let width = self.func[value].ty.bits();
+        let signed = count == BitCount::RedundantSign;
+        let mut held = self.widen(value, signed, Type::int(128), span);
+        if signed {
+            held = self.sign_folded(held, span);
+        }
+        let mut build = self.build(span);
+        let low = build.unary(Opcode::Trunc, held, Type::int(64));
+        let half = build.iconst(Type::int(128), 64);
+        let high = build.binary(Opcode::LShr, held, half, Flags::NONE);
+        let high = build.unary(Opcode::Trunc, high, Type::int(64));
+        let counted = match count {
+            BitCount::Leading | BitCount::RedundantSign => {
+                self.halves(Opcode::Ctlz, high, low, span)
+            }
+            BitCount::Trailing => self.halves(Opcode::Cttz, low, high, span),
+            BitCount::FirstSet => {
+                let trailing = self.halves(Opcode::Cttz, low, high, span);
                 let mut build = self.build(span);
-                let top = build.iconst(ty, i128::from(ty.bits()) - 1);
-                let sign = build.binary(Opcode::AShr, value, top, Flags::NONE);
-                let folded = build.binary(Opcode::Xor, value, sign, Flags::NONE);
-                let one = build.iconst(ty, 1);
-                let moved = build.binary(Opcode::Shl, folded, one, Flags::NONE);
-                let filled = build.binary(Opcode::Or, moved, one, Flags::NONE);
-                build.unary(Opcode::Ctlz, filled, ty)
+                let one = build.iconst(Type::int(64), 1);
+                let position = build.binary(Opcode::Add, trailing, one, Flags::NONE);
+                let none = build.iconst(Type::int(128), 0);
+                let nonzero = build.icmp(IntPred::Ne, held, none);
+                let spread = build.unary(Opcode::ZExt, nonzero, Type::int(64));
+                let nothing = build.iconst(Type::int(64), 0);
+                let mask = build.binary(Opcode::Sub, nothing, spread, Flags::NONE);
+                build.binary(Opcode::And, position, mask, Flags::NONE)
+            }
+            BitCount::Ones | BitCount::Parity => {
+                let mut build = self.build(span);
+                let up = build.unary(Opcode::Ctpop, high, Type::int(64));
+                let down = build.unary(Opcode::Ctpop, low, Type::int(64));
+                let ones = build.binary(Opcode::Add, up, down, Flags::NONE);
+                if count == BitCount::Ones {
+                    ones
+                } else {
+                    let one = build.iconst(Type::int(64), 1);
+                    build.binary(Opcode::And, ones, one, Flags::NONE)
+                }
             }
         };
-        self.widen(counted, false, into, span)
+        self.less_above(counted, count, 128 - width, span)
+    }
+
+    /// The count `opcode` makes of two 64 bit halves, `first` and then `then` when `first` has no
+    /// bits in it, as one 128 bit count.
+    fn halves(&mut self, opcode: Opcode, first: Value, then: Value, span: Span) -> Value {
+        let mut build = self.build(span);
+        let near = build.unary(opcode, first, Type::int(64));
+        let far = build.unary(opcode, then, Type::int(64));
+        let half = build.iconst(Type::int(64), 64);
+        let past = build.binary(Opcode::Add, far, half, Flags::NONE);
+        let none = build.iconst(Type::int(64), 0);
+        let empty = build.icmp(IntPred::Eq, first, none);
+        build.select(empty, past, near)
     }
 
     /// One of the overflow checking builtins: the exact arithmetic, the store, and the answer.
@@ -13193,7 +13313,11 @@ impl<'a> Scan<'a> {
             ExprKind::Abs { operand }
             | ExprKind::ConvertVector { operand }
             | ExprKind::ByteSwap { operand }
-            | ExprKind::BitCount { operand, .. } => self.expr(operand),
+            | ExprKind::BitCount { operand, zero: None, .. } => self.expr(operand),
+            ExprKind::BitCount { operand, zero: Some(zero), .. } => {
+                self.expr(operand);
+                self.expr(zero);
+            }
             // The third operand is a pointer the program worked out for itself, so nothing here
             // takes an address that was not already taken.
             ExprKind::Overflow { args, .. } | ExprKind::Atomic { args, .. } => {

@@ -42,11 +42,28 @@
 //! is zero rather than undefined, which is the one exception in the family and is the reason `ffs`
 //! costs a comparison that `ctz` does not. `clrsb(0)` is the width less one, which is not an
 //! exception so much as the rule read at zero: every bit below the sign repeats it there.
+//!
+//! # The type generic spellings
+//!
+//! gcc 14 added one more name per question, `__builtin_clzg` and its five siblings, which count at
+//! the width of whatever integer they are given rather than at the width of a parameter. So there
+//! is no signature to check the call against, and the argument is not converted: what
+//! `__builtin_clzg` counts in an `unsigned char` is the leading zeroes of eight bits, and in an
+//! `unsigned __int128` or an `unsigned _BitInt(100)` of that many. The type is checked here
+//! instead, in gcc's words, and it has to be an integer of the sign the question is asked about,
+//! not `bool` and not an enumeration.
+//!
+//! `__builtin_clzg` and `__builtin_ctzg` take a second argument, an `int`, which is the answer
+//! for a zero. That makes the zero defined for them, which it is not for the old spellings. gcc
+//! evaluates it whether or not the first is zero, so the walk to the IR does too.
 
+use rucc_ast as ast;
 use rucc_base::Symbol;
-use rucc_diag::Span;
+use rucc_diag::{Diagnostic, Span};
+use rucc_types::{IntKind, TypeKind, integer_info};
 
 use crate::check::Checker;
+use crate::eval::bare;
 use crate::expr::{BitCount, Category, Expr, ExprId, ExprKind};
 
 /// The six questions and the stem each is spelled with.
@@ -69,6 +86,23 @@ const FAMILY: &[(&str, BitCount)] = &[
 /// `ll` before `l` before nothing, because `__builtin_clzll` ends in `l` as well and stripping one
 /// character off it would leave `__builtin_clzl`, which is a different row with a different type.
 const WIDTHS: &[&str] = &["ll", "l", ""];
+
+/// The type generic spellings, which have no width suffix and are not rows with a signature.
+const GENERIC: &[(&str, BitCount)] = &[
+    ("__builtin_clzg", BitCount::Leading),
+    ("__builtin_ctzg", BitCount::Trailing),
+    ("__builtin_popcountg", BitCount::Ones),
+    ("__builtin_parityg", BitCount::Parity),
+    ("__builtin_ffsg", BitCount::FirstSet),
+    ("__builtin_clrsbg", BitCount::RedundantSign),
+];
+
+/// Whether this is one of the type generic names, which is what the test in `generic.rs` asks of
+/// every row without a signature.
+#[cfg(test)]
+pub(super) fn is_family(name: &str) -> bool {
+    GENERIC.iter().any(|&(row, _)| row == name)
+}
 
 /// Which question a name asks, if it asks one.
 fn question(spelled: &str) -> Option<BitCount> {
@@ -108,10 +142,101 @@ impl Checker<'_> {
         }
         // An `int` however wide the operand is, because a count of bits is a small number.
         let ty = self.int();
-        Some(
-            self.tast
-                .expr(Expr::new(ExprKind::BitCount { operand, count }, ty, Category::Rvalue), span),
-        )
+        let kind = ExprKind::BitCount { operand, count, zero: None };
+        Some(self.tast.expr(Expr::new(kind, ty, Category::Rvalue), span))
+    }
+
+    /// Answers a call to one of the type generic spellings, if the name is one.
+    ///
+    /// The caller has already made sure the program did not declare the name itself.
+    pub(super) fn generic_count_builtin_call(
+        &mut self,
+        name: Symbol,
+        args: ast::ExprList,
+        span: Span,
+    ) -> Option<ExprId> {
+        let spelled = self.text(name);
+        let &(spelled, count) = GENERIC.iter().find(|&&(row, _)| row == spelled)?;
+        let written: Vec<ast::ExprId> = self.ast[args].to_vec();
+        // Every argument is checked whatever else is wrong with the call, as for any other call.
+        let args: Vec<ExprId> = written
+            .into_iter()
+            .map(|arg| {
+                let arg = self.expr(arg);
+                self.value(arg)
+            })
+            .collect();
+        let most = if matches!(count, BitCount::Leading | BitCount::Trailing) { 2 } else { 1 };
+        if args.is_empty() || args.len() > most {
+            let how = if args.is_empty() { "few" } else { "many" };
+            self.report(
+                Diagnostic::error(format!("too {how} arguments to function '{spelled}'"), span)
+                    .with_code("E0511"),
+            );
+            return Some(self.poison(span));
+        }
+        if args.iter().any(|&arg| self.is_poisoned(arg)) {
+            return Some(self.poison(span));
+        }
+        let operand = args[0];
+        let signed = matches!(count, BitCount::FirstSet | BitCount::RedundantSign);
+        let ty = self.tast[operand].ty;
+        let wrong = match bare(&self.types, ty) {
+            TypeKind::Bool => Some("has boolean type"),
+            TypeKind::Enum(_) => Some("has enumerated type"),
+            TypeKind::Int(_) | TypeKind::BitInt { .. } => {
+                match integer_info(&self.types, ty, self.cx.target) {
+                    Some(info) if info.signed && !signed => Some("has signed type"),
+                    Some(info) if !info.signed && signed => Some("has unsigned type"),
+                    // gcc counts a `_BitInt` of any width, and the lowering here goes as far as
+                    // two 64 bit halves. A wider one is refused rather than counted wrong.
+                    Some(info) if info.width > 128 => Some("is wider than 128 bits"),
+                    Some(_) => None,
+                    None => Some("does not have integral type"),
+                }
+            }
+            _ => Some("does not have integral type"),
+        };
+        if let Some(wrong) = wrong {
+            let what = format!("argument 1 in call to function '{spelled}' {wrong}");
+            let at = self.tast.expr_span(operand);
+            self.report(Diagnostic::error(what, at).with_code("E0885"));
+            return Some(self.poison(span));
+        }
+        let zero = match args.get(1) {
+            Some(&zero) => match self.count_zero(spelled, zero) {
+                Some(zero) => Some(zero),
+                None => return Some(self.poison(span)),
+            },
+            None => None,
+        };
+        let kind = ExprKind::BitCount { operand, count, zero };
+        let int = self.int();
+        Some(self.tast.expr(Expr::new(kind, int, Category::Rvalue), span))
+    }
+
+    /// The answer for a zero that `__builtin_clzg` and `__builtin_ctzg` may be given, which gcc
+    /// takes after the integer promotions and only when that leaves an `int`.
+    ///
+    /// A `char` or a `short` is fine, then, and an `unsigned int` or a `long` is not, even with a
+    /// value an `int` holds. A call refused here is a poisoned call.
+    fn count_zero(&mut self, spelled: &str, zero: ExprId) -> Option<ExprId> {
+        let at = self.tast.expr_span(zero);
+        let integral = matches!(
+            bare(&self.types, self.tast[zero].ty),
+            TypeKind::Bool | TypeKind::Int(_) | TypeKind::BitInt { .. } | TypeKind::Enum(_)
+        );
+        let promoted = if integral { Some(self.conv().promote(zero)) } else { None };
+        let wrong = match promoted {
+            None => "does not have integral type",
+            Some(zero) if bare(&self.types, self.tast[zero].ty) == TypeKind::Int(IntKind::Int) => {
+                return Some(zero);
+            }
+            Some(_) => "does not have 'int' type",
+        };
+        let what = format!("argument 2 in call to function '{spelled}' {wrong}");
+        self.report(Diagnostic::error(what, at).with_code("E0885"));
+        None
     }
 }
 
@@ -182,6 +307,26 @@ mod tests {
     fn a_name_without_the_prefix_or_outside_the_family_asks_nothing() {
         for name in ["ffs", "clz", "clrsb", "__builtin_clzlll", "__builtin_cl", "__builtin_"] {
             assert_eq!(question(name), None, "{name}");
+        }
+    }
+
+    /// The six type generic names are the six questions with a `g`, and each is a row of the table
+    /// without a signature, because a signature would convert the argument and the width of the
+    /// argument is the question. Nor are they read as a fixed spelling with a stray letter.
+    #[test]
+    fn the_type_generic_names_are_rows_without_a_signature() {
+        assert_eq!(GENERIC.len(), FAMILY.len());
+        for (&(spelled, count), &(stem, want)) in GENERIC.iter().zip(FAMILY) {
+            assert_eq!(spelled, format!("__builtin_{stem}g"));
+            assert_eq!(count, want, "{spelled}");
+            assert_eq!(question(spelled), None, "{spelled}");
+            let Some(feature) = rucc_gnu::lookup(Kind::Builtin, spelled) else {
+                panic!("{spelled} is answered here and is not in features.toml");
+            };
+            assert_eq!(feature.status, Status::Implemented, "{spelled}");
+            assert!(feature.signature.is_empty(), "{spelled} converts nothing");
+            assert!(feature.library.is_empty(), "{spelled} is not a call to anything");
+            assert_eq!(feature.gcc_version, "14.0", "{spelled}");
         }
     }
 }
