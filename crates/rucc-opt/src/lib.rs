@@ -188,6 +188,7 @@ pub mod split;
 pub mod sroa;
 pub mod startup;
 pub mod stats;
+pub mod step;
 pub mod subscript;
 pub mod switch_conv;
 pub mod tailrec;
