@@ -379,7 +379,20 @@ pub fn globals(
             out.weak.push(names.resolve(global.name).to_owned());
         }
     }
-    let mut referred: Set<Symbol> = module.relocs().iter().map(|reloc| reloc.symbol).collect();
+    // From the initializers of what is still defined, and not from the module's pool of
+    // relocations, which keeps the entries of an object the optimizer dropped. A `static` table
+    // that nothing reads is turned into a declaration, and the names its initializer held would
+    // otherwise come out as hidden undefined symbols that no link can resolve.
+    let mut referred: Set<Symbol> = Set::default();
+    for id in module.globals() {
+        let init = module[id].init.map(|list| &module[list]).unwrap_or_default();
+        for datum in init {
+            if let Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } = *datum
+            {
+                referred.insert(module[reloc].symbol);
+            }
+        }
+    }
     for id in module.funcs() {
         let func = &module[id];
         for block in func.blocks() {
