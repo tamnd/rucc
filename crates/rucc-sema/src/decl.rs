@@ -569,6 +569,9 @@ impl DeclFlags {
     /// The same for `signed-integer-overflow`.
     pub const NO_UBSAN_SIGNED_OVERFLOW: Self = Self(1 << 52);
 
+    /// The same for `vla-bound`.
+    pub const NO_UBSAN_VLA_BOUND: Self = Self(1 << 53);
+
     /// `no_sanitize_address`, `no_address_safety_analysis`, or `no_sanitize` naming `address` or
     /// `kernel-address`, was written on a declaration of this function, so its accesses are not
     /// checked against the shadow. The kernel's `noinstr` says it. Merged the way

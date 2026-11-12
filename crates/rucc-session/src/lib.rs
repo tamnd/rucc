@@ -352,6 +352,12 @@ pub struct Sanitize {
     pub enumeration: Check,
     /// `bounds-strict`: an index into an array whose length is known that is past its end.
     pub bounds_strict: Check,
+    /// `bounds`: the same, but an array at the end of a structure that a pointer points at is
+    /// not checked, since a program may allocate past its end. When both are asked for,
+    /// `bounds-strict` is the one that is made, as in gcc.
+    pub bounds: Check,
+    /// `vla-bound`: a variable length array whose length is zero or negative.
+    pub vla_bound: Check,
     /// `unreachable`: control that reaches a `__builtin_unreachable()`. gcc has no routine that
     /// comes back for this one, so a report and an abort are the same call.
     pub unreachable: Check,
@@ -367,13 +373,15 @@ pub struct Sanitize {
 
 impl Sanitize {
     /// The names `-fsanitize=` takes that this compiler generates, in gcc's spelling.
-    pub const NAMES: [&'static str; 10] = [
+    pub const NAMES: [&'static str; 12] = [
         "integer-divide-by-zero",
         "shift-exponent",
         "shift-base",
         "bool",
         "enum",
         "bounds-strict",
+        "bounds",
+        "vla-bound",
         "unreachable",
         "signed-integer-overflow",
         "return",
@@ -389,6 +397,8 @@ impl Sanitize {
             self.boolean,
             self.enumeration,
             self.bounds_strict,
+            self.bounds,
+            self.vla_bound,
             self.unreachable,
             self.signed_overflow,
             self.returns,
@@ -407,6 +417,8 @@ impl Sanitize {
             "bool" => Some(&mut self.boolean),
             "enum" => Some(&mut self.enumeration),
             "bounds-strict" => Some(&mut self.bounds_strict),
+            "bounds" => Some(&mut self.bounds),
+            "vla-bound" => Some(&mut self.vla_bound),
             "unreachable" => Some(&mut self.unreachable),
             "signed-integer-overflow" => Some(&mut self.signed_overflow),
             "return" => Some(&mut self.returns),

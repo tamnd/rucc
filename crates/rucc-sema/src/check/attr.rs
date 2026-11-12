@@ -3708,6 +3708,7 @@ fn unsanitized(name: &str) -> DeclFlags {
         "bounds" | "bounds-strict" => DeclFlags::NO_UBSAN_BOUNDS,
         "unreachable" => DeclFlags::NO_UBSAN_UNREACHABLE,
         "signed-integer-overflow" => DeclFlags::NO_UBSAN_SIGNED_OVERFLOW,
+        "vla-bound" => DeclFlags::NO_UBSAN_VLA_BOUND,
         "address" | "kernel-address" => DeclFlags::NO_ASAN,
         "undefined" => {
             DeclFlags::NO_UBSAN_DIVIDE
@@ -3717,6 +3718,7 @@ fn unsanitized(name: &str) -> DeclFlags {
                 | DeclFlags::NO_UBSAN_BOUNDS
                 | DeclFlags::NO_UBSAN_UNREACHABLE
                 | DeclFlags::NO_UBSAN_SIGNED_OVERFLOW
+                | DeclFlags::NO_UBSAN_VLA_BOUND
         }
         _ => DeclFlags::NONE,
     }

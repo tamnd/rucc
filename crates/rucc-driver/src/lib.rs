@@ -590,8 +590,12 @@ fn protector_param(opts: &mut Options, spec: &str) -> Result<bool, String> {
 fn sanitizer_names(name: &str) -> Vec<&str> {
     match name {
         "shift" => vec!["shift-exponent", "shift-base"],
+        // gcc's group leaves `bounds-strict` out, since it has `bounds`.
         "all" | "undefined" => {
             let mut names = Sanitize::NAMES.to_vec();
+            if name == "undefined" {
+                names.retain(|&one| one != "bounds-strict");
+            }
             names.push(name);
             names
         }

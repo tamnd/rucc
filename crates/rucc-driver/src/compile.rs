@@ -582,7 +582,15 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 shift_exponent: lower_check(opts.sanitize.shift_exponent),
                                 shift_base: lower_check(opts.sanitize.shift_base),
                                 boolean: lower_check(opts.sanitize.boolean),
-                                bounds: lower_check(opts.sanitize.bounds_strict),
+                                bounds: lower_check(
+                                    if opts.sanitize.bounds_strict == rucc_session::Check::Off {
+                                        opts.sanitize.bounds
+                                    } else {
+                                        opts.sanitize.bounds_strict
+                                    },
+                                ),
+                                trailing: opts.sanitize.bounds_strict == rucc_session::Check::Off,
+                                vla_bound: lower_check(opts.sanitize.vla_bound),
                                 unreachable: lower_check(opts.sanitize.unreachable),
                                 signed_overflow: lower_check(opts.sanitize.signed_overflow),
                                 address: opts.kasan.on,
