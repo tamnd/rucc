@@ -2972,19 +2972,25 @@ impl<'a> Lowering<'a> {
             args.push(abi::Passing { ty, reg, abi });
         }
         let block = self.at.expect("a block is being filled");
+        // A structure passed by value that is too large to unroll is copied by a call to the
+        // runtime, which is an ordinary function of the unit whatever the callee is. See
+        // [`abi::Calling::runtime`].
+        let unit = self.conv.under(Convention::Target).unwrap_or(self.conv);
         // Through the procedure linkage table in i386 position independent code, for a name this
         // file does not define or one the link may replace, and then the table's entry wants the
-        // table's address in `%ebx`. A call through a register never reaches the table, but a
-        // structure it passes by value may be copied by a call to the runtime, which does.
+        // table's address in `%ebx`. A call through a register never reaches the table, and nor
+        // does a call to a local function, but the runtime's copy of an argument does.
         let linked = match callee {
             abi::Callee::Named(symbol) if self.elsewhere.linked(symbol) => self.table_base(),
-            abi::Callee::Through(_)
-                if args.iter().any(|arg| matches!(arg.abi, Abi::ByVal { .. })) =>
-            {
-                self.table_base()
-            }
             _ => None,
         };
+        let mut copied = None;
+        if abi::copies_by_runtime(&args, unit) {
+            let copier = self.names.intern(abi::copier(unit));
+            if self.elsewhere.linked(copier) {
+                copied = self.table_base();
+            }
+        }
         let what = abi::Calling {
             callee,
             args: &args,
@@ -2993,6 +2999,10 @@ impl<'a> Lowering<'a> {
             named: named.len(),
             at: self.source.span(inst),
             linked: linked.map(|got| (got, x86_64::RBX)),
+            runtime: Some(abi::Runtime {
+                conv: unit,
+                linked: copied.map(|got| (got, x86_64::RBX)),
+            }),
             forwarded,
         };
         // The callee's convention and not this function's, since the two differ when either was
@@ -4669,6 +4679,7 @@ impl<'a> Lowering<'a> {
             named: 1,
             at: span,
             linked: None,
+            runtime: None,
             forwarded: false,
         };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
@@ -10365,6 +10376,7 @@ impl<'a> Lowering<'a> {
             named: args.len(),
             at: span,
             linked: None,
+            runtime: None,
             forwarded: false,
         };
         let apart = CallRegs { shared_positions: false, shadow: 0, ..*self.conv };

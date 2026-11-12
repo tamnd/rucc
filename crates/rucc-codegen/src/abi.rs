@@ -834,12 +834,56 @@ pub struct Calling<'a> {
     /// jumps through `name@GOT(%ebx)`. `None` everywhere else, and for a call through a register,
     /// which never reaches the table.
     pub linked: Option<(mir::Reg, PhysReg)>,
+    /// How a copy of a structure passed by value is made when it is a call to the runtime, and
+    /// [`None`] for the convention and the table of the call itself.
+    ///
+    /// The routine is an ordinary function of the unit, and the callee can be something else. A
+    /// static function that only the unit calls is `regparm(3)` on i386 above `-O0`, and a call to
+    /// it from a unit of cdecl functions passed `memcpy` its three words in `eax`, `edx` and `ecx`.
+    /// That `memcpy` reads them from the stack. Nor does a call to a local function go through the
+    /// procedure linkage table, but a call to `memcpy` does, so the table is the routine's too.
+    pub runtime: Option<Runtime<'a>>,
     /// Whether what goes to memory goes up the area this function's own caller passed its
     /// arguments in rather than down the outgoing one, which is a `musttail` call that becomes a
     /// jump: by the time the callee reads its arguments this frame is gone and the area is the
     /// one its return address is under. Where that area is from the stack pointer is the frame's
     /// answer, so the stores are left for [`crate::finish`] and listed in [`Made::forwarded`].
     pub forwarded: bool,
+}
+
+/// The call to the runtime that copies an argument too large to unroll, as the convention it is
+/// made in and the table it goes through. See [`Calling::runtime`].
+#[derive(Debug, Clone, Copy)]
+pub struct Runtime<'a> {
+    /// The convention of an ordinary function of the unit.
+    pub conv: &'a CallRegs,
+    /// The global offset table's register and the register it has to be in, when a call to the
+    /// routine goes through the procedure linkage table. See [`Calling::linked`].
+    pub linked: Option<(mir::Reg, PhysReg)>,
+}
+
+/// The most bytes a copy into the argument area unrolls to under that convention of the runtime.
+///
+/// A convention with fewer than three argument registers is every i386 one but `regparm(3)`.
+/// There the copy's own three words go on the stack, at the bottom of the outgoing area this call
+/// is being written into, over the arguments already stored there, so every copy is words however
+/// many there are. GCC makes no library call while it sets up a call's arguments either. 00204 of
+/// c-testsuite passed two large structures and printed garbage for the first. Everywhere else the
+/// limit is the one for speed, since nothing this far down knows the goal.
+fn unrolls_to(runtime: &CallRegs) -> usize {
+    if runtime.int_args.len() < 3 { usize::MAX } else { crate::expand::copies(Goal::Speed) }
+}
+
+/// Whether a call with these arguments copies one of them by a call to the runtime, which is the
+/// question of whether that call needs the global offset table's register.
+#[must_use]
+pub fn copies_by_runtime(args: &[Passing], runtime: &CallRegs) -> bool {
+    args.iter().any(|arg| match arg.abi {
+        Abi::ByVal { size, align, .. } => {
+            crate::expand::plan(size, align, runtime.word, unrolls_to(runtime)).is_none()
+        }
+        _ => false,
+    })
 }
 
 /// Builds one call: what it passes, what comes back, and what it destroys.
@@ -862,7 +906,9 @@ pub fn call(
     insts: &Insts,
     names: &mut Interner,
 ) -> Result<Made, Refused> {
-    let &Calling { callee, args, returns, variadic, named, at: span, linked, forwarded } = made;
+    let &Calling { callee, args, returns, variadic, named, at: span, linked, runtime, forwarded } =
+        made;
+    let runtime = runtime.unwrap_or(Runtime { conv, linked });
     // Where everything goes, worked out before anything is built, so that a call this cannot make
     // leaves no half of one behind.
     let mut places = Places::new(conv);
@@ -918,20 +964,9 @@ pub fn call(
             };
             // Nothing here refuses a plan it did not get, because a copy the words give up on is
             // a call to the runtime below. What the byte count has to fit in is the immediate the
-            // call passes it as, and an object that large is what is left of the old refusal. The
-            // limit is the one for speed, since nothing this far down knows the goal.
-            //
-            // Except on a convention with fewer than three argument registers, which is every
-            // i386 one. There the copy's own three words go on the stack, at the bottom of the
-            // outgoing area this call is being written into, over the arguments already stored
-            // there, so every copy is words however many there are. GCC makes no library call
-            // while it sets up a call's arguments either. 00204 of c-testsuite passed two large
-            // structures and printed garbage for the first.
-            let most = if conv.int_args.len() < 3 {
-                usize::MAX
-            } else {
-                crate::expand::copies(Goal::Speed)
-            };
+            // call passes it as, and an object that large is what is left of the old refusal. How
+            // far the words go is the runtime's convention's answer, per [`unrolls_to`].
+            let most = unrolls_to(runtime.conv);
             let plan = crate::expand::plan(u64::from(size), align, conv.word, most);
             let count = i32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
             as_bytes.push((reg, up, count, plan));
@@ -1061,8 +1096,8 @@ pub fn call(
     for (from, up, count, plan) in as_bytes {
         let up = i32::try_from(up).expect("an argument area under two gigabytes");
         let Some(plan) = plan else {
-            let what = Copying { from, up, count, span, linked };
-            nested = nested.max(by_runtime(out, block, conv, insts, names, what));
+            let what = Copying { from, up, count, span, linked: runtime.linked };
+            nested = nested.max(by_runtime(out, block, runtime.conv, insts, names, what));
             stores = None;
             continue;
         };
@@ -1276,6 +1311,24 @@ struct Copying {
     linked: Option<(mir::Reg, PhysReg)>,
 }
 
+/// The routine of the runtime that copies an argument too large to unroll.
+///
+/// On a target whose library may have no `memcpy`, the routine is `memmove`. The two sides do not
+/// overlap, so that is right too.
+///
+/// # Panics
+///
+/// If the capability table has no row for a large copy, which it always has.
+#[must_use]
+pub fn copier(conv: &CallRegs) -> &'static str {
+    let (opcode, mode) = if conv.copies_by_moving {
+        (rucc_ir::Opcode::Memmove, "any")
+    } else {
+        (rucc_ir::Opcode::Memcpy, "big")
+    };
+    capability::libcall(opcode, mode).expect("the runtime copies a block too large to unroll")
+}
+
 /// One object with more words than a copy into the argument area unrolls to, copied there by a
 /// call to the runtime, and how many bytes that call itself needed below the stack pointer.
 ///
@@ -1292,15 +1345,7 @@ fn by_runtime(
     what: Copying,
 ) -> u32 {
     let Copying { from, up, count, span, linked } = what;
-    // On a target whose library may have no `memcpy`, the routine is `memmove`. The two sides do
-    // not overlap, so that is right too.
-    let (opcode, mode) = if conv.copies_by_moving {
-        (rucc_ir::Opcode::Memmove, "any")
-    } else {
-        (rucc_ir::Opcode::Memcpy, "big")
-    };
-    let routine =
-        capability::libcall(opcode, mode).expect("the runtime copies a block too large to unroll");
+    let routine = copier(conv);
 
     // Where the copy goes, which is a distance up the outgoing area and so is the stack pointer
     // plus that distance. A `lea` rather than an add, because the stack pointer is not this
@@ -1336,6 +1381,7 @@ fn by_runtime(
         named: args.len(),
         at: span,
         linked,
+        runtime: None,
         forwarded: false,
     };
     // Three pointer sized arguments and nothing coming back is a call every convention that gets
@@ -1875,6 +1921,7 @@ mod tests {
             named,
             at: Span::DUMMY,
             linked: None,
+            runtime: None,
             forwarded: false,
         };
         let made = call(&mut out, block, &what, conv, &X86_64, &mut names);
@@ -2038,6 +2085,7 @@ mod tests {
             named: passed.len(),
             at: Span::DUMMY,
             linked: None,
+            runtime: None,
             forwarded: false,
         };
         call(&mut out, block, &what, &SYSV, &X86_64, &mut names)
@@ -2106,6 +2154,7 @@ mod tests {
             named: args.len(),
             at: Span::DUMMY,
             linked: None,
+            runtime: None,
             forwarded: false,
         };
         let made = call(&mut out, block, &what, conv, insts, &mut names);
