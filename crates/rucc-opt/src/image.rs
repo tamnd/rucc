@@ -243,6 +243,22 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
                     data.args = args;
                     continue;
                 }
+                Found::Null(word) => {
+                    stats.optimized(FOLDED);
+                    let at = func.add_imm(Imm::int(0, word));
+                    let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+                    let span = func.span(inst);
+                    let made = func.create_inst(data, &[word], span);
+                    func.insert_before(made, inst);
+                    let Some(zero) = func[made].results().next() else { continue };
+                    let args = func.push_values(&[zero]);
+                    let data = &mut func[inst];
+                    data.opcode = Opcode::IntToPtr;
+                    data.flags = Flags::NONE;
+                    data.extra = Extra::None;
+                    data.args = args;
+                    continue;
+                }
             };
             let data = &mut func[inst];
             data.flags = Flags::NONE;
@@ -508,6 +524,8 @@ enum Found {
     Address(Symbol),
     /// The address of this symbol, read as an integer as wide as a pointer.
     Number(Symbol),
+    /// A null pointer, which is zero of this integer type cast to a pointer.
+    Null(Type),
 }
 
 /// The initial image of every global in a module that a load can be answered out of.
@@ -863,7 +881,14 @@ fn answer(func: &Func, inst: Inst, images: &Images) -> Option<Found> {
     let Extra::Symbol(name) = func[made].extra else { return None };
     let offset = u64::try_from(offset).ok()?;
     if ty.is_ptr() {
-        return images.address(name, offset).map(Found::Address);
+        if let Some(symbol) = images.address(name, offset) {
+            return Some(Found::Address(symbol));
+        }
+        // A pointer the image holds as zero bytes is null. FreeBSD reads each member of its
+        // `struct pcpu` through `static struct pcpu __seg_gs *__pc = 0`, and gcc writes
+        // `%gs:56` for the CPU number where rucc loaded `__pc` first.
+        let word = Type::int(u32::try_from(images.pointer * 8).ok()?);
+        return (images.read(name, word, offset)?.bits() == 0).then_some(Found::Null(word));
     }
     // A structure of pointers passed by value is read a word at a time as integers, since that is
     // the class the ABI gives it, so a word holding an address is answered with the address made
