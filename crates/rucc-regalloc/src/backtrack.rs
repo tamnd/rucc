@@ -1441,18 +1441,18 @@ fn index(reg: Reg) -> usize {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Constraint, Flags, Opcode, Operand, Param};
-    use rucc_target::x86_64::{GPR, R8, R9, R10, R11, RAX, RCX, RDI, RDX, REGS, RSI, SYSV};
+    use rucc_target::x86_64::{GPR, R8, R9, R10, R11, RAX, RCX, RDI, RDX, REGS, RSI};
 
     use super::*;
     use crate::check;
 
     fn env() -> Env {
-        let (order, scratch) = SYSV.int_order.split_at(SYSV.int_order.len() - 3);
+        let (order, scratch) = crate::INT_ORDER.split_at(crate::INT_ORDER.len() - 3);
         Env::new().with(GPR, order, scratch)
     }
 
     fn narrow(count: usize) -> Env {
-        Env::new().with(GPR, &SYSV.int_order[..count], &SYSV.int_order[count..count + 1])
+        Env::new().with(GPR, &crate::INT_ORDER[..count], &crate::INT_ORDER[count..count + 1])
     }
 
     fn named(place: Option<Place>) -> String {

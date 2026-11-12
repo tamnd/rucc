@@ -11443,11 +11443,11 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// operation is inside it, and that no `xchg` or `xadd` got used for something neither of them
     /// does.
     ///
-    /// gcc 16.2.0 writes the same loop for the same functions, down to which register holds the
-    /// value that was read.
+    /// gcc 13.3.0 writes the same loop for the same functions, down to which register holds the
+    /// value that is put back.
     #[test]
     fn a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange() {
-        let widths = [("char", "b", "%dl"), ("short", "w", "%dx"), ("int", "l", "%edx")];
+        let widths = [("char", "b", "%cl"), ("short", "w", "%cx"), ("int", "l", "%ecx")];
         for (ty, suffix, reg) in widths {
             for (name, call, insn) in [
                 ("and", "__atomic_fetch_and(p, v, 5)", "and"),
@@ -11468,7 +11468,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             }
         }
         let source = "long f(long *p, long v) { return __atomic_fetch_or(p, v, 5); }\n";
-        assert!(asm(source).contains("cmpxchgq\t%rdx, (%rdi)"), "{}", asm(source));
+        assert!(asm(source).contains("cmpxchgq\t%rcx, (%rdi)"), "{}", asm(source));
 
         // The nand, which puts two instructions inside the loop rather than one. The flip is an
         // exclusive or against every bit set in the IR and the folder turns that into the `not` the
@@ -12645,8 +12645,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(body.contains("\tsubq\t$8, %rsp\n"), "no red zone: {text}");
         assert!(body.contains("\tmovq\t%rbp, (%rax)\n"), "the frame pointer: {text}");
         assert!(body.contains("\tmovq\t%rsp, 16(%rax)\n"), "the stack pointer: {text}");
-        assert!(body.contains("\tleaq\t.Lf_1(%rip), %rcx\n"), "where to come back to: {text}");
-        assert!(body.contains("\tmovq\t%rcx, 8(%rax)\n"), "and that goes in the buffer: {text}");
+        assert!(body.contains("\tleaq\t.Lf_1(%rip), %rdx\n"), "where to come back to: {text}");
+        assert!(body.contains("\tmovq\t%rdx, 8(%rax)\n"), "and that goes in the buffer: {text}");
         assert!(!body.contains("24(%rax)"), "no fourth word: {text}");
         let back = body.split_once(".Lf_1:\n").expect("the block control comes back to").1;
         assert!(back.starts_with("\tmovq\t(%rsp), %rax\n"), "the answer is read back: {text}");

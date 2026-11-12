@@ -245,14 +245,14 @@ fn index(reg: Reg) -> usize {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Opcode, Weight};
-    use rucc_target::x86_64::{GPR, SYSV};
+    use rucc_target::x86_64::GPR;
 
     use super::*;
     use crate::assign::Env;
     use crate::order::Order;
 
     fn narrow(count: usize) -> Env {
-        Env::new().with(GPR, &SYSV.int_order[..count], &SYSV.int_order[count..count + 1])
+        Env::new().with(GPR, &crate::INT_ORDER[..count], &crate::INT_ORDER[count..count + 1])
     }
 
     fn chosen(func: &Func, env: &Env) -> Vec<Reg> {
