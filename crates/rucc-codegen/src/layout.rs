@@ -1394,6 +1394,76 @@ pub fn fusable(
     found
 }
 
+/// Makes a branch on whether a flag output is zero a branch on the output itself, and gives back
+/// how many it made.
+///
+/// FreeBSD writes `atomic_cmpset_int` with `"=@cce"` into a `u_char`, and a branch on
+/// `!atomic_cmpset_int(...)` compares that byte with zero. The comparison is then what [`fusable`]
+/// folds into the branch, so the `sete` stays and a `testb` reads it. gcc jumps on the flags the
+/// `cmpxchg` left. The byte of a flag output is 0 or 1, so a test that it is not zero is the byte,
+/// and a test that it is zero is the byte with the two arms the other way round. With the
+/// comparison gone the template is in front of the branch, and [`fusable`] takes the line that
+/// writes the byte out of it. The rucc kernel had 40403 of these and the gcc kernel had 149.
+///
+/// Run before allocation and before [`fusable`], where a register is written once.
+pub fn through(
+    func: &mut mir::Func,
+    insts: &BranchInsts,
+    fused: &Fused,
+    names: &mut Interner,
+) -> usize {
+    let branch = mir::Opcode::new(names.join(insts.prefix, insts.cond));
+    let reads = crate::changes::Reads::of(func);
+    let blocks: Vec<mir::Block> = func.blocks().collect();
+    let mut made = 0;
+    for block in blocks {
+        let order: Vec<mir::Inst> = func.insts(block).collect();
+        let Some((&last, above)) = order.split_last() else { continue };
+        if func[last].opcode != branch || func[block].succs.len() != 2 {
+            continue;
+        }
+        let Some(&read) = func[func[last].operands].first() else { continue };
+        if !read.reg.is_virtual() || reads.count(read.reg) != 1 {
+            continue;
+        }
+        let Some(&compare) = above.iter().rfind(|&&inst| {
+            func[func[inst].operands]
+                .iter()
+                .any(|operand| operand.reg == read.reg && operand.role.is_def())
+        }) else {
+            continue;
+        };
+        let data = func[compare];
+        let Some(fusion) = fused.0.get(&data.opcode) else { continue };
+        // Only `!=` and `==`, which are the two jumps a test of the byte is.
+        let equal = fusion.if_true == insts.if_false;
+        if (fusion.if_true != insts.if_true && !equal) || data.mem.is_some() {
+            continue;
+        }
+        // Against zero. A test of the byte against a mask of zero would say nothing about the byte,
+        // but `x & 0` is folded long before selection.
+        if data.imm.is_none_or(|imm| func[imm].0 != 0) {
+            continue;
+        }
+        let &[_, byte] = &func[data.operands][..] else { continue };
+        let set = above.iter().copied().find(|&inst| {
+            flagged(func, fused, names, inst).is_some_and(|(written, _)| written == byte.reg)
+        });
+        if set.is_none() || !byte.reg.is_virtual() {
+            continue;
+        }
+        let operand = mir::Operand { reg: byte.reg, ..read };
+        let operands = func.push_operands(&[operand]);
+        func[last].operands = operands;
+        func.remove_inst(compare);
+        if equal {
+            func.succs_mut(block).swap(0, 1);
+        }
+        made += 1;
+    }
+    made
+}
+
 /// Moves the comparison a branch reads the answer of down to the branch, when something else was
 /// written between the two, and gives back how many it moved.
 ///
@@ -2613,6 +2683,85 @@ mod tests {
         assert!(!text.iter().any(|line| line.contains("setc")), "{text:?}");
         assert!(!text.iter().any(|line| line.starts_with("x64.test_rr_8")), "{text:?}");
         assert!(text.contains(&"x64.jcc_ae block2, block1".to_owned()), "{text:?}");
+    }
+
+    /// A branch on whether a flag output is zero, which is what `if (!atomic_cmpset_int(...))` is,
+    /// jumps on the flags too, with the arms the other way round. A branch on whether it is not
+    /// zero jumps the same way the byte does.
+    #[test]
+    fn a_branch_on_a_flag_output_compared_with_zero_jumps_on_the_flags() {
+        // `btl` puts the bit in the carry, so the first arm, which holds the `ud2`, is taken on a
+        // clear carry for `== 0` and on a set one for `!= 0`.
+        for (cond, carry) in [("cmp_set_e_ri_8", "ae"), ("cmp_set_ne_ri_8", "b")] {
+            let (mut names, mut func, made) = blank(3);
+            let byte = func.new_vreg(GPR);
+            let bit = rucc_target::template::template_reg(1, 'k');
+            let set = rucc_target::template::template_reg(0, 'b');
+            let text = names.intern(&format!("btl $3, {bit}\n\tsetc {set}"));
+            let opcode = Opcode::new(names.intern("x64.template"));
+            func.build(made[0], opcode)
+                .def(byte, GPR)
+                .operand(Operand::read(Reg::physical(RAX), GPR))
+                .symbol(text)
+                .finish();
+            let answer = func.new_vreg(GPR);
+            let opcode = Opcode::new(names.join("x64.", cond));
+            func.build(made[0], opcode)
+                .def(answer, GPR)
+                .operand(Operand::read(byte, GPR))
+                .imm(0)
+                .finish();
+            let opcode = Opcode::new(names.intern("x64.br_cond_8"));
+            func.build(made[0], opcode).operand(Operand::read(answer, GPR)).finish();
+            *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
+            func.build(made[1], Opcode::new(names.intern("x64.ud2"))).finish();
+            func.build(made[2], Opcode::new(names.intern("x64.nop"))).finish();
+
+            let fused = Fused::new(&BRANCH, &mut names).keeping(&FLAGS);
+            assert_eq!(through(&mut func, &BRANCH, &fused, &mut names), 1, "{cond}");
+            let text = laid_out(&mut func, &mut names);
+
+            assert!(!text.iter().any(|line| line.contains("setc")), "{cond}: {text:?}");
+            assert!(!text.iter().any(|line| line.starts_with("x64.test_rr_8")), "{cond}: {text:?}");
+            assert!(!text.iter().any(|line| line.contains(cond)), "{cond}: {text:?}");
+            // The layout may put either arm next and numbers the blocks in its order, so find the
+            // arm with the `ud2` and the jump to see which condition leads to it.
+            let jump = text.iter().find(|line| line.starts_with("x64.jcc_")).expect("a jump");
+            let (name, target) = jump.split_once(' ').expect("the jump has its arms");
+            let target = target.split(',').next().expect("the jump has a target");
+            let at = text.iter().position(|line| line == "x64.ud2").expect("the ud2 is kept");
+            let label = text[..at].iter().rfind(|line| line.ends_with(':')).expect("a label");
+            let taken = name.trim_start_matches("x64.jcc_");
+            assert!(matches!(taken, "b" | "ae"), "a jump on the carry: {text:?}");
+            let inverse = |c: &str| if c == "b" { "ae" } else { "b" };
+            let to_ud2 = if format!("{target}:") == *label { taken } else { inverse(taken) };
+            assert_eq!(to_ud2, carry, "{cond}: {text:?}");
+        }
+    }
+
+    /// A comparison of a byte no flag output wrote stays, since the byte may be any number.
+    #[test]
+    fn a_byte_compared_with_zero_that_no_flag_output_wrote_keeps_its_comparison() {
+        let (mut names, mut func, made) = blank(3);
+        let byte = func.new_vreg(GPR);
+        let opcode = Opcode::new(names.intern("x64.mov_rr_64"));
+        func.build(made[0], opcode)
+            .def(byte, GPR)
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .finish();
+        let answer = func.new_vreg(GPR);
+        let opcode = Opcode::new(names.intern("x64.cmp_set_e_ri_8"));
+        func.build(made[0], opcode)
+            .def(answer, GPR)
+            .operand(Operand::read(byte, GPR))
+            .imm(0)
+            .finish();
+        let opcode = Opcode::new(names.intern("x64.br_cond_8"));
+        func.build(made[0], opcode).operand(Operand::read(answer, GPR)).finish();
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
+
+        let fused = Fused::new(&BRANCH, &mut names).keeping(&FLAGS);
+        assert_eq!(through(&mut func, &BRANCH, &fused, &mut names), 0);
     }
 
     /// The same flag output with something else reading it keeps the `setc` and loses the test.
