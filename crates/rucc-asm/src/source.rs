@@ -5752,10 +5752,14 @@ impl Reader {
                     // from the end of the instruction they are the last of.
                     let addend = residue.constant + fixup.at as i64 - offset;
                     // A static name defined here needs no stub whichever section it is in, and
-                    // gas says so by asking for the plain distance to it rather than a call.
+                    // gas says so by asking for the plain distance to it rather than a call. Not
+                    // an ifunc that an i386 file calls with `@PLT`: the name marks the resolver,
+                    // so the call has to go through the stub, and a linker refuses the plain
+                    // distance to one in a shared library. gas keeps `R_386_PLT32` for it.
                     let near = self.known.get(name).is_some_and(|&sym| {
                         self.syms[sym].binding == Binding::Local
                             && matches!(self.syms[sym].at, Held::In { .. })
+                            && !(self.i386 && self.syms[sym].sort == Sort::Ifunc)
                     });
                     // The table less a label is a distance and not somewhere to go, in an address
                     // as much as in a directive. NetBSD's i386 rtld_start.S writes
@@ -11067,6 +11071,33 @@ nop
                 (6, "g", Reference::Call, -4),
                 (15, "g", Reference::Call, -4),
                 (21, "g", Reference::Call, -4),
+            ]
+        );
+    }
+
+    /// A `static` ifunc on i386 is called through its stub when the call asks with `@PLT`, which
+    /// is how gcc calls one in position independent code, and its address is read out of a slot.
+    /// gas writes `R_386_PLT32` and `R_386_GOT32X`. FreeBSD's `__vdso_gettc.c` calls one in
+    /// `libsys.so`, whose link fails on `R_386_PC32` there.
+    #[test]
+    fn an_i386_call_to_a_static_ifunc_keeps_the_stub() {
+        let read = i386(
+            "\t.text\nf.resolver:\n\tret\n\t.type f, @gnu_indirect_function\n\t.set f,f.resolver\n\
+             caller:\n\tcall f@PLT\n\tjmp f@PLT\n\tcall f\n\tmovl f@GOT(%ebx), %eax\n",
+        );
+        assert_eq!(name(&read, "f").sort, Sort::Ifunc);
+        let named: Vec<_> = relocs(&read, ".text")
+            .into_iter()
+            .filter(|(_, symbol, _, _)| *symbol == "f")
+            .map(|(at, _, kind, _)| (at, kind))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                (2, Reference::Call),
+                (7, Reference::Call),
+                (12, Reference::Data),
+                (18, Reference::Slot)
             ]
         );
     }
