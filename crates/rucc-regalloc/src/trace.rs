@@ -479,7 +479,7 @@ fn holding(found: Option<Reg>) -> String {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Constraint, Opcode, Operand};
-    use rucc_target::x86_64::{GPR, RAX, RSP, SYSV};
+    use rucc_target::x86_64::{GPR, RAX, RSP};
 
     use super::*;
     use crate::assign::{Env, assign};
@@ -490,13 +490,13 @@ mod tests {
 
     /// The x86-64 environment, with the last three of the allocation order held back as scratch.
     fn env() -> Env {
-        let (order, scratch) = SYSV.int_order.split_at(SYSV.int_order.len() - 3);
+        let (order, scratch) = crate::INT_ORDER.split_at(crate::INT_ORDER.len() - 3);
         Env::new().with(GPR, order, scratch)
     }
 
     /// An environment with that many general purpose registers and two scratch after them.
     fn narrow(count: usize) -> Env {
-        Env::new().with(GPR, &SYSV.int_order[..count], &SYSV.int_order[count..count + 2])
+        Env::new().with(GPR, &crate::INT_ORDER[..count], &crate::INT_ORDER[count..count + 2])
     }
 
     /// Allocates a function and hands back everything the checker is told about it.
@@ -602,7 +602,7 @@ mod tests {
         // The move that carries the dividend into the register the instruction insists on, sent
         // to the register next door instead. That is the shape of a rewrite that hands out the
         // wrong scratch register, and it has to be caught at the instruction that reads it.
-        edits[0].mov.to = Place::Reg(SYSV.int_order[2]);
+        edits[0].mov.to = Place::Reg(crate::INT_ORDER[2]);
         assert_eq!(
             said(&func, &taken, &assignment, &edits),
             ["instruction 1 reads %0 out of register 0 of class 0, which holds nothing anything \
@@ -651,7 +651,7 @@ mod tests {
         // The same swap written as the two moves it looks like, which is what a sequencer that
         // did not notice the cycle would leave. The second move reads a register the first has
         // already written, so both parameters end up holding the same value.
-        let (to, from) = (Place::Reg(SYSV.int_order[0]), Place::Reg(SYSV.int_order[1]));
+        let (to, from) = (Place::Reg(crate::INT_ORDER[0]), Place::Reg(crate::INT_ORDER[1]));
         edits.truncate(edits.len() - 3);
         edits.push(Edit { at: At::EndOf(body), mov: Move::new(to, from), class: GPR });
         edits.push(Edit { at: At::EndOf(body), mov: Move::new(from, to), class: GPR });
@@ -710,8 +710,8 @@ mod tests {
         // One arm of the diamond writes over the register the value is in. The block the two arms
         // meet in reads it, and what it gets depends on which way the program came, which is
         // exactly the case a walk that only followed one path would miss.
-        let at = Place::Reg(SYSV.int_order[0]);
-        let elsewhere = Place::Reg(SYSV.int_order[1]);
+        let at = Place::Reg(crate::INT_ORDER[0]);
+        let elsewhere = Place::Reg(crate::INT_ORDER[1]);
         edits.push(Edit { at: At::EndOf(arm), mov: Move::new(at, elsewhere), class: GPR });
 
         assert_eq!(
@@ -744,10 +744,10 @@ mod tests {
         let block = func.create_block();
         let argument = func.new_vreg(GPR);
         func.build(block, opcode)
-            .operand(Operand::write(argument, GPR).with(Constraint::Fixed(SYSV.int_order[0])))
+            .operand(Operand::write(argument, GPR).with(Constraint::Fixed(crate::INT_ORDER[0])))
             .finish();
         func.build(block, opcode)
-            .operand(Operand::read(Reg::physical(SYSV.int_order[0]), GPR))
+            .operand(Operand::read(Reg::physical(crate::INT_ORDER[0]), GPR))
             .finish();
 
         // This is a function whose argument arrives in a register and whose body is an `asm`

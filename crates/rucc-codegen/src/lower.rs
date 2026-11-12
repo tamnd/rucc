@@ -12485,7 +12485,7 @@ mod tests {
         // What the call writes is the value that comes back and then every register the callee is
         // free to destroy, in both classes, which is the whole of what stops the allocator from
         // leaving something in one of them.
-        assert!(text.contains("%2:gpr($rax), $rcx, $rdx, $r8, $r9, $r10, $r11, $xmm0,"), "{text}");
+        assert!(text.contains("%2:gpr($rax), $rdx, $rcx, $r8, $r9, $r10, $r11, $xmm0,"), "{text}");
         assert!(text.contains("$xmm15 = x64.call"), "{text}");
     }
 

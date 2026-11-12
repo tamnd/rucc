@@ -214,12 +214,12 @@ fn index(reg: Reg) -> usize {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{Opcode, Operand};
-    use rucc_target::x86_64::{GPR, RAX, SYSV};
+    use rucc_target::x86_64::{GPR, RAX};
 
     use super::*;
 
     fn narrow(count: usize) -> Env {
-        Env::new().with(GPR, &SYSV.int_order[..count], &SYSV.int_order[count..count + 1])
+        Env::new().with(GPR, &crate::INT_ORDER[..count], &crate::INT_ORDER[count..count + 1])
     }
 
     fn of(func: &Func, env: &Env) -> (Order, Pressure) {

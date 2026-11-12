@@ -797,13 +797,13 @@ pub(crate) fn phys(reg: Reg) -> PhysReg {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::Opcode;
-    use rucc_target::x86_64::{GPR, RAX, RCX, RDX, RSI, SYSV};
+    use rucc_target::x86_64::{GPR, RAX, RCX, RDX, RSI};
 
     use super::*;
 
     /// Two registers to hand out and two held back after them.
     fn env() -> Env {
-        Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..4])
+        Env::new().with(GPR, &crate::INT_ORDER[..2], &crate::INT_ORDER[2..4])
     }
 
     fn func() -> (Func, Opcode, rucc_mir::Block) {

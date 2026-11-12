@@ -1626,9 +1626,13 @@ static SYSV_X87_RETURNS: [PhysReg; 2] = [st(0), st(1)];
 static SYSV_INT_SAVED: [PhysReg; 6] = [RBX, RBP, R12, R13, R14, R15];
 static SYSV_SSE_SAVED: [PhysReg; 0] = [];
 // The nine a call may destroy first, then the five it may not. A value that dies before the
-// next call should not be occupying a register somebody has to push to use.
+// next call should not be occupying a register somebody has to push to use. Among the nine the
+// order is gcc's, `REG_ALLOC_ORDER` in i386.h, which has `rdx` before `rcx`. The register a value
+// is in can be seen from outside: under `-mindirect-branch=thunk` an indirect call goes through
+// a thunk named for the register that holds the target, and each object holds one thunk for each
+// register it calls through.
 static SYSV_INT_ORDER: [PhysReg; 14] =
-    [RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, RBX, R12, R13, R14, R15];
+    [RAX, RDX, RCX, RSI, RDI, R8, R9, R10, R11, RBX, R12, R13, R14, R15];
 // In number order, which both conventions are happy with: SysV preserves none of them, and
 // Windows preserves the upper ten, so counting up hands out the ones a call destroys first on
 // the target where that is a distinction.

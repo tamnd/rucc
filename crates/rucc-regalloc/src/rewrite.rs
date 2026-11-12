@@ -524,13 +524,13 @@ mod tests {
 
     /// The x86-64 environment, with the last three of the allocation order held back as scratch.
     fn env() -> Env {
-        let (order, scratch) = SYSV.int_order.split_at(SYSV.int_order.len() - 3);
+        let (order, scratch) = crate::INT_ORDER.split_at(crate::INT_ORDER.len() - 3);
         Env::new().with(GPR, order, scratch)
     }
 
     /// An environment with that many general purpose registers and two scratch after them.
     fn narrow(count: usize) -> Env {
-        Env::new().with(GPR, &SYSV.int_order[..count], &SYSV.int_order[count..count + 2])
+        Env::new().with(GPR, &crate::INT_ORDER[..count], &crate::INT_ORDER[count..count + 2])
     }
 
     /// What a place is called, which is what an assertion reads.
@@ -868,7 +868,7 @@ mod tests {
 
         // One register in each file, so the value of each that is wanted later goes to the stack
         // and is read back at the instruction that wants it.
-        let env = Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]).with(
+        let env = Env::new().with(GPR, &crate::INT_ORDER[..1], &crate::INT_ORDER[1..3]).with(
             XMM,
             &SYSV.sse_order[..1],
             &SYSV.sse_order[1..3],
@@ -1010,7 +1010,7 @@ mod tests {
         *func.succs_mut(head) = vec![BlockCall::with(body, vec![first, second])];
         func.build(body, opcode).uses(left, GPR).uses(right, GPR).finish();
 
-        let one = Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
+        let one = Env::new().with(GPR, &crate::INT_ORDER[..1], &crate::INT_ORDER[1..2]);
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
         assert!(fits(&func, &assign(&func, &order, &live, &one), &one, &order, &live));
@@ -1045,7 +1045,7 @@ mod tests {
 
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
-        let one = Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
+        let one = Env::new().with(GPR, &crate::INT_ORDER[..1], &crate::INT_ORDER[1..2]);
         assert!(!fits(&func, &assign(&func, &order, &live, &one), &one, &order, &live));
         assert!(fits(&func, &assign(&func, &order, &live, &narrow(1)), &narrow(1), &order, &live));
     }

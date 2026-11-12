@@ -295,3 +295,19 @@ fn a_unit_built_with_thunk_carries_each_thunk_it_calls() {
     assert!(holds(&bytes, b".text.__x86_indirect_thunk_r12\0"), "no section for the thunk");
     assert!(holds(&bytes, CAUGHT), "no pause and lfence in the object");
 }
+
+/// A call through a pointer to a function with `...` holds the count of vector arguments in
+/// `%rax`, and the first argument registers are taken, so the target goes in the first free one
+/// in gcc's order, which is `%rdx` and not `%rcx`. The thunk is named for it, so the set of thunks
+/// an object holds is the set gcc's object holds. tamnd/rucc#4361.
+#[test]
+fn the_target_goes_in_the_register_gcc_picks() {
+    let source = "\
+struct ops { int (*log)(const char *, ...); };
+int say(struct ops *o, int x) { return o->log(\"x\", x); }
+";
+    let text = asm(&["-mindirect-branch=thunk-extern"], source);
+    let lines = insts(&text);
+    assert!(lines.contains(&"jmp\t__x86_indirect_thunk_rdx"), "{text}");
+    assert!(!text.contains("__x86_indirect_thunk_rcx"), "{text}");
+}

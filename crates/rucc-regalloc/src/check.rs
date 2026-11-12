@@ -415,14 +415,14 @@ fn place_name(place: Place) -> String {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Opcode, Operand};
-    use rucc_target::x86_64::{GPR, RAX, RCX, RDX, SYSV};
+    use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
 
     use super::*;
     use crate::assign::{Env, assign};
 
     /// The x86-64 environment, with the last three of the allocation order held back as scratch.
     fn env() -> Env {
-        let (order, scratch) = SYSV.int_order.split_at(SYSV.int_order.len() - 3);
+        let (order, scratch) = crate::INT_ORDER.split_at(crate::INT_ORDER.len() - 3);
         Env::new().with(GPR, order, scratch)
     }
 

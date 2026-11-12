@@ -342,11 +342,20 @@ fn write(
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M3";
 
+/// The x86-64 integer registers in the order the tests of this crate hand them out. The tests
+/// check the allocator and not the target's order, so they keep an order of their own. The
+/// target's order follows gcc's and can change again.
+#[cfg(test)]
+pub(crate) static INT_ORDER: [rucc_target::PhysReg; 14] = {
+    use rucc_target::x86_64::{R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBX, RCX, RDI, RDX, RSI};
+    [RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11, RBX, R12, R13, R14, R15]
+};
+
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Func, Opcode, Operand, Reg, Weight};
-    use rucc_target::x86_64::{GPR, RAX, RCX, RDX, SYSV};
+    use rucc_target::x86_64::{GPR, RAX, RCX, RDX};
 
     use super::*;
 
@@ -372,7 +381,7 @@ mod tests {
         // Two registers to hand out and three values that are all wanted at once, so one of them
         // goes to the stack and the instruction that reads it gets a reload. This is also where
         // the checker runs, since a debug build asserts on what it says.
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..5]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..2], &INT_ORDER[2..5]);
         let allocation = run(&mut func, &env, "test", true);
 
         assert_eq!(allocation.assignment.spilled(), 1);
@@ -403,8 +412,8 @@ mod tests {
 
         // Two to hand out and one held back, or three to hand out and none held back. Nothing
         // spills with three, so the third is the one held back and no move is wanted anywhere.
-        let wide = assign::Env::new().with(GPR, &SYSV.int_order[..3], &[]);
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..4]);
+        let wide = assign::Env::new().with(GPR, &INT_ORDER[..3], &[]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..2], &INT_ORDER[2..4]);
         let allocation = run_either(&mut func, &wide, &env, "test", true, Allocator::Single);
 
         assert_eq!(allocation.assignment.spilled(), 0);
@@ -426,8 +435,8 @@ mod tests {
 
         // Two to hand out either way. The wide answer spills a value it has nothing to read back
         // into, so the function is allocated again with the scratch registers held back.
-        let wide = assign::Env::new().with(GPR, &SYSV.int_order[..2], &[]);
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..4]);
+        let wide = assign::Env::new().with(GPR, &INT_ORDER[..2], &[]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..2], &INT_ORDER[2..4]);
         let allocation = run_either(&mut func, &wide, &env, "test", true, Allocator::Single);
 
         assert_eq!(allocation.assignment.spilled(), 1);
@@ -442,9 +451,9 @@ mod tests {
         // The wide answer spills a value it has nothing to read back into. The middle one spills
         // the same value and reads it back into the one register it holds back, and has a register
         // more than the narrow one to hand out, so it is the one written.
-        let wide = assign::Env::new().with(GPR, &SYSV.int_order[..2], &[]);
-        let middle = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..3]);
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]);
+        let wide = assign::Env::new().with(GPR, &INT_ORDER[..2], &[]);
+        let middle = assign::Env::new().with(GPR, &INT_ORDER[..2], &INT_ORDER[2..3]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..1], &INT_ORDER[1..3]);
         let (allocation, used) =
             run_first(&mut func, &[&wide, &middle], &env, "test", true, Allocator::Single, None);
 
@@ -463,8 +472,8 @@ mod tests {
         // the last instruction reads all three. The one register the middle answer holds back is
         // not enough for that, and borrowing another would put a third value in memory and bring
         // it back around the instruction, so the function is allocated with both held back.
-        let middle = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]);
+        let middle = assign::Env::new().with(GPR, &INT_ORDER[..1], &INT_ORDER[1..2]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..1], &INT_ORDER[1..3]);
         let (allocation, used) =
             run_first(&mut func, &[&middle], &env, "test", true, Allocator::Single, None);
 
@@ -498,8 +507,8 @@ mod tests {
         // instruction reading both borrows a register for the second. Two to hand out and two held
         // back puts one of the three read four times on the stack as well, which costs more than
         // the register borrowed once, so the middle answer is the one written.
-        let middle = assign::Env::new().with(GPR, &SYSV.int_order[..3], &SYSV.int_order[3..4]);
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..4]);
+        let middle = assign::Env::new().with(GPR, &INT_ORDER[..3], &INT_ORDER[3..4]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..2], &INT_ORDER[2..4]);
         let (allocation, used) =
             run_first(&mut func, &[&middle], &env, "test", true, Allocator::Backtracking, None);
 
@@ -538,8 +547,8 @@ mod tests {
             }
         }
 
-        let middle = assign::Env::new().with(GPR, &SYSV.int_order[..3], &SYSV.int_order[3..4]);
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..4]);
+        let middle = assign::Env::new().with(GPR, &INT_ORDER[..3], &INT_ORDER[3..4]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..2], &INT_ORDER[2..4]);
         let (allocation, used) =
             run_first(&mut func, &[&middle], &env, "test", true, Allocator::Backtracking, None);
 
@@ -568,8 +577,8 @@ mod tests {
 
         // Nothing spills, but the loop hands the two values back the other way round, which takes a
         // third register for one of them while the other moves.
-        let wide = assign::Env::new().with(GPR, &SYSV.int_order[..2], &[]);
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..4]);
+        let wide = assign::Env::new().with(GPR, &INT_ORDER[..2], &[]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..2], &INT_ORDER[2..4]);
         let allocation = run_either(&mut func, &wide, &env, "test", true, Allocator::Single);
 
         assert_eq!(allocation.assignment.spilled(), 0);
@@ -594,8 +603,8 @@ mod tests {
 
         // One value on each edge goes round in no cycle, so the answer with nothing held back is
         // the one written, and writing the edge has no scratch register to ask for.
-        let wide = assign::Env::new().with(GPR, &SYSV.int_order[..2], &[]);
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]);
+        let wide = assign::Env::new().with(GPR, &INT_ORDER[..2], &[]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..1], &INT_ORDER[1..3]);
         let allocation = run_either(&mut func, &wide, &env, "test", true, Allocator::Single);
 
         assert_eq!(allocation.assignment.spilled(), 0);
@@ -635,7 +644,7 @@ mod tests {
         // Two registers and the call destroys both, so the only other answer is the stack and a
         // load in every turn. The trace runs here as well, and it is what says the value read back
         // behind the call is the one put away in front of it.
-        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..5]);
+        let env = assign::Env::new().with(GPR, &INT_ORDER[..2], &INT_ORDER[2..5]);
         let allocation = run_with(&mut func, &env, "test", true, Allocator::Backtracking);
 
         let assignment = &allocation.assignment;
