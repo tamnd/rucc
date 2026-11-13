@@ -1003,7 +1003,8 @@ pub fn compile_recording(
     } else {
         maths::Roots::Bare
     };
-    let built = lowering::Built { fused, pairs, converts, roots, sines: flags.sincos };
+    let built =
+        lowering::Built { fused, pairs, converts, roots, sines: flags.sincos, x87: flags.x87 };
     let ran = lowering::group(source, names, conv, switching, &counts, built, counting);
     // AArch64 has the conditional compare, which is what gcc keeps the and for. See [`jumps`].
     if flags.jumps && !std::ptr::eq(machine.shapes, &aarch64::MACHINE) {

@@ -187,7 +187,7 @@ pub fn pairs(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
         let signature = func.add_signature(as_integers(&func[call.signature]));
         func[inst].extra = Extra::Call(func.add_call(CallInfo { signature, ..call }));
     }
-    if crate::wide::halves(func, names, conv) {
+    if crate::wide::halves(func, names, conv, false) {
         return true;
     }
     *func = before;

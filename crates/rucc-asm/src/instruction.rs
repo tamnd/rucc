@@ -3590,6 +3590,14 @@ mod tests {
         assert_eq!(bytes("fildq (%rsp)"), bytes("fildll (%rsp)"));
     }
 
+    /// `fistpq` is the name gcc writes for `fistpll`, the store of an eight byte integer that
+    /// pops. tamnd/rucc#4528.
+    #[test]
+    fn fistpq_is_the_store_of_an_eight_byte_integer() {
+        assert_eq!(bytes("fistpq (%rsp)"), vec![0xdf, 0x3c, 0x24]);
+        assert_eq!(bytes("fistpq (%rsp)"), bytes("fistpll (%rsp)"));
+    }
+
     #[test]
     fn an_instruction_with_no_operands() {
         assert_eq!(bytes("ret"), vec![0xc3]);

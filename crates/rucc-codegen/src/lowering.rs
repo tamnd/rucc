@@ -413,7 +413,7 @@ impl Step {
             Self::BrainFloats => brain::floats(func),
             Self::Decimals => decimal::calls(func, names, conv.abi, conv.word),
             Self::HalfFloats => half::calls(func, names, conv.abi, built.converts),
-            Self::Halves => return wide::halves(func, names, conv),
+            Self::Halves => return wide::halves(func, names, conv, built.x87),
             Self::Widths => return widths::integers(func, conv),
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func, conv.byte_swaps),
@@ -622,6 +622,9 @@ pub struct Built {
     /// Whether a call to `sin` and a call to `cos` of one operand become one call to `sincos`.
     /// See [`maths::calls`].
     pub sines: bool,
+    /// Whether the x87 stack may hold a value, in which case [`wide::halves`] converts between a
+    /// `long long` and a float on it on i386 rather than calling libgcc.
+    pub x87: bool,
 }
 
 /// Runs the whole group over one function, in the order [`Step::GROUP`] gives.
