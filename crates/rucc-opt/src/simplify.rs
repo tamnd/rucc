@@ -271,6 +271,22 @@
 //! count. It is written by hand because the mask it builds is the two constants worked out
 //! together, which no pattern in the rule tables can name.
 //!
+//! ### A mask before a shift
+//!
+//! `(x & c) >> s` is `x >> s` when `c` keeps every bit from bit `s` up. The bits that `c` clears
+//! are bits that the shift removes. This is also true for an arithmetic shift. `RW_READERS(x)` in
+//! the FreeBSD kernel is `((x) & ~RW_LOCK_FLAGMASK) >> RW_READERS_SHIFT`, and each read lock
+//! release did an `and` that has no effect.
+//!
+//! ### A comparison after a shift
+//!
+//! An unsigned `(x >> s) > c` is `x > d`, where `d` is `c + 1` moved up by `s`, less one. `<=` is
+//! the same. For `>=` and `<`, `d` is `c` moved up by `s`. Thus the shift goes, and the
+//! comparison takes a different constant. `RW_READERS(v) > 1` in `__rw_runlock_try` is one `cmp`
+//! with 63 in gcc. The rewrite occurs only when nothing else reads the shift and when `d` fits in
+//! 32 bits as a signed number. A comparison that the shift settles is left for other rewrites.
+//! The constant is the two constants worked out together, and the rule tables cannot name it.
+//!
 //! ### A bit moved to another place
 //!
 //! `(x & 2^k) != 0 ? 2^m : 0` is `x & 2^k` shifted by `m - k`, left or right, and widened first
@@ -418,6 +434,18 @@ const TESTED: &str = "bit tested after a shift tested in place";
 
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_TESTED: &str = "bit tested after a shift left alone, the pass ran out of fuel";
+
+/// Recorded once for each mask before a shift that the shift makes unnecessary.
+const CLEARED: &str = "mask before a shift that clears only bits the shift removes taken out";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_CLEARED: &str = "mask before a shift left alone, the pass ran out of fuel";
+
+/// Recorded once for each comparison after a shift that compares the unshifted value instead.
+const SHIFTED: &str = "unsigned comparison after a shift made a comparison before it";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_SHIFTED: &str = "comparison after a shift left alone, the pass ran out of fuel";
 
 /// Recorded once for each choice between a bit and nothing made a shift of the bit tested.
 const MOVED: &str = "choice of one bit on another bit made a shift";
@@ -929,6 +957,12 @@ impl<'a> Finder<'a> {
         }
         if let Some(rewrite) = tested_bits(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), TESTED, NO_FUEL_TESTED));
+        }
+        if let Some(rewrite) = cleared_shift(func, inst) {
+            return Some((Found::Rule(rewrite), CLEARED, NO_FUEL_CLEARED));
+        }
+        if let Some(rewrite) = shifted_comparison(func, inst, &self.uses) {
+            return Some((Found::Rule(rewrite), SHIFTED, NO_FUEL_SHIFTED));
         }
         if let Some(rewrite) = moved_bit(func, inst) {
             return Some((Found::Rule(rewrite), MOVED, NO_FUEL_MOVED));
@@ -2088,6 +2122,75 @@ fn tested_bits(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
         pred: Some(pred),
         lhs: Operand::Built(Box::new(inner)),
         rhs: Operand::Value(zero),
+    })
+}
+
+/// `(x & c) >> s` as `x >> s` when `c` keeps every bit from bit `s` up, for a logical or an
+/// arithmetic shift. The mask stays when something else reads it.
+fn cleared_shift(func: &Func, inst: Inst) -> Option<Rewrite> {
+    let data = &func[inst];
+    let opcode @ (Opcode::LShr | Opcode::AShr) = data.opcode else { return None };
+    let ty = func[data.first_result?].ty;
+    let bits = ty.bits();
+    let wide = bits > 64; // not a threshold: the mask is held in a `u64`.
+    if !ty.is_int() || !ty.is_scalar() || wide {
+        return None;
+    }
+    let [masked, amount] = func[data.args] else { return None };
+    let s = u32::try_from(constant(func, amount)?).ok().filter(|&s| s > 0 && s < bits)?;
+    let (Opcode::And, [x, c]) = producer(func, masked)? else { return None };
+    let all = u64::MAX >> (64 - bits);
+    let c = u64::try_from(constant(func, c)? & i128::from(all)).ok()?;
+    let kept = all & !((1 << s) - 1);
+    if c & kept != kept {
+        return None;
+    }
+    Some(Rewrite::Built { opcode, pred: None, lhs: Operand::Value(x), rhs: Operand::Value(amount) })
+}
+
+/// An unsigned `(x >> s) pred c` as `x pred d`, with `d` worked out from `c` and `s`, when nothing
+/// else reads the shift and `d` fits in 32 bits as a signed number.
+fn shifted_comparison(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
+    let data = &func[inst];
+    let Extra::IntPred(pred @ (IntPred::Ult | IntPred::Ule | IntPred::Ugt | IntPred::Uge)) =
+        data.extra
+    else {
+        return None;
+    };
+    let [shifted, c] = func[data.args] else { return None };
+    if data.opcode != Opcode::ICmp {
+        return None;
+    }
+    let (Opcode::LShr, [x, s]) = producer(func, shifted)? else { return None };
+    let ty = func[x].ty;
+    let bits = ty.bits();
+    let wide = bits > 64; // not a threshold: the constant is held in a `u64`.
+    if !ty.is_int() || !ty.is_scalar() || wide {
+        return None;
+    }
+    let s = u32::try_from(constant(func, s)?).ok().filter(|&s| s > 0 && s < bits)?;
+    let all = u64::MAX >> (64 - bits);
+    let c = u64::try_from(constant(func, c)? & i128::from(all)).ok()?;
+    // The largest value the shift can give. A constant at or past it settles the comparison.
+    let top = all >> s;
+    let number = match pred {
+        IntPred::Ugt | IntPred::Ule if c < top => ((c + 1) << s) - 1,
+        IntPred::Uge | IntPred::Ult if c > 0 && c <= top => c << s,
+        _ => return None,
+    };
+    // An instruction carries a 32-bit immediate that it sign extends.
+    let half = 0x7fff_ffff;
+    if number > half && number < all.saturating_sub(half) {
+        return None;
+    }
+    if uses.get(shifted.index()) != Some(&1) && read_elsewhere(func, shifted, inst, uses) {
+        return None;
+    }
+    Some(Rewrite::Built {
+        opcode: Opcode::ICmp,
+        pred: Some(pred),
+        lhs: Operand::Value(x),
+        rhs: Operand::Constant { number: i128::from(number), bits },
     })
 }
 
@@ -4088,6 +4191,106 @@ mod tests {
             let args = operands(&func, masked);
             assert_eq!(args[0], x);
             assert_eq!(number(&func, args[1]), mask, "i{bits} >> {s} & {c}");
+        }
+    }
+
+    /// `(x & c) >> s` returned from a function of `x`, at the width of `ty`.
+    fn cleared(ty: Type, op: Opcode, c: i128, s: i128) -> (Func, Block, Value) {
+        let (_, mut func, block) = one_block(ty);
+        let x = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let c = build.iconst(ty, c);
+        let masked = build.binary(Opcode::And, x, c, Flags::NONE);
+        let amount = build.iconst(ty, s);
+        let shifted = build.binary(op, masked, amount, Flags::NONE);
+        build.ret(&[shifted]);
+        (func, block, x)
+    }
+
+    /// `RW_READERS(x)` is `x` shifted, because the mask clears only bits the shift removes.
+    #[test]
+    fn a_mask_of_the_bits_a_shift_removes_goes() {
+        for (bits, op, c, s) in
+            [(64, Opcode::LShr, !0x1f, 5), (64, Opcode::AShr, !0xf, 4), (32, Opcode::LShr, -8, 3)]
+        {
+            let (mut func, block, x) = cleared(Type::int(bits), op, c, s);
+            assert!(simplify(&mut func), "i{bits} {op:?} {c:#x} {s}");
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, op);
+            let args = operands(&func, result);
+            assert_eq!(args[0], x, "i{bits} {op:?} {c:#x} {s}");
+            assert_eq!(number(&func, args[1]), s);
+        }
+    }
+
+    /// A mask that clears a bit the shift keeps stays.
+    #[test]
+    fn a_mask_of_a_bit_a_shift_keeps_stays() {
+        for (c, s) in [(!0x3f, 5), (0x7fff_ffff_ffff_ffe0, 5)] {
+            let (mut func, block, _) = cleared(Type::int(64), Opcode::LShr, c, s);
+            simplify(&mut func);
+            let result = returned(&func, block);
+            let masked = operands(&func, result)[0];
+            assert_eq!(came_from(&func, masked).0, Opcode::And, "{c:#x} {s}");
+        }
+    }
+
+    /// `(x >> s) pred c` returned from a function of `x`, at the width of `ty`.
+    fn compared(ty: Type, s: i128, pred: IntPred, c: i128) -> (Func, Block, Value) {
+        let (_, mut func, block) = one_block(Type::int(1));
+        let x = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let amount = build.iconst(ty, s);
+        let shifted = build.binary(Opcode::LShr, x, amount, Flags::NONE);
+        let c = build.iconst(ty, c);
+        let out = build.icmp(pred, shifted, c);
+        build.ret(&[out]);
+        (func, block, x)
+    }
+
+    /// `RW_READERS(v) > 1` is `v > 63`, and the other unsigned comparisons take their constant
+    /// the same way.
+    #[test]
+    fn an_unsigned_comparison_after_a_shift_compares_before_it() {
+        for (bits, s, pred, c, d) in [
+            (64, 5, IntPred::Ugt, 1, 63),
+            (64, 5, IntPred::Ule, 1, 63),
+            (32, 3, IntPred::Uge, 4, 32),
+            (32, 3, IntPred::Ult, 4, 32),
+            (32, 4, IntPred::Ugt, 0x0fff_fff0, 0xffff_ff0f),
+        ] {
+            let (mut func, block, x) = compared(Type::int(bits), s, pred, c);
+            assert!(simplify(&mut func), "i{bits} >> {s} {pred:?} {c}");
+            let result = returned(&func, block);
+            let (opcode, extra) = came_from(&func, result);
+            assert_eq!(opcode, Opcode::ICmp);
+            assert_eq!(extra, Extra::IntPred(pred));
+            let args = operands(&func, result);
+            assert_eq!(args[0], x, "i{bits} >> {s} {pred:?} {c}");
+            let all = (1i128 << bits) - 1;
+            assert_eq!(number(&func, args[1]) & all, d & all, "i{bits} >> {s} {pred:?} {c}");
+        }
+    }
+
+    /// A comparison that the shift settles, a signed one, and one whose new constant does not
+    /// fit in 32 bits keep the shift.
+    #[test]
+    fn a_comparison_after_a_shift_that_cannot_move_stays() {
+        for (s, pred, c) in [
+            (60, IntPred::Ugt, 15),
+            (5, IntPred::Uge, 0),
+            (5, IntPred::Sgt, 1),
+            (5, IntPred::Eq, 1),
+            (8, IntPred::Ugt, 1 << 24),
+        ] {
+            let (mut func, block, _) = compared(Type::int(64), s, pred, c);
+            simplify(&mut func);
+            let result = returned(&func, block);
+            if came_from(&func, result).0 != Opcode::ICmp {
+                continue;
+            }
+            let shifted = operands(&func, result)[0];
+            assert_eq!(came_from(&func, shifted).0, Opcode::LShr, "{s} {pred:?} {c}");
         }
     }
 
