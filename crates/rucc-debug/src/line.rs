@@ -121,6 +121,15 @@ pub struct Unit {
     /// it leaves the object out of the map, or crashes, so on a Mac those three strings go where
     /// clang puts them and the line program's own strings stay where they are.
     pub mach_o: bool,
+    /// Whether a unit with no code and no variables still gets its entry in `.debug_info`.
+    ///
+    /// gcc writes the entry for every file it compiles under `-g`, and a file of declarations, or
+    /// a file whose code an `#ifdef` took out, is one. A FreeBSD kernel has many such files, and
+    /// `ctfconvert` reads each object: with no `.debug_info` and no symbol, it writes an empty CTF
+    /// section, and the kernel then has CTF that holds no types, where gcc's DWARF 5 entry gives it
+    /// none. clang writes nothing for such a file, so this is off where clang is the compiler to
+    /// match.
+    pub bare: bool,
     /// Which version of DWARF to write.
     pub version: Version,
     /// Whether the code is RISC-V code the linker may relax, which takes bytes out of a function
@@ -287,11 +296,14 @@ impl gimli::write::RelocateWriter for Section {
 
 /// The sections a unit's debug information goes in.
 ///
-/// The result is empty when nothing in the unit has a row and the unit defines no variable, which
-/// is a file of declarations and a file whose every function was dropped. A file that defines only
-/// variables gets a unit with no address range, as gcc writes it, because its variables and their
-/// types are described there and the kernel's BTF is read from those entries: a table of `const`
-/// structures in a file with no code would otherwise have its types missing from the BTF.
+/// The result is empty when nothing in the unit has a row, the unit defines no variable and
+/// [`Unit::bare`] is off, which is a file of declarations and a file whose every function was
+/// dropped. With [`Unit::bare`] on, such a file gets a unit with no address range, no line table
+/// and nothing in it but its producer, its name, its directory and its language. A file that
+/// defines only variables gets a unit with no address range, as gcc writes it, because its
+/// variables and their types are described there and the kernel's BTF is read from those entries:
+/// a table of `const` structures in a file with no code would otherwise have its types missing
+/// from the BTF.
 ///
 /// # Errors
 ///
@@ -299,7 +311,7 @@ impl gimli::write::RelocateWriter for Section {
 /// out of this compiler, so that is a bug here rather than a program's mistake.
 pub fn write(unit: &Unit) -> Result<Info, Error> {
     let code = unit.funcs.iter().any(|func| !func.rows.is_empty());
-    if !code && unit.globals.is_empty() {
+    if !code && unit.globals.is_empty() && !unit.bare {
         return Ok(Info::default());
     }
     let version = match unit.version {
@@ -745,6 +757,7 @@ mod tests {
             pointer: 8,
             frames: true,
             mach_o: false,
+            bare: false,
             version: Version::Five,
             relaxed: false,
         }
@@ -905,6 +918,23 @@ mod tests {
         let mut unit = one();
         unit.funcs[0].rows.clear();
         assert_eq!(write(&unit).expect("sections"), Info::default());
+    }
+
+    /// The same file under [`Unit::bare`] gets a unit with no address range and nothing below it,
+    /// as gcc writes for a file whose code an `#ifdef` took out.
+    #[test]
+    fn a_bare_unit_with_no_rows_still_writes_its_entry() {
+        let mut unit = Unit { bare: true, ..one() };
+        unit.funcs[0].rows.clear();
+        let info = write(&unit).expect("sections");
+        let names: Vec<&str> = info.chunks.iter().map(|chunk| chunk.name.as_str()).collect();
+        assert!(names.contains(&".debug_info"), "{names:?}");
+        assert!(names.contains(&".debug_abbrev"), "{names:?}");
+        assert!(!names.contains(&".debug_rnglists"), "{names:?}");
+        let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        // The version is the two bytes after the length.
+        assert_eq!(held.bytes[4..6], [5, 0]);
+        assert!(held.relocs.iter().all(|reloc| reloc.symbol != "f"), "{:?}", held.relocs);
     }
 
     /// A file that defines only variables still describes them, in a unit with no address range,
