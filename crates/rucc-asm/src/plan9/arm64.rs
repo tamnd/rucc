@@ -14,9 +14,11 @@
 //!   body does not use.
 //! - The frame pointer is set only in a function whose body reads `x29`. No other code reads it.
 //! - `7l` writes `R17` when it expands an instruction, for example a load from a far offset or the
-//!   address of a symbol. The listing uses `x17` as a scratch register, so `x17` becomes `R26`,
-//!   which neither this compiler nor `7c` gives to a variable in a program. `R28` holds the static
-//!   base and is never written.
+//!   address of a symbol. The listing uses `x17` as a scratch register, so `x17` becomes `R25`,
+//!   which neither this compiler nor `7c` gives to a variable in a program. An address with an
+//!   offset that `7l` cannot encode goes in `R24`, for the same reason. `R26` and `R27` hold the
+//!   `extern register` variables, for example `up` and `m` of the kernel, and the listing writes
+//!   them as it writes any other register. `R28` holds the static base and is never written.
 //! - An address is `adrp` and then an `add` or a load with `:lo12:`. The `adrp` is removed and the
 //!   instruction that uses the page becomes `MOV $sym(SB), R` or a load from `sym(SB)`, which the
 //!   linker makes from the static base.
@@ -75,10 +77,10 @@ pub fn arm64(listing: &str, file: &str, directory: Option<&str>) -> Result<Objec
 const X17: u8 = 17;
 
 /// The register that holds the value of `x17` of the listing.
-const SCRATCH: u8 = 26;
+const SCRATCH: u8 = 25;
 
 /// The register that holds an address with an offset that `7l` cannot encode.
-const UNALIGNED: u8 = 27;
+const UNALIGNED: u8 = 24;
 
 /// The stack pointer, and the zero register, in the operands of `7l`.
 const RSP: u8 = 31;
@@ -139,7 +141,7 @@ enum At {
 fn gpr(n: u8, line: usize) -> Result<u8, Trouble> {
     match n {
         X17 => Ok(SCRATCH),
-        SCRATCH | 27 | 28 => Err(trouble(
+        SCRATCH | UNALIGNED | 28 => Err(trouble(
             line,
             format!("the register x{n}, which the Plan 9 translation keeps for itself"),
         )),
@@ -1326,6 +1328,17 @@ mod tests {
         let p = progs(listing);
         assert_eq!(p[1].to.reg, SCRATCH);
         assert_eq!((p[2].from.reg, p[2].reg), (SCRATCH, 16));
+    }
+
+    /// The kernel keeps `up` in `R26` and `m` in `R27`, and its code reads and writes them.
+    #[test]
+    fn the_extern_register_variables_pass_through() {
+        let listing = "\t.text\n\t.globl f\nf:\n\tmov x26, x0\n\tldr x1, [x27, #8]\n\tret\n";
+        let p = progs(listing);
+        assert_eq!((p[1].from.reg, p[1].to.reg), (0, 26));
+        assert_eq!(p[2].from.reg, 27);
+        assert_ne!(SCRATCH, 26);
+        assert_ne!(UNALIGNED, 27);
     }
 
     #[test]
