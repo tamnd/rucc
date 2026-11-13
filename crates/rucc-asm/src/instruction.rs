@@ -656,6 +656,15 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     }
     accumulated(word, &mut operands);
     implied(word, &operands, mode)?;
+    // gas takes `movd` with a sixty four bit register for `movq`, and nettle writes
+    // `movd %xmm4, %rax`. The rows of `movd` do not say how wide the register is, so without this
+    // the line would move the low four bytes and say nothing.
+    let quad = operands.iter().any(|op| matches!(op, Operand::Reg(_, Width::Quad)));
+    let word = match word {
+        "movd" if quad => "movq",
+        "vmovd" if quad => "vmovq",
+        _ => word,
+    };
     let predicated = predicated(word).or_else(|| multiplied(word));
     let word = match &predicated {
         Some((name, which)) => {
@@ -3192,6 +3201,21 @@ mod tests {
             bytes("vpclmulhqlqdq %xmm1, %xmm2, %xmm3"),
             [0xc4, 0xe3, 0x69, 0x44, 0xd9, 0x01]
         );
+    }
+
+    /// A `movd` with a sixty four bit register is the `movq` that moves all eight bytes, as gas
+    /// takes it, and not a `movd` of the low four.
+    #[test]
+    fn a_movd_with_a_sixty_four_bit_register_moves_eight_bytes() {
+        assert_eq!(bytes("movd %xmm4, %rax"), [0x66, 0x48, 0x0f, 0x7e, 0xe0]);
+        assert_eq!(bytes("movd %rax, %xmm4"), [0x66, 0x48, 0x0f, 0x6e, 0xe0]);
+        assert_eq!(bytes("movd %xmm15, %r9"), [0x66, 0x4d, 0x0f, 0x7e, 0xf9]);
+        assert_eq!(bytes("vmovd %xmm1, %rax"), [0xc4, 0xe1, 0xf9, 0x7e, 0xc8]);
+        assert_eq!(bytes("vmovd %rax, %xmm1"), [0xc4, 0xe1, 0xf9, 0x6e, 0xc8]);
+        assert_eq!(bytes("movd %mm1, %rax"), [0x48, 0x0f, 0x7e, 0xc8]);
+        assert_eq!(bytes("movq %rax, %mm1"), [0x48, 0x0f, 0x6e, 0xc8]);
+        assert_eq!(bytes("movd %xmm1, %eax"), [0x66, 0x0f, 0x7e, 0xc8]);
+        assert_eq!(bytes("movd %eax, %mm1"), [0x0f, 0x6e, 0xc8]);
     }
 
     /// A bare number where an address goes is that address, with no base and no index.

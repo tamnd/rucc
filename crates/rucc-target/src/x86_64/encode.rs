@@ -2929,6 +2929,10 @@ static ENCODINGS: &[Encoding] = &[
     bytes("movq", &PP, Long, &[0x0F, 0x6F], pair(0, 1), NO_IMM),
     bytes("movq", &MP, Long, &[0x0F, 0x6F], pair(0, 1), NO_IMM),
     bytes("movq", &PM, Long, &[0x0F, 0x7F], pair(1, 0), NO_IMM),
+    // The eight byte moves between an MMX register and a general one, which are the four byte
+    // ones with REX.W.
+    bytes("movq", &RP, Quad, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
+    bytes("movq", &PR, Quad, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
     bytes("movd", &RP, Long, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
     bytes("movd", &MP, Long, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
     bytes("movd", &PR, Long, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
