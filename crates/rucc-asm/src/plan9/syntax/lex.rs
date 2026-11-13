@@ -658,9 +658,9 @@ impl<'a> Lexer<'a> {
         self.peekc = c;
         let name = self.symb.clone();
         let s = self.lookup(&name);
-        if self.syms[s].macro_.is_some()
-            && let Some(mut buf) = self.macexpand(s, BUFSIZ - 1)?
-        {
+        let expanded =
+            if self.syms[s].macro_.is_some() { self.macexpand(s, BUFSIZ - 1)? } else { None };
+        if let Some(mut buf) = expanded {
             if self.peekc != IGN {
                 buf.push(byte(self.peekc));
                 self.peekc = IGN;
@@ -1528,15 +1528,13 @@ impl<'a> Lexer<'a> {
     /// `linehist`. The assemblers never set `newflag`, so a `#line` with the same name as the
     /// last `#line` overwrites it.
     fn linehist(&mut self, f: Option<Vec<u8>>, offset: i64) {
-        if let Some(e) = self.hist.last_mut()
-            && offset != 0
-            && e.offset != 0
-            && let (Some(n), Some(en)) = (&f, &e.name)
-            && n == en
-        {
-            e.line = self.lineno;
-            e.offset = offset;
-            return;
+        if let Some(e) = self.hist.last_mut() {
+            let same = matches!((&f, &e.name), (Some(n), Some(en)) if n == en);
+            if offset != 0 && e.offset != 0 && same {
+                e.line = self.lineno;
+                e.offset = offset;
+                return;
+            }
         }
         self.hist.push(Hist { name: f, line: self.lineno, offset });
     }
