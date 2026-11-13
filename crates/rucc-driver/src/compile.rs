@@ -8626,10 +8626,10 @@ decl #0 x : int object external static defined
         assert!(text.contains("\t.data\n\t.globl\tcounter\n"), "{text}");
         assert!(text.contains("\ncounter:\n\t.long\t42\n"), "{text}");
         assert!(text.contains("\t.size\tcounter, .-counter\n"), "{text}");
-        // A zeroed variable carries its size and none of its bytes, and a `static` one is not
-        // announced to the linker at all, which is the whole of what `static` means here.
-        assert!(text.contains("\t.bss\n\t.p2align\t2\n"), "{text}");
-        assert!(text.contains("\nhidden:\n\t.space\t4\n"), "{text}");
+        // A zeroed variable carries its size and none of its bytes. A `static` one is written as
+        // `.local` and `.comm`, as gcc writes it, and is not announced to the linker at all,
+        // which is the whole of what `static` means here.
+        assert!(text.contains("\t.local\thidden\n\t.comm\thidden,4,4\n"), "{text}");
         assert!(!text.contains(".globl\thidden"), "{text}");
         // Nothing writes through it, so it goes in a page the loader can map read only and every
         // process running the program can share.
