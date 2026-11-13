@@ -326,6 +326,43 @@ mod tests {
     }
 
     #[test]
+    fn the_files_come_from_the_9p_server() {
+        use std::collections::HashMap;
+        use std::net::TcpListener;
+        let files = HashMap::from([
+            ("/sys/src/a/x.s", "#include \"../h/m.h\"\nTEXT f(SB), $0\n\tMOVQ $N, AX\n\tRET\n"),
+            ("/sys/src/h/m.h", "#define N 7\n"),
+        ]);
+        let mut tree = rucc_9p::serve::Tree::new();
+        for (name, text) in &files {
+            tree.insert(name.trim_start_matches('/'), text.as_bytes());
+        }
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let _ = rucc_9p::serve::serve(stream, &Mutex::new(tree));
+        });
+        let out = std::env::temp_dir().join(format!("rucc-plan9as-{}.6", std::process::id()));
+        let a = args(&[
+            &format!("--sysroot=9p:tcp!127.0.0.1!{port}"),
+            "--cwd=/sys/src/a",
+            "-o",
+            out.to_str().unwrap(),
+            "x.s",
+        ]);
+        assert_eq!(run("6a", &a), 0);
+        server.join().unwrap();
+        let read = |name: &str| {
+            let key = absolute("/sys/src/a", name).replace("/a/../", "/");
+            files.get(key.as_str()).map(|t| t.as_bytes().to_vec())
+        };
+        let want = assemble6("x.s", "/sys/src/a", &[], &[], &read).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), want);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
     fn a_relative_name_is_under_the_directory() {
         assert_eq!(absolute("/sys/src/9/pc64", "../port/x.h"), "/sys/src/9/pc64/../port/x.h");
         assert_eq!(absolute("/sys/src", "/amd64/include/u.h"), "/amd64/include/u.h");
