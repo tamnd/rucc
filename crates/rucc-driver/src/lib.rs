@@ -1542,6 +1542,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-print-prog-name=") => {
                 query = Some(Query::ProgName(arg["-print-prog-name=".len()..].to_owned()));
             }
+            // gcc's long spellings of the two, with the name after `=` or in the next word.
+            // libtool's check for the linker plugin runs `$CC --print-prog-name liblto_plugin.so`.
+            "--print-file-name" | "--print-prog-name" => {
+                let name =
+                    args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?.clone();
+                i += 1;
+                query = Some(if arg == "--print-file-name" {
+                    Query::FileName(name)
+                } else {
+                    Query::ProgName(name)
+                });
+            }
+            _ if arg.starts_with("--print-file-name=") => {
+                query = Some(Query::FileName(arg["--print-file-name=".len()..].to_owned()));
+            }
+            _ if arg.starts_with("--print-prog-name=") => {
+                query = Some(Query::ProgName(arg["--print-prog-name=".len()..].to_owned()));
+            }
             // A program built to run in more than one thread. On every platform this compiler
             // targets that is a macro the library's headers read and one more library on the
             // link line, and the library is added after the loop so that it lands after the
@@ -10981,6 +10999,23 @@ mod tests {
         let (opts, _) =
             compile(&["--target=x86_64-pc-windows-msvc", "-fgnuc-version=9.5", "-c", "a.c"]);
         assert!(!Session::new(*opts).common());
+    }
+
+    /// gcc takes `--print-prog-name` and `--print-file-name` with the name after `=` or in the
+    /// next word, and answers as for the `-print-` forms. libtool's plugin check runs the first.
+    #[test]
+    fn the_long_print_name_options_take_the_name_joined_or_in_the_next_word() {
+        let target = "--target=x86_64-unknown-linux-gnu";
+        let plugin = printed(&[target, "-O", "--print-prog-name", "liblto_plugin.so"]);
+        assert_eq!(plugin, "liblto_plugin.so");
+        assert_eq!(
+            printed(&[target, "--print-prog-name=ld"]),
+            printed(&[target, "-print-prog-name=ld"])
+        );
+        for line in [["--print-file-name", "none.a"], ["--print-file-name=none.a", "-O"]] {
+            assert_eq!(printed(&[target, line[0], line[1]]), "none.a");
+        }
+        assert!(refused(&[target, "--print-prog-name"]).contains("requires an argument"));
     }
 
     #[test]
