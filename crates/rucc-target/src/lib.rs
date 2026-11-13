@@ -1234,7 +1234,7 @@ pub struct TargetInfo {
     /// Whether the output says where an unwind lands, which is the language specific data area
     /// beside a function's call frame information that a cleanup under `-fexceptions` needs.
     ///
-    /// ELF on x86-64 and AArch64 and nothing else yet. It is a claim about what this compiler
+    /// ELF on x86-64, AArch64 and i386 and nothing else yet. It is a claim about what this compiler
     /// writes rather than about what the platform can do, so lowering turns down a cleanup it could
     /// not honour on the others instead of emitting one the unwinder would skip.
     pub landing_pads: bool,
@@ -1721,7 +1721,7 @@ impl TargetInfo {
             lock_free_width: 64,
             object_format: ObjectFormat::from_tuple(target.object_format()),
             landing_pads: x86_64_elf(target, layout.pointer_size)
-                || (target.arch() == tuple::Arch::Aarch64
+                || (matches!(target.arch(), tuple::Arch::Aarch64 | tuple::Arch::X86)
                     && target.object_format() == tuple::ObjectFormat::Elf),
             relative_tables: x86_64_elf(target, layout.pointer_size),
             absolute_tables: matches!(target.arch(), tuple::Arch::Wasm32),
