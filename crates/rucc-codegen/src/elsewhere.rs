@@ -91,6 +91,7 @@ pub struct Elsewhere {
     aligned: Map<Symbol, u32>,
     unstubbed: Set<Symbol>,
     direct: Set<Symbol>,
+    numbered: Set<Symbol>,
 }
 
 /// Which pointer a name on COFF is reached through, when it is reached through one.
@@ -270,9 +271,7 @@ impl Elsewhere {
         }
         // Position dependent code, which is `-fno-pic` and a kernel. The link puts every name at
         // an address it knows and nothing moves the program afterwards, so there is no name this
-        // file cannot reach directly, and the table is empty. A function this file only declares
-        // gets the address the linker gives it, which in an executable is the canonical entry
-        // it makes for it. A weak variable nothing defines is resolved to zero where it is
+        // file cannot reach directly, and the table is empty. A weak variable nothing defines is resolved to zero where it is
         // referenced, which `ld` does for `R_X86_64_PC32` and for the absolute forms alike. That
         // second one is why this is not only an optimization: a slot the linker cannot relax
         // leaves a `.got` behind, and the kernel's link script asserts there is none, so a single
@@ -308,7 +307,10 @@ impl Elsewhere {
                 .map(|id| module[id].name),
         );
         if pic == Pic::Absolute && copies && format == ObjectFormat::Elf {
-            return Self { names: indirect.collect(), ..Self::default() };
+            let names: Set<Symbol> = indirect.collect();
+            let numbered =
+                Self::declared_functions(module).filter(|name| !names.contains(name)).collect();
+            return Self { names, numbered, ..Self::default() };
         }
         // A Plan 9 loader links every program at one fixed address and has no slots at all, so
         // each name is reached directly, as `6c` and `7c` do.
@@ -354,6 +356,17 @@ impl Elsewhere {
             .filter(|&id| pic.replaceable(module[id].linkage, module[id].visibility))
             .map(|id| module[id].name);
         funcs.map(|id| module[id].name).chain(globals).chain(aliases).chain(indirect).collect()
+    }
+
+    /// The functions this file only declares and a library may define, whose address position
+    /// dependent code writes as a number. See [`Self::numbered`].
+    fn declared_functions(module: &Module) -> impl Iterator<Item = Symbol> + '_ {
+        module
+            .funcs()
+            .filter(|&id| {
+                module[id].is_declaration() && module[id].visibility == Visibility::Default
+            })
+            .map(|id| module[id].name)
     }
 
     /// Whether the file says it needs every name another object defines reached through the
@@ -424,6 +437,26 @@ impl Elsewhere {
     #[must_use]
     pub fn holds(&self, name: Symbol) -> bool {
         self.names.contains(&name)
+    }
+
+    /// Whether the address of that function is wanted as a number rather than as a distance
+    /// from the instruction pointer, which is a function this file only declares, in position
+    /// dependent code on ELF.
+    ///
+    /// The function may be in a shared library, and then the executable has to give it one
+    /// address that the library and the program agree on, which is the canonical entry the linker
+    /// makes for it in the procedure linkage table. GNU `ld` makes that entry only for a
+    /// reference that takes the address. It reads `R_X86_64_PC32` in code as a call or a jump,
+    /// so `leaq ext(%rip), %rax` is resolved to a stub of the executable's own and the symbol
+    /// keeps the value zero. The library then compares against the real function and the two
+    /// pointers differ: jq asserts that the callback it was given is its own, and aborts,
+    /// tamnd/rucc#4550. gcc writes `movl $ext, %eax`, whose `R_X86_64_32` is an address taken,
+    /// and this writes `movq $ext, %rax` with `R_X86_64_32S`, which `ld` reads the same way. A
+    /// call to the name is still a call, and a read through it is still from the instruction
+    /// pointer.
+    #[must_use]
+    pub fn numbered(&self, name: Symbol) -> bool {
+        self.numbered.contains(&name)
     }
 
     /// The pointer the address of that name is read out of on COFF, where it is read out of one.

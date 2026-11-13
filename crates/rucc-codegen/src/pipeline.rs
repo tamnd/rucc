@@ -1236,8 +1236,13 @@ pub fn compile_recording(
         if std::ptr::eq(machine.shapes, &x86_64::MACHINE) {
             fold::named_stores(&mut func, names, machine.shapes, true);
         }
-        fold::absolute(&mut func, machine.insts, names);
+        fold::absolute(&mut func, machine.insts, names, |_| true);
         fold::tables(&mut func, machine.insts, names);
+    } else if flags.code_model == CodeModel::Small && std::ptr::eq(machine.shapes, &x86_64::MACHINE)
+    {
+        // Position dependent code takes the address of a function a library may define as a
+        // number, so that the linker gives the function one address. See `Elsewhere::numbered`.
+        fold::absolute(&mut func, machine.insts, names, |name| elsewhere.numbered(name));
     }
     // i386 outside position independent code, where the address of a name is a number a store
     // can carry. After the three above for the same reason as the kernel's.

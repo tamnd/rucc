@@ -138,8 +138,8 @@
 //! arithmetic and would be reading a register file where the reader's base may have been reused
 //! for something else in between.
 
-use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
+use rucc_base::{Interner, Symbol};
 use rucc_mir as mir;
 use rucc_target::{FrameInsts, MachineInsts, RegClass, Role};
 
@@ -1010,7 +1010,16 @@ pub fn unread_arguments(func: &mut mir::Func, pending: &mut Pending<'_>) -> usiz
 /// write `leaq sym(%rip), %rax`. The two are the same length and the same speed. The reason to
 /// write the first is that it is gcc's output, and that a kernel link checks every address of this
 /// kind fits in the top 2 GiB, which is the promise the model makes. tamnd/rucc#2275.
-pub fn absolute(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) -> usize {
+///
+/// Only the names `wanted` says yes to. The kernel model wants every name. Position dependent
+/// code under the small model wants the functions another object may define, see
+/// [`Elsewhere::numbered`].
+pub fn absolute(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    names: &mut Interner,
+    wanted: impl Fn(Symbol) -> bool,
+) -> usize {
     let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
     let mut marked = 0;
     for block in func.blocks().collect::<Vec<_>>() {
@@ -1019,7 +1028,7 @@ pub fn absolute(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) 
                 continue;
             }
             let Some(mem) = func[inst].mem else { continue };
-            if named_alone(func[mem]) {
+            if named_alone(func[mem]) && func[mem].symbol.is_some_and(&wanted) {
                 func[mem].reach = mir::Reach::Absolute;
                 marked += 1;
             }
@@ -2315,7 +2324,7 @@ mod tests {
         let to = func.new_vreg(GPR);
         func.build(block, load).def(to, GPR).mem(mir::Mem::of(here)).finish();
 
-        assert_eq!(absolute(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(absolute(&mut func, &FRAME, &mut names, |_| true), 1);
         let reaches: Vec<mir::Reach> =
             shape(&func, &names, block).into_iter().map(|(_, amode)| amode.reach).collect();
         assert_eq!(
@@ -2345,7 +2354,7 @@ mod tests {
 
         assert_eq!(spread(&mut func, &FRAME, &mut names), 2);
         assert_eq!(folds_under(&mut func, &mut names, CodeModel::Kernel), 2);
-        assert_eq!(absolute(&mut func, &FRAME, &mut names), 0);
+        assert_eq!(absolute(&mut func, &FRAME, &mut names, |_| true), 0);
         let shape = shape(&func, &names, block);
         assert_eq!(shape.len(), 2, "{shape:?}");
         for (opcode, amode) in shape {
@@ -2378,7 +2387,7 @@ mod tests {
 
         assert_eq!(spread(&mut func, &FRAME, &mut names), 1);
         assert_eq!(folds_under(&mut func, &mut names, CodeModel::Kernel), 1);
-        assert_eq!(absolute(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(absolute(&mut func, &FRAME, &mut names, |_| true), 1);
         assert_eq!(shape(&func, &names, block).len(), 3);
     }
 

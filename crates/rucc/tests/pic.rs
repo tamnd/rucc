@@ -237,14 +237,47 @@ fn position_dependent_code_reaches_every_name_directly() {
         assert!(!text.contains("GOTPCREL"), "{flags:?}: {text}");
         assert!(!text.contains("@PLT"), "{flags:?}: {text}");
         assert!(text.contains("maybe(%rip)"), "{flags:?}: {text}");
-        assert!(text.contains("act(%rip)"), "{flags:?}: {text}");
-        assert!(text.contains("perhaps(%rip)"), "{flags:?}: {text}");
+        assert!(text.contains("$act,"), "{flags:?}: {text}");
+        assert!(text.contains("$perhaps,"), "{flags:?}: {text}");
         assert!(text.contains("call\tperhaps"), "{flags:?}: {text}");
     }
     // What gets the table without the flag, so that the test above is known to be asking about
     // something the flag changes.
     let executable = asm("absolute-exe", &[], EVERY);
     assert!(executable.contains("maybe@GOTPCREL(%rip)"), "{executable}");
+}
+
+/// Position dependent code writes the address of a function it only declares as a number,
+/// `movq $ext, %rax`, as gcc writes `movl $ext, %eax`, and not as `leaq ext(%rip), %rax`.
+///
+/// The function may be in a shared library. GNU `ld` reads `R_X86_64_PC32` in code as a call,
+/// so for the second form it gives the executable a stub of its own and no canonical entry, and
+/// the pointer the program has is not the one the library has. jq built `-fno-pic` on FreeBSD
+/// compared the callback it was given against its own `jq_util_input_next_input_cb` and aborted,
+/// tamnd/rucc#4550. A hidden function is in this image, a function this file defines is too, and
+/// a call is a call, so those three stay as they were.
+#[test]
+fn position_dependent_code_takes_a_declared_function_address_as_a_number() {
+    let source = "\
+extern int ext(int);
+extern int hid(int) __attribute__((visibility(\"hidden\")));
+int mine(int x) { return x; }
+void *ext_address(void) { return (void *)ext; }
+void *hid_address(void) { return (void *)hid; }
+void *mine_address(void) { return (void *)mine; }
+int call_ext(void) { return ext(1) + 1; }
+";
+    for level in ["-O0", "-O2"] {
+        let text = asm("numbered", &["-fno-pic", level], source);
+        assert!(text.contains("$ext, %rax"), "{level}: {text}");
+        assert!(!text.contains("ext(%rip)"), "{level}: {text}");
+        assert!(text.contains("call\text"), "{level}: {text}");
+        assert!(text.contains("hid(%rip)"), "{level}: {text}");
+        assert!(text.contains("mine(%rip)"), "{level}: {text}");
+    }
+    // A position independent executable still reads it out of the table.
+    let executable = asm("numbered-pie", &["-fPIE"], source);
+    assert!(executable.contains("ext@GOTPCREL(%rip)"), "{executable}");
 }
 
 /// A constant holding an address goes in `.rodata` under `-fno-pic`, as gcc puts it, and in
