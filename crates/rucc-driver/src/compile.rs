@@ -2678,6 +2678,8 @@ fn describe(
         // the table a frame base is read through is there.
         frames: opts.unwinds() || frames.is_some(),
         mach_o: target.object_format == rucc_target::ObjectFormat::MachO,
+        // gcc's answer on ELF, where gcc is the compiler matched, and clang's on a Mac.
+        bare: target.object_format == rucc_target::ObjectFormat::Elf,
         version: if opts.dwarf_version == 4 {
             rucc_debug::Version::Four
         } else {
@@ -2917,6 +2919,8 @@ fn describe_wasm(
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(4),
         frames: false,
         mach_o: false,
+        // clang, the compiler for wasm, writes nothing for a unit with nothing in it.
+        bare: false,
         version: if opts.dwarf_version == 4 {
             rucc_debug::Version::Four
         } else {

@@ -1339,6 +1339,7 @@ mod tests {
             pointer: 8,
             frames: true,
             mach_o: false,
+            bare: false,
             version: Version::Five,
             relaxed: false,
         }
