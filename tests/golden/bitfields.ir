@@ -176,40 +176,40 @@ func @report(ptr, ...) -> i32, linkage(external);
 
 func @past_the_prototype(ptr), linkage(external) {
 block0(%0: ptr):
-    %1 = global_addr @.Lstr.0
-    %2 = load.i32 %0, align 4
-    %3 = zext.i64 %2
-    %4 = iconst.i64 4
-    %5 = ptr_add.nuw %0, %4
-    %6 = load.i16 %5, align 2
-    %7 = zext.i64 %6
-    %8 = iconst.i64 32
-    %9 = shl %7, %8
-    %10 = or %3, %9
-    %11 = iconst.i64 19
-    %12 = shl %10, %11
-    %13 = iconst.i64 19
-    %14 = ashr %12, %13
-    %15 = trunc.i45 %14
-    %16 = sext.i64 %15
-    %17 = iconst.i64 8
-    %18 = ptr_add.nuw %0, %17
-    %19 = load.i32 %18, align 4
-    %20 = zext.i64 %19
-    %21 = iconst.i64 4
-    %22 = ptr_add.nuw %18, %21
-    %23 = load.i8 %22, align 1
-    %24 = zext.i64 %23
-    %25 = iconst.i64 32
-    %26 = shl %24, %25
-    %27 = or %20, %26
-    %28 = iconst.i64 29
-    %29 = shl %27, %28
-    %30 = iconst.i64 29
-    %31 = ashr %29, %30
-    %32 = trunc.i35 %31
-    %33 = sext.i64 %32
-    %34 = call @report(%1, %16, %33) : (ptr, ...) -> i32
+    %1 = iconst.i64 8
+    %2 = ptr_add.nuw %0, %1
+    %3 = load.i32 %2, align 4
+    %4 = zext.i64 %3
+    %5 = iconst.i64 4
+    %6 = ptr_add.nuw %2, %5
+    %7 = load.i8 %6, align 1
+    %8 = zext.i64 %7
+    %9 = iconst.i64 32
+    %10 = shl %8, %9
+    %11 = or %4, %10
+    %12 = iconst.i64 29
+    %13 = shl %11, %12
+    %14 = iconst.i64 29
+    %15 = ashr %13, %14
+    %16 = trunc.i35 %15
+    %17 = sext.i64 %16
+    %18 = load.i32 %0, align 4
+    %19 = zext.i64 %18
+    %20 = iconst.i64 4
+    %21 = ptr_add.nuw %0, %20
+    %22 = load.i16 %21, align 2
+    %23 = zext.i64 %22
+    %24 = iconst.i64 32
+    %25 = shl %23, %24
+    %26 = or %19, %25
+    %27 = iconst.i64 19
+    %28 = shl %26, %27
+    %29 = iconst.i64 19
+    %30 = ashr %28, %29
+    %31 = trunc.i45 %30
+    %32 = sext.i64 %31
+    %33 = global_addr @.Lstr.0
+    %34 = call @report(%33, %32, %17) : (ptr, ...) -> i32
     return
 }
 

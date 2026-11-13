@@ -12211,6 +12211,112 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
+    /// The values one argument of a call travels as, pushed to `values` in the order the
+    /// parameter takes them. When `checked` says the parameter is `nonnull`, `nonnull` gets the
+    /// value the check reads.
+    fn argument(
+        &mut self,
+        arg: ExprId,
+        travel: &Travel,
+        checked: bool,
+        values: &mut Vec<Value>,
+        nonnull: &mut Option<Value>,
+        span: Span,
+    ) {
+        let tast = self.tast();
+        match travel.pass {
+            // Nothing of it travels, and it is still evaluated: `f(g())` calls `g`.
+            Pass::Ignore => {
+                self.discard(arg);
+            }
+            Pass::Direct => {
+                let value = self.value(arg);
+                if checked {
+                    *nonnull = Some(value);
+                }
+                values.push(value);
+            }
+            // A scalar that travels as the bits of something else, which is a floating point
+            // argument of a variadic function on Windows on AArch64, in an x register, and a
+            // `_BitInt` wider than a register on x86-64, in the words it is classified as.
+            Pass::Pieces(_)
+                if repr::value_type(self.types(), self.target(), tast[arg].ty).is_some() =>
+            {
+                let value = self.value(arg);
+                let slots = self.split(value, travel, span);
+                values.extend(slots);
+            }
+            Pass::Pieces(_) => {
+                let place = self.place(arg);
+                // gcc says a read of an argument is where the call starts.
+                self.check_load_at(place, span.lo, span);
+                let align = self.place_align(place);
+                let addr = self.address_of(place, span);
+                let slots = self.load_slots(addr, align, travel, span);
+                values.extend(slots);
+            }
+            // The callee is given the address of a copy and may write to it, so the copy is
+            // made here and the object the program wrote is not what travels.
+            Pass::Reference => {
+                let ty = tast[arg].ty;
+                // An object of no fixed size, whose copy is as big as the program says it
+                // is here and so is made where the call is rather than in the entry block.
+                if repr::is_variable_length(self.types(), ty) {
+                    let length = self.size_value(ty, span);
+                    let copy = self.dynamic(length, travel.align, span);
+                    let place = self.place(arg);
+                    // gcc says a read of an argument is where the call starts.
+                    self.check_load_at(place, span.lo, span);
+                    let from = self.address_of(place, span);
+                    self.copy_bytes(copy, from, ty, span);
+                    values.push(copy);
+                    return;
+                }
+                let copy = self.scratch(travel.size, travel.align, span);
+                match repr::value_type(self.types(), self.target(), ty) {
+                    // A scalar that travels that way, which is a `long double` on Windows.
+                    // The value is what the program has, and `f(a * b)` has no object to
+                    // copy from, so the copy is where the value is written rather than
+                    // where it already was.
+                    Some(_) => {
+                        let value = self.value(arg);
+                        let info = self.access(ty);
+                        self.build(span).store(value, copy, info, Flags::NONE);
+                    }
+                    None => {
+                        let place = self.place(arg);
+                        // gcc says a read of an argument is where the call starts.
+                        self.check_load_at(place, span.lo, span);
+                        let from = self.address_of(place, span);
+                        self.memcpy(copy, from, travel.size, travel.align, span);
+                    }
+                }
+                values.push(copy);
+            }
+            // The object's own bytes go in the argument area, which is what `byval` on the
+            // parameter says and what the backend does, so what travels is where they are.
+            Pass::Memory => {
+                let ty = tast[arg].ty;
+                // A scalar that goes there, which is a `_BitInt` wider than a register on
+                // x86-64 once the pair of registers is gone. It is a value and may be no
+                // object at all, so it is written somewhere first.
+                if repr::value_type(self.types(), self.target(), ty).is_some() {
+                    let value = self.value(arg);
+                    let copy = self.scratch(travel.size, travel.align, span);
+                    let info = self.access(ty);
+                    self.build(span).store(value, copy, info, Flags::NONE);
+                    values.push(copy);
+                    return;
+                }
+                let place = self.place(arg);
+                // gcc says a read of an argument is where the call starts.
+                self.check_load_at(place, span.lo, span);
+                let addr = self.address_of(place, span);
+                values.push(addr);
+            }
+        }
+    }
+
     /// A call, direct when the callee is a function and indirect when it is a pointer.
     ///
     /// `into` is where a return value that is an object goes, which the caller of this knows and
@@ -12267,100 +12373,27 @@ impl<'u> Body<'_, 'u> {
         // arguments of can say which values were one argument. See [`Func::set_arg_groups`].
         let mut starts = Vec::with_capacity(count + 1);
         let mut nonnull = Vec::new();
-        for index in 0..count {
-            starts.push(values.len());
+        // The arguments are evaluated in the order gcc evaluates them on this target, which C
+        // leaves unspecified. See [`TargetInfo::arguments_right_to_left`]. What travels is still
+        // in the order of the parameters.
+        let mut pieces: Vec<Vec<Value>> = vec![Vec::new(); count];
+        let mut checked: Vec<Option<Value>> = vec![None; count];
+        let order: Vec<usize> = if self.target().arguments_right_to_left() {
+            (0..count).rev().collect()
+        } else {
+            (0..count).collect()
+        };
+        for index in order {
             let arg = tast[args][index];
-            let travel = &plan.args[index];
-            match travel.pass {
-                // Nothing of it travels, and it is still evaluated: `f(g())` calls `g`.
-                Pass::Ignore => {
-                    self.discard(arg);
-                }
-                Pass::Direct => {
-                    let value = self.value(arg);
-                    if self.checks_nonnull_arg(named, index + 1) {
-                        nonnull.push((index + 1, value));
-                    }
-                    values.push(value);
-                }
-                // A scalar that travels as the bits of something else, which is a floating point
-                // argument of a variadic function on Windows on AArch64, in an x register, and a
-                // `_BitInt` wider than a register on x86-64, in the words it is classified as.
-                Pass::Pieces(_)
-                    if repr::value_type(self.types(), self.target(), tast[arg].ty).is_some() =>
-                {
-                    let value = self.value(arg);
-                    let slots = self.split(value, travel, span);
-                    values.extend(slots);
-                }
-                Pass::Pieces(_) => {
-                    let place = self.place(arg);
-                    // gcc says a read of an argument is where the call starts.
-                    self.check_load_at(place, span.lo, span);
-                    let align = self.place_align(place);
-                    let addr = self.address_of(place, span);
-                    let slots = self.load_slots(addr, align, travel, span);
-                    values.extend(slots);
-                }
-                // The callee is given the address of a copy and may write to it, so the copy is
-                // made here and the object the program wrote is not what travels.
-                Pass::Reference => {
-                    let ty = tast[arg].ty;
-                    // An object of no fixed size, whose copy is as big as the program says it
-                    // is here and so is made where the call is rather than in the entry block.
-                    if repr::is_variable_length(self.types(), ty) {
-                        let length = self.size_value(ty, span);
-                        let copy = self.dynamic(length, travel.align, span);
-                        let place = self.place(arg);
-                        // gcc says a read of an argument is where the call starts.
-                        self.check_load_at(place, span.lo, span);
-                        let from = self.address_of(place, span);
-                        self.copy_bytes(copy, from, ty, span);
-                        values.push(copy);
-                        continue;
-                    }
-                    let copy = self.scratch(travel.size, travel.align, span);
-                    match repr::value_type(self.types(), self.target(), ty) {
-                        // A scalar that travels that way, which is a `long double` on Windows.
-                        // The value is what the program has, and `f(a * b)` has no object to
-                        // copy from, so the copy is where the value is written rather than
-                        // where it already was.
-                        Some(_) => {
-                            let value = self.value(arg);
-                            let info = self.access(ty);
-                            self.build(span).store(value, copy, info, Flags::NONE);
-                        }
-                        None => {
-                            let place = self.place(arg);
-                            // gcc says a read of an argument is where the call starts.
-                            self.check_load_at(place, span.lo, span);
-                            let from = self.address_of(place, span);
-                            self.memcpy(copy, from, travel.size, travel.align, span);
-                        }
-                    }
-                    values.push(copy);
-                }
-                // The object's own bytes go in the argument area, which is what `byval` on the
-                // parameter says and what the backend does, so what travels is where they are.
-                Pass::Memory => {
-                    let ty = tast[arg].ty;
-                    // A scalar that goes there, which is a `_BitInt` wider than a register on
-                    // x86-64 once the pair of registers is gone. It is a value and may be no
-                    // object at all, so it is written somewhere first.
-                    if repr::value_type(self.types(), self.target(), ty).is_some() {
-                        let value = self.value(arg);
-                        let copy = self.scratch(travel.size, travel.align, span);
-                        let info = self.access(ty);
-                        self.build(span).store(value, copy, info, Flags::NONE);
-                        values.push(copy);
-                        continue;
-                    }
-                    let place = self.place(arg);
-                    // gcc says a read of an argument is where the call starts.
-                    self.check_load_at(place, span.lo, span);
-                    let addr = self.address_of(place, span);
-                    values.push(addr);
-                }
+            let check = self.checks_nonnull_arg(named, index + 1);
+            let (piece, value) = (&mut pieces[index], &mut checked[index]);
+            self.argument(arg, &plan.args[index], check, piece, value, span);
+        }
+        for (index, piece) in pieces.into_iter().enumerate() {
+            starts.push(values.len());
+            values.extend(piece);
+            if let Some(value) = checked[index] {
+                nonnull.push((index + 1, value));
             }
         }
 
