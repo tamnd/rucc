@@ -10738,15 +10738,15 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
         // The destination whose object is in sight keeps its check, size and all.
         assert!(
-            text.contains("call @__memcpy_chk(%2, %0, %1, %3) : (ptr, ptr, i64, i64)"),
+            text.contains("call @__memcpy_chk(%3, %0, %1, %2) : (ptr, ptr, i64, i64)"),
             "{text}"
         );
 
         // The three whose object is not lose the argument and the name along with it. The type of
         // the call goes with them, which is what says the argument is gone rather than ignored.
-        assert!(text.contains("call @memcpy(%6, %0, %1) : (ptr, ptr, i64) -> ptr"), "{text}");
-        assert!(text.contains("call @strcpy(%10, %0) : (ptr, ptr) -> ptr"), "{text}");
-        assert!(text.contains("call @stpncpy(%14, %0, %1) : (ptr, ptr, i64) -> ptr"), "{text}");
+        assert!(text.contains("call @memcpy(%7, %0, %1) : (ptr, ptr, i64) -> ptr"), "{text}");
+        assert!(text.contains("call @strcpy(%11, %0) : (ptr, ptr) -> ptr"), "{text}");
+        assert!(text.contains("call @stpncpy(%15, %0, %1) : (ptr, ptr, i64) -> ptr"), "{text}");
 
         // The formatted one never folds, whatever the size says, because refusing a `%n` in a
         // writable format is the other half of what it was asked to do.
@@ -15540,7 +15540,7 @@ int p(const char *, ...);
 int f(struct big b, struct pair q) { return p(\"\", 1, b, q); }
 ");
         assert!(
-            text.contains("call @p(%3, %4, %0 byval(64, align 8), %5) : (ptr, ...) -> i32"),
+            text.contains("call @p(%5, %4, %0 byval(64, align 8), %3) : (ptr, ...) -> i32"),
             "{text}"
         );
     }

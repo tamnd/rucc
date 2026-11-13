@@ -239,7 +239,9 @@ int main(void) {
     }
   }
   int (*through)(int) = f;
-  printf("%d %d\n", f(20), through(20));
+  int first = f(20);
+  int second = through(20);
+  printf("%d %d\n", first, second);
   return 0;
 }
 "#;
