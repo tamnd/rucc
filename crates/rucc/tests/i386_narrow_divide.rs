@@ -20,7 +20,7 @@ u64 masked(u64 a) { return (a & 0xffffffff) / 1000; }
 u64 shifted(u64 a) { return (a >> 32) / 7; }
 u64 both(unsigned a, unsigned b) { return (u64)a / b; }
 u64 both_left(unsigned a, unsigned b) { return (u64)a % b; }
-u64 whole(u64 a) { return a / 10; }
+u64 whole(u64 a) { return a / 1000; }
 s64 any(int a, int b) { return (s64)a / b; }
 ";
 
@@ -86,7 +86,8 @@ fn a_constant_divisor_is_a_multiply_at_the_word() {
     }
 }
 
-/// A value that is 64 bits wide to begin with does not fit in a word, and a signed division by a
+/// A value that is 64 bits wide to begin with does not fit in a word, and gcc calls the runtime to
+/// divide it by 1000, which has no short form at 64 bits on i386. A signed division by a
 /// variable may be the most negative `int` over minus one, whose quotient is 2 to the 31 and does
 /// not fit either. Both are still the runtime's, as they are with gcc.
 #[test]
