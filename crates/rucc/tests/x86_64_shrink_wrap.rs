@@ -43,6 +43,10 @@ long g(long *p, long x) {
 ";
 
 fn listing() -> String {
+    listing_with(&[])
+}
+
+fn listing_with(extra: &[&str]) -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("rucc-x64-wrap-{}-{n}", std::process::id()));
@@ -51,6 +55,7 @@ fn listing() -> String {
     std::fs::write(&path, SOURCE).expect("the fixture can be written");
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .args(["--target=x86_64-unknown-linux-gnu", "-O2", "-fno-pic", "-S", "-o", "-"])
+        .args(extra)
         .arg(&path)
         .output()
         .expect("the compiler is built before its own tests run");
@@ -120,4 +125,45 @@ fn the_unwind_rows_follow_the_frame() {
 fn a_call_on_every_path_keeps_the_prologue_at_the_top() {
     let text = listing();
     assert!(pushes_before_branch(&text, "g") > 0, "{text}");
+}
+
+/// A frame pointer goes in with the rest of the prologue, as gcc does under
+/// `-fno-omit-frame-pointer`. The FreeBSD kernel builds with it, and `free` and `malloc` there leave
+/// on their first test before gcc pushes `%rbp`.
+#[test]
+fn a_frame_pointer_goes_in_with_the_prologue() {
+    let text = listing_with(&["-fno-omit-frame-pointer"]);
+    assert_eq!(pushes_before_branch(&text, "f"), 0, "{text}");
+    assert!(lines(&text, "f").iter().any(|line| line == "pushq\t%rbp"), "{text}");
+    assert!(pushes_before_branch(&text, "g") > 0, "{text}");
+}
+
+/// With a frame pointer the rows move the address to `%rbp` and back. Read in the order of the
+/// listing, the address is 8 above `%rsp` at each `ret`, and at each `call` it is 16 above `%rbp`
+/// or a multiple of 16 above `%rsp`.
+#[test]
+fn the_unwind_rows_follow_a_frame_with_a_frame_pointer() {
+    let text = listing_with(&["-fno-omit-frame-pointer"]);
+    for name in ["f", "h", "walk", "g"] {
+        let (mut reg, mut cfa) = (7, 8);
+        let mut kept = Vec::new();
+        for line in lines(&text, name) {
+            if let Some(at) = line.strip_prefix(".cfi_def_cfa_offset ") {
+                cfa = at.parse().expect("a distance");
+            } else if let Some(to) = line.strip_prefix(".cfi_def_cfa_register ") {
+                reg = to.parse().expect("a register");
+            } else if let Some(rule) = line.strip_prefix(".cfi_def_cfa ") {
+                let (to, at) = rule.split_once(", ").expect("a register and a distance");
+                (reg, cfa) = (to.parse().expect("a register"), at.parse().expect("a distance"));
+            } else if line == ".cfi_remember_state" {
+                kept.push((reg, cfa));
+            } else if line == ".cfi_restore_state" {
+                (reg, cfa) = kept.pop().expect("a remembered state");
+            } else if line == "ret" {
+                assert_eq!((reg, cfa), (7, 8), "{name}\n{text}");
+            } else if line.starts_with("call") {
+                assert!((reg, cfa) == (6, 16) || (reg == 7 && cfa % 16 == 0), "{name}\n{text}");
+            }
+        }
+    }
 }

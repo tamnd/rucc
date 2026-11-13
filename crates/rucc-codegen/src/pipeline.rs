@@ -1726,7 +1726,7 @@ pub fn compile_recording(
         Some(targets) => Some(targets.call),
         None => landing.filter(|_| asked && !source.attrs.set.contains(ir::AttrSet::NOCF)),
     };
-    // Only x86-64, where a frame without a frame pointer is pushes and a subtraction and the
+    // Only x86-64, where a frame is pushes, a move and a subtraction and the
     // unwinder reads rows, and only when optimizing, as gcc does. Not in the kencc convention,
     // because a Plan 9 loader makes the frame itself from the size on the `TEXT` record and puts
     // the adjustment at the entry, so the code has to keep it there.
