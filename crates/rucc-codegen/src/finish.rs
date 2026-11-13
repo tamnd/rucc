@@ -737,10 +737,15 @@ fn region(
 ) -> Option<Region> {
     let entry = func.entry()?;
     let saved = frame.saved_int();
+    // The frame pointer wants the frame too when the frame keeps one. An incoming argument is
+    // read through it, and so is the answer to `__builtin_frame_address`.
+    let pointer = frame.frame_pointer().then_some(conv.frame_pointer);
     let touches = |operand: &Operand, loose: &[PhysReg]| {
         operand.class == conv.int_class
             && operand.reg.phys().is_some_and(|at| {
-                at == conv.stack_pointer || (saved.contains(&at) && !loose.contains(&at))
+                at == conv.stack_pointer
+                    || Some(at) == pointer
+                    || (saved.contains(&at) && !loose.contains(&at))
             })
     };
     // A template and the address of a block are both somewhere this cannot see past.
@@ -895,12 +900,17 @@ fn twin(func: &mut Func, moves: &mut Moves, block: Block, inside: &Set<Block>) -
 }
 
 /// Whether the prologue of that frame can go somewhere other than the top: it is pushes and one
-/// subtraction, which is every frame on SysV x86-64 without a frame pointer, and nothing else in
-/// the function says where it begins.
+/// subtraction, which is every frame on SysV x86-64, and nothing else in the function says where
+/// it begins.
+///
+/// A frame pointer is one more push and a move, so a frame with one can go further in too. That
+/// is what gcc does under `-fno-omit-frame-pointer`, and the FreeBSD kernel builds with it. `free`
+/// and `malloc` test their argument and leave before gcc pushes `%rbp`. Not when the pointer is
+/// set after the pushes, which is the late order of the Windows convention.
 fn wrappable(func: &Func, frame: &Frame, conv: &CallRegs) -> bool {
     let odd = frame.naked()
-        || (frame.saved_int().is_empty() && frame.size() == 0)
-        || frame.frame_pointer()
+        || (frame.saved_int().is_empty() && frame.size() == 0 && !frame.frame_pointer())
+        || (frame.frame_pointer() && frame.late())
         || frame.home() > 0
         || frame.realign().is_some()
         || frame.grows()
@@ -2613,7 +2623,17 @@ impl Writer<'_> {
         let body = self.func.cfi.iter().filter(|(inst, _)| prologue.contains(inst));
         let body = body.map(|&(_, op)| op).collect();
         let int = self.conv.int_class;
-        let mut entered = vec![CfiOp::DefCfaOffset(offset(self.conv.return_address))];
+        let at = offset(self.conv.return_address);
+        // A frame pointer moves the address to that register, so the rows outside go back to the
+        // stack pointer and say that the frame pointer holds the caller's value. The first row is
+        // also the last row of each epilogue, which is how [`rows`] finds one.
+        let mut entered = if frame.frame_pointer() {
+            let sp = self.dwarf(int, self.conv.stack_pointer);
+            let fp = self.dwarf(int, self.conv.frame_pointer);
+            vec![CfiOp::DefCfa { reg: sp, offset: at }, CfiOp::Restore(fp)]
+        } else {
+            vec![CfiOp::DefCfaOffset(at)]
+        };
         for &reg in frame.saved_int() {
             entered.push(CfiOp::Restore(self.dwarf(int, reg)));
         }
