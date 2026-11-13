@@ -43,7 +43,7 @@
 //! # Twice as wide as a register
 //!
 //! gcc also writes most other divisions of a `long long` by a constant without a call on i386, as
-//! `expand_doubleword_divmod` at `gcc/optabs.cc` does, and [`wider`] follows it. A remainder by an
+//! `expand_doubleword_divmod` at `gcc/optabs.cc` does, and `wider` follows it. A remainder by an
 //! odd divisor `d` is the remainder of a short sum: when two to the power of some `bit` leaves one
 //! over after a division by `d`, the dividend cut into pieces of `bit` bits leaves the same
 //! remainder as the sum of the pieces, and that sum fits in a register. The remainder of the sum is
