@@ -500,6 +500,19 @@ pub static PAIR_LIBCALLS: &[(Opcode, &str, &str)] = &[
     (Opcode::FPToUI, "f80.i64", "__fixunsxfdi"),
 ];
 
+/// The routines [`crate::wide`] calls for a quotient and a remainder of the same `long long`
+/// operands at once, on a target whose registers are thirty two bits wide. The unsigned one is
+/// first. Each takes the address the remainder goes to as its third argument. libgcc has both, and
+/// `runtime/builtins/div.c` defines both.
+pub static PAIR_DIVMOD: [&str; 2] = ["__udivmoddi4", "__divmoddi4"];
+
+/// The routine that gives both the quotient and the remainder of a `long long` on a target whose
+/// registers are thirty two bits wide.
+#[must_use]
+pub fn pair_divmod(signed: bool) -> &'static str {
+    PAIR_DIVMOD[usize::from(signed)]
+}
+
 /// The runtime function this operation at this mode becomes on a target whose registers are
 /// thirty two bits wide, or nothing where it is not a call there.
 #[must_use]

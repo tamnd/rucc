@@ -85,6 +85,10 @@
 //! `_Float16`, is left alone here and refused below the way every function of this width used to
 //! be.
 //!
+//! On a thirty two bit target a quotient and a remainder of the same two operands are one call to
+//! `__udivmoddi4` or `__divmoddi4` where gcc makes one, which is [`sharing`]. The remainder comes
+//! back through an address, which is a frame slot here.
+//!
 //! The call is asked for with the halves already in it, four parameters of sixty four bits for the
 //! two operands of a divide and two results for the answer, or two parameters and a float, or a
 //! float and two results, which is the shape this pass gives a call it found in the program anyway.
@@ -105,9 +109,10 @@ use rucc_ir::{
     FloatPred, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Param, Restrict,
     Signature, Type, Value,
 };
+use rucc_opt::{Cfg, Dominators};
 use rucc_target::{AbiDescription, CallRegs, Convention, Places, Variadic, Where};
 
-use crate::capability;
+use crate::{capability, divide};
 
 /// The width a register is on the target being compiled for, which is the width of each half and
 /// the one fact everything else this pass writes down follows from.
@@ -186,6 +191,11 @@ impl Width {
     /// What the capability table calls the width split, which is how the rule language spells one.
     fn mode(self) -> &'static str {
         if self.half == 64 { "i128" } else { "i64" }
+    }
+
+    /// The runtime routine that gives a quotient and a remainder at once, at thirty two bits only.
+    fn divmod(self, signed: bool) -> Option<&'static str> {
+        (self.half == 32 && !self.nested).then(|| capability::pair_divmod(signed))
     }
 
     /// The runtime routine for this operation at this mode, from the table for this width.
@@ -275,6 +285,7 @@ fn halves_at(func: &mut Func, names: &mut Interner, conv: &CallRegs, width: Widt
         return false;
     }
 
+    let mut shared = Shared { by: sharing(func, width, &insts), answers: Map::default() };
     let mut halves: Halves = Map::default();
     let mut forward: Map<Value, Value> = Map::default();
     let entry = func.entry();
@@ -286,7 +297,7 @@ fn halves_at(func: &mut Func, names: &mut Interner, conv: &CallRegs, width: Widt
         }
     }
     for &inst in &insts {
-        rewrite(func, names, conv, width, &mut halves, &mut forward, inst);
+        rewrite(func, names, conv, width, &mut halves, &mut forward, &mut shared, inst);
     }
     substitute(func, &forward);
     let signature = planned(func.signature(), width, &arriving);
@@ -860,6 +871,7 @@ fn arrive(
 }
 
 /// One instruction, as instructions over halves.
+#[allow(clippy::too_many_arguments)]
 fn rewrite(
     func: &mut Func,
     names: &mut Interner,
@@ -867,6 +879,7 @@ fn rewrite(
     width: Width,
     halves: &mut Halves,
     forward: &mut Map<Value, Value>,
+    shared: &mut Shared,
     inst: Inst,
 ) {
     // The runtime's routines are ordinary functions of the platform, whatever convention the
@@ -883,7 +896,7 @@ fn rewrite(
         Opcode::Add | Opcode::Sub if produces => carried(func, width, halves, inst, data.opcode),
         Opcode::Mul if produces => multiply(func, width, halves, inst),
         Opcode::UDiv | Opcode::SDiv | Opcode::URem | Opcode::SRem if produces => {
-            divide(func, names, calls, halves, inst, data.opcode);
+            divide(func, names, calls, halves, shared, inst, data.opcode);
         }
         Opcode::Shl | Opcode::LShr | Opcode::AShr if produces => {
             shifted(func, width, halves, inst, data.opcode);
@@ -1215,6 +1228,7 @@ fn divide(
     names: &mut Interner,
     calls: Calls,
     halves: &mut Halves,
+    shared: &mut Shared,
     inst: Inst,
     opcode: Opcode,
 ) {
@@ -1232,11 +1246,150 @@ fn divide(
         replace(func, halves, inst, low, high);
         return;
     }
+    let remainder = usize::from(matches!(opcode, Opcode::URem | Opcode::SRem));
+    if let Some(&top) = shared.by.get(&inst) {
+        if let Some(answers) = shared.answers.get(&top) {
+            let (low, high) = answers[remainder];
+            replace(func, halves, inst, low, high);
+            return;
+        }
+        let signed = matches!(opcode, Opcode::SDiv | Opcode::SRem);
+        if top == inst
+            && let Some(answers) = quotient_and_remainder(
+                func,
+                names,
+                calls,
+                inst,
+                signed,
+                (a_low, a_high),
+                (b_low, b_high),
+            )
+        {
+            shared.answers.insert(inst, answers);
+            let (low, high) = answers[remainder];
+            replace(func, halves, inst, low, high);
+            return;
+        }
+    }
     let Some(routine) = width.libcall(opcode, width.mode()) else { return };
     let args = [Operand::Split(a_low, a_high), Operand::Split(b_low, b_high)];
     let made = runtime(func, names, calls, inst, routine, &args, &[width.half(), width.half()]);
     let [low, high] = made[..] else { return };
     replace(func, halves, inst, low, high);
+}
+
+/// The divisions and remainders that share one call, and what each call gave.
+struct Shared {
+    /// Every member of a pair, with the instruction that makes the call for it.
+    by: Map<Inst, Inst>,
+    /// The halves of the quotient and of the remainder, by the instruction that made the call.
+    answers: Map<Inst, [(Value, Value); 2]>,
+}
+
+/// Which divisions and remainders of a `long long` share one call to the runtime, each with the
+/// one that makes the call.
+///
+/// `convert_to_divmod` at `gcc/tree-ssa-math-opts.cc`. A quotient and a remainder of the same two
+/// operands, read with the same sign, are one call to `__udivmoddi4` or `__divmoddi4` when one of
+/// them is in a block that dominates the blocks of the others. For each remainder, the first one
+/// in the walk whose block dominates the remainder's block makes the call. It answers for every
+/// one in the blocks it dominates, and there must be a quotient and a remainder among them. gcc
+/// keeps a constant dividend and a divisor that is a power of two apart, since each is cheaper
+/// alone. It also keeps a signed one by a negative constant apart, because it changes the signed
+/// remainder by a negative constant to the one by its size, so the two no longer have the same
+/// operands.
+///
+/// Only at thirty two bits, which is the one width with these routines, and only for what
+/// [`divide::divisions`] left as a division.
+fn sharing(func: &Func, width: Width, insts: &[Inst]) -> Map<Inst, Inst> {
+    let mut by: Map<Inst, Inst> = Map::default();
+    if width.half != 32 || width.nested {
+        return by;
+    }
+    let mut groups: Map<(Value, Value, bool), Vec<Inst>> = Map::default();
+    let mut keys = Vec::new();
+    for &inst in insts {
+        let data = &func[inst];
+        let signed = match data.opcode {
+            Opcode::SDiv | Opcode::SRem => true,
+            Opcode::UDiv | Opcode::URem => false,
+            _ => continue,
+        };
+        let &[a, b] = &func[data.args] else { continue };
+        if !width.is_wide(func[a].ty) || divide::constant(func, a).is_some() {
+            continue;
+        }
+        if let Some(imm) = divide::constant(func, b) {
+            let value = imm.signed(func[b].ty);
+            if imm.unsigned().is_power_of_two() || (signed && value < 0) {
+                continue;
+            }
+        }
+        groups
+            .entry((a, b, signed))
+            .or_insert_with(|| {
+                keys.push((a, b, signed));
+                Vec::new()
+            })
+            .push(inst);
+    }
+    let rest = |inst: Inst| matches!(func[inst].opcode, Opcode::URem | Opcode::SRem);
+    let mut doms: Option<Dominators> = None;
+    for key in keys {
+        let members = &groups[&key];
+        if !members.iter().any(|&inst| rest(inst)) || members.iter().all(|&inst| rest(inst)) {
+            continue;
+        }
+        let doms = doms.get_or_insert_with(|| Dominators::new(&Cfg::new(func)));
+        let block = |inst: Inst| func.block_of(inst);
+        let over = |of: Inst, inst: Inst| match (block(of), block(inst)) {
+            (Some(of), Some(inst)) => doms.dominates(of, inst),
+            _ => false,
+        };
+        for &remainder in members.iter().filter(|&&inst| rest(inst)) {
+            if by.contains_key(&remainder) {
+                continue;
+            }
+            let Some(&top) = members.iter().find(|&&inst| over(inst, remainder)) else { continue };
+            let under: Vec<Inst> = members
+                .iter()
+                .copied()
+                .filter(|&inst| !by.contains_key(&inst) && over(top, inst))
+                .collect();
+            if under.contains(&top) && under.iter().any(|&inst| !rest(inst)) {
+                by.extend(under.into_iter().map(|inst| (inst, top)));
+            }
+        }
+    }
+    by
+}
+
+/// One call that gives the quotient and the remainder, written in front of a division, with the
+/// halves of each.
+///
+/// The remainder comes back through the address that is the third argument, which is a frame slot
+/// read back in halves after the call.
+fn quotient_and_remainder(
+    func: &mut Func,
+    names: &mut Interner,
+    calls: Calls,
+    inst: Inst,
+    signed: bool,
+    a: (Value, Value),
+    b: (Value, Value),
+) -> Option<[(Value, Value); 2]> {
+    let width = calls.width;
+    let routine = width.divmod(signed)?;
+    let size = u64::from(width.bytes());
+    let slot = room(func, inst, size, align(size));
+    let args = [Operand::Split(a.0, a.1), Operand::Split(b.0, b.1), Operand::Whole(slot)];
+    let made = runtime(func, names, calls, inst, routine, &args, &[width.half(), width.half()]);
+    let [low, high] = made[..] else { return None };
+    let info = whole(size, align(size));
+    let rest_low = read(func, width, inst, slot, word(width, info, 0), Flags::NONE);
+    let up = stepped(func, width, inst, slot);
+    let rest_high = read(func, width, inst, up, word(width, info, width.step()), Flags::NONE);
+    Some([(low, high), (rest_low, rest_high)])
 }
 
 /// A divide or a remainder of two values that each fit in a half, worked out at the half width.
@@ -3764,6 +3917,71 @@ mod tests {
             assert!(text.contains(&call), "{routine} gets four halves: {text}");
             assert!(text.contains("return %4, %5"), "and two come back: {text}");
         }
+    }
+
+    /// `a / b` and `a % b` of the same operands, which gcc makes one call that gives both. The
+    /// remainder comes back through the address that is the fifth argument.
+    #[test]
+    fn at_thirty_two_bits_a_quotient_and_a_remainder_are_one_call() {
+        for (div, rem, routine) in [
+            (Opcode::UDiv, Opcode::URem, "__udivmoddi4"),
+            (Opcode::SDiv, Opcode::SRem, "__divmoddi4"),
+        ] {
+            let mut names = Interner::new();
+            let (mut func, entry, params) = shell(&mut names, &[long(), long()], &[long()]);
+            let mut build = Builder::new(&mut func, entry);
+            let quotient = build.binary(div, params[0], params[1], Flags::NONE);
+            let remainder = build.binary(rem, params[0], params[1], Flags::NONE);
+            let sum = build.binary(Opcode::Add, quotient, remainder, Flags::NONE);
+            build.ret(&[sum]);
+
+            assert!(narrow(&mut func, &mut names), "there is a width to split");
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("i64"), "nothing that wide is left: {text}");
+            let call = format!("@{routine}(%0, %1, %2, %3, %");
+            assert_eq!(text.matches(&call).count(), 1, "one {routine} for both: {text}");
+            assert_eq!(text.matches(" call ").count(), 1, "and no other call: {text}");
+            assert_eq!(text.matches(" = load.i32 ").count(), 2, "the remainder read back: {text}");
+        }
+    }
+
+    /// A quotient and a remainder on the two sides of a branch, where neither is on the way to the
+    /// other, and a remainder by a constant dividend. gcc calls a routine for each of these, and so
+    /// does this.
+    #[test]
+    fn at_thirty_two_bits_a_quotient_and_a_remainder_apart_are_two_calls() {
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[long(), long(), long()], &[long()]);
+        let (left, right) = (func.create_block(), func.create_block());
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(long(), 0);
+        let taken = build.icmp(IntPred::Ne, params[2], zero);
+        build.br_if(taken, left, &[], right, &[]);
+        let mut build = Builder::new(&mut func, left);
+        let quotient = build.binary(Opcode::UDiv, params[0], params[1], Flags::NONE);
+        build.ret(&[quotient]);
+        let mut build = Builder::new(&mut func, right);
+        let remainder = build.binary(Opcode::URem, params[0], params[1], Flags::NONE);
+        build.ret(&[remainder]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("__udivmoddi4"), "no shared call: {text}");
+        assert!(text.contains("@__udivdi3(") && text.contains("@__umoddi3("), "{text}");
+
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[long()], &[long()]);
+        let mut build = Builder::new(&mut func, entry);
+        let ten = build.iconst(long(), 1_000_000_000_000);
+        let quotient = build.binary(Opcode::UDiv, ten, params[0], Flags::NONE);
+        let remainder = build.binary(Opcode::URem, ten, params[0], Flags::NONE);
+        let sum = build.binary(Opcode::Add, quotient, remainder, Flags::NONE);
+        build.ret(&[sum]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("__udivmoddi4"), "a constant dividend is apart: {text}");
+        assert!(text.contains("@__udivdi3(") && text.contains("@__umoddi3("), "{text}");
     }
 
     #[test]

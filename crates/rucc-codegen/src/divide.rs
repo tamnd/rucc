@@ -40,6 +40,21 @@
 //! and widened back, which is `(u64)a / 10` with `a` 32 bits wide, and that division then gets its
 //! magic number like any other.
 //!
+//! # Twice as wide as a register
+//!
+//! gcc also writes most other divisions of a `long long` by a constant without a call on i386, as
+//! `expand_doubleword_divmod` at `gcc/optabs.cc` does, and [`wider`] follows it. A remainder by an
+//! odd divisor `d` is the remainder of a short sum: when two to the power of some `bit` leaves one
+//! over after a division by `d`, the dividend cut into pieces of `bit` bits leaves the same
+//! remainder as the sum of the pieces, and that sum fits in a register. The remainder of the sum is
+//! then a division at the width of a register, which gets its magic number. The dividend less the
+//! remainder is a multiple of `d`, so a multiply by the inverse of `d` is the exact quotient. An
+//! even divisor is a power of two times an odd one, and the power of two comes out of that quotient
+//! last. A divisor that has no such `bit`, which is 1000, 10^9 and 641 among others, stays a call
+//! to `__udivdi3` and its kin, as with gcc. So does all of this when the goal is size, as gcc calls
+//! the runtime at `-Os`. An unsigned divisor with the top bit set is a compare at every goal, which
+//! is what gcc does too.
+//!
 //! # What the dividend is known to hold
 //!
 //! C divides at `int` at least, so an `unsigned short` divided by ten is an `int` division of a
@@ -86,7 +101,8 @@ pub fn divisions(func: &mut Func, goal: Goal, register: u32) {
         if matches!(goal, Goal::Size) && division.width <= register {
             continue;
         }
-        let Some(program) = program_at(division, register) else { continue };
+        let program = program_at(division, register).or_else(|| wider(division, register, goal));
+        let Some(program) = program else { continue };
         write(func, inst, &program);
     }
 }
@@ -239,6 +255,21 @@ impl Program {
         self.op(Opcode::Sub, zero, value, self.width)
     }
 
+    /// The steps of another program put after these, with that program's dividend read from
+    /// `from`. Gives back the value that program's answer is.
+    fn splice(&mut self, other: &Program, from: usize) -> usize {
+        let base = self.steps.len();
+        let at = |value: usize| if value == DIVIDEND { from } else { base + value };
+        for &step in &other.steps {
+            let step = match step {
+                Step::Op(opcode, [lhs, rhs], bits) => Step::Op(opcode, [at(lhs), at(rhs)], bits),
+                constant @ Step::Const(..) => constant,
+            };
+            self.steps.push(step);
+        }
+        if other.steps.is_empty() { from } else { self.steps.len() }
+    }
+
     /// The dividend less the quotient times the divisor, which is the remainder.
     fn left_over(&mut self, quotient: usize, divisor: i128) -> usize {
         let back = self.by(Opcode::Mul, quotient, divisor, self.width);
@@ -298,6 +329,170 @@ pub fn program_at(division: Division, register: u32) -> Option<Program> {
         }
     }
     Some(program)
+}
+
+/// The rewrite for a division at twice the width of a register that [`program_at`] leaves, or
+/// `None` where it stays a call to the runtime.
+///
+/// Only on a machine of thirty two bits, where that division is a `long long` and the call is
+/// `__udivdi3` and its kin. An unsigned divisor with the top bit set is a compare at every goal,
+/// as with gcc. The rest is [`doubleword`], which gcc does only when it optimizes for speed.
+fn wider(division: Division, register: u32, goal: Goal) -> Option<Program> {
+    let Division { signed, width, divisor, .. } = division;
+    if register != 32 || width != 2 * register {
+        return None;
+    }
+    if !signed && divisor >= 1i128 << (width - 1) {
+        return Some(huge(division));
+    }
+    if matches!(goal, Goal::Size) {
+        return None;
+    }
+    doubleword(division)
+}
+
+/// An unsigned division by a divisor with the top bit set, whose quotient is zero or one.
+///
+/// The quotient is one when the dividend is at least the divisor. That needs the top bit of the
+/// dividend set, and then the difference of the two fits in the signed range, so its top bit is
+/// clear exactly when the dividend is the larger one. The top bit of the dividend without the top
+/// bit of the difference is the quotient. The same bit spread over the whole value picks the
+/// divisor that the remainder takes off.
+fn huge(division: Division) -> Program {
+    let width = division.width;
+    let divisor = signed_at(division.divisor as u128, width);
+    let top = i128::from(width - 1);
+    let mut program = Program::new(width, width.min(32));
+    let difference = program.by(Opcode::Sub, DIVIDEND, divisor, width);
+    let clear = program.by(Opcode::Xor, difference, -1, width);
+    let bit = program.op(Opcode::And, DIVIDEND, clear, width);
+    if division.remainder {
+        let all = program.by(Opcode::AShr, bit, top, width);
+        let taken = program.by(Opcode::And, all, divisor, width);
+        program.op(Opcode::Sub, DIVIDEND, taken, width);
+    } else {
+        program.by(Opcode::LShr, bit, top, width);
+    }
+    program
+}
+
+/// A division at twice the width of a register by a constant, from a remainder at the width of a
+/// register.
+///
+/// `expand_doubleword_mod` and `expand_doubleword_divmod` at `gcc/optabs.cc`, step for step. The
+/// pieces of `bit` bits come from [`pieces`]. With `bit` equal to the width of a register the two
+/// halves are added and the carry out of them is added back, which is right because two to that
+/// power leaves one. The remainder of the sum by the odd part of the divisor is the remainder of
+/// the dividend by it, and a multiply by the inverse of the odd part turns the dividend less that
+/// remainder into the quotient. A power of two in the divisor then comes out of that quotient.
+///
+/// A signed dividend that is negative reads as itself plus two to the width, so the sum is off.
+/// gcc adds a correction to the sum when the dividend is negative, and one less the divisor to the
+/// remainder after it, which together give C's remainder. A signed remainder by a negative divisor
+/// is the one by its size, as C gives the remainder the sign of the dividend. A signed quotient by
+/// a negative divisor stays a call, as with gcc.
+fn doubleword(division: Division) -> Option<Program> {
+    let Division { signed, remainder, width, divisor, .. } = division;
+    let n = width / 2;
+    let size =
+        if signed && remainder { divisor.unsigned_abs() } else { u128::try_from(divisor).ok()? };
+    if size <= 1 || size.is_power_of_two() || size >= 1u128 << (width - 1) {
+        return None;
+    }
+    let power = size.trailing_zeros();
+    let odd = size >> power;
+    let (bit, correction) = (n / 2..=n).rev().find_map(|bit| pieces(signed, odd, bit, width))?;
+    let mut program = Program::new(width, n);
+    let low = program.convert(Opcode::Trunc, DIVIDEND, n);
+    let high = (bit == n || signed).then(|| {
+        let up = program.by(Opcode::LShr, DIVIDEND, i128::from(n), width);
+        program.convert(Opcode::Trunc, up, n)
+    });
+    let mut sum = low;
+    if let (true, Some(high)) = (bit == n, high) {
+        let low = program.convert(Opcode::ZExt, low, width);
+        let high = program.convert(Opcode::ZExt, high, width);
+        let both = program.op(Opcode::Add, low, high, width);
+        let up = program.by(Opcode::LShr, both, i128::from(n), width);
+        let carry = program.convert(Opcode::Trunc, up, n);
+        let bottom = program.convert(Opcode::Trunc, both, n);
+        sum = program.op(Opcode::Add, bottom, carry, n);
+    } else {
+        let count = width.div_ceil(bit);
+        let piece = (1i128 << bit) - 1;
+        sum = program.by(Opcode::And, sum, piece, n);
+        for at in 1..count {
+            let up = program.by(Opcode::LShr, DIVIDEND, i128::from(at * bit), width);
+            let mut value = program.convert(Opcode::Trunc, up, n);
+            if at + 1 < count {
+                value = program.by(Opcode::And, value, piece, n);
+            }
+            sum = program.op(Opcode::Add, sum, value, n);
+        }
+    }
+    let sign =
+        high.filter(|_| signed).map(|high| program.by(Opcode::AShr, high, i128::from(n - 1), n));
+    if let (Some(sign), Some(correction)) = (sign, correction) {
+        let added = program.by(Opcode::And, sign, signed_at(correction, n), n);
+        sum = program.op(Opcode::Add, sum, added, n);
+    }
+    let odd_divisor = i128::try_from(odd).ok()?;
+    let short = Division {
+        signed: false,
+        remainder: true,
+        exact: false,
+        width: n,
+        range: Range::Unsigned(n),
+        divisor: odd_divisor,
+    };
+    let short = program_at(short, n).or_else(|| (odd >= 1u128 << (n - 1)).then(|| huge(short)))?;
+    let mut left = program.splice(&short, sum);
+    if let Some(sign) = sign {
+        let fix = program.by(Opcode::And, sign, 1 - odd_divisor, n);
+        left = program.op(Opcode::Add, left, fix, n);
+    }
+    let extend = if signed { Opcode::SExt } else { Opcode::ZExt };
+    let left = program.convert(extend, left, width);
+    if remainder && power == 0 {
+        return Some(program);
+    }
+    let rest = program.op(Opcode::Sub, DIVIDEND, left, width);
+    let inverse = signed_at(inverse(odd_divisor, width), width);
+    let quotient = program.by(Opcode::Mul, rest, inverse, width);
+    if power == 0 {
+        return Some(program);
+    }
+    let range = if signed { Range::Signed(width) } else { Range::Unsigned(width) };
+    let by = Division { signed, remainder, exact: false, width, range, divisor: 1 << power };
+    let part = program.splice(&program_at(by, n)?, quotient);
+    if remainder {
+        let back = program.by(Opcode::Mul, part, odd_divisor, width);
+        program.op(Opcode::Add, back, left, width);
+    }
+    Some(program)
+}
+
+/// The size of the pieces [`doubleword`] cuts a dividend into for this odd divisor, and the
+/// correction a negative signed dividend adds to their sum, or `None` where `bit` does not work.
+///
+/// The loop in `expand_doubleword_mod`. Two to the power of `bit` has to leave one over. A piece as
+/// wide as a register needs a carry, and gcc takes that only for an unsigned dividend. A piece one
+/// bit narrower than a register is skipped, since the sum of the pieces may not fit. A correction
+/// that would make the sum too large to fit is skipped too.
+fn pieces(signed: bool, odd: u128, bit: u32, width: u32) -> Option<(u32, Option<u128>)> {
+    let n = width / 2;
+    if (1u128 << bit) % odd != 1 || bit + 1 == n || (signed && bit == n) {
+        return None;
+    }
+    let low = (1u128 << (width - 1)) % odd;
+    let high = odd - 1 - low;
+    if !signed || low == high {
+        return Some((bit, None));
+    }
+    let correction = 2 * odd - 1 - 2 * low;
+    let count = width.div_ceil(bit);
+    let most = mask(bit) * u128::from(count - 1) + mask(width - (count - 1) * bit) + correction;
+    (most >> n == 0).then_some((bit, Some(correction)))
 }
 
 /// The magic number for dividing by `divisor` a value of `bits` bits whose top `bits - precision`
@@ -677,7 +872,8 @@ mod tests {
     use rucc_ir::{Builder, Flags, Func, Opcode, Signature, Type, Value};
 
     use super::{
-        Division, Program, Range, Step, divisions, mask, multiplier, program, program_at, signed_at,
+        Division, Program, Range, Step, divisions, mask, multiplier, program, program_at,
+        signed_at, wider,
     };
 
     /// What a program gives for one dividend, worked the way the machine works it, with the width
@@ -689,7 +885,8 @@ mod tests {
             let value = match step {
                 Step::Const(value, bits) => (value as u128 & mask(bits), bits),
                 Step::Op(opcode, [lhs, rhs], bits) => {
-                    assert!(bits <= program.register, "{opcode:?} at {bits} bits");
+                    let widest = program.register.max(program.width);
+                    assert!(bits <= widest, "{opcode:?} at {bits} bits");
                     let (a, from) = values[lhs];
                     let (b, other) = values[rhs];
                     let answer = match opcode {
@@ -706,6 +903,7 @@ mod tests {
                                 Opcode::Sub => a.wrapping_sub(b),
                                 Opcode::Mul => a.wrapping_mul(b),
                                 Opcode::And => a & b,
+                                Opcode::Xor => a ^ b,
                                 Opcode::UMulHigh => {
                                     assert_eq!(bits, program.register, "a high multiply at {bits}");
                                     (a * b) >> bits
@@ -1093,6 +1291,132 @@ mod tests {
         }
     }
 
+    /// The divisors gcc 14 leaves as a call for a `long long` on i386 at `-O2`, by their size. No
+    /// power of two in these leaves one over by a power of two from sixteen to thirty two.
+    const CALLED: [i128; 8] =
+        [641, 1_000, 1_000_000, 1_000_000_000, 6_700_417, 0x7fff_ffff, 0x8000_0001, 0x1_0000_0001];
+
+    /// The divisors of a `long long` that gcc 14 was asked about on i386, read at sixty four bits.
+    const ASKED: [i128; 37] = [
+        3,
+        5,
+        6,
+        7,
+        9,
+        10,
+        11,
+        12,
+        13,
+        15,
+        17,
+        20,
+        24,
+        25,
+        31,
+        51,
+        85,
+        100,
+        127,
+        255,
+        257,
+        641,
+        1_000,
+        4_095,
+        65_535,
+        65_537,
+        1_000_000,
+        1_000_000_000,
+        6_700_417,
+        0x7fff_ffff,
+        0x8000_0001,
+        0xffff_ffff,
+        0x1_0000_0001,
+        -3,
+        -10,
+        -7,
+        -1_000,
+    ];
+
+    /// Whether gcc 14 at `-O2` calls the runtime for a `long long` on i386 by this divisor.
+    ///
+    /// gcc folds a signed remainder by a negative divisor to the one by its size, and calls the
+    /// runtime for every signed quotient by one. An unsigned divisor with the top bit set is a
+    /// compare. 65537 and `0xffffffff` need the carry of a piece as wide as a register, which
+    /// gcc takes only for an unsigned dividend.
+    fn gcc_calls(signed: bool, remainder: bool, divisor: i128) -> bool {
+        if !signed && divisor >= 1 << 63 {
+            return false;
+        }
+        let size = divisor.abs();
+        CALLED.contains(&size)
+            || (signed && matches!(size, 65_537 | 0xffff_ffff))
+            || (signed && !remainder && divisor < 0)
+    }
+
+    /// A `long long` divided by a constant on i386. The divisors that stay a call are held to
+    /// the ones gcc 14 calls for at `-O2`, and every rewrite is checked on numbers: the ends, the
+    /// multiples nearest them, the numbers either side of each power of two and a random sample.
+    /// At `-Os` only the compare for a huge unsigned divisor is written.
+    #[test]
+    fn sixty_four_bit_divisions_on_a_thirty_two_bit_machine_are_calls_only_where_gcc_calls() {
+        let mut values = Vec::new();
+        let mut state = 0x510e_527f_ade6_82d1;
+        let mut divisors: Vec<i128> = (-600..=600).collect();
+        divisors.extend(ASKED);
+        for power in 1..=64 {
+            let at = 1i128 << power;
+            divisors.extend([at - 1, at + 1, -at + 1, -at - 1, at * 3, at * 5, at * 255]);
+        }
+        for _ in 0..300 {
+            divisors.push(i128::from(random(&mut state) >> (random(&mut state) % 64)));
+        }
+        let mut written = 0;
+        for (signed, remainder) in both() {
+            let range = if signed { Range::Signed(64) } else { Range::Unsigned(64) };
+            let (low, high) = ends(range);
+            for &divisor in &divisors {
+                let bits = divisor as u128 & mask(64);
+                let divisor = if signed { signed_at(bits, 64) } else { bits as i128 };
+                let division = division(signed, remainder, 64, range, divisor);
+                let pointless = matches!(divisor, 0 | 1) || (signed && divisor == -1);
+                if pointless || program_at(division, 32).is_some() {
+                    continue;
+                }
+                let speed = wider(division, 32, Goal::Speed);
+                let size = wider(division, 32, Goal::Size);
+                if ASKED.iter().any(|&asked| asked as u128 & mask(64) == bits) {
+                    let calls = gcc_calls(signed, remainder, divisor);
+                    assert_eq!(speed.is_none(), calls, "{division:?} at -O2");
+                }
+                assert_eq!(size.is_some(), !signed && divisor >= 1 << 63, "{division:?} at -Os");
+                let Some(program) = speed else { continue };
+                written += 1;
+                let span = divisor.abs();
+                let mut dividends = vec![low, low + 1, -1, 0, 1, 2, high - 1, high];
+                for end in [low, high] {
+                    let near = end / span * span;
+                    dividends.extend([near - 1, near, near + 1, near - span, near + span]);
+                }
+                for power in 0..64 {
+                    let at = 1i128 << power;
+                    dividends.extend([at - 1, at, at + 1, -at - 1, -at, -at + 1]);
+                    dividends.extend([low + at, high - at, at * span, -at * span]);
+                }
+                for _ in 0..64 {
+                    let x = u128::from(random(&mut state));
+                    dividends.push(if signed { signed_at(x, 64) } else { x as i128 });
+                }
+                dividends.retain(|x| (low..=high).contains(x));
+                for x in dividends {
+                    let x = x as u128 & mask(64);
+                    let got = run(&program, x, &mut values);
+                    assert_eq!(got, truth(&division, x), "{division:?} of {x:#x}");
+                }
+            }
+        }
+        assert!(written > 1_000, "only {written} divisions were written out");
+    }
+
     /// An exact division is a shift and a multiply by an inverse at any width, checked over
     /// multiples of the divisor, which are the only dividends it is promised.
     #[test]
@@ -1281,6 +1605,26 @@ mod tests {
         divisions(&mut func, Goal::Speed, 64);
         let want = [Opcode::SMulHigh, Opcode::AShr, Opcode::AShr, Opcode::Sub, Opcode::Return];
         assert_eq!(opcodes(&func), want);
+    }
+
+    /// `x / 10` and `x % 1000` on a `long long` on i386. gcc writes the first without a call to
+    /// `__udivdi3` and calls `__umoddi3` for the second, and so does this.
+    #[test]
+    fn a_long_long_on_a_thirty_two_bit_machine_is_divided_where_gcc_divides_it() {
+        let i64 = Type::int(64);
+        let mut func = one(i64, i64, divided(Opcode::UDiv, 10, Flags::NONE));
+        divisions(&mut func, Goal::Speed, 32);
+        let ops = opcodes(&func);
+        assert!(!ops.contains(&Opcode::UDiv) && !ops.contains(&Opcode::URem), "{ops:?}");
+        assert!(ops.contains(&Opcode::UMulHigh), "{ops:?}");
+
+        let mut func = one(i64, i64, divided(Opcode::URem, 1_000, Flags::NONE));
+        divisions(&mut func, Goal::Speed, 32);
+        assert_eq!(opcodes(&func), [Opcode::URem, Opcode::Return]);
+
+        let mut func = one(i64, i64, divided(Opcode::UDiv, 10, Flags::NONE));
+        divisions(&mut func, Goal::Size, 32);
+        assert_eq!(opcodes(&func), [Opcode::UDiv, Opcode::Return]);
     }
 
     #[test]
