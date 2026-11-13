@@ -142,7 +142,11 @@ const AAPCS64_BASE: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
-    bit_ints: BitInts::Untaught,
+    // AAPCS64 leaves the bits above a `_BitInt(N)` in its register unspecified, and
+    // aarch64-linux-gnu-gcc 14 agrees from both sides: its callee of `f(_BitInt(37))` tests the
+    // argument against a 37 bit mask, and its caller of a function returning `_BitInt(7)` sign
+    // extends the seven bits it got back before comparing them.
+    bit_ints: BitInts::SpareBits,
     cleanup: Cleanup::Caller,
 };
 
@@ -214,8 +218,15 @@ pub static DARWIN_ARM64: AbiDescription = AbiDescription {
 /// is what the rest of a mingw program was built with. The other difference people list, x18 being
 /// the thread's own register, is a fact about the register allocator and lives in `rucc-target`
 /// with the registers.
-pub static WINDOWS_ARM64: AbiDescription =
-    AbiDescription { name: "Windows arm64", variadic: Variadic::IntegersOnly, ..AAPCS64_BASE };
+///
+/// The `_BitInt` agreement of AAPCS64 is not taken over, because the compilers a mingw program is
+/// built with have not been checked here for it.
+pub static WINDOWS_ARM64: AbiDescription = AbiDescription {
+    name: "Windows arm64",
+    variadic: Variadic::IntegersOnly,
+    bit_ints: BitInts::Untaught,
+    ..AAPCS64_BASE
+};
 
 /// Windows x64.
 ///
@@ -452,7 +463,10 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
-    bit_ints: BitInts::Untaught,
+    // The psABI has no `_BitInt` section, and gcc 15 `-m32` keeps the x86-64 agreement: its callee
+    // of `f(_BitInt(37))` sign extends the five bits it wants out of the high word before it
+    // reads it, so a caller owes nothing above the value.
+    bit_ints: BitInts::SpareBits,
     cleanup: Cleanup::Caller,
 };
 

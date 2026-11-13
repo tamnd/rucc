@@ -352,7 +352,8 @@ pub enum BitInts {
     /// Anything, both ways. The side that receives the value reads only its own bits, and the
     /// side that sends it owes nothing above them. The x86-64 psABI, and gcc 16.2.0 does what it
     /// says: its callee of `f(unsigned _BitInt(37))` masks the argument before it divides, and its
-    /// caller of a function returning `_BitInt(7)` reads only the low seven bits of `al`.
+    /// caller of a function returning `_BitInt(7)` reads only the low seven bits of `al`. AAPCS64
+    /// says the same, and aarch64-linux-gnu-gcc 14 and gcc 15 `-m32` both keep it from each side.
     SpareBits,
     /// The rule has not been taught here, so a function with one at its boundary is refused by
     /// name rather than compiled to an agreement nobody checked. tamnd/rucc#425 is the issue.
