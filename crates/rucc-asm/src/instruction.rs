@@ -656,7 +656,7 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     }
     accumulated(word, &mut operands);
     implied(word, &operands, mode)?;
-    let predicated = predicated(word);
+    let predicated = predicated(word).or_else(|| multiplied(word));
     let word = match &predicated {
         Some((name, which)) => {
             operands.insert(0, Operand::Imm(*which));
@@ -1317,6 +1317,27 @@ fn compared(word: &str) -> Option<(String, i64)> {
     }
     let which = INTEGER_PREDICATES.iter().position(|&known| known == predicate)?;
     Some((format!("vpcmp{unsigned}{lanes}"), which as i64))
+}
+
+/// A carryless multiply written with the halves it multiplies in the name, as the mnemonic that
+/// takes them as an immediate and the immediate.
+///
+/// gas takes `pclmullqhqdq %xmm1, %xmm2` for `pclmulqdq $0x10, %xmm1, %xmm2`, and nettle writes
+/// the first. The first half in the name is of the destination, which is bit 0 of the immediate,
+/// and the second half is of the source, which is bit 4. The `vpclmul` names are the same.
+fn multiplied(word: &str) -> Option<(String, i64)> {
+    let (vex, rest) = match word.strip_prefix('v') {
+        Some(rest) => ("v", rest),
+        None => ("", word),
+    };
+    let which = match rest.strip_prefix("pclmul")?.strip_suffix("dq")? {
+        "lqlq" => 0x00,
+        "hqlq" => 0x01,
+        "lqhq" => 0x10,
+        "hqhq" => 0x11,
+        _ => return None,
+    };
+    Some((format!("{vex}pclmulqdq"), which))
 }
 
 /// The mnemonics whose bare name operand is somewhere to go rather than an address.
@@ -3155,6 +3176,22 @@ mod tests {
         assert_eq!(bytes("cmpnlesd %xmm0, %xmm2"), [0xf2, 0x0f, 0xc2, 0xd0, 0x06]);
         assert_eq!(bytes("cmpltss (%rax), %xmm1"), [0xf3, 0x0f, 0xc2, 0x08, 0x01]);
         assert_eq!(bytes("cmpnlesd %xmm0, %xmm2"), bytes("cmpsd $6, %xmm0, %xmm2"));
+    }
+
+    /// A carryless multiply with its halves in the name is the one with them as an immediate.
+    #[test]
+    fn a_carryless_multiply_named_for_its_halves_is_the_one_with_an_immediate() {
+        assert_eq!(bytes("pclmullqlqdq %xmm1, %xmm2"), bytes("pclmulqdq $0x00, %xmm1, %xmm2"));
+        assert_eq!(bytes("pclmulhqlqdq %xmm1, %xmm2"), bytes("pclmulqdq $0x01, %xmm1, %xmm2"));
+        assert_eq!(
+            bytes("pclmullqhqdq %xmm12, %xmm13"),
+            [0x66, 0x45, 0x0f, 0x3a, 0x44, 0xec, 0x10]
+        );
+        assert_eq!(bytes("pclmulhqhqdq (%rax), %xmm0"), [0x66, 0x0f, 0x3a, 0x44, 0x00, 0x11]);
+        assert_eq!(
+            bytes("vpclmulhqlqdq %xmm1, %xmm2, %xmm3"),
+            [0xc4, 0xe3, 0x69, 0x44, 0xd9, 0x01]
+        );
     }
 
     /// A bare number where an address goes is that address, with no base and no index.
