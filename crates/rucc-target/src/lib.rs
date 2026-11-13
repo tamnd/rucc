@@ -1477,6 +1477,20 @@ impl TargetInfo {
         self.call_regs.is_some_and(|regs| regs.x87_floats) && self.long_double_format.is_x87()
     }
 
+    /// Whether gcc evaluates the arguments of a call from the last to the first on this target,
+    /// which is so on i386 and x86-64 and on no other target here.
+    ///
+    /// C leaves the order unspecified, and gcc takes it from the target: its gimplifier goes from
+    /// the last argument to the first when the target's `push_argument` hook says yes, which the
+    /// x86 hook does. A program can see the order when two arguments call functions that change
+    /// the same state. NetBSD's flex calls `mkor (mkstate (c), mkstate (reverse_case (c)))` for
+    /// a letter under `-i`, so a flex built in the other order numbers its states in the other
+    /// order and writes other tables, and a gdb built with that flex is not the gdb of a G build.
+    #[must_use]
+    pub fn arguments_right_to_left(&self) -> bool {
+        matches!(self.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86)
+    }
+
     /// The type names this target's compiler has before any header is read, and what each is.
     ///
     /// Empty everywhere but AArch64, where gcc has the Advanced SIMD and SVE types and glibc's
