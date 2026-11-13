@@ -31,6 +31,7 @@ use crate::Trouble;
 mod arm64;
 mod oplook7;
 mod optab;
+pub mod syntax;
 // `r9 optab` writes the table, with each class and a `pub` that the check does not use.
 #[allow(dead_code, unreachable_pub)]
 mod optab6;
