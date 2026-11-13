@@ -886,8 +886,10 @@ static KENCC_SAVED: [PhysReg; 0] = [];
 // instructions to reach a far address or make a large constant; `x26` and `x27`, which hold
 // `extern register` variables, and the kernel keeps `m` and `up` in them; `x28`, which is the
 // static base that `_main` sets and nothing may change; the frame pointer, the link register and
-// the stack pointer. `x18` has no job on Plan 9 and is handed out.
-static KENCC_INT_ORDER: [PhysReg; 24] = [
+// the stack pointer. Also left out: `x24` and `x25`, which the translation to the records of `7l`
+// keeps for itself, and which `7c` also never gives to a variable. `x18` has no job on Plan 9 and
+// is handed out.
+static KENCC_INT_ORDER: [PhysReg; 22] = [
     x(0),
     x(1),
     x(2),
@@ -910,8 +912,6 @@ static KENCC_INT_ORDER: [PhysReg; 24] = [
     x(21),
     x(22),
     x(23),
-    x(24),
-    x(25),
 ];
 
 /// Where a call of kencc on Plan 9 puts things, per 08.2 of the rucc-plan9 plan.
