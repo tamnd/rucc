@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- Under `-fexceptions` a `cleanup` handler now works on i386 ELF, where it was refused with E0519. A call in the scope of the handler gets a landing pad, and the unwind table names `__gcc_personality_v0` and the call site table, as on x86-64. Thus the handler runs when `pthread_exit`, `pthread_cancel` or a forced unwind passes through the call. FreeBSD `main` puts a `cleanup` in `THR_CLEANUP_PUSH` of `libthr`, and the `lib32` copy of `libthr` is built with `-fexceptions`, so the `lib32` world of `main` stopped at `thr_join.c`.
 - The SHA-1, SHA-256 and SHA-512 intrinsics of `<arm_neon.h>`, `vsha1cq_u32` to `vsha512su1q_u64`, as gcc has them. Each is the one instruction. FreeBSD's `libmd` is written with them.
 - RISC-V 64 assembly now takes `jr` and `jalr` with a displacement, written `jr -4(t2)` or `jr t2, -4`, and `jalr rd, rs`, as GNU as does. FreeBSD's `memset.S` jumps that way.
 - `-pg` on aarch64 and riscv64 ELF targets. Each function calls `_mcount` at the top of its body with the address it returns to, as gcc does on these machines. The call is put in after the inliner, so an inlined copy of a function does not call it again, and a function with `no_instrument_function` has no call. Before, `-pg` was refused there with E0653. NetBSD builds its profiled libraries with `-pg` on both machines, which was about 5600 units of each R world (Part of #4088)

@@ -7071,6 +7071,39 @@ decl #0 x : int object external static defined
         assert!(has(b"DW.ref.__gcc_personality_v0\0"));
     }
 
+    /// Under `-fexceptions` a `cleanup` handler on i386 gets its landing pad as well, which is what
+    /// the `lib32` copy of FreeBSD's `libthr` needs from `THR_CLEANUP_PUSH`. The header reaches the
+    /// routine through a pointer of four bytes, and the call site table has its own section.
+    #[test]
+    fn an_i386_object_keeps_the_landing_pads_of_its_cleanups() {
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.exceptions = true;
+        opts.target = "i686-unknown-freebsd15.1".parse::<Triple>().unwrap();
+        let source = concat!(
+            "void g(int);\n",
+            "void done(int *p);\n",
+            "void f(int n) {\n",
+            "  for (int i = 0; i < n; i++) { int a __attribute__((cleanup(done))) = i; g(i); }\n",
+            "}\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let text = result.text();
+        assert!(text.contains(".cfi_personality 0x9b,DW.ref.__gcc_personality_v0"), "{text}");
+        assert!(text.contains(".cfi_lsda 0x1b,.LLSDA_f"), "{text}");
+        assert!(text.contains("_Unwind_Resume"), "{text}");
+
+        opts.emit = EmitKind::Object;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        let Artifact::Object { bytes, .. } = result.artifact else { panic!("an object") };
+        let has = |name: &[u8]| bytes.windows(name.len()).any(|at| at == name);
+        assert!(has(b".gcc_except_table\0"), "no call site table");
+        assert!(has(b"zPLR\0"), "no header naming the personality routine");
+        assert!(has(b"DW.ref.__gcc_personality_v0\0"));
+    }
+
     /// gcc's AArch64 vector type names are there before any header, which glibc's `<math.h>`
     /// needs, a declaration can still hide one, and on x86-64 they are ordinary identifiers.
     #[test]
