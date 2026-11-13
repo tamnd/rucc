@@ -101,8 +101,9 @@
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Abi, AsmInfo, AsmOperands, Block, BlockCall, CallInfo, Def, Extra, Flags, Float, Func, Imm,
-    Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
+    Abi, AsmInfo, AsmOperands, Block, BlockCall, BlockCallList, CallInfo, Def, Extra, Flags, Float,
+    FloatPred, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Param, Restrict,
+    Signature, Type, Value,
 };
 use rucc_target::{AbiDescription, CallRegs, Convention, Places, Variadic, Where};
 
@@ -127,12 +128,15 @@ struct Width {
     /// Whether the halves are two registers wide themselves, which is the first of two splits of a
     /// value four registers wide. See [`Width::outer`].
     nested: bool,
+    /// Whether a conversion between the value and a `float`, a `double` or a `long double` is done
+    /// on the x87 stack rather than by a call, which is i386 with the x87 on. See [`stacked`].
+    x87: bool,
 }
 
 impl Width {
     /// The width of a register under that convention, which is how many bytes one takes saved.
     fn of(conv: &CallRegs) -> Self {
-        Self { half: conv.word * 8, pairs: conv.total_store_order, nested: false }
+        Self { half: conv.word * 8, pairs: conv.total_store_order, nested: false, x87: false }
     }
 
     /// The split before this one, on a machine of thirty two bits, where a value of a hundred and
@@ -146,7 +150,12 @@ impl Width {
     /// a function whose boundary has such a value alone, and no routine is named at that width,
     /// since libgcc for i386 has none of the `ti` ones.
     fn outer(self) -> Option<Self> {
-        (self.half == 32 && !self.nested).then_some(Self { half: 64, pairs: false, nested: true })
+        (self.half == 32 && !self.nested).then_some(Self {
+            half: 64,
+            pairs: false,
+            nested: true,
+            x87: false,
+        })
     }
 
     /// How many bits the value this pass splits is, which is two registers.
@@ -210,8 +219,15 @@ impl Width {
 /// halves of sixty four and then each of those into two words, see `Width::outer`. When the
 /// second split leaves the function alone, so is the first undone, and the function is split at
 /// the register width only, as it was before there was a first split.
-pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs) -> bool {
-    let width = Width::of(conv);
+///
+/// `x87` is whether the x87 stack may hold a value, which `-mno-80387` and `-msoft-float` turn
+/// off. Where it may, on i386, a conversion between a `long long` and a float is `fildq` or
+/// `fistpq` through a slot in the frame, as gcc writes it, rather than a call to libgcc, which a
+/// kernel does not link against. FreeBSD's `subr_clockcalib.c` converts between `uint64_t` and
+/// `double` under `-msoft-float -m80387`. tamnd/rucc#4528.
+pub fn halves(func: &mut Func, names: &mut Interner, conv: &CallRegs, x87: bool) -> bool {
+    let mut width = Width::of(conv);
+    width.x87 = x87 && width.half == 32 && width.pairs;
     let outer =
         width.outer().filter(|outer| func.values().any(|value| outer.is_wide(func[value].ty)));
     if let Some(outer) = outer {
@@ -456,7 +472,9 @@ fn can_split(
         return false;
     }
     if matches!(data.opcode, Opcode::SIToFP | Opcode::UIToFP | Opcode::FPToSI | Opcode::FPToUI)
-        && converted(func, inst).and_then(|format| conversion(width, data.opcode, format)).is_none()
+        && !converted(func, inst).is_some_and(|format| {
+            stacked(width, format) || conversion(width, data.opcode, format).is_some()
+        })
     {
         return false;
     }
@@ -1308,6 +1326,13 @@ fn to_float(
     let (Some(result), Some(format)) = (func[inst].first_result, converted(func, inst)) else {
         return;
     };
+    if stacked(calls.width, format) {
+        let ty = func[result].ty;
+        let answer = loaded(func, names, calls.width, inst, (low, high), signed, ty);
+        forward.insert(result, answer);
+        func.remove_inst(inst);
+        return;
+    }
     let opcode = if signed { Opcode::SIToFP } else { Opcode::UIToFP };
     let routine = routine(calls.width, opcode, format);
     let args = [Operand::Split(low, high)];
@@ -1337,6 +1362,11 @@ fn from_float(
 ) {
     let Some(&arg) = func[func[inst].args].first() else { return };
     let Some(format) = converted(func, inst) else { return };
+    if stacked(calls.width, format) {
+        let (low, high) = cut(func, names, calls.width, inst, arg, signed);
+        replace(func, halves, inst, low, high);
+        return;
+    }
     let opcode = if signed { Opcode::FPToSI } else { Opcode::FPToUI };
     let routine = routine(calls.width, opcode, format);
     let args = [Operand::Whole(arg)];
@@ -1350,6 +1380,155 @@ fn from_float(
 fn routine(width: Width, opcode: Opcode, format: Float) -> &'static str {
     conversion(width, opcode, format)
         .unwrap_or_else(|| panic!("no routine for `{}` at {format:?}", opcode.name()))
+}
+
+/// Whether a conversion between a split value and a float of that format is done on the x87 stack.
+///
+/// A `float`, a `double` and a `long double` are all loaded onto the stack and stored off it as
+/// they are, so all three are. A `__float128` is not a format the unit has and keeps its routine.
+fn stacked(width: Width, format: Float) -> bool {
+    width.x87 && matches!(format, Float::F32 | Float::F64 | Float::F80)
+}
+
+/// The eighty bit float, which is what the x87 stack holds and what `fildq` and `fistpq` work in.
+fn extended() -> Type {
+    Type::float(Float::F80)
+}
+
+/// The bits of the eighty bit float that is two to this power.
+const fn two_to_the(power: u32) -> u128 {
+    ((0x3fff + power as u128) << 64) | 0x8000_0000_0000_0000
+}
+
+/// A float constant of that type, written in front of an instruction.
+fn float_const(func: &mut Func, inst: Inst, bits: u128, ty: Type) -> Value {
+    let extra = Extra::Imm(func.add_imm(Imm::from_bits(bits)));
+    written(func, inst, InstData { extra, ..InstData::new(Opcode::FConst) }, ty)
+}
+
+/// An instruction over these operands put in front of another, producing a value of that type.
+fn ahead_as(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value], ty: Type) -> Value {
+    let args = func.push_values(args);
+    written(func, inst, InstData { args, ..InstData::new(opcode) }, ty)
+}
+
+/// An assembly statement written in front of an instruction, with the results it gives back.
+fn stated(
+    func: &mut Func,
+    names: &mut Interner,
+    inst: Inst,
+    (template, constraints, clobbers): (&str, &str, &str),
+    args: &[Value],
+    results: &[Type],
+) -> Vec<Value> {
+    let info = AsmInfo {
+        template: names.intern(template),
+        constraints: names.intern(constraints),
+        clobbers: names.intern(clobbers),
+        targets: BlockCallList::EMPTY,
+    };
+    let extra = Extra::Asm(func.add_asm(info));
+    let args = func.push_values(args);
+    let data = InstData { args, extra, ..InstData::new(Opcode::InlineAsm) };
+    let span = func.span(inst);
+    let made = func.create_inst(data, results, span);
+    func.insert_before(made, inst);
+    func[made].results().collect()
+}
+
+/// A split integer becoming a float on the x87 stack, which is `fildq` of the two halves stored
+/// side by side in a slot.
+///
+/// That is what gcc writes. The load is exact, since the stack's significand is sixty four bits, so
+/// a `float` or a `double` answer is rounded once, by the `fptrunc` at the end.
+///
+/// An unsigned value with its top bit set is loaded as that value less two to the sixty fourth, and
+/// the constant is added back. gcc branches round the `fadds`; here the choice is the comparison
+/// turned into a one or a zero and multiplied by the constant, which is how `expand` writes the
+/// same correction for a `long double` from a register wide integer. The sum is a sixty four bit
+/// integer again and so exact, and the rounding is still the one at the end.
+fn loaded(
+    func: &mut Func,
+    names: &mut Interner,
+    width: Width,
+    inst: Inst,
+    (low, high): (Value, Value),
+    signed: bool,
+    ty: Type,
+) -> Value {
+    let size = u64::from(width.bytes());
+    let slot = room(func, inst, size, align(size));
+    let info = whole(size, align(size));
+    write(func, inst, low, slot, word(width, info, 0), Flags::NONE);
+    let up = stepped(func, width, inst, slot);
+    write(func, inst, high, up, word(width, info, width.step()), Flags::NONE);
+    let wide = extended();
+    let made = stated(func, names, inst, ("fildq %1", "=t,m", "memory"), &[slot], &[wide]);
+    let [mut value] = made[..] else { unreachable!("one result was asked for") };
+    if !signed {
+        let zero = ahead_const(func, width, inst, 0);
+        let over = compared(func, inst, IntPred::Slt, high, zero);
+        let one = ahead(func, width, inst, Opcode::ZExt, &[over]);
+        let flag = ahead_as(func, inst, Opcode::SIToFP, &[one], wide);
+        let range = float_const(func, inst, two_to_the(64), wide);
+        let addend = ahead_as(func, inst, Opcode::FMul, &[range, flag], wide);
+        value = ahead_as(func, inst, Opcode::FAdd, &[value, addend], wide);
+    }
+    if ty == wide { value } else { ahead_as(func, inst, Opcode::FPTrunc, &[value], ty) }
+}
+
+/// A float on the x87 stack becoming a split integer, which is `fistpq` into a slot under a control
+/// word that rounds towards zero, and the two halves read back out of it.
+///
+/// The control word is saved, changed and put back around the store, as gcc does and as
+/// `x87_to_signed` in the lowering does for an integer a register holds. It goes through a register
+/// on the way, since nothing here ORs a constant into memory.
+///
+/// An unsigned answer is the conversion `expand` writes for one from a `long double`: two to the
+/// sixty third is taken off a value at least that large, the rest is converted as signed, and the
+/// top bit is put back into the high half. gcc branches between two `fistpq`s for the same thing.
+fn cut(
+    func: &mut Func,
+    names: &mut Interner,
+    width: Width,
+    inst: Inst,
+    arg: Value,
+    signed: bool,
+) -> (Value, Value) {
+    let wide = extended();
+    let mut value =
+        if func[arg].ty == wide { arg } else { ahead_as(func, inst, Opcode::FPExt, &[arg], wide) };
+    let mut over = None;
+    if !signed {
+        let half = float_const(func, inst, two_to_the(width.wide() - 1), wide);
+        let args = func.push_values(&[value, half]);
+        let extra = Extra::FloatPred(FloatPred::Oge);
+        let data = InstData { args, extra, ..InstData::new(Opcode::FCmp) };
+        let large = written(func, inst, data, Type::I1);
+        let one = ahead(func, width, inst, Opcode::ZExt, &[large]);
+        let flag = ahead_as(func, inst, Opcode::SIToFP, &[one], wide);
+        let taken = ahead_as(func, inst, Opcode::FMul, &[half, flag], wide);
+        value = ahead_as(func, inst, Opcode::FSub, &[value, taken], wide);
+        over = Some(one);
+    }
+    let size = u64::from(width.bytes());
+    let slot = room(func, inst, size, align(size));
+    let saved = room(func, inst, 4, 4);
+    let truncating = room(func, inst, 4, 4);
+    let template = "fnstcw %1\n\tmovl %1, %3\n\torl $3072, %3\n\tmovl %3, %2\n\tfldcw %2\n\t\
+                    fistpq %0\n\tfldcw %1";
+    let shape = (template, "=m,=m,=m,=&r,t", "st,memory,cc");
+    stated(func, names, inst, shape, &[slot, saved, truncating, value], &[width.half()]);
+    let info = whole(size, align(size));
+    let low = read(func, width, inst, slot, word(width, info, 0), Flags::NONE);
+    let up = stepped(func, width, inst, slot);
+    let mut high = read(func, width, inst, up, word(width, info, width.step()), Flags::NONE);
+    if let Some(one) = over {
+        let shift = ahead_const(func, width, inst, i128::from(width.half - 1));
+        let top = ahead(func, width, inst, Opcode::Shl, &[one, shift]);
+        high = ahead(func, width, inst, Opcode::Xor, &[high, top]);
+    }
+    (low, high)
 }
 
 /// What shapes a call this pass writes to a routine in the runtime: the platform's ABI, which says
@@ -2511,7 +2690,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, params[0], params[1], Flags::NONE);
         build.ret(&[sum]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         // Two adds for the halves, one more for the carry, and the carry itself is the unsigned
@@ -2529,7 +2708,7 @@ mod tests {
         let difference = build.binary(Opcode::Sub, params[0], params[1], Flags::NONE);
         build.ret(&[difference]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert_eq!(text.matches(" = sub ").count(), 3, "three subtracts: {text}");
         // The borrow is the operands compared, not the answer, which is what tells a reader the
@@ -2544,7 +2723,7 @@ mod tests {
         let mut build = Builder::new(&mut func, entry);
         build.ret(&[params[1]]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         assert_eq!(
             func.signature().param_types().collect::<Vec<_>>(),
             [Type::int(32), Type::int(HALF), Type::int(HALF)],
@@ -2569,7 +2748,7 @@ mod tests {
         let value = build.load(wide(), params[0], info(16, 16), Flags::NONE);
         build.ret(&[value]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert_eq!(text.matches(" = load.i64 ").count(), 2, "two reads: {text}");
         assert!(text.contains("ptr_add"), "the high word is a word up: {text}");
@@ -2588,7 +2767,7 @@ mod tests {
         let answer = build.unary(Opcode::ZExt, same, Type::int(32));
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert_eq!(text.matches("icmp").count(), 1, "one comparison: {text}");
         assert_eq!(text.matches(" = xor ").count(), 2, "the halves differ or they do not: {text}");
@@ -2603,7 +2782,7 @@ mod tests {
         let answer = build.unary(Opcode::ZExt, below, Type::int(32));
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("icmp slt"), "the high halves keep the sign: {text}");
         assert!(text.contains("icmp ult"), "the low halves have none: {text}");
@@ -2628,7 +2807,7 @@ mod tests {
         let answer = build.unary(Opcode::ZExt, at_least, Type::int(32));
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("icmp sgt"), "the high halves settle it outright: {text}");
         assert!(!text.contains("icmp sge"), "a tie in the high halves settles nothing: {text}");
@@ -2643,7 +2822,7 @@ mod tests {
         let value = build.unary(Opcode::SExt, params[0], wide());
         build.ret(&[value]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("sext.i64"), "the value fills the low half: {text}");
         assert!(text.contains("ashr"), "and its sign fills the high one: {text}");
@@ -2663,7 +2842,7 @@ mod tests {
         let mut build = Builder::new(&mut func, tail);
         build.ret(&[carried]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         assert!(text.contains("block1(%7: i64, %8: i64)"), "the block takes two: {text}");
@@ -2688,7 +2867,7 @@ mod tests {
         let args = func.push_values(&[carried]);
         func.set_block_call(at, BlockCall { args, ..call });
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         assert!(text.contains("block1(%2: i64, %3: i64)"), "the block takes two: {text}");
@@ -2709,7 +2888,7 @@ mod tests {
         let product = build.binary(Opcode::Mul, params[0], params[1], Flags::NONE);
         build.ret(&[product]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         assert_eq!(text.matches(" = mul ").count(), 3, "the low halves and two crosses: {text}");
@@ -2730,7 +2909,7 @@ mod tests {
             let product = build.binary(Opcode::Mul, a, b, Flags::NONE);
             build.ret(&[product]);
 
-            assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+            assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
             let text = printed(&func, &mut names);
             assert!(!text.contains("i128"), "nothing that wide is left: {text}");
             assert_eq!(text.matches(" = mul ").count(), 1, "the low product alone: {text}");
@@ -2751,7 +2930,7 @@ mod tests {
         let product = build.binary(Opcode::Mul, a, params[1], Flags::NONE);
         build.ret(&[product]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert_eq!(text.matches(" = mul ").count(), 2, "the low product and one cross: {text}");
         assert_eq!(text.matches(" = umulh ").count(), 1, "and the carry: {text}");
@@ -2778,7 +2957,7 @@ mod tests {
             let answer = build.binary(opcode, params[0], params[1], Flags::NONE);
             build.ret(&[answer]);
 
-            assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+            assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
             let text = printed(&func, &mut names);
             assert!(!text.contains("i128"), "nothing that wide is left: {text}");
             assert!(text.contains(&format!("call @{routine}")), "{routine} is called: {text}");
@@ -2798,7 +2977,7 @@ mod tests {
         let quotient = build.binary(Opcode::UDiv, params[0], params[1], Flags::NONE);
         build.ret(&[quotient]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__udivti3(%0, %1, %2, %3)"), "four halves go over: {text}");
         assert!(text.contains("return %4, %5"), "and two come back: {text}");
@@ -2818,7 +2997,7 @@ mod tests {
         let quotient = build.binary(Opcode::SDiv, sum, params[1], Flags::NONE);
         build.ret(&[quotient]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         assert_eq!(text.matches(" = add ").count(), 3, "the sum is still a sum: {text}");
@@ -2852,7 +3031,7 @@ mod tests {
             let answer = build.unary(opcode, params[0], float);
             build.ret(&[answer]);
 
-            assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+            assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
             let text = printed(&func, &mut names);
             assert!(!text.contains("i128"), "nothing that wide is left: {text}");
             assert!(text.contains(&format!("call @{routine}")), "{routine} is called: {text}");
@@ -2873,7 +3052,7 @@ mod tests {
             let answer = build.unary(opcode, params[0], wide());
             build.ret(&[answer]);
 
-            assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+            assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
             let text = printed(&func, &mut names);
             assert!(!text.contains("i128"), "nothing that wide is left: {text}");
             assert!(text.contains(&format!("call @{routine}")), "{routine} is called: {text}");
@@ -2894,7 +3073,7 @@ mod tests {
         let answer = build.unary(Opcode::SIToFP, params[0], double);
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__floattidf(%0, %1)"), "two halves go over: {text}");
         assert!(text.contains("return %2"), "and one float comes back: {text}");
@@ -2905,7 +3084,7 @@ mod tests {
         let answer = build.unary(Opcode::FPToSI, params[0], wide());
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__fixdfti(%0)"), "the float goes over as it is: {text}");
         assert!(text.contains("return %1, %2"), "and two halves come back: {text}");
@@ -2926,7 +3105,7 @@ mod tests {
         let answer = build.unary(Opcode::UIToFP, params[0], quad);
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__floatuntitf(%0, %1)"), "two halves go over: {text}");
         assert!(text.contains("return %2"), "and one quad comes back: {text}");
@@ -2937,7 +3116,7 @@ mod tests {
         let answer = build.unary(Opcode::FPToSI, params[0], wide());
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__fixtfti(%0)"), "the quad goes over as it is: {text}");
         assert!(text.contains("return %1, %2"), "and two halves come back: {text}");
@@ -2957,7 +3136,10 @@ mod tests {
         let answer = build.unary(Opcode::SIToFP, params[0], long);
         build.ret(&[answer]);
 
-        assert!(!halves(&mut func, &mut names, &SYSV), "the pass does not understand this one");
+        assert!(
+            !halves(&mut func, &mut names, &SYSV, false),
+            "the pass does not understand this one"
+        );
         let text = printed(&func, &mut names);
         assert!(text.contains("i128"), "the width is still there: {text}");
     }
@@ -2976,7 +3158,7 @@ mod tests {
         let moved = build.binary(Opcode::Shl, params[0], params[1], Flags::NONE);
         build.ret(&[moved]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         assert_eq!(
@@ -3002,7 +3184,7 @@ mod tests {
         let moved = build.binary(Opcode::LShr, params[0], params[1], Flags::NONE);
         build.ret(&[moved]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("iconst.i64 63"), "sixty three is the distance left: {text}");
         assert!(text.contains("iconst.i64 1"), "after the one place that comes first: {text}");
@@ -3026,7 +3208,7 @@ mod tests {
         let moved = build.binary(Opcode::AShr, params[0], params[1], Flags::NONE);
         build.ret(&[moved]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
         // The high half by the count, and the high half by sixty three for the half left empty.
@@ -3048,7 +3230,7 @@ mod tests {
         let low = build.unary(Opcode::Trunc, values[wide_at], word);
         build.ret(&[low]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let ret = func.insts(entry).last().expect("the block ends in a return");
         let read = func[func[ret].args][0];
         let at = func[entry].params.iter().position(|&value| value == read);
@@ -3103,7 +3285,7 @@ mod tests {
         let low = build.unary(Opcode::Trunc, values[10], word);
         build.ret(&[low]);
 
-        assert!(halves(&mut func, &mut names, &DARWIN), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &DARWIN, false), "there is a width to split");
         let mut split = vec![word; 8];
         split.extend([byte, word, word, word]);
         assert_eq!(types(func.signature()), split, "no filler anywhere");
@@ -3124,7 +3306,7 @@ mod tests {
         build.call(callee, signature, &[one, one, one, one, one, big]);
         build.ret(&[]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let call = func.insts(entry).find(|&inst| func[inst].opcode == Opcode::Call);
         let call = call.expect("the call is still there");
         let Extra::Call(info) = func[call].extra else { unreachable!("a call has call info") };
@@ -3159,7 +3341,7 @@ mod tests {
         build.ret(&[]);
         let before = printed(&func, &mut names);
 
-        assert!(!halves(&mut func, &mut names, &SYSV), "the named parameters cannot move");
+        assert!(!halves(&mut func, &mut names, &SYSV, false), "the named parameters cannot move");
         assert_eq!(printed(&func, &mut names), before, "so nothing moved");
     }
 
@@ -3181,7 +3363,7 @@ mod tests {
         build.call_varargs(callee, signature, &[one, one, one, one, one, big], &[Abi::Plain]);
         build.ret(&[]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let call = func.insts(entry).find(|&inst| func[inst].opcode == Opcode::Call);
         let call = call.expect("the call is still there");
         let Extra::Call(info) = func[call].extra else { unreachable!("a call has call info") };
@@ -3211,7 +3393,7 @@ mod tests {
         build.call_varargs(callee, signature, &[one, big], &[Abi::Plain]);
         build.ret(&[]);
 
-        assert!(halves(&mut func, &mut names, &LP64D), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &LP64D, false), "there is a width to split");
         let call = func.insts(entry).find(|&inst| func[inst].opcode == Opcode::Call);
         let call = call.expect("the call is still there");
         let passed = func[func[call].args].to_vec();
@@ -3241,7 +3423,7 @@ mod tests {
         let low = build.unary(Opcode::Trunc, values[7], word);
         build.ret(&[low]);
 
-        assert!(halves(&mut func, &mut names, &LP64D), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &LP64D, false), "there is a width to split");
         assert_eq!(types(func.signature()), vec![word; 9], "seven, and the two halves");
         let ret = func.insts(entry).last().expect("the block ends in a return");
         let read = func[func[ret].args][0];
@@ -3265,7 +3447,7 @@ mod tests {
         build.call_varargs(callee, signature, &[one, big], &[Abi::Plain]);
         build.ret(&[]);
 
-        assert!(!halves(&mut func, &mut names, &MINGW64), "the call is left for a refusal");
+        assert!(!halves(&mut func, &mut names, &MINGW64, false), "the call is left for a refusal");
     }
 
     /// The order the function holds its blocks in is not the order they run in.
@@ -3292,7 +3474,7 @@ mod tests {
         build.ret(&[again]);
 
         assert!(
-            halves(&mut func, &mut names, &SYSV),
+            halves(&mut func, &mut names, &SYSV, false),
             "the definition runs before the use whatever the list says"
         );
         let text = printed(&func, &mut names);
@@ -3308,7 +3490,7 @@ mod tests {
         let sum = build.binary(Opcode::Add, params[0], params[1], Flags::NONE);
         build.ret(&[sum]);
 
-        assert!(!halves(&mut func, &mut names, &SYSV), "there is nothing to split");
+        assert!(!halves(&mut func, &mut names, &SYSV, false), "there is nothing to split");
     }
 
     /// The operands of a runtime call go over the way the target's convention passes them.
@@ -3326,7 +3508,7 @@ mod tests {
         let answer = build.unary(Opcode::SIToFP, params[0], quad);
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &MINGW64), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &MINGW64, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("call @__floattidf"), "{text}");
         // One slot with the two halves written into it, and the address of it is the argument.
@@ -3346,7 +3528,7 @@ mod tests {
         let answer = build.unary(Opcode::SIToFP, params[0], quad);
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &MINGW64), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &MINGW64, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("call @__floattitf"), "{text}");
         // The slot for the answer and the slot for the operand.
@@ -3365,7 +3547,7 @@ mod tests {
         let answer = build.unary(Opcode::SIToFP, params[0], double);
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__floattidf(%0, %1)"), "both halves in registers: {text}");
         assert!(!text.contains("alloca"), "nothing goes through the frame: {text}");
@@ -3381,7 +3563,7 @@ mod tests {
         let answer = build.binary(Opcode::SDiv, params[0], params[1], Flags::NONE);
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &MINGW64), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &MINGW64, false), "there is a width to split");
         let text = printed(&func, &mut names);
         // The call answers one value and it is at the quad format, which is the name this compiler
         // has for sixteen bytes in a vector register.
@@ -3401,7 +3583,7 @@ mod tests {
         let answer = build.binary(Opcode::SDiv, params[0], params[1], Flags::NONE);
         build.ret(&[answer]);
 
-        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        assert!(halves(&mut func, &mut names, &SYSV, false), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(text.contains("@__divti3(%0, %1, %2, %3)"), "four halves over: {text}");
         assert!(!text.contains("alloca"), "nothing goes through the frame: {text}");
@@ -3411,7 +3593,7 @@ mod tests {
     ///
     /// No target with such registers lowers yet, so the pass is driven at the width directly, over
     /// the System V registers standing in for a convention that puts both halves in two of them.
-    const NARROW: super::Width = super::Width { half: 32, pairs: true, nested: false };
+    const NARROW: super::Width = super::Width { half: 32, pairs: true, nested: false, x87: false };
 
     /// Splits at thirty two bits, which is what the pass does on i386.
     fn narrow(func: &mut Func, names: &mut Interner) -> bool {
@@ -3647,13 +3829,57 @@ mod tests {
             let answer = build.unary(opcode, params[0], quad);
             build.ret(&[answer]);
 
-            assert!(halves(&mut func, &mut names, &rucc_target::x86::SYSV), "a width to split");
+            assert!(
+                halves(&mut func, &mut names, &rucc_target::x86::SYSV, false),
+                "a width to split"
+            );
             let text = printed(&func, &mut names);
             assert!(text.contains(&format!("call @{routine}")), "{routine}: {text}");
             assert_eq!(text.matches("alloca").count(), 1, "a slot for the answer: {text}");
             assert_eq!(text.matches(" = call").count(), 0, "the call answers nothing: {text}");
             assert_eq!(text.matches(" = load").count(), 1, "the answer is the load: {text}");
         }
+    }
+
+    /// tamnd/rucc#4528. With the x87 on, a conversion between a `long long` and a `float`, a
+    /// `double` or a `long double` is `fildq` or `fistpq` through a slot and calls nothing, which is
+    /// what a kernel built with `-msoft-float -m80387` links. A quad still has its routine.
+    #[test]
+    fn on_i386_with_the_x87_a_long_long_converts_on_the_stack() {
+        let i386 = &rucc_target::x86::SYSV;
+        for format in [Float::F32, Float::F64, Float::F80] {
+            let float = Type::float(format);
+            for (opcode, wanted) in [(Opcode::SIToFP, "fildq"), (Opcode::UIToFP, "fildq")] {
+                let mut names = Interner::new();
+                let (mut func, entry, params) = shell(&mut names, &[long()], &[float]);
+                let mut build = Builder::new(&mut func, entry);
+                let answer = build.unary(opcode, params[0], float);
+                build.ret(&[answer]);
+                assert!(halves(&mut func, &mut names, i386, true), "a width to split");
+                let text = printed(&func, &mut names);
+                assert!(text.contains(wanted) && !text.contains("call"), "{format:?}: {text}");
+            }
+            for (opcode, wanted) in [(Opcode::FPToSI, "fistpq"), (Opcode::FPToUI, "fistpq")] {
+                let mut names = Interner::new();
+                let (mut func, entry, params) = shell(&mut names, &[float], &[long()]);
+                let mut build = Builder::new(&mut func, entry);
+                let answer = build.unary(opcode, params[0], long());
+                build.ret(&[answer]);
+                assert!(halves(&mut func, &mut names, i386, true), "a width to split");
+                let text = printed(&func, &mut names);
+                assert!(text.contains(wanted) && !text.contains("call"), "{format:?}: {text}");
+                assert!(text.contains("return %"), "two halves come back: {text}");
+            }
+        }
+        let mut names = Interner::new();
+        let quad = Type::float(Float::F128);
+        let (mut func, entry, params) = shell(&mut names, &[long()], &[quad]);
+        let mut build = Builder::new(&mut func, entry);
+        let answer = build.unary(Opcode::SIToFP, params[0], quad);
+        build.ret(&[answer]);
+        assert!(halves(&mut func, &mut names, i386, true), "a width to split");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("call @__floatditf"), "a quad keeps its routine: {text}");
     }
 
     #[test]
@@ -3677,7 +3903,7 @@ mod tests {
     fn at_sixty_four_bits_the_width_is_the_one_the_registers_say() {
         assert_eq!(
             super::Width::of(&SYSV),
-            super::Width { half: HALF, pairs: true, nested: false }
+            super::Width { half: HALF, pairs: true, nested: false, x87: false }
         );
         assert_eq!(super::Width::of(&SYSV).mode(), "i128");
         assert_eq!(NARROW.mode(), "i64");

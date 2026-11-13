@@ -3449,6 +3449,9 @@ static ENCODINGS: &[Encoding] = &[
     bytes("fstpl", &M, Long, &[0xDD], ext(0, 3), NO_IMM),
     bytes("fistpl", &M, Long, &[0xDB], ext(0, 3), NO_IMM),
     bytes("fistpll", &M, Long, &[0xDF], ext(0, 7), NO_IMM),
+    // The same store under the name with `q`, which is the one gcc writes and the one the
+    // conversion of a `long long` from an x87 float on i386 is spelled with. tamnd/rucc#4528.
+    bytes("fistpq", &M, Long, &[0xDF], ext(0, 7), NO_IMM),
     // The arithmetic with an operand in memory, on the top of the stack. `0xD8` reads four bytes
     // of float and `0xDC` eight, and the extension is the operation in the order the stack forms
     // number them: add, multiply, compare, compare and pop, subtract, subtract the other way,

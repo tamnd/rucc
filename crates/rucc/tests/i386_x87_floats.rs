@@ -168,3 +168,43 @@ fn f_takes_the_free_register_of_the_x87_stack() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// tamnd/rucc#4528. FreeBSD builds its i386 kernel with `-msoft-float` and turns the x87 back on
+/// with `-m80387` for `subr_clockcalib.c`, which converts between `uint64_t` and `double`. The
+/// kernel has no libgcc, so each conversion between a `long long` and a float is `fildq` or
+/// `fistpq` through the frame, as gcc writes it, and calls nothing.
+#[test]
+fn a_long_long_converts_to_and_from_an_x87_float_without_libgcc() {
+    const CONVERT: &str = "\
+typedef unsigned long long u64;
+typedef long long s64;
+float a(u64 x) { return x; }
+double b(u64 x) { return x; }
+long double c(u64 x) { return x; }
+double d(s64 x) { return x; }
+u64 e(float x) { return x; }
+u64 f(double x) { return x; }
+u64 g(long double x) { return x; }
+s64 h(double x) { return x; }
+";
+    for level in ["-O0", "-O2"] {
+        let dir =
+            std::env::temp_dir().join(format!("rucc-i386-x87-wide-{}{level}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+        let path = dir.join("convert.c");
+        std::fs::write(&path, CONVERT).expect("the fixture can be written");
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=i386-unknown-freebsd14.0", "-mno-mmx", "-mno-sse", "-msoft-float"])
+            .args(["-m80387", "-ffreestanding", "-S", "-o", "-", level])
+            .arg(&path)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let _ = std::fs::remove_dir_all(&dir);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{level}: {stderr}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(!text.contains("call"), "{level}: a call to the runtime\n{text}");
+        assert_eq!(text.matches("fildq").count(), 4, "{level}: a load each\n{text}");
+        assert_eq!(text.matches("fistpq").count(), 4, "{level}: a store each\n{text}");
+    }
+}
