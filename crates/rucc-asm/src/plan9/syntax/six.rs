@@ -941,36 +941,7 @@ impl Six<'_> {
     fn outhist(&mut self) {
         let hist: Vec<Hist> = self.lx.hist.clone();
         for h in &hist {
-            let mut parts: Vec<&[u8]> = Vec::new();
-            if let Some(p) = h.name.as_deref() {
-                if p.first() != Some(&b'/') && h.offset == 0 && self.pathname.first() == Some(&b'/')
-                {
-                    parts.push(&self.pathname);
-                }
-                parts.push(p);
-            }
-            let mut names: Vec<Vec<u8>> = Vec::new();
-            for p in parts {
-                let mut rest = p;
-                loop {
-                    match rest.iter().position(|&c| c == b'/') {
-                        Some(0) => {
-                            names.push(b"/".to_vec());
-                            rest = &rest[1..];
-                        }
-                        Some(n) => {
-                            names.push(rest[..n].to_vec());
-                            rest = &rest[n + 1..];
-                        }
-                        None => {
-                            if !rest.is_empty() {
-                                names.push(rest.to_vec());
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
+            let names = h.names(&self.pathname);
             for n in names {
                 self.put16(i32::from(a6::ANAME));
                 self.put(&[D_FILE, 1, b'<']);

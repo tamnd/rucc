@@ -1,15 +1,15 @@
-//! A command with the arguments of `6a`, for the comparison with the C program.
+//! A command with the arguments of `6a` and `7a`, for the comparison with the C programs.
 //!
-//! Usage: `p9a 6 [-o out] [-Dname] [-Idir] file.s`. An absolute name is read under `$P9ROOT`, and
+//! Usage: `p9a 6|7 [-o out] [-Dname] [-Idir] file.s`. An absolute name is read under `$P9ROOT`, and
 //! `$P9CWD` is the directory of the history.
 
 use std::process::ExitCode;
 
-use rucc_asm::plan9::syntax::assemble6;
+use rucc_asm::plan9::syntax::{assemble6, assemble7};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let _machine = args.next();
+    let machine = args.next().unwrap_or_default();
     let (mut out, mut defines, mut includes, mut file) = (None, Vec::new(), Vec::new(), None);
     while let Some(a) = args.next() {
         if a == "-o" {
@@ -31,7 +31,7 @@ fn main() -> ExitCode {
         }
     }
     let Some(file) = file else {
-        eprintln!("usage: p9a 6 [-o out] file.s");
+        eprintln!("usage: p9a 6|7 [-o out] file.s");
         return ExitCode::FAILURE;
     };
     let root = std::env::var("P9ROOT").unwrap_or_default();
@@ -40,9 +40,10 @@ fn main() -> ExitCode {
         let p = if n.starts_with('/') { format!("{root}{n}") } else { n.to_string() };
         std::fs::read(p).ok()
     };
-    match assemble6(&file, &cwd, &defines, &includes, &read) {
+    let assemble = if machine == "7" { assemble7 } else { assemble6 };
+    match assemble(&file, &cwd, &defines, &includes, &read) {
         Ok(o) => {
-            let out = out.unwrap_or_else(|| "6.out".to_string());
+            let out = out.unwrap_or_else(|| format!("{machine}.out"));
             if std::fs::write(&out, o).is_err() {
                 return ExitCode::FAILURE;
             }

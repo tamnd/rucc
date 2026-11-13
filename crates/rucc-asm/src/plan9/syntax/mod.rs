@@ -7,8 +7,12 @@
 //! machine has its grammar and its object writer.
 
 mod itab6;
+mod itab7;
 mod lex;
+mod seven;
 mod six;
+mod tab7;
 
 pub use lex::Reader;
+pub use seven::assemble as assemble7;
 pub use six::assemble as assemble6;

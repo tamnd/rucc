@@ -86,6 +86,43 @@ pub(super) struct Hist {
     pub(super) offset: i64,
 }
 
+impl Hist {
+    /// The names that `outhist` writes for the entry, one for each part of the file name. A
+    /// relative name of a file gets the directory `pathname` in front, and a leading `/` is a name.
+    pub(super) fn names(&self, pathname: &[u8]) -> Vec<Vec<u8>> {
+        let mut parts: Vec<&[u8]> = Vec::new();
+        if let Some(p) = self.name.as_deref() {
+            if p.first() != Some(&b'/') && self.offset == 0 && pathname.first() == Some(&b'/') {
+                parts.push(pathname);
+            }
+            parts.push(p);
+        }
+        let mut names: Vec<Vec<u8>> = Vec::new();
+        for p in parts {
+            let mut rest = p;
+            loop {
+                match rest.iter().position(|&c| c == b'/') {
+                    Some(0) => {
+                        names.push(b"/".to_vec());
+                        rest = &rest[1..];
+                    }
+                    Some(n) => {
+                        names.push(rest[..n].to_vec());
+                        rest = &rest[n + 1..];
+                    }
+                    None => {
+                        if !rest.is_empty() {
+                            names.push(rest.to_vec());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        names
+    }
+}
+
 /// A token and its value.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Tok {
