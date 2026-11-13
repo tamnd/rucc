@@ -4858,8 +4858,9 @@ impl<'u> Body<'_, 'u> {
             // an aggregate is not a value the IR can hold.
             let source = self.place(value);
             self.check_load(source, span);
+            let volatile = [ty, place.ty, source.ty].into_iter().any(|ty| self.is_volatile(ty));
             let source = self.address_of(source, span);
-            self.copy_bytes(addr, source, ty, span);
+            self.copy_object(addr, source, ty, volatile, span);
             return;
         }
         let Some(value) = self.eval(value) else { return };
@@ -4967,26 +4968,25 @@ impl<'u> Body<'_, 'u> {
         if size == 0 {
             return;
         }
-        self.move_bytes(to, from, size, None, align, span);
+        self.move_bytes(to, from, (size, None), align, Flags::NONE, span);
     }
 
-    /// A copy from one address to another of a length the program works out.
+    /// A copy of a fixed number of bytes, or of a length the program works out, which is where
+    /// the payload and the operands are decided.
     ///
-    /// Separate from [`Self::memcpy`] for the reason [`Self::memset_value`] is separate from
-    /// [`Self::memset`]: which of the two shapes is built decides whether the copy can be written
-    /// out as stores, so a caller that has a number says so by calling the other one.
-    fn memcpy_value(&mut self, to: Value, from: Value, length: Value, align: u32, span: Span) {
-        self.move_bytes(to, from, 0, Some(length), align, span);
-    }
-
-    /// What both of the two build, which is where the payload and the operands are decided.
+    /// The length is a size of the payload or a value, and which of the two shapes is built
+    /// decides whether the copy can be written out as stores, for the reason [`Self::memset_value`]
+    /// is separate from [`Self::memset`].
+    ///
+    /// The flags are [`Flags::VOLATILE`] for a copy into or out of a volatile object, and none
+    /// for every other copy.
     fn move_bytes(
         &mut self,
         to: Value,
         from: Value,
-        size: u64,
-        length: Option<Value>,
+        (size, length): (u64, Option<Value>),
         align: u32,
+        flags: Flags,
         span: Span,
     ) {
         let info = MemInfo {
@@ -5002,7 +5002,10 @@ impl<'u> Body<'_, 'u> {
         let mut operands = vec![to, from];
         operands.extend(length);
         let args = build.func().push_values(&operands);
-        build.inst(InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memcpy) }, &[]);
+        build.inst(
+            InstData { args, extra: Extra::Mem(mem), flags, ..InstData::new(Opcode::Memcpy) },
+            &[],
+        );
     }
 
     // Places.
@@ -6953,14 +6956,28 @@ impl<'u> Body<'_, 'u> {
     /// are the same copy and the second is the one a call to the runtime's `memcpy` stands in for,
     /// since there is nothing to write out as stores when nobody knows how many there are.
     fn copy_bytes(&mut self, to: Value, from: Value, ty: TypeId, span: Span) {
+        self.copy_object(to, from, ty, self.is_volatile(ty), span);
+    }
+
+    /// [`Self::copy_bytes`] for a copy that the caller says is into or out of a volatile object.
+    ///
+    /// The type of an assignment or of an initializer entry is not qualified, and the object it
+    /// writes can be. C17 6.7.3p7 makes each access to a volatile object one the program does,
+    /// so the copy is a volatile `memcpy`, and no pass makes it shorter or removes it. Without
+    /// this, `d = g(d)` on a `volatile long double complex d` kept only the bytes of the real half
+    /// that a later read used (tamnd/rucc#4535).
+    fn copy_object(&mut self, to: Value, from: Value, ty: TypeId, volatile: bool, span: Span) {
         let align = repr::align_of(self.types(), self.target(), ty);
-        if repr::is_variable_length(self.types(), ty) {
-            let length = self.size_value(ty, span);
-            self.memcpy_value(to, from, length, align, span);
-            return;
-        }
-        let size = repr::size_of(self.types(), self.target(), ty);
-        self.memcpy(to, from, size, align, span);
+        let flags = if volatile { Flags::VOLATILE } else { Flags::NONE };
+        let size = if repr::is_variable_length(self.types(), ty) {
+            (0, Some(self.size_value(ty, span)))
+        } else {
+            match repr::size_of(self.types(), self.target(), ty) {
+                0 => return,
+                size => (size, None),
+            }
+        };
+        self.move_bytes(to, from, size, align, flags, span);
     }
 
     /// The type both halves of a complex type have.
@@ -11824,6 +11841,7 @@ impl<'u> Body<'_, 'u> {
         }
         let source = self.place(rhs);
         self.check_load_at(source, at, span);
+        let volatile = [ty, place.ty, source.ty].into_iter().any(|ty| self.is_volatile(ty));
         let source = self.address_of(source, span);
         let space = self.space(place.ty);
         let destination = self.address_of(place, span);
@@ -11835,7 +11853,7 @@ impl<'u> Body<'_, 'u> {
             self.ordered_write(destination, source, place.ty, MemOrder::SeqCst, span);
             return None;
         }
-        self.copy_bytes(destination, source, ty, span);
+        self.copy_object(destination, source, ty, volatile, span);
         None
     }
 
