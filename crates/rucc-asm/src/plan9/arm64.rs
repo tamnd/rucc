@@ -987,6 +987,9 @@ impl Out<'_> {
                 let (first, first_reg) = one(a)?;
                 let (second, second_reg) = one(b)?;
                 let at = self.memory(mem, post, width(name), line)?;
+                if name == "MOVPD" {
+                    return self.double_pair(m == "stp", first, second, at, line);
+                }
                 let op = Self::op(name, line)?;
                 if m == "stp" {
                     self.emit3(op, first, second_reg, at);
@@ -1164,6 +1167,41 @@ impl Out<'_> {
         })
     }
 
+    /// A pair of doubles as two `FMOVD`.
+    ///
+    /// `7l` takes the scale of the offset of a pair from the size bit of the opcode, and `MOVPD`
+    /// does not have that bit. Thus `7l` divides the offset by 4, but the processor multiplies it
+    /// by 8, and `ldp d0, d1, [x1, #8]` reads from `x1+16`. `7c` never makes `MOVPD`. A register
+    /// of the pair is never the base, so the order of the two moves does not change the result.
+    fn double_pair(
+        &mut self,
+        store: bool,
+        first: Addr7,
+        second: Addr7,
+        at: Addr7,
+        line: usize,
+    ) -> Result<(), Trouble> {
+        let op = Self::op("FMOVD", line)?;
+        let near = oreg(at.reg, if at.ty == a7::D_OREG { at.offset } else { 0 });
+        let far = oreg(at.reg, near.offset + 8);
+        // A pre-index move writes the base first, and a post-index move writes it last. The
+        // other move uses the base as it is after the pre-index move, or before the post-index
+        // move.
+        let (one, two) = match at.ty {
+            a7::D_XPRE => ((first, at), (second, far)),
+            a7::D_XPOST => ((second, far), (first, at)),
+            _ => ((first, near), (second, far)),
+        };
+        for (r, m) in [one, two] {
+            if store {
+                self.emit(op, r, m);
+            } else {
+                self.emit(op, m, r);
+            }
+        }
+        Ok(())
+    }
+
     /// Give every branch to a label the `pc` of the label.
     fn resolve(&mut self) -> Result<(), Trouble> {
         for (at, label, line) in std::mem::take(&mut self.fixups) {
@@ -1328,6 +1366,30 @@ mod tests {
         let p = progs(listing);
         assert_eq!(p[1].to.reg, SCRATCH);
         assert_eq!((p[2].from.reg, p[2].reg), (SCRATCH, 16));
+    }
+
+    /// `7l` scales the offset of `MOVPD` by 4 and not by 8, so a pair of doubles is two moves.
+    #[test]
+    fn a_pair_of_doubles_is_two_moves() {
+        let listing = "\t.text\n\t.globl f\nf:\n\tldp d0, d1, [x1, #8]\n\tstp d2, d3, [x0, #16]\n\
+                       \tstp d4, d5, [x2, #-16]!\n\tldp d6, d7, [x3], #32\n\tldp s0, s1, [x1, #8]\n\tret\n";
+        let p = progs(listing);
+        assert_eq!(
+            ops(listing),
+            [
+                "ATEXT", "AFMOVD", "AFMOVD", "AFMOVD", "AFMOVD", "AFMOVD", "AFMOVD", "AFMOVD",
+                "AFMOVD", "AMOVPS", "ARETURN", "AEND"
+            ]
+        );
+        let at = |a: &Addr7| (a.ty, a.reg, a.offset);
+        assert_eq!((at(&p[1].from), p[1].to.reg), ((a7::D_OREG, 1, 8), 0));
+        assert_eq!((at(&p[2].from), p[2].to.reg), ((a7::D_OREG, 1, 16), 1));
+        assert_eq!((p[3].from.reg, at(&p[3].to)), (2, (a7::D_OREG, 0, 16)));
+        assert_eq!((p[4].from.reg, at(&p[4].to)), (3, (a7::D_OREG, 0, 24)));
+        assert_eq!((p[5].from.reg, at(&p[5].to)), (4, (a7::D_XPRE, 2, -16)));
+        assert_eq!((p[6].from.reg, at(&p[6].to)), (5, (a7::D_OREG, 2, 8)));
+        assert_eq!((at(&p[7].from), p[7].to.reg), ((a7::D_OREG, 3, 8), 7));
+        assert_eq!((at(&p[8].from), p[8].to.reg), ((a7::D_XPOST, 3, 32), 6));
     }
 
     /// The kernel keeps `up` in `R26` and `m` in `R27`, and its code reads and writes them.
