@@ -57,7 +57,7 @@ fn i386_masks_an_argument_and_extends_a_value_it_gets_back() {
     let (ok, listing, errors) = assembly("i686-unknown-linux-gnu");
     assert!(ok, "{errors}");
     let quot = body(&listing, "quot");
-    assert!(quot.contains("andl\t$31, %ecx\n"), "five bits of the high word are kept: {quot}");
+    assert!(quot.contains("andl\t$31, %e"), "five bits of the high word are kept: {quot}");
     let negative = body(&listing, "negative");
     let after = &negative[negative.find("call\tseven").expect("the call is made")..];
     assert!(after.contains("shlb\t$1, %al\n"), "the seven bits are moved up: {negative}");

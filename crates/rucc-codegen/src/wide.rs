@@ -86,7 +86,7 @@
 //! be.
 //!
 //! On a thirty two bit target a quotient and a remainder of the same two operands are one call to
-//! `__udivmoddi4` or `__divmoddi4` where gcc makes one, which is [`sharing`]. The remainder comes
+//! `__udivmoddi4` or `__divmoddi4` where gcc makes one, which is `sharing`. The remainder comes
 //! back through an address, which is a frame slot here.
 //!
 //! The call is asked for with the halves already in it, four parameters of sixty four bits for the
@@ -1254,8 +1254,8 @@ fn divide(
             return;
         }
         let signed = matches!(opcode, Opcode::SDiv | Opcode::SRem);
-        if top == inst
-            && let Some(answers) = quotient_and_remainder(
+        if top == inst {
+            if let Some(answers) = quotient_and_remainder(
                 func,
                 names,
                 calls,
@@ -1263,12 +1263,12 @@ fn divide(
                 signed,
                 (a_low, a_high),
                 (b_low, b_high),
-            )
-        {
-            shared.answers.insert(inst, answers);
-            let (low, high) = answers[remainder];
-            replace(func, halves, inst, low, high);
-            return;
+            ) {
+                shared.answers.insert(inst, answers);
+                let (low, high) = answers[remainder];
+                replace(func, halves, inst, low, high);
+                return;
+            }
         }
     }
     let Some(routine) = width.libcall(opcode, width.mode()) else { return };
