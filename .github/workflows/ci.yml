@@ -953,7 +953,13 @@ jobs:
           tar xzf zlib.tar.gz
       - name: fetch the lua sources
         run: |
-          curl -fsSL -o lua.tar.gz https://www.lua.org/ftp/lua-5.4.8.tar.gz
+          # www.lua.org often resets the connection from a runner, so its mirrors are tried next.
+          # The checksum below holds whichever one answers.
+          for url in https://www.lua.org/ftp/lua-5.4.8.tar.gz \
+            https://www.tecgraf.puc-rio.br/lua/mirror/ftp/lua-5.4.8.tar.gz \
+            https://distfiles.macports.org/lua/lua-5.4.8.tar.gz; do
+            curl -fsSL -o lua.tar.gz "$url" && break
+          done
           echo "4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae  lua.tar.gz" | sha256sum -c -
           tar xzf lua.tar.gz
       - name: fetch the brotli sources
@@ -1061,7 +1067,13 @@ jobs:
           cargo xtask builtins --target ${{ matrix.triple }}
       - name: fetch the lua sources
         run: |
-          curl -fsSL -o lua.tar.gz https://www.lua.org/ftp/lua-5.4.8.tar.gz
+          # www.lua.org often resets the connection from a runner, so its mirrors are tried next.
+          # The checksum below holds whichever one answers.
+          for url in https://www.lua.org/ftp/lua-5.4.8.tar.gz \
+            https://www.tecgraf.puc-rio.br/lua/mirror/ftp/lua-5.4.8.tar.gz \
+            https://distfiles.macports.org/lua/lua-5.4.8.tar.gz; do
+            curl -fsSL -o lua.tar.gz "$url" && break
+          done
           echo "4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae  lua.tar.gz" | sha256sum -c -
           tar xzf lua.tar.gz
       - name: the gdb check
