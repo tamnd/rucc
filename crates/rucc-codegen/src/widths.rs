@@ -43,20 +43,23 @@
 //! A parameter, a return value and an argument of a call are agreed with code this compilation is
 //! not looking at, and the agreement is the ABI's rather than this file's. Where the ABI says the
 //! bits above a `_BitInt` in its register are anything, which is [`BitInts::SpareBits`] and the
-//! x86-64 psABI, the agreement is the one this pass already keeps: the value crosses in the
-//! register that holds it, the side that sends it owes nothing above its own bits, and the side
-//! that receives it reads only those. So the signatures are widened with everything else and
-//! nothing is shaped on the way across. gcc 16.2.0 keeps the same agreement from its side, which
-//! is what makes the two compilers' halves of one call agree.
+//! x86-64 psABI, AAPCS64 and i386, the agreement is the one this pass already keeps: the value
+//! crosses in the register that holds it, the side that sends it owes nothing above its own bits,
+//! and the side that receives it reads only those. So the signatures are widened with everything
+//! else and nothing is shaped on the way across. gcc 16.2.0, aarch64-linux-gnu-gcc 14 and gcc 15 `-m32`
+//! keep the same agreement from their side, which is what makes the two compilers' halves of one
+//! call agree.
 //!
-//! Where the ABI has not been taught, which is every other one today, a function with one of
+//! Where the ABI has not been taught, which is RISC-V and Windows today, a function with one of
 //! these widths at its own boundary or at a call's is left exactly as it was, and the selector
-//! refuses it by name. RISC-V extends a `_BitInt` to the whole register and AAPCS64 has a section
-//! of its own for it, and neither is the answer above. `tamnd/rucc#425` is the issue for them.
+//! refuses it by name. RISC-V extends a `_BitInt` to the whole register, which is not the answer
+//! above, and no compiler for it has been checked here. `tamnd/rucc#425` is the issue for it.
 //!
-//! A `_BitInt` wider than sixty four bits reaches here at a boundary only on those ABIs as well.
-//! The x86-64 psABI passes one as a structure of `long`s, which is a question about the C type and
-//! is answered in `rucc-lower`, so what this pass sees there is two `i64`s and not an `i65`.
+//! A `_BitInt` wider than sixty four bits does not reach here at a boundary on x86-64 or i386. The
+//! x86-64 psABI passes one as a structure of `long`s and i386 as one of its 32 bit limbs, which are
+//! questions about the C type answered in `rucc-lower`, so what this pass sees there is words and
+//! not an `i65`. AAPCS64 passes one up to 128 bits as it does an `__int128`, so there an `i65` is
+//! widened to an `i128` with the rest and crosses in a pair of registers.
 
 use rucc_base::Idx;
 use rucc_ir::{

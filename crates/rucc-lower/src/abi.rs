@@ -621,8 +621,9 @@ fn floating_mode(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
 /// of words is asked into (tamnd/rucc#2490). gcc 16.2.0 does both. On i386 outside Windows one
 /// wider than 64 bits is a structure of its 32 bit limbs, which goes in the argument area and
 /// comes back through the hidden address, and gcc 16.2.0 `-m32` does that too (tamnd/rucc#4333).
-/// A narrower one on AArch64, and the other machines, have rules of their own that
-/// tamnd/rucc#425 has not been taught yet.
+/// A narrower one on AArch64 travels as the scalar it is, the way an `__int128` does, which is
+/// what AAPCS64 says. The other machines have rules of their own that tamnd/rucc#425 has not been
+/// taught yet.
 fn chunks(types: &Types, target: &TargetInfo, id: TypeId) -> Option<Shaped> {
     let TypeKind::BitInt { width, .. } = types.kind(id) else { return None };
     let windows = target.tuple.os() == Os::Windows;
@@ -949,7 +950,8 @@ mod tests {
     /// A `_BitInt` wider than a register is a structure of `long`s to the x86-64 psABI, so it
     /// travels as two words both ways, and once the registers are gone it goes to the argument
     /// area aligned to eight, where an `__int128` would be aligned to sixteen. gcc 16.2.0 says
-    /// `_Alignof(_BitInt(128))` is eight. AArch64 has not been taught this and keeps the scalar.
+    /// `_Alignof(_BitInt(128))` is eight. AArch64 keeps the scalar, since AAPCS64 passes one up to
+    /// 128 bits as it does an `__int128`.
     #[test]
     fn a_bit_int_wider_than_a_register_on_x86_64_is_a_structure_of_words() {
         let mut types = Types::new();
