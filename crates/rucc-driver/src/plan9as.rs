@@ -36,7 +36,10 @@ use std::net::TcpStream;
 use std::sync::Mutex;
 
 use rucc_9p::Client;
-use rucc_asm::plan9::syntax::{assemble6, assemble7};
+use rucc_asm::plan9::syntax::{assemble6, assemble7, namelenerror};
+
+/// `Enonexist` of the Plan 9 kernel.
+const ENONEXIST: &str = "file does not exist";
 
 /// The option that selects this driver as the first argument.
 pub const DRIVER_OPTION: &str = "--driver=plan9-as";
@@ -218,8 +221,8 @@ impl Files {
         }
     }
 
-    fn read(&self, cwd: &str, name: &str, rooted: bool) -> Option<Vec<u8>> {
-        match self {
+    fn read(&self, cwd: &str, name: &str, rooted: bool) -> Result<Vec<u8>, String> {
+        let text = match self {
             Files::Disk(_) if !rooted => std::fs::read(name).ok(),
             Files::Disk(root) => std::fs::read(format!("{root}{}", absolute(cwd, name))).ok(),
             Files::Server(client) => {
@@ -227,7 +230,35 @@ impl Files {
                 let mut c = client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 c.read_file(path.trim_start_matches('/')).ok().map(|b| b.to_vec())
             }
+        };
+        text.ok_or_else(|| namelenerror(name, self.missing(cwd, name, rooted), ENONEXIST))
+    }
+
+    /// The end of the first element of `name` that does not exist, as the kernel finds it when
+    /// it walks the name. It is the length of the name when each element exists.
+    fn missing(&self, cwd: &str, name: &str, rooted: bool) -> usize {
+        let ends = name
+            .char_indices()
+            .filter(|&(i, c)| c == '/' && i > 0 && !name[..i].ends_with('/'))
+            .map(|(i, _)| i);
+        for end in ends {
+            let prefix = &name[..end];
+            let found = match self {
+                Files::Disk(_) if !rooted => std::path::Path::new(prefix).exists(),
+                Files::Disk(root) => {
+                    std::path::Path::new(&format!("{root}{}", absolute(cwd, prefix))).exists()
+                }
+                Files::Server(client) => {
+                    let path = absolute(cwd, prefix);
+                    let mut c = client.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    c.stat(path.trim_start_matches('/')).is_ok()
+                }
+            };
+            if !found {
+                return end;
+            }
         }
+        name.len()
     }
 }
 
@@ -355,7 +386,7 @@ mod tests {
         server.join().unwrap();
         let read = |name: &str| {
             let key = absolute("/sys/src/a", name).replace("/a/../", "/");
-            files.get(key.as_str()).map(|t| t.as_bytes().to_vec())
+            files.get(key.as_str()).map(|t| t.as_bytes().to_vec()).ok_or_else(String::new)
         };
         let want = assemble6("x.s", "/sys/src/a", &[], &[], &read).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), want);

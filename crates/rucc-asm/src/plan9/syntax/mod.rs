@@ -12,7 +12,10 @@ mod lex;
 mod seven;
 mod six;
 mod tab7;
+mod yacc;
+mod ydebug6;
+mod ydebug7;
 
-pub use lex::Reader;
+pub use lex::{Reader, namelenerror};
 pub use seven::assemble as assemble7;
 pub use six::assemble as assemble6;

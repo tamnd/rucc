@@ -5,7 +5,7 @@
 
 use std::process::ExitCode;
 
-use rucc_asm::plan9::syntax::{assemble6, assemble7};
+use rucc_asm::plan9::syntax::{assemble6, assemble7, namelenerror};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     let cwd = std::env::var("P9CWD").unwrap_or_else(|_| "/".to_string());
     let read = |n: &str| {
         let p = if n.starts_with('/') { format!("{root}{n}") } else { n.to_string() };
-        std::fs::read(p).ok()
+        std::fs::read(p).map_err(|_| namelenerror(n, n.len(), "file does not exist"))
     };
     let assemble = if machine == "7" { assemble7 } else { assemble6 };
     match assemble(&file, &cwd, &defines, &includes, &read) {

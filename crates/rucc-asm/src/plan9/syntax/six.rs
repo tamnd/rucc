@@ -17,6 +17,7 @@ use super::lex::{
     Arch, EOF, Fatal, Hist, LCONST, LFCONST, LLAB, LNAME, LSCONST, LVAR, Lexer, NSYM, R, Reader,
     Tok, ieeedtod,
 };
+use super::ydebug6::TABLES;
 
 const D_SP: i16 = 20;
 const D_NONE: i16 = 111;
@@ -167,6 +168,7 @@ impl Six<'_> {
             if self.peek().map_err(|_| Fatal)?.t == EOF {
                 return Ok(());
             }
+            self.lx.line_start(1);
             match self.line() {
                 Ok(()) => {}
                 Err(Stop::Fatal) => return Err(Fatal),
@@ -174,7 +176,7 @@ impl Six<'_> {
                 // the last error has no message.
                 Err(Stop::Syntax) => {
                     if self.errflag == 0 {
-                        self.lx.syntax_error()?;
+                        self.lx.syntax_error(&TABLES)?;
                     }
                     self.errflag = 3;
                     loop {
@@ -1037,7 +1039,7 @@ mod tests {
 
     fn asm(text: &str) -> Result<Vec<u8>, String> {
         let text = text.as_bytes().to_vec();
-        let read = move |n: &str| if n == "t.s" { Some(text.clone()) } else { None };
+        let read = move |n: &str| if n == "t.s" { Ok(text.clone()) } else { Err(String::new()) };
         assemble("t.s", "/usr/glenda", &[], &[], &read)
     }
 
@@ -1082,12 +1084,12 @@ mod tests {
     #[test]
     fn the_object_is_the_object_of_the_c_program() {
         // `t1.6` is the output of `6a -DDEFD=5 -DVAL -I/tmp/r9syn/sub t1.s` in `/tmp/r9syn`.
-        let read = |n: &str| -> Option<Vec<u8>> {
-            Some(match n {
+        let read = |n: &str| -> Result<Vec<u8>, String> {
+            Ok(match n {
                 "t1.s" => include_bytes!("testdata/t1.s").to_vec(),
                 "inc.h" => include_bytes!("testdata/inc.h").to_vec(),
                 "sub/deep.h" => include_bytes!("testdata/sub/deep.h").to_vec(),
-                _ => return None,
+                _ => return Err(String::new()),
             })
         };
         let defines = ["DEFD=5".to_string(), "VAL".to_string()];
@@ -1100,5 +1102,21 @@ mod tests {
     fn a_syntax_error_has_no_object() {
         let e = asm("MOVQ ,,\n").unwrap_err();
         assert!(e.contains("syntax error"), "{e}");
+    }
+
+    #[test]
+    fn a_syntax_error_has_the_debug_text_of_yacc() {
+        // The text and the state are those of 6a at the pin, which yacc made with -D1.
+        let e = asm("MOV AX\n").unwrap_err();
+        assert_eq!(
+            e,
+            "t.s:1 syntax error, last name: AX\nline:  LNAME.: $$5 line \ninst:  LNAME.= expr \nsaw LLREG\n"
+        );
+    }
+
+    #[test]
+    fn an_error_soon_after_an_error_has_no_debug_text() {
+        let e = asm("MOV AX\nMOV AX\n").unwrap_err();
+        assert_eq!(e.matches("saw ").count(), 1, "{e}");
     }
 }
