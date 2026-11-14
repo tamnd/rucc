@@ -54,7 +54,8 @@ use rucc_types::{
 
 use crate::check::Checker;
 use crate::decl::{
-    DeclFlags, DeclId, DeclKind, Effects, Linkage, Priority, Startup, StorageDuration, Visibility,
+    DeclFlags, DeclId, DeclKind, Definition, Effects, Linkage, Priority, Startup, StorageDuration,
+    Visibility,
 };
 use crate::eval;
 use crate::expr::ExprKind;
@@ -1239,6 +1240,16 @@ impl Checker<'_> {
             return;
         }
         self.tast.record_section(decl, id);
+        // gcc makes the entry for a name in its symbol table when a section is given to it, so a
+        // declaration that names one and defines nothing places the name here, and the definition
+        // below it does not move it again. See `Tast::record_placed`.
+        let node = &self.tast[decl];
+        if node.kind != DeclKind::Type
+            && node.state == Definition::Declared
+            && self.scopes.at_file_scope()
+        {
+            self.tast.record_placed(decl);
+        }
     }
 
     /// Reads `error("...")` and `warning("...")` off the lists a declaration was written with and

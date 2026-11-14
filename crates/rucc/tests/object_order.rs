@@ -1,12 +1,12 @@
 //! The order the objects of a unit are laid out in at `-O2`, which is gcc's.
 //!
 //! gcc lays them out newest first, and an object is as new as its entry in gcc's symbol table.
-//! The entry is made at the first declaration that defines the object, so an `extern` one above
-//! it does not count, and the entry for a `static` in a function body is made when gcc analyzes
-//! the body, after it has read the whole file and in the order its walk over the call graph
-//! reaches the body. The order is seen from outside where objects share a section, as the
-//! NetBSD kernel's link sets do, and in the padding between objects of different sizes.
-//! tamnd/rucc#4338.
+//! The entry is made at the first declaration that defines the object or names its section, so an
+//! `extern` one above it that names no section does not count, and the entry for a `static` in a
+//! function body is made when gcc analyzes the body, after it has read the whole file and in the
+//! order its walk over the call graph reaches the body. The order is seen from outside where
+//! objects share a section, as the NetBSD kernel's link sets do, and in the padding between objects
+//! of different sizes. tamnd/rucc#4338.
 //!
 //! Each order below is the one gcc 13 lays the source out in at `-O2`.
 
@@ -155,4 +155,25 @@ int h(void) { return c++; }
     assert!(text.contains("\t.local\tc\n\t.comm\tc,4,4\n"), "{text}");
     assert!(text.contains("\t.comm\ts."), "{text}");
     assert_eq!(labels(&text, &["e1", "s", "c"]), ["e1"]);
+}
+
+/// An object declared `extern` with a section above its definition is as old as the first
+/// declaration that names the section, since gcc makes the entry when it is given one. This is
+/// the shape of a NetBSD `MODULE_HOOK`, whose header declares the hook `__cacheline_aligned`, and
+/// `sys/net/if.c` defines it below another object in the same section.
+#[test]
+fn an_object_declared_extern_with_a_section_is_as_old_as_that_declaration() {
+    let source = "\
+#define S __attribute__((section(\".data.x\")))
+extern int b S;
+extern int c S;
+extern int d;
+int a S;
+int c;
+int b;
+extern int d S;
+int d;
+";
+    let text = assembly("sectioned", source);
+    assert_eq!(labels(&text, &["a", "b", "c", "d"]), ["d", "a", "c", "b"], "{text}");
 }
