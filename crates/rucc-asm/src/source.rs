@@ -206,6 +206,7 @@ pub fn read_with_debug(
     // Whether the passes are still on gas's first round. See [`Reader::first_round`].
     let mut first_round = true;
     let mut within = Map::default();
+    let mut encoded = Map::default();
     loop {
         passes += 1;
         let aarch64 = arch == Arch::Aarch64;
@@ -218,6 +219,7 @@ pub fn read_with_debug(
             guesses,
             first_round: passes > 1 && first_round,
             within: std::mem::take(&mut within),
+            encoded: std::mem::take(&mut encoded),
             aarch64,
             riscv,
             i386,
@@ -234,6 +236,7 @@ pub fn read_with_debug(
             ..Reader::default()
         };
         reader.run(text)?;
+        encoded = std::mem::take(&mut reader.encoded);
         match reader.finish()? {
             Ok(done) if decorated => return Ok(kept(at_signs_back(done), flags)),
             Ok(done) => return Ok(kept(done, flags)),
@@ -670,6 +673,9 @@ struct Reader {
     first_round: bool,
     /// How far into its piece each label was on the last pass, for [`Reader::first_round`].
     within: Map<String, u64>,
+    /// Every instruction written so far, by its mode, mnemonic and operands, kept from one pass to
+    /// the next. See [`Reader::encoded`].
+    encoded: Map<(Mode, String), crate::instruction::Written>,
     /// Whether [`Reader::first_round`] made any count come out different.
     first_round_counted: std::cell::Cell<bool>,
     /// Whether a count is being worked out, which is the only thing [`Reader::first_round`] is for.
@@ -1481,6 +1487,35 @@ impl Reader {
         self.code.unwrap_or(if self.i386 { Mode::Bits32 } else { Mode::Bits64 })
     }
 
+    /// [`crate::instruction::one_in`], or what it said the last time it was asked the same.
+    ///
+    /// The file is read once for each pass, and on mm/memory.c from Linux 7.3 that was five passes,
+    /// with each instruction written again each time from its text. What comes back is decided by
+    /// the mode, the mnemonic and the operands alone, as anything a name stands for is a hole in the
+    /// bytes that this file fills in later, so a line that reads the same is written the same.
+    /// tamnd/rucc-kernel#109.
+    fn encoded(
+        &mut self,
+        word: &str,
+        args: &[String],
+        mode: Mode,
+    ) -> Result<crate::instruction::Written, String> {
+        let mut key =
+            String::with_capacity(word.len() + args.iter().map(|a| a.len() + 1).sum::<usize>());
+        key.push_str(word);
+        for arg in args {
+            key.push('\0');
+            key.push_str(arg);
+        }
+        let key = (mode, key);
+        if let Some(written) = self.encoded.get(&key) {
+            return Ok(written.clone());
+        }
+        let written = crate::instruction::one_in(word, args, mode)?;
+        self.encoded.insert(key, written.clone());
+        Ok(written)
+    }
+
     /// One instruction, as the bytes of it.
     ///
     /// What an instruction is is [`crate::instruction`]'s business and what it refers to is this
@@ -1527,7 +1562,7 @@ impl Reader {
                 crate::sixteen::one_in16_addr32(word, &args, gcc)
             }
             Some(gcc) => crate::sixteen::one_in16(word, &args, gcc),
-            None => crate::instruction::one_in(word, &args, mode),
+            None => self.encoded(word, &args, mode),
         }
         .map_err(|why| self.bad(&why))?;
         if self.before_2_42 && self.sixteen.is_none() && mode == Mode::Bits64 {
