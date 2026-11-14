@@ -9,12 +9,15 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// A leaf, which calls nothing, and a function that calls a function in another file, so that
-/// inlining cannot make it a leaf. The last one is a leaf with a local in its frame.
+/// inlining cannot make it a leaf. Then a leaf with a local in its frame, and a leaf that works in
+/// floating point.
 const SOURCE: &str = "\
 int other(int);
 int leaf(int a, int b) { return a * b + 1; }
 int caller(int a) { return other(a) + 2; }
 int framed(int i) { volatile int a[16]; a[i & 15] = i; return a[0]; }
+double fl(double a, double b, double c, double d, double e, double x)
+{ return a * b + c * d + e * x; }
 ";
 
 fn fixture(what: &str) -> PathBuf {
@@ -80,4 +83,16 @@ fn a_leaf_keeps_the_frame_pointer_only_where_gcc_keeps_it() {
         assert!(!body(&text, "leaf").contains(setup), "{target} omit:\n{text}");
         assert!(body(&text, "caller").contains(setup), "{target} omit, not a leaf:\n{text}");
     }
+}
+
+/// A leaf that works in floating point names `%xmm4` and `%xmm5`, which have the numbers of `%rsp`
+/// and `%rbp`. That once kept the frame pointer in every such leaf, and gcc on x86-64 gives it back.
+#[test]
+fn a_leaf_that_names_xmm5_gives_the_frame_pointer_back() {
+    let text = asm("x86_64-unknown-linux-gnu", "fl", &["-mno-omit-leaf-frame-pointer"]);
+    let start = text.find("\nfl:").unwrap_or_else(|| panic!("no fl:\n{text}"));
+    let rest = &text[start..];
+    let fl = &rest[..rest.find("\t.size").unwrap_or(rest.len())];
+    assert!(fl.contains("%xmm5"), "{fl}");
+    assert!(!fl.contains("%rbp"), "{fl}");
 }

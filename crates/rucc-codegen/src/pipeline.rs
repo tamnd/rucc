@@ -1331,11 +1331,14 @@ pub fn compile_recording(
         frame_pointer: !naked && !machine.conv.frameless && (asked || needed),
         // A leaf the flags alone gave one to may hand it back once it turns out to have no frame,
         // which gcc does on x86. Not on a machine whose call leaves the return address in a
-        // register, where the frame record is also where that register is put away.
+        // register, where the frame record is also where that register is put away. Nor in one
+        // laid out as a leaf because its only calls are tail calls, which keeps the frame pointer
+        // the flags asked for and puts it back before the jump.
         spare_frame_pointer: flags.spare_frame_pointer
             && asked
             && !needed
             && leaf
+            && stack.tails.is_empty()
             && machine.conv.link.is_none(),
         // And not in a naked function either, which is not about what the red zone costs but about
         // what the refusal below has to be able to see. A local small enough to live below the
