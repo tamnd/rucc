@@ -1002,13 +1002,18 @@ impl Frame {
 
 /// Whether anything in the function names the stack pointer or the frame pointer, which a local,
 /// an argument the caller passed on the stack and an `asm` reading `current_stack_pointer` all do.
+///
+/// Only an integer register is one of those. On x86-64 `%xmm4` and `%xmm5` have the numbers `%rsp`
+/// and `%rbp` have, so without the class a leaf that works in floating point with either of them
+/// kept the frame pointer the flags asked for. gcc gives it back.
 fn touches_stack(func: &Func, conv: &CallRegs) -> bool {
     func.blocks().flat_map(|block| func.insts(block)).any(|inst| {
         func[func[inst].operands].iter().any(|operand| {
-            operand
-                .reg
-                .phys()
-                .is_some_and(|at| at == conv.stack_pointer || at == conv.frame_pointer)
+            operand.class == conv.int_class
+                && operand
+                    .reg
+                    .phys()
+                    .is_some_and(|at| at == conv.stack_pointer || at == conv.frame_pointer)
         })
     })
 }
@@ -1447,6 +1452,27 @@ mod tests {
         assert!(kept(13, 13, &spare));
         // And a function that calls something is no leaf.
         assert!(kept(2, 4, &Layout { leaf: false, ..spare }));
+    }
+
+    #[test]
+    fn a_vector_register_with_the_number_of_the_frame_pointer_does_not_keep_it() {
+        let base = Layout { red_zone: false, frame_pointer: true, ..Layout::new(&SYSV, REGS) };
+        let spare = Layout { spare_frame_pointer: true, ..base };
+        let kept = |class| {
+            let mut names = Interner::new();
+            let mut func = Func::new(names.intern("f"));
+            let opcode = Opcode::new(names.intern("x64.nop"));
+            let block = func.create_block();
+            // What `mulsd %xmm5, %xmm4` names in a leaf that works in floating point.
+            func.build(block, opcode).operand(Operand::write(Reg::physical(RBP), class)).finish();
+            let allocation = rucc_regalloc::run(&mut func, &env(&SYSV, 4), "test", true);
+            Frame::of(&func, &allocation, &spare).frame_pointer()
+        };
+
+        // `%xmm5` is not `%rbp`, so the leaf gives the frame pointer back.
+        assert!(!kept(XMM));
+        // And `%rbp` itself still keeps it.
+        assert!(kept(GPR));
     }
 
     #[test]
