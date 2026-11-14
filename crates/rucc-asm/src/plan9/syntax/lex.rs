@@ -8,6 +8,8 @@
 
 use rucc_base::hash::Map;
 
+use super::yacc::Tables;
+
 /// The end of the input.
 pub(super) const EOF: i32 = -1;
 /// No character in `peekc`.
@@ -147,8 +149,67 @@ struct Io {
     file: bool,
 }
 
-/// The reader of a file. It takes the name as the assembler gives it to `open`.
-pub type Reader<'a> = &'a dyn Fn(&str) -> Option<Vec<u8>>;
+/// The reader of a file. It takes the name as the assembler gives it to `open`. The error is the
+/// error string of Plan 9 for the open, which `%r` prints. `namelenerror` makes that string.
+pub type Reader<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, String>;
+
+/// `ERRMAX` of Plan 9.
+const ERRMAX: usize = 128;
+
+/// The error string of the Plan 9 kernel when the open of `name` fails with the error `err` at
+/// the element of the name that ends at the byte `len`. This is `namelenerror` of `port/chan.c`.
+/// A long name gives only a suffix of the name.
+#[must_use]
+pub fn namelenerror(name: &str, len: usize, err: &str) -> String {
+    let b = name.as_bytes();
+    let ename = len.min(b.len());
+    let errlen = err.len();
+    let long = |l: usize| l < ERRMAX / 3 || l + errlen < 2 * ERRMAX / 3;
+    let shown = if long(ename) {
+        b[..ename].to_vec()
+    } else {
+        let mut next = ename;
+        let mut start;
+        loop {
+            start = next;
+            if next == 0 {
+                break;
+            }
+            while next > 0 {
+                next -= 1;
+                if b[next] == b'/' {
+                    break;
+                }
+            }
+            if !long(ename - next) {
+                break;
+            }
+        }
+        if start == ename {
+            start = ename.saturating_sub(ERRMAX / 4);
+            let mut i = 0;
+            while i < 4 && b.get(start).is_some_and(|&c| c & 0xC0 == 0x80) {
+                start += 1;
+                i += 1;
+            }
+        }
+        let mut v = b"...".to_vec();
+        v.extend_from_slice(&b[start..ename]);
+        v
+    };
+    // up->genbuf has ERRMAX bytes, and %#q always quotes.
+    let shown = &shown[..shown.len().min(ERRMAX - 1)];
+    let mut out = format!("{err}: '").into_bytes();
+    for &c in shown {
+        out.push(c);
+        if c == b'\'' {
+            out.push(c);
+        }
+    }
+    out.push(b'\'');
+    out.truncate(ERRMAX - 1);
+    String::from_utf8_lossy(&out).into_owned()
+}
 
 /// The state of the lexer.
 pub(super) struct Lexer<'a> {
@@ -163,6 +224,8 @@ pub(super) struct Lexer<'a> {
     symb: Vec<u8>,
     pub(super) nerrors: u32,
     pub(super) messages: String,
+    /// The tokens since the start of the line, for the debug text of yacc.
+    toks: Vec<i32>,
     read: Reader<'a>,
 }
 
@@ -234,6 +297,7 @@ impl<'a> Lexer<'a> {
             symb: Vec::new(),
             nerrors: 0,
             messages: String::new(),
+            toks: Vec::new(),
             read,
         }
     }
@@ -310,10 +374,20 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    /// The message of yacc for a syntax error.
-    pub(super) fn syntax_error(&mut self) -> R<()> {
+    /// The message of yacc for a new syntax error, and the debug text of yacc after it.
+    pub(super) fn syntax_error(&mut self, tables: &Tables) -> R<()> {
         let s = String::from_utf8_lossy(&self.symb).into_owned();
-        self.yyerror(&format!("syntax error, last name: {s}"))
+        self.yyerror(&format!("syntax error, last name: {s}"))?;
+        if let Some(text) = tables.debug(&self.toks) {
+            self.messages.push_str(&text);
+        }
+        Ok(())
+    }
+
+    /// The start of a line for yacc. The last `keep` tokens are the first tokens of the line.
+    pub(super) fn line_start(&mut self, keep: usize) {
+        let n = self.toks.len().saturating_sub(keep);
+        self.toks.drain(..n);
     }
 
     /// `prfile`.
@@ -384,13 +458,10 @@ impl<'a> Lexer<'a> {
         let text = match text {
             Some(t) => t,
             None => match (self.read)(&String::from_utf8_lossy(&name)) {
-                Some(t) => t,
-                None => {
+                Ok(t) => t,
+                Err(e) => {
                     let s = String::from_utf8_lossy(&name).into_owned();
-                    self.yyerror(&format!(
-                        "{}a: file does not exist: {s}",
-                        char::from(self.arch.thechar)
-                    ))?;
+                    self.yyerror(&format!("{}a: {e}: {s}", char::from(self.arch.thechar)))?;
                     return Err(Fatal);
                 }
             },
@@ -511,6 +582,12 @@ impl<'a> Lexer<'a> {
 
     /// `yylex`.
     pub(super) fn yylex(&mut self) -> R<Tok> {
+        let t = self.lex()?;
+        self.toks.push(t.t);
+        Ok(t)
+    }
+
+    fn lex(&mut self) -> R<Tok> {
         let mut c = self.peekc;
         if c == IGN {
             c = self.getc_raw();
@@ -1355,7 +1432,7 @@ impl<'a> Lexer<'a> {
             while p.starts_with(b"./") {
                 p.drain(..2);
             }
-            if let Some(t) = (self.read)(&String::from_utf8_lossy(&p)) {
+            if let Ok(t) = (self.read)(&String::from_utf8_lossy(&p)) {
                 found = Some((p, t));
                 break;
             }
@@ -1658,5 +1735,25 @@ mod tests {
         assert!((atof(b"1e") - 1.0).abs() < f64::EPSILON);
         assert!((atof(b"2.5e+") - 2.5).abs() < f64::EPSILON);
         assert!((atof(b".5") - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_short_name_is_in_the_error_string() {
+        let e = namelenerror("xendefs.h", 9, "file does not exist");
+        assert_eq!(e, "file does not exist: 'xendefs.h'");
+        let e = namelenerror("../a/b.h", 4, "file does not exist");
+        assert_eq!(e, "file does not exist: '../a'");
+        let e = namelenerror("it's", 4, "file does not exist");
+        assert_eq!(e, "file does not exist: 'it''s'");
+    }
+
+    #[test]
+    fn a_long_name_gives_a_suffix_in_the_error_string() {
+        // The name has 76 bytes. The longest suffix that starts at a slash and is shorter than
+        // 66 bytes is shown, as 66 bytes and the 19 bytes of the error are 2*ERRMAX/3.
+        let name = "/sys/src/cmd/some/very/long/directory/name/with/many/many/elements/in/it/x.h";
+        let e = namelenerror(name, name.len(), "file does not exist");
+        let want = "file does not exist: '.../some/very/long/directory/name/with/many/many/elements/in/it/x.h'";
+        assert_eq!(e, want);
     }
 }

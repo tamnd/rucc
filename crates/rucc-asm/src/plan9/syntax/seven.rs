@@ -13,6 +13,7 @@ use super::tab7::{
     CHECK, DEFACT, DEFGOTO, PACT, PGOTO, R1, R2, TABLE, YYFINAL, YYLAST, YYNTOKENS, YYPACT_NINF,
     YYTABLE_NINF, symbol,
 };
+use super::ydebug7::TABLES;
 
 const D_NONE: i16 = 1;
 const D_STATIC: i16 = 3;
@@ -226,6 +227,10 @@ impl Seven<'_> {
                         self.action(r, &args, &mut val)?;
                         ss.truncate(ss.len() - len);
                         vs.truncate(vs.len() - len);
+                        if ss.len() == 1 {
+                            // The reduction to prog: the start of a line.
+                            self.lx.line_start(usize::from(la.is_some()));
+                        }
                         let lhs = i32::from(at(&R1, r)) - YYNTOKENS;
                         let top = *ss.last().unwrap_or(&0);
                         let i = i32::from(at(&PGOTO, lhs)) + top;
@@ -247,7 +252,7 @@ impl Seven<'_> {
                     continue 'newstate;
                 }
                 if errflag == 0 {
-                    self.lx.syntax_error()?;
+                    self.lx.syntax_error(&TABLES)?;
                 }
                 errflag = 3;
                 while let Some(&s) = ss.last() {
@@ -733,7 +738,7 @@ mod tests {
 
     fn asm(text: &str) -> Result<Vec<u8>, String> {
         let text = text.as_bytes().to_vec();
-        let read = move |n: &str| if n == "/t.s" { Some(text.clone()) } else { None };
+        let read = move |n: &str| if n == "/t.s" { Ok(text.clone()) } else { Err(String::new()) };
         assemble("/t.s", "/", &[], &[], &read)
     }
 
@@ -800,11 +805,11 @@ mod tests {
     #[test]
     fn the_object_is_the_object_of_the_c_program() {
         // `t7.7` is the output of `7a t7.s` in `/tmp/r9s7b`.
-        let read = |n: &str| -> Option<Vec<u8>> {
-            Some(match n {
+        let read = |n: &str| -> Result<Vec<u8>, String> {
+            Ok(match n {
                 "t7.s" => include_bytes!("testdata/t7.s").to_vec(),
                 "inc7.h" => include_bytes!("testdata/inc7.h").to_vec(),
-                _ => return None,
+                _ => return Err(String::new()),
             })
         };
         let o = assemble("t7.s", "/tmp/r9s7b", &[], &[], &read).unwrap();
@@ -828,5 +833,17 @@ mod tests {
     fn a_label_has_the_pc() {
         let o = asm("TEXT f(SB), $0\nl: B l\nRET\n").unwrap();
         assert!(records(&o).iter().any(|x| x.0 == a7::ATEXT));
+    }
+
+    #[test]
+    fn a_syntax_error_has_the_debug_text_of_yacc() {
+        // The text and the state are those of 7a at the pin, which yacc made with -D1.
+        let e = asm("MOVL addr+0(FP), AX\n").unwrap_err();
+        assert!(
+            e.ends_with(
+                "syntax error, last name: addr\nline:  LNAME.: $$5 line \nline:  LNAME.= expr ; \nsaw LNAME\n"
+            ),
+            "{e}"
+        );
     }
 }
