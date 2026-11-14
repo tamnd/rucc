@@ -12400,8 +12400,8 @@ impl<'u> Body<'_, 'u> {
         self.check_nonnull_args(&nonnull, span);
         let direct = self.direct(callee, &plan, &actual, span);
         if let Some((symbol, _)) = &direct {
-            if let Some(made) = self.small_bulk(callee, *symbol, &values, &plan, destination, span)
-            {
+            let call = (callee, tast[args].get(2).copied());
+            if let Some(made) = self.small_bulk(call, *symbol, &values, &plan, destination, span) {
                 return made;
             }
         }
@@ -12604,15 +12604,19 @@ impl<'u> Body<'_, 'u> {
     /// spelling qualifies, and a declaration that renamed the symbol leaves the call alone. The
     /// code generator decides how the bytes move, which is a word at a time wherever the machine
     /// allows it.
+    ///
+    /// `call` is the callee and the length as the program wrote it, which is how a length written
+    /// as a constant expression is read. See [`Self::small_length`].
     fn small_bulk(
         &mut self,
-        callee: ExprId,
+        call: (ExprId, Option<ExprId>),
         symbol: Symbol,
         values: &[Value],
         plan: &Plan,
         destination: Option<Value>,
         span: Span,
     ) -> Option<Option<Value>> {
+        let (callee, written) = call;
         let spelled = self.builtin_named(callee)?;
         let name = spelled.strip_prefix("__builtin_").unwrap_or(spelled);
         let opcode = match name {
@@ -12635,7 +12639,7 @@ impl<'u> Body<'_, 'u> {
         // than as the call (tamnd/rucc#3761).
         let inline =
             opcode == Opcode::Memset && self.unit.environment.contains(AttrSet::INLINE_MEMSET);
-        let Some(size) = self.small_length(length) else {
+        let Some(size) = self.small_length(length, written) else {
             if !inline || self.sanitize.address {
                 return None;
             }
@@ -12711,7 +12715,13 @@ impl<'u> Body<'_, 'u> {
     /// A length that is a constant of at most [`SMALL`], looking through the widening an `int`
     /// argument gets on its way to a `size_t` parameter. A small constant widens to itself either
     /// way, so which extension it was does not matter.
-    fn small_length(&self, mut value: Value) -> Option<u64> {
+    ///
+    /// A length the program wrote as an integer constant expression counts too. The walk builds
+    /// `6 * sizeof(long)` as a multiplication of two constants, and the optimizer folds it only
+    /// later. gcc folds it first. Under `-ffreestanding` the code generator leaves a call a call,
+    /// so this is the last place the copy can become moves. FreeBSD's `cpu_fetch_syscall_args`
+    /// copies the six argument registers that way on every system call.
+    fn small_length(&self, mut value: Value, written: Option<ExprId>) -> Option<u64> {
         loop {
             let Def::Result { inst, .. } = self.func[value].def else { return None };
             let data = &self.func[inst];
@@ -12720,7 +12730,19 @@ impl<'u> Body<'_, 'u> {
                 _ => break,
             }
         }
-        u64::try_from(self.bits_of(value)?).ok().filter(|&size| size <= SMALL)
+        let size = match self.bits_of(value) {
+            Some(bits) => i128::try_from(bits).ok(),
+            None => written.and_then(|expr| self.integer_value(expr)),
+        };
+        u64::try_from(size?).ok().filter(|&size| size <= SMALL)
+    }
+
+    /// The value of an integer constant expression, and nothing for any other expression.
+    fn integer_value(&self, expr: ExprId) -> Option<i128> {
+        let mut eval = Eval::new(self.tast(), self.types(), self.target(), self.unit.names);
+        let folded = eval.integer(expr);
+        let clean = !eval.addressed() && eval.finish().is_empty();
+        folded.ok().filter(|_| clean)
     }
 
     /// The function a call names, through any commas in front of it.

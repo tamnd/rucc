@@ -146,6 +146,30 @@ void fill(void *d) { memset(d, 0, 8); }
     assert!(reaches(body(&text, "fill"), "memset"), "{text}");
 }
 
+/// A length written as a constant expression is a constant too, under `-ffreestanding` where the
+/// code generator leaves every call a call. FreeBSD's `cpu_fetch_syscall_args` copies the six
+/// argument registers with `sizeof(sa->args[0]) * NARGREGS` on every system call, and gcc writes
+/// six pairs of moves for it.
+#[test]
+fn a_length_written_as_a_constant_expression_is_moves_under_freestanding() {
+    let source = "\
+struct frame { long a, b, rdi, rsi, rdx, rcx, r8, r9; };
+struct args { long code; long args[8]; };
+void fetch(struct args *sa, struct frame *tf) {
+    __builtin_memcpy(sa->args, &tf->rdi, sizeof(sa->args[0]) * 6);
+}
+void fill(struct args *sa) { __builtin_memset(sa->args, 0, 2 * sizeof(long) + 8); }
+void over(void *d, const void *s) { __builtin_memcpy(d, s, 9 * sizeof(long)); }
+";
+    let text = asm("written", &["-O2", "-ffreestanding"], source);
+    let fetch = body(&text, "fetch");
+    assert!(!reaches(fetch, "memcpy"), "{fetch}");
+    assert_eq!(fetch.matches("(%rdi)\n").count(), 6, "{fetch}");
+    assert!(!reaches(body(&text, "fill"), "memset"), "{text}");
+    // Past 64 bytes it is still the library's.
+    assert!(reaches(body(&text, "over"), "memcpy"), "{text}");
+}
+
 /// Every length from 0 to 64 at four misalignments, with bytes on either side that must not
 /// change, and a `memmove` both ways over itself, checked by running it.
 #[cfg(any(
