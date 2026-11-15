@@ -244,18 +244,29 @@ fn the_hook_is_a_nop_of_the_same_length_when_asked() {
     }
 }
 
-/// gcc refuses `-mnop-mcount` in position independent code, the default included, and so does
-/// rucc, in gcc's words.
+/// gcc 14 refuses `-mnop-mcount` in position independent code, the default included, and so does
+/// rucc when it claims gcc 14, in gcc's words. gcc 15 refuses it only beside `-fno-plt` and writes
+/// the nop otherwise, and so does rucc when it claims gcc 15 or claims nothing.
 #[test]
-fn the_nop_is_refused_beside_position_independent_code() {
+fn the_nop_is_refused_beside_position_independent_code_as_the_gcc_claimed_does() {
     for flags in
         [&["-mnop-mcount"][..], &["-fPIC", "-pg", "-mnop-mcount"], &["-fpie", "-mnop-mcount"]]
     {
-        let (ok, _, err) = run("nop-pic", TARGET, flags, THREE);
-        assert!(!ok, "{flags:?}");
+        let claimed = [&["-fgnuc-version=14.2.0"][..], flags].concat();
+        let (ok, _, err) = run("nop-pic", TARGET, &claimed, THREE);
+        assert!(!ok, "{claimed:?}");
         assert!(err.contains("'-mnop-mcount' is not implemented for '-fPIC'"), "{flags:?}: {err}");
+        let (ok, _, err) = run("nop-pic", TARGET, flags, THREE);
+        assert!(ok, "{flags:?}: {err}");
     }
+    let (ok, _, err) = run("nop-plt", TARGET, &["-fPIC", "-fno-plt", "-mnop-mcount"], THREE);
+    assert!(!ok);
+    assert!(err.contains("'-mnop-mcount' is not implemented for '-fno-plt'"), "{err}");
     asm("nop-abs", &["-pg", "-fno-pic", "-mnop-mcount"], THREE);
+    asm("nop-abs", &["-fgnuc-version=14", "-pg", "-fno-pic", "-mnop-mcount"], THREE);
+    let text = asm("nop-pie", &["-pg", "-fPIC", "-mnop-mcount"], THREE);
+    assert!(text.contains("\t.byte\t0x0f, 0x1f, 0x44, 0x00, 0x00\n"), "{text}");
+    assert!(!text.contains("mcount@"), "{text}");
 }
 
 /// A function that said `no_instrument_function` gets no hook and no entry in `__mcount_loc`, as

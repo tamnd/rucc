@@ -4282,11 +4282,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             opts.target
         )));
     }
-    // The nop is written where a direct call would be, and a position independent call to the hook
-    // goes through the procedure linkage table, so gcc refuses the pair, with or without `-pg`, and
-    // so does this, in its words.
+    // The nop is written where the call to the hook would be. gcc 14 refuses it in any position
+    // independent code, with or without `-pg`, and gcc 15 only when that code calls without the
+    // procedure linkage table. Linux 7.4 asks Kconfig about `-mnop-mcount` with no other flag, so
+    // the default PIE decides `CC_HAS_MNOP_MCOUNT`, and this gives the answer of the gcc claimed.
     if opts.nop_mcount && opts.pic != Pic::Absolute {
-        return Err(err("'-mnop-mcount' is not implemented for '-fPIC'".to_owned()));
+        if opts.gnuc.major < 15 {
+            return Err(err("'-mnop-mcount' is not implemented for '-fPIC'".to_owned()));
+        }
+        if !opts.plt {
+            return Err(err("'-mnop-mcount' is not implemented for '-fno-plt'".to_owned()));
+        }
     }
     // NetBSD's gcc for RISC-V is configured for medany, and says so when no `-mcmodel=` is given.
     // The code is the same under either, so only the macro changes.
