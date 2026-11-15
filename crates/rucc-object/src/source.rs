@@ -1097,11 +1097,18 @@ fn moved(
     // In a relaxed object every relocation reaches a label, as gas writes it, except for one the
     // assembler made somewhere other than code, such as the front of `.debug_frame`, which gas
     // reaches by the section. The strings of the line table's header are the exception to that,
-    // which gas reaches by a label as well.
+    // which gas reaches by a label as well, and so is the place taken off in a difference. ld
+    // 2.42 takes the addend of an `R_RISCV_SUB32` the wrong way round when it is against a
+    // section, so the kernel's `.long 1b - .` in a table of places to patch came out eight bytes
+    // further off for each entry and the kernel patched the wrong instructions.
     if input.relax {
         let code = input.parts.get(part).is_some_and(|part| part.shape.exec);
         let made = name.name.starts_with('\u{1}') && !name.name.starts_with("\u{1}line");
-        return (made && !code).then_some((part, offset));
+        let taken = matches!(
+            reloc.kind,
+            Reference::Sum { minus: true, .. } | Reference::Leb { minus: true }
+        );
+        return (made && !code && !taken).then_some((part, offset));
     }
     // A reference to an indirect function is to whatever its resolver picks, and the place the
     // name marks is the resolver. The section and an offset would be the resolver itself, so the
@@ -1828,6 +1835,83 @@ mod tests {
                 (4, elf::R_RISCV_CALL_PLT, Some(("g".to_owned(), 0)), 0),
                 (4, elf::R_RISCV_RELAX, None, 0),
                 (12, elf::R_RISCV_ALIGN, None, 12),
+            ]
+        );
+    }
+
+    /// `.long 1b - .` in a table that is not code, in a relaxed RISC-V object. The place taken off
+    /// is a `.L0 ` label where the entry is with nothing added, as gas writes it, rather than the
+    /// table's section and the entry's offset, which ld reads wrongly. A plain address of a place
+    /// made in the table is still the section and an offset.
+    #[test]
+    fn a_relaxed_riscv_difference_takes_off_a_label_and_not_its_section() {
+        let mut text = part(".text", vec![0; 8]);
+        text.relocs = vec![Reloc {
+            at: 0,
+            symbol: "\u{1}here0".to_owned(),
+            kind: Reference::Riscv(RvFixup::Branch),
+            addend: 0,
+            after: 0,
+        }];
+        let mut table = part("runtime_ptr_x", vec![0; 16]);
+        table.shape.exec = false;
+        let sum = |at, symbol: &str, minus| Reloc {
+            at,
+            symbol: symbol.to_owned(),
+            kind: Reference::Sum { bytes: 4, minus },
+            addend: 0,
+            after: 0,
+        };
+        table.relocs = vec![
+            sum(4, "f", false),
+            sum(4, "\u{1}here1", true),
+            Reloc {
+                at: 8,
+                symbol: "\u{1}here2".to_owned(),
+                kind: Reference::Address { bytes: 8 },
+                addend: 0,
+                after: 0,
+            },
+        ];
+        let here = |name, part, offset| {
+            let mut name = at(name, 0, Sort::Untyped, Binding::Local);
+            name.at = Held::In { part, offset };
+            name
+        };
+        let input = Assembled {
+            parts: vec![text, table],
+            names: vec![
+                here("f", 0, 4),
+                here("\u{1}here0", 0, 4),
+                here("\u{1}here1", 1, 4),
+                here("\u{1}here2", 1, 12),
+            ],
+            subsections: false,
+            relax: true,
+        };
+        let target = TargetInfo::new(Triple::new(TargetArch::Riscv64, Os::Linux, Env::Gnu));
+        let bytes = assembled(&input, &target).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let section = file.section_by_name("runtime_ptr_x").expect("the section");
+        let relocs: Vec<_> = section
+            .relocations()
+            .map(|(at, reloc)| {
+                let RelocationFlags::Elf { r_type } = reloc.flags() else { panic!("ELF") };
+                let object::RelocationTarget::Symbol(index) = reloc.target() else {
+                    panic!("a symbol")
+                };
+                let symbol = file.symbol_by_index(index).expect("the symbol");
+                let named = (symbol.kind() != SymbolKind::Section)
+                    .then(|| (symbol.name().expect("a name").to_owned(), symbol.address()));
+                (at, r_type, named, reloc.addend())
+            })
+            .collect();
+        assert_eq!(
+            relocs,
+            [
+                (4, elf::R_RISCV_ADD32, Some(("f".to_owned(), 4)), 0),
+                (4, elf::R_RISCV_SUB32, Some((".L0 ".to_owned(), 4)), 0),
+                (8, elf::R_RISCV_64, None, 12),
             ]
         );
     }
