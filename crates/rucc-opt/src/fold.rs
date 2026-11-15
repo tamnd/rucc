@@ -86,18 +86,22 @@
 //! and one for a byte holding it, so the constant this leaves behind lowers wherever the
 //! comparison did.
 
-use rucc_base::Symbol;
 use rucc_base::float::{Float, Format, Status};
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
+use rucc_base::{Idx, Symbol};
+use rucc_diag::Span;
 use rucc_ir::{
-    AttrSet, Block, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
-    SymbolRef, Type, Value,
+    AttrSet, Block, BlockCall, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred,
+    Module, Opcode, SymbolRef, Type, Value,
 };
 
 use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, uses};
 
 /// Recorded once for each instruction that became a constant.
 const FOLDED: &str = "instruction with constant operands folded to a constant";
+
+/// Recorded once for each operation on a block parameter that became a parameter of its own.
+const THROUGH: &str = "operation on a parameter of constants folded into a new parameter";
 
 /// Recorded for an instruction that would have folded if there had been fuel for it.
 ///
@@ -176,6 +180,7 @@ pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
             stats.optimized(FOLDED);
         }
     }
+    through_params(func, fuel, &mut stats, &mut forward, &mut split_up);
     if !forward.is_empty() {
         uses::substitute(func, &forward);
         // Gone here rather than left for dead code, because `crate::constant_p` runs this until a
@@ -186,6 +191,322 @@ pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
         }
     }
     stats
+}
+
+/// The most edges into a block for which an operation is folded through its parameter.
+///
+/// Each edge gets one constant and one more argument, so the cost grows with the number of edges.
+/// The cases that pay have a few edges: a switch or an `if` chain that picks a number, then one
+/// call that was inlined.
+const EDGES: usize = 8;
+
+/// Folds an operation on a block parameter whose arguments are all constants into a new parameter
+/// of the same block. That new parameter gets the answer for each edge.
+///
+/// This is LLVM's `foldOpIntoPhi`. gcc gets the same result from its PRE pass, which moves the
+/// operation through the merge into each edge, where it folds. NetBSD's `citrus_prop.c` divides
+/// `UINT64_MAX` by a `base` that is 8, 10 or 16 after inlining. gcc folds each quotient and
+/// remainder to a constant. Without this fold, rucc calls `__udivdi3` and `__umoddi3` on i386, and
+/// `libBIG5.so` needs `libgcc_s.so.1` in the rucc build only. That is tamnd/rucc#4562.
+///
+/// The operation is one that [`arithmetic`] evaluates, with two operands. Each operand is a
+/// constant or a parameter of one block, and at least one is a parameter. An operand of a division
+/// can also be a widening or a narrowing of one, as `UINT64_MAX / base` is when `base` is an `int`.
+/// The answer on each edge is [`arithmetic`] on what that edge passes. So a division by zero and
+/// the most negative value divided by minus one do not fold, and then nothing changes.
+///
+/// An edge can also come from a [`forwarder`] that passes its own parameters on. Then the answers
+/// go on the edges into the forwarder, and the forwarder passes a new parameter of its own on.
+///
+/// A new parameter costs a copy on each edge. That is less than the operation it replaces when the
+/// operation is a division or a remainder, so those fold always. Any other operation folds only
+/// when it is the one reader of each parameter it reads. Then the old parameter goes away with it.
+///
+/// The result is pointed at the new parameter through `forward`, and the operation is put in
+/// `gone`, so that the caller takes both of them out with the rest.
+fn through_params(
+    func: &mut Func,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+    forward: &mut Map<Value, Value>,
+    gone: &mut Vec<Inst>,
+) {
+    let Some(entry) = func.entry() else { return };
+    let mut found: Vec<(Inst, Block)> = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if let Some(merge) = through(func, inst, entry) {
+                found.push((inst, merge));
+            }
+        }
+    }
+    // Most functions have no candidate at all, so the edges and the use counts are found only
+    // when there is one.
+    if found.is_empty() {
+        return;
+    }
+    let edges = crate::simplify_cfg::incoming(func);
+    let addressed = crate::copy::addressed(func);
+    let uses = uses::count(func);
+    for (inst, merge) in found {
+        if addressed.contains(&merge) {
+            continue;
+        }
+        let Some(into) = edges.get(&merge) else { continue };
+        if into.is_empty() || into.len() > EDGES {
+            continue;
+        }
+        let Some(ways) = answers(func, inst, merge, into, &edges, entry, &addressed, &uses) else {
+            continue;
+        };
+        if !fuel.take() {
+            stats.missed(NO_FUEL);
+            continue;
+        }
+        let result = result_of(func, inst);
+        let ty = func[result].ty;
+        let span = func.span(inst);
+        let param = func.append_param(merge, ty);
+        for (&(from, at), way) in into.iter().zip(ways) {
+            let value = match way {
+                Way::Direct(answer) => answer_before(func, from, answer, ty, span),
+                Way::Forwarded(answers) => {
+                    let passed = func.append_param(from, ty);
+                    let outer = edges.get(&from).map_or(&[][..], Vec::as_slice);
+                    for (&(above, over), answer) in outer.iter().zip(answers) {
+                        let value = answer_before(func, above, answer, ty, span);
+                        pass(func, over, value);
+                    }
+                    passed
+                }
+            };
+            pass(func, at, value);
+        }
+        forward.insert(result, param);
+        gone.push(inst);
+        stats.optimized(THROUGH);
+    }
+}
+
+/// How the answer of a folded operation gets to the merge on one edge.
+enum Way {
+    /// The edge passes constants, and this is the answer on it.
+    Direct(Imm),
+    /// The edge comes from a block that only passes its own parameters on to the merge. These are
+    /// the answers on each edge into that block, in the order of its edges.
+    Forwarded(Vec<Imm>),
+}
+
+/// A constant with the answer, put at the end of `from` before its branch.
+fn answer_before(func: &mut Func, from: Block, answer: Imm, ty: Type, span: Span) -> Value {
+    let term = func.terminator(from).expect("a block with an edge out ends in a branch");
+    let imm = func.add_imm(answer);
+    let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+    let made = func.create_inst(data, &[ty], span);
+    func.insert_before(made, term);
+    func[made].results().next().expect("a constant is one value")
+}
+
+/// Adds `value` to the end of what the edge at `at` passes.
+fn pass(func: &mut Func, at: Idx<BlockCall>, value: Value) {
+    let call = func[at];
+    let args = func.append_arg(call.args, value);
+    func.set_block_call(at, BlockCall { args, ..call });
+}
+
+/// Whether `block` only jumps to `merge` and does nothing else, so that what it passes on is what
+/// came into it.
+///
+/// `simplify_cfg` keeps such a block when it passes arguments on, because the back end would put
+/// an empty block back on the edge. In `citrus_prop.c` that block is the inner `if` that picks 16
+/// or 8, and the merge sees 10 and a parameter of that block, not three constants.
+fn forwarder(
+    func: &Func,
+    block: Block,
+    merge: Block,
+    entry: Block,
+    addressed: &Set<Block>,
+) -> bool {
+    if block == entry || block == merge || addressed.contains(&block) {
+        return false;
+    }
+    let Some(term) = func.terminator(block) else { return false };
+    func[term].opcode == Opcode::Jump && func.insts(block).count() == 1
+}
+
+/// The block whose parameters this instruction reads, when it is one [`through_params`] can fold.
+fn through(func: &Func, inst: Inst, entry: Block) -> Option<Block> {
+    let data = &func[inst];
+    let foldable = matches!(
+        data.opcode,
+        Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::And
+            | Opcode::Or
+            | Opcode::Xor
+            | Opcode::Shl
+            | Opcode::LShr
+            | Opcode::AShr
+            | Opcode::SDiv
+            | Opcode::UDiv
+            | Opcode::SRem
+            | Opcode::URem
+            | Opcode::ICmp
+    );
+    // A division that can unwind under `-fnon-call-exceptions` has an `unwound` after it, and that
+    // has to stay where the division was.
+    if !foldable || data.results != 1 || func.unwinds_to_pad(inst) {
+        return None;
+    }
+    let ty = func[data.results().next()?].ty;
+    if !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let &[lhs, rhs] = &func[data.args] else { return None };
+    let depth = if divides(data.opcode) { CONVERSIONS } else { 0 };
+    let mut merge = None;
+    for value in [lhs, rhs] {
+        let value = beneath(func, value, depth);
+        match func[value].def {
+            Def::Param { block, .. } if block != entry && merge.is_none_or(|it| it == block) => {
+                merge = Some(block);
+            }
+            _ if constant(func, value).is_some() => {}
+            _ => return None,
+        }
+    }
+    merge
+}
+
+/// How many conversions [`through_params`] looks through on an operand of a division.
+///
+/// The usual arithmetic conversions put one between `UINT64_MAX / base` and the `int` `base`, and
+/// a narrowing and a widening make two.
+const CONVERSIONS: u32 = 2;
+
+/// Whether the operation is a division or a remainder, the operations that fold through a
+/// parameter whatever else reads it.
+fn divides(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::SDiv | Opcode::UDiv | Opcode::SRem | Opcode::URem)
+}
+
+/// The value under as many as `depth` widenings and narrowings of this one.
+fn beneath(func: &Func, value: Value, depth: u32) -> Value {
+    let mut value = value;
+    for _ in 0..depth {
+        let Some(inner) = converted(func, value) else { break };
+        value = inner;
+    }
+    value
+}
+
+/// What this value is a widening or a narrowing of, if it is one.
+fn converted(func: &Func, value: Value) -> Option<Value> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = &func[inst];
+    if !matches!(data.opcode, Opcode::SExt | Opcode::ZExt | Opcode::Trunc) {
+        return None;
+    }
+    func[data.args].first().copied()
+}
+
+/// The answer of the operation on each edge into `merge`, in the order of `into`, or nothing if
+/// one edge does not fold or the fold does not pay.
+///
+/// An edge that does not pass constants can come from a [`forwarder`]. Then the answers are
+/// found on the edges into the forwarder. All the edges with an answer count against [`EDGES`].
+#[expect(clippy::too_many_arguments, reason = "each is a different fact the fold reads")]
+fn answers(
+    func: &Func,
+    inst: Inst,
+    merge: Block,
+    into: &[(Block, Idx<BlockCall>)],
+    edges: &crate::simplify_cfg::Edges,
+    entry: Block,
+    addressed: &Set<Block>,
+    uses: &[u32],
+) -> Option<Vec<Way>> {
+    let data = &func[inst];
+    let args = &func[data.args];
+    let ty = func[result_of(func, inst)].ty;
+    let index = |value: Value| match func[value].def {
+        Def::Param { block, index } if block == merge => Some(index as usize),
+        _ => None,
+    };
+    let depth = if divides(data.opcode) {
+        CONVERSIONS
+    } else {
+        // An operand of anything else is the parameter itself, and this is its one reader.
+        for &value in args {
+            if index(value).is_none() {
+                continue;
+            }
+            let here = args.iter().filter(|&&arg| arg == value).count();
+            if uses.get(value.index()).copied() != u32::try_from(here).ok() {
+                return None;
+            }
+        }
+        0
+    };
+    let evaluate = |arg: &dyn Fn(usize) -> Option<(Imm, Type)>| {
+        arithmetic(data, args, ty, &|value| on_edge(func, value, &index, arg, depth))
+    };
+    let mut ways = Vec::with_capacity(into.len());
+    let mut count = 0;
+    for &(from, at) in into {
+        let edge = &func[func[at].args];
+        if let Some(answer) = evaluate(&|at| constant(func, *edge.get(at)?)) {
+            ways.push(Way::Direct(answer));
+            count += 1;
+            continue;
+        }
+        if !forwarder(func, from, merge, entry, addressed) {
+            return None;
+        }
+        let outer = edges.get(&from).filter(|outer| !outer.is_empty())?;
+        let mut answers = Vec::with_capacity(outer.len());
+        for &(_, above) in outer {
+            let passed = &func[func[above].args];
+            let arg = |at: usize| {
+                let value = *edge.get(at)?;
+                match func[value].def {
+                    Def::Param { block, index } if block == from => {
+                        constant(func, *passed.get(index as usize)?)
+                    }
+                    _ => constant(func, value),
+                }
+            };
+            answers.push(evaluate(&arg)?);
+        }
+        count += answers.len();
+        ways.push(Way::Forwarded(answers));
+    }
+    (count <= EDGES).then_some(ways)
+}
+
+/// What `value` is when control arrives at the merge, looking through as many as `depth`
+/// conversions to a parameter of the merge or a constant. `arg` gives the constant that the edge
+/// passes to the parameter at an index.
+fn on_edge(
+    func: &Func,
+    value: Value,
+    index: &dyn Fn(Value) -> Option<usize>,
+    arg: &dyn Fn(usize) -> Option<(Imm, Type)>,
+    depth: u32,
+) -> Option<(Imm, Type)> {
+    if let Some(at) = index(value) {
+        return arg(at);
+    }
+    if let Some(found) = constant(func, value) {
+        return Some(found);
+    }
+    let inner = converted(func, value)?;
+    let next = depth.checked_sub(1)?;
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let (number, from) = on_edge(func, inner, index, arg, next)?;
+    let to = func[value].ty;
+    Some((convert(func[inst].opcode, number, from, to), to))
 }
 
 /// The result and the overflow bit of an overflow checking operation on two constants.
@@ -1822,6 +2143,253 @@ block0:
         build.ret(&[wide]);
         assert!(fold(&mut func));
         assert!(!fold(&mut func), "a second run found something to do");
+    }
+
+    /// Parses one function, runs the pass over it, checks that the result verifies, and gives
+    /// back the text and the statistics.
+    fn through(body: &str) -> (String, crate::Stats) {
+        let text = format!(
+            "; ModuleID = 'phi.c'\n; format 0\ntarget triple = \"x86_64-unknown-linux-gnu\"\n\
+             target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"\n\
+             func @f(i32) -> i64, linkage(external) {{\n{body}}}\n"
+        );
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let mut an = crate::machine::fixtures::analyses();
+        let stats = Fold.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        if let Err(errors) = rucc_ir::verify_func(&module, &module[id], &names) {
+            panic!("{errors:#?}\n{}", rucc_ir::print(&module, &names));
+        }
+        (rucc_ir::print(&module, &names), stats)
+    }
+
+    /// Three edges into `block5`, each passing `%8` a constant, then `op`, which starts at `%9`
+    /// and ends in `%last`. A `mul` of that by `%8` reads the parameter a second time.
+    fn three(left: i64, middle: i64, right: i64, op: &str, last: u32) -> String {
+        let next = last + 1;
+        format!(
+            "block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+block1:
+    %3 = iconst.i64 {left}
+    jump block5(%3)
+block2:
+    %4 = iconst.i32 1
+    %5 = icmp eq %0, %4
+    br_if %5, block3, block4
+block3:
+    %6 = iconst.i64 {middle}
+    jump block5(%6)
+block4:
+    %7 = iconst.i64 {right}
+    jump block5(%7)
+block5(%8: i64):
+{op}
+    %{next} = mul %{last}, %8
+    return %{next}
+"
+        )
+    }
+
+    /// `UINT64_MAX / base` and `UINT64_MAX % base` with `base` 8, 16 or 10, which is NetBSD's
+    /// `citrus_prop.c` after inlining. Both become a new parameter, the division and the remainder
+    /// are gone, and each edge passes the answer for its own divisor.
+    #[test]
+    fn a_division_by_a_parameter_of_constants_becomes_a_parameter_of_answers() {
+        let op = "    %9 = iconst.i64 -1\n    %10 = udiv %9, %8\n    %11 = urem %9, %8\n    \
+                  %12 = add %10, %11";
+        let (out, stats) = through(&three(8, 16, 10, op, 12));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 2, "{out}");
+        assert!(!out.contains("udiv") && !out.contains("urem"), "{out}");
+        for answer in [u64::MAX / 8, u64::MAX / 16, u64::MAX / 10] {
+            assert!(out.contains(&format!("iconst.i64 {answer}\n")), "{answer}: {out}");
+        }
+        for rest in [7, 15, 5] {
+            assert!(out.contains(&format!("iconst.i64 {rest}\n")), "{rest}: {out}");
+        }
+    }
+
+    /// The divisor is an `int` widened to the dividend's type, which is what the usual arithmetic
+    /// conversions make of `UINT64_MAX / base`. The fold looks through the widening, and the
+    /// widening stays for the `mul` that also reads it.
+    #[test]
+    fn a_division_by_a_widened_parameter_of_constants_folds() {
+        let body = "block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+block1:
+    %3 = iconst.i32 8
+    jump block3(%3)
+block2:
+    %4 = iconst.i32 10
+    jump block3(%4)
+block3(%5: i32):
+    %6 = iconst.i64 -1
+    %7 = sext.i64 %5
+    %8 = udiv %6, %7
+    %9 = mul %8, %7
+    return %9
+";
+        let (out, stats) = through(body);
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        assert!(!out.contains("udiv"), "{out}");
+        for answer in [u64::MAX / 8, u64::MAX / 10] {
+            assert!(out.contains(&format!("iconst.i64 {answer}\n")), "{answer}: {out}");
+        }
+        assert!(out.contains("sext.i64"), "{out}");
+    }
+
+    /// A zero divisor on one edge is undefined there, so nothing is folded on any edge.
+    #[test]
+    fn a_zero_divisor_on_one_edge_is_not_folded() {
+        for op in ["udiv", "sdiv", "urem", "srem"] {
+            let body = format!("    %9 = iconst.i64 100\n    %10 = {op} %9, %8");
+            let (out, stats) = through(&three(8, 0, 10, &body, 10));
+            assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+            assert!(out.contains(&format!("%10 = {op} %9, %8")), "{out}");
+        }
+    }
+
+    /// The most negative value divided by minus one overflows, so a signed division with that on
+    /// one edge is not folded on any edge.
+    #[test]
+    fn the_most_negative_value_divided_by_minus_one_is_not_folded() {
+        for op in ["sdiv", "srem"] {
+            let body = format!("    %9 = iconst.i64 {}\n    %10 = {op} %9, %8", i64::MIN);
+            let (out, stats) = through(&three(8, -1, 10, &body, 10));
+            assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+            assert!(out.contains(&format!("%10 = {op} %9, %8")), "{out}");
+        }
+        // The same divisors with a dividend that does not overflow do fold.
+        let body = "    %9 = iconst.i64 -80\n    %10 = sdiv %9, %8";
+        let (out, stats) = through(&three(8, -1, 10, body, 10));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        assert!(out.contains("iconst.i64 80\n") && out.contains("iconst.i64 -10\n"), "{out}");
+    }
+
+    /// An add on a parameter that something else also reads is left alone, because the new
+    /// parameter would cost a copy on each edge and the old one would stay. An add that is the
+    /// one reader of the parameter folds.
+    #[test]
+    fn a_cheap_operation_folds_only_when_it_is_the_one_reader() {
+        let body = "    %9 = iconst.i64 5\n    %10 = add %8, %9";
+        let (out, stats) = through(&three(1, 2, 3, body, 10));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+        let alone = three(1, 2, 3, body, 10).replace("mul %10, %8", "mul %10, %10");
+        let (out, stats) = through(&alone);
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        assert!(!out.contains("add %8"), "{out}");
+        assert!(out.contains("iconst.i64 6\n") && out.contains("iconst.i64 8\n"), "{out}");
+    }
+
+    /// Both operands are parameters of the same block, and each edge gives both a constant.
+    #[test]
+    fn two_parameters_of_one_block_fold_together() {
+        let body = "block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+block1:
+    %3 = iconst.i64 100
+    %4 = iconst.i64 7
+    jump block3(%3, %4)
+block2:
+    %5 = iconst.i64 90
+    %6 = iconst.i64 4
+    jump block3(%5, %6)
+block3(%7: i64, %8: i64):
+    %9 = udiv %7, %8
+    %10 = mul %9, %8
+    return %10
+";
+        let (out, stats) = through(body);
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        assert!(out.contains("iconst.i64 14\n") && out.contains("iconst.i64 22\n"), "{out}");
+        assert!(!out.contains("udiv"), "{out}");
+    }
+
+    /// The shape of `citrus_prop.c` after inlining. The inner `if` picks 16 or 8 in `block5`, which
+    /// only passes it on, and `block6` sees 10 and the parameter of `block5`.
+    fn forwarded(inner: i64) -> String {
+        format!(
+            "block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+block1:
+    %3 = iconst.i32 10
+    jump block6(%3)
+block2:
+    %4 = iconst.i32 1
+    %5 = icmp eq %0, %4
+    br_if %5, block3, block4
+block3:
+    %6 = iconst.i32 16
+    jump block5(%6)
+block4:
+    %7 = iconst.i32 {inner}
+    jump block5(%7)
+block5(%8: i32):
+    jump block6(%8)
+block6(%9: i32):
+    %10 = iconst.i64 -1
+    %11 = sext.i64 %9
+    %12 = udiv %10, %11
+    %13 = urem %10, %11
+    %14 = add %12, %13
+    %15 = mul %14, %11
+    return %15
+"
+        )
+    }
+
+    /// The answers for 16 and 8 go on the edges into the forwarder, and the forwarder passes them
+    /// on in a new parameter. A zero on an edge into the forwarder stops the fold as well.
+    #[test]
+    fn a_division_through_a_block_that_only_passes_a_parameter_on_folds() {
+        let (out, stats) = through(&forwarded(8));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 2, "{out}");
+        assert!(!out.contains("udiv") && !out.contains("urem"), "{out}");
+        for answer in [u64::MAX / 8, u64::MAX / 16, u64::MAX / 10, 7, 15, 5] {
+            assert!(out.contains(&format!("iconst.i64 {answer}\n")), "{answer}: {out}");
+        }
+        let (out, stats) = through(&forwarded(0));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+        assert!(out.contains("udiv") && out.contains("urem"), "{out}");
+    }
+
+    /// A division by a parameter that `edges` edges pass a constant into.
+    fn many(edges: u32) -> String {
+        let cases: Vec<String> =
+            (1..edges).map(|case| format!("{case} => block{}", case + 1)).collect();
+        let mut body = format!("block0(%0: i32):\n    switch %0, block1, [{}]\n", cases.join(", "));
+        let merge = edges + 1;
+        for block in 1..=edges {
+            body.push_str(&format!(
+                "block{block}:\n    %{block} = iconst.i64 {}\n    jump block{merge}(%{block})\n",
+                block + 1
+            ));
+        }
+        let (param, dividend, quotient) = (merge, merge + 1, merge + 2);
+        body.push_str(&format!(
+            "block{merge}(%{param}: i64):\n    %{dividend} = iconst.i64 1000\n    \
+             %{quotient} = udiv %{dividend}, %{param}\n    return %{quotient}\n"
+        ));
+        body
+    }
+
+    /// More edges than the limit are not folded, because each edge pays a copy.
+    #[test]
+    fn a_block_with_many_edges_is_not_folded() {
+        let (out, stats) = through(&many(super::EDGES as u32));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 1, "{out}");
+        let (out, stats) = through(&many(super::EDGES as u32 + 1));
+        assert_eq!(stats.count(Kind::Optimized, super::THROUGH), 0, "{out}");
+        assert!(out.contains("udiv"), "{out}");
     }
 
     /// The instruction that defines a value, which every value in these tests has.

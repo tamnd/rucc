@@ -171,3 +171,74 @@ u64 k10(u64 a, u64 *r) { *r = a % 10; return a / 10; }
     assert_eq!(calls(&compiled(source, "-O2"), "k10"), Vec::<&str>::new());
     assert_eq!(calls(&compiled(source, "-Os"), "k10"), ["__udivmoddi4"]);
 }
+
+/// What NetBSD's `citrus_prop.c` does: a `static` function divides `UINT64_MAX` by a `base` that
+/// is 8, 10 or 16, as a quotient and a remainder.
+const CONVERT: &str = "\
+typedef unsigned long long u64;
+extern int next(void);
+static int conv(u64 *out, int base)
+{
+	u64 cutoff = 0xffffffffffffffffULL / base;
+	int cutlim = 0xffffffffffffffffULL % base;
+	u64 acc = 0;
+	int d;
+	while ((d = next()) >= 0 && d < base) {
+		if (acc > cutoff || (acc == cutoff && d > cutlim))
+			return 1;
+		acc = acc * base + d;
+	}
+	*out = acc;
+	return 0;
+}
+";
+
+/// The divisor is 8, 10 or 16 at three call sites, or it is chosen by a `switch` or an `if` chain
+/// before one call. After inlining, the last two divide by a block parameter of those constants.
+/// gcc 14 at `-O2` folds the quotient and the remainder on each edge into it, so nothing but
+/// `next` is called. rucc now folds the division into a parameter of the answers, so
+/// `libBIG5.so` needs no `libgcc_s.so.1`. tamnd/rucc#4562.
+#[test]
+fn a_long_long_divided_by_a_choice_of_constants_calls_nothing() {
+    let three = "\
+int conv8(u64 *o) { return conv(o, 8); }
+int conv10(u64 *o) { return conv(o, 10); }
+int conv16(u64 *o) { return conv(o, 16); }
+";
+    let chosen = "\
+int pick(u64 *o, int c)
+{
+	int base;
+	switch (c) {
+	case 'o': base = 8; break;
+	case 'x': base = 16; break;
+	default: base = 10; break;
+	}
+	return conv(o, base);
+}
+";
+    let prefix = "\
+int prefix(const char *s, u64 *o)
+{
+	int base;
+	if (*s == '0') {
+		if (s[1] == 'x' || s[1] == 'X')
+			base = 16;
+		else
+			base = 8;
+	} else
+		base = 10;
+	return conv(o, base);
+}
+";
+    for (callers, names) in [
+        (three, &["conv8", "conv10", "conv16"][..]),
+        (chosen, &["pick"][..]),
+        (prefix, &["prefix"][..]),
+    ] {
+        let listing = compiled(&format!("{CONVERT}{callers}"), "-O2");
+        for name in names {
+            assert_eq!(calls(&listing, name), ["next"], "{name}: {listing}");
+        }
+    }
+}
