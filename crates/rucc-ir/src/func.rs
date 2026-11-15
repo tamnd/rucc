@@ -477,11 +477,12 @@ impl Func {
 
     /// Gives a value a different type, leaving where it comes from alone.
     ///
-    /// There is one caller and it is the back end pass that puts an integer of a width the
-    /// machine has no register for into the width it does have one for. Nothing in the middle
-    /// end changes a value's type, because a value's type is what the instruction that made it
-    /// produces and changing one without changing the other is how an IR stops meaning
-    /// anything. That pass changes both, which is why this is a method and not a field.
+    /// There are two callers. One is the back end pass that puts an integer of a width the
+    /// machine has no register for into the width it does have one for. The other is constant
+    /// folding, which gives a block parameter the type of the one conversion that reads it when
+    /// it folds that conversion into every argument passed to the parameter. A value's type is
+    /// what makes it, and changing one without changing the other is how an IR stops meaning
+    /// anything. Both callers change both, which is why this is a method and not a field.
     ///
     /// # Panics
     ///

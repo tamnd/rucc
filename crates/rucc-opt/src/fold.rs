@@ -110,6 +110,10 @@ const THROUGH: &str = "operation on a parameter of constants folded into a new p
 /// of sites past the cut is how far there is left to go.
 const NO_FUEL: &str = "instruction not folded, the pass ran out of fuel";
 
+/// Recorded once for each conversion of a block parameter that was folded on the edges into the
+/// block.
+const AT_EDGES: &str = "conversion of a parameter folded on each edge that passes a constant";
+
 /// The pass. It holds nothing, because folding needs to know nothing beyond the instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fold;
@@ -190,6 +194,7 @@ pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
             func.remove_inst(inst);
         }
     }
+    at_edges(func, fuel, &mut stats);
     stats
 }
 
@@ -507,6 +512,140 @@ fn on_edge(
     let (number, from) = on_edge(func, inner, index, arg, next)?;
     let to = func[value].ty;
     Some((convert(func[inst].opcode, number, from, to), to))
+}
+
+/// The conversions [`at_edges`] folds on the edges into a join. They are the floating point ones,
+/// because a select of their operand type is not always there to take the join away first. An
+/// `f80` has no select on x86-64, and a conversion of one to `f128` is a call.
+fn converts_float(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::FPExt
+            | Opcode::FPTrunc
+            | Opcode::SIToFP
+            | Opcode::UIToFP
+            | Opcode::FPToSI
+            | Opcode::FPToUI
+    )
+}
+
+/// Whether this value is an `iconst` or an `fconst`.
+fn is_constant(func: &Func, value: Value) -> Option<Inst> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    matches!(func[inst].opcode, Opcode::IConst | Opcode::FConst).then_some(inst)
+}
+
+/// Folds a floating point conversion of a block parameter on each edge into the block.
+///
+/// The conversion must be the only reader of the parameter, and each edge must pass a constant
+/// that the conversion folds. Then each edge passes the converted constant, the parameter gets
+/// the type of the conversion, and the conversion goes. `(__float128) (c ? 0.5L : -0.5L)` is two
+/// `f80` constants into a join and an `fpext` after it. Without this, the `fpext` stays as a call
+/// to `__extendxftf2` that gcc does not make, because gcc folds a conversion of a conditional into
+/// its two arms in `fold_unary`. That call is the one `sind_r16` in libgfortran made, and the one
+/// symbol the libgfortran of tamnd/rucc-bsd had that gcc's did not.
+///
+/// A parameter that is the value of a declaration is left alone, because the debugging
+/// information says what type the declaration has.
+fn at_edges(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) {
+    let Some(entry) = func.entry() else { return };
+    let uses = uses::count(func);
+    let mut readers: Vec<(Value, Inst)> = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            if data.results != 1 || !converts_float(data.opcode) {
+                continue;
+            }
+            let &[arg] = &func[data.args] else { continue };
+            let Def::Param { block: at, .. } = func[arg].def else { continue };
+            if at != entry && uses[arg.index()] == 1 && func.value_decls(arg).next().is_none() {
+                readers.push((arg, inst));
+            }
+        }
+    }
+    if readers.is_empty() {
+        return;
+    }
+    readers.sort_unstable();
+    // The runs of arguments of the edges into each block.
+    let mut edges: Map<Block, Vec<rucc_ir::ValueList>> = Map::default();
+    for block in func.blocks() {
+        let Some(terminator) = func.terminator(block) else { continue };
+        for call in func.successors(terminator) {
+            edges.entry(call.block).or_default().push(call.args);
+        }
+    }
+    let mut forward = Map::default();
+    let mut gone = Vec::new();
+    for (param, conversion) in readers {
+        let Def::Param { block, index } = func[param].def else { continue };
+        let Some(lists) = edges.get(&block) else { continue };
+        let index = index as usize;
+        let incoming: Option<Vec<Value>> =
+            lists.iter().map(|&list| func[list].get(index).copied()).collect();
+        let Some(mut incoming) = incoming else { continue };
+        incoming.sort_unstable();
+        incoming.dedup();
+        if incoming.is_empty() || incoming.iter().any(|&value| is_constant(func, value).is_none()) {
+            continue;
+        }
+        // One converted constant next to each constant, which is where it is sure to be above
+        // every edge that passes the constant. It is kept only if it folds.
+        let ty = func[result_of(func, conversion)].ty;
+        let span = func.span(conversion);
+        let mut made = Vec::new();
+        let mut folds = true;
+        for &value in &incoming {
+            let args = func.push_values(&[value]);
+            let data = InstData { args, ..func[conversion] };
+            let inst = func.create_inst(data, &[ty], span);
+            let after = is_constant(func, value).expect("checked above");
+            func.insert_after(inst, after);
+            made.push((value, inst));
+            match evaluate(func, inst) {
+                Some(folded) => write(func, inst, folded),
+                None => {
+                    folds = false;
+                    break;
+                }
+            }
+        }
+        if !folds || !fuel.take() {
+            if folds {
+                stats.missed(NO_FUEL);
+            }
+            for (_, inst) in made {
+                func.remove_inst(inst);
+            }
+            continue;
+        }
+        let converted: Map<Value, Value> =
+            made.iter().map(|&(value, inst)| (value, result_of(func, inst))).collect();
+        for &list in lists {
+            let mut at = 0;
+            func.rewrite(list, |value| {
+                let passed = if at == index {
+                    converted.get(&value).copied().unwrap_or(value)
+                } else {
+                    value
+                };
+                at += 1;
+                passed
+            });
+        }
+        func.retype(param, ty);
+        func.set_facts(param, rucc_ir::Facts::NONE);
+        forward.insert(result_of(func, conversion), param);
+        gone.push(conversion);
+        stats.optimized(AT_EDGES);
+    }
+    if !forward.is_empty() {
+        uses::substitute(func, &forward);
+        for inst in gone {
+            func.remove_inst(inst);
+        }
+    }
 }
 
 /// The result and the overflow bit of an overflow checking operation on two constants.
@@ -1878,6 +2017,91 @@ mod tests {
                 assert_eq!(value_of(&func, out, Type::int(32)), Some(i128::from(i32::MIN)));
             }
         }
+    }
+
+    /// The function of `(__float128) (c ? 0.5L : -0.5L)` as the lowering hands it over, and the
+    /// same with the parameter read a second time.
+    fn joined(second_reader: bool) -> String {
+        let tail = if second_reader {
+            "    %7 = fpext.f128 %5\n    %8 = fadd %6, %7\n    return %8\n"
+        } else {
+            "    return %6\n"
+        };
+        format!(
+            "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+func @f(i32) -> f128, linkage(external) {{
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp slt %0, %1
+    br_if %2, block1, block2
+
+block1:
+    %3 = fconst.f80 0x3ffe8000000000000000
+    jump block3(%3)
+
+block2:
+    %4 = fconst.f80 0xbffe8000000000000000
+    jump block3(%4)
+
+block3(%5: f80):
+    %6 = fpext.f128 %5
+{tail}}}
+"
+        )
+    }
+
+    #[test]
+    fn a_conversion_of_a_join_of_two_constants_is_folded_on_each_edge() {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&joined(false), &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        assert!(super::fold_in(&mut module[id], &mut Fuel::unlimited()).changed());
+        rucc_ir::verify(&module, &names).expect("the folded function is well formed");
+        let func = &module[id];
+        let insts = func.blocks().flat_map(|block| func.insts(block));
+        assert!(insts.into_iter().all(|inst| func[inst].opcode != Opcode::FPExt));
+        let join = func.blocks().last().expect("the join");
+        let param = func[join].params[0];
+        assert_eq!(func[param].ty, Type::float(Float::F128));
+        // 0.5 and -0.5 in binary128: a biased exponent of 0x3ffe and nothing in the fraction.
+        let mut passed: Vec<u128> = func
+            .blocks()
+            .filter_map(|block| func.terminator(block))
+            .flat_map(|jump| func.successors(jump).collect::<Vec<_>>())
+            .filter(|call| call.block == join)
+            .map(|call| float_bits(func, func[call.args][0]).expect("a constant is passed"))
+            .collect();
+        passed.sort_unstable();
+        assert_eq!(
+            passed,
+            [0x3ffe_0000_0000_0000_0000_0000_0000_0000, 0xbffe_0000_0000_0000_0000_0000_0000_0000]
+        );
+        assert!(!super::fold_in(&mut module[id], &mut Fuel::unlimited()).changed());
+    }
+
+    #[test]
+    fn a_join_parameter_read_twice_keeps_its_conversions() {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&joined(true), &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        assert!(!super::fold_in(&mut module[id], &mut Fuel::unlimited()).changed());
+    }
+
+    #[test]
+    fn a_conversion_of_a_join_folds_only_with_fuel_for_it() {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&joined(false), &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let stats = super::fold_in(&mut module[id], &mut Fuel::of(0));
+        assert!(!stats.changed());
+        rucc_ir::verify(&module, &names).expect("nothing is left half done");
+        let func = &module[id];
+        let insts = func.blocks().flat_map(|block| func.insts(block));
+        assert_eq!(insts.into_iter().filter(|&inst| func[inst].opcode == Opcode::FPExt).count(), 1);
     }
 
     #[test]
