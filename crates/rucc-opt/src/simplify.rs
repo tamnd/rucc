@@ -317,6 +317,18 @@
 //! set, `p->freed_tables = 1` in `__zap_vma_range` was a load, an `and`, an `or` and a store,
 //! and gcc writes one `orb` to memory.
 //!
+//! ### A product tested through a division
+//!
+//! An unsigned `x > ~0 / y` is true when `x * y` does not fit and false when it fits, so it is the
+//! overflow bit of `umul_overflow x, y`. `x <= ~0 / y` is the negation of that bit, and `~0 / y < x`
+//! and `~0 / y >= x` are the same two. When `y` is zero the division is undefined, so any answer is
+//! correct. `strtoint` in the libuutil of NetBSD tests `val > multmax`, where `multmax` is
+//! `UINT64_MAX / base`, and on i386 that division is a call to `__udivdi3` in `libgcc_s`. gcc makes
+//! the same change in `match.pd`, and its libuutil has no such call. The rewrite occurs only when
+//! nothing else reads the division, because otherwise the division stays and the rewrite adds a
+//! multiplication. It is written by hand because a rule in the tables gives one value, and this
+//! rewrite makes an instruction with two results. tamnd/rucc#4600.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -446,6 +458,14 @@ const SHIFTED: &str = "unsigned comparison after a shift made a comparison befor
 
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_SHIFTED: &str = "comparison after a shift left alone, the pass ran out of fuel";
+
+/// Recorded once for each comparison with all ones divided by a value made an overflow test.
+const OVERFLOWED: &str =
+    "unsigned comparison with all ones divided by a value made an overflow test";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_OVERFLOWED: &str =
+    "comparison with all ones divided by a value left alone, the pass ran out of fuel";
 
 /// Recorded once for each choice between a bit and nothing made a shift of the bit tested.
 const MOVED: &str = "choice of one bit on another bit made a shift";
@@ -880,6 +900,9 @@ pub(crate) enum Found {
     Composite(Composite),
     /// A lane read back out of a packed pair, which is the value the lane was packed from.
     Lane(Value),
+    /// An unsigned comparison of a value with all ones divided by another, which is the overflow
+    /// bit of the product of the two, or its negation.
+    Overflow(Overflow),
     /// What a rule out of `rules/` wrote.
     Rule(Rewrite),
 }
@@ -964,6 +987,9 @@ impl<'a> Finder<'a> {
         if let Some(rewrite) = shifted_comparison(func, inst, &self.uses) {
             return Some((Found::Rule(rewrite), SHIFTED, NO_FUEL_SHIFTED));
         }
+        if let Some(overflow) = overflow_test(func, inst, &self.uses) {
+            return Some((Found::Overflow(overflow), OVERFLOWED, NO_FUEL_OVERFLOWED));
+        }
         if let Some(rewrite) = moved_bit(func, inst) {
             return Some((Found::Rule(rewrite), MOVED, NO_FUEL_MOVED));
         }
@@ -994,6 +1020,16 @@ pub(crate) fn apply(
             let result = func[inst].first_result.expect("a truncation has a result");
             forward.insert(result, lane);
             return true;
+        }
+        Found::Overflow(Overflow { x, y, fits }) => {
+            let flag = overflow_bit(func, inst, x, y);
+            if !fits {
+                let result = func[inst].first_result.expect("a comparison has a result");
+                forward.insert(result, flag);
+                return true;
+            }
+            let ones = Operand::Constant { number: -1, bits: 1 };
+            become_instruction(func, inst, Opcode::Xor, None, Operand::Value(flag), ones);
         }
         Found::Rule(Rewrite::Value(value)) => {
             let result = func[inst].first_result.expect("the rule matched a result");
@@ -2192,6 +2228,59 @@ fn shifted_comparison(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> 
         lhs: Operand::Value(x),
         rhs: Operand::Constant { number: i128::from(number), bits },
     })
+}
+
+/// What an unsigned comparison with all ones divided by a value becomes. See [`overflow_test`].
+pub(crate) struct Overflow {
+    /// The value that is compared.
+    x: Value,
+    /// The divisor.
+    y: Value,
+    /// Whether the comparison is true when the product fits, rather than when it does not.
+    fits: bool,
+}
+
+/// An unsigned `x > ~0 / y`, `x <= ~0 / y`, `~0 / y < x` or `~0 / y >= x`, when nothing else
+/// reads the division. The first and the third are true when `x * y` does not fit, and the other
+/// two are true when it fits. A constant `y` is left alone, because then the division is a
+/// constant and the comparison is one with a constant.
+fn overflow_test(func: &Func, inst: Inst, uses: &[u32]) -> Option<Overflow> {
+    let data = &func[inst];
+    let Extra::IntPred(pred) = data.extra else { return None };
+    let [lhs, rhs] = func[data.args] else { return None };
+    if data.opcode != Opcode::ICmp {
+        return None;
+    }
+    let (x, quotient, fits) = match pred {
+        IntPred::Ugt => (lhs, rhs, false),
+        IntPred::Ule => (lhs, rhs, true),
+        IntPred::Ult => (rhs, lhs, false),
+        IntPred::Uge => (rhs, lhs, true),
+        _ => return None,
+    };
+    let (Opcode::UDiv, [ones, y]) = producer(func, quotient)? else { return None };
+    let ty = func[x].ty;
+    if !ty.is_int() || !ty.is_scalar() || ty.bits() < 8 || func[y].ty != ty {
+        return None;
+    }
+    if !all_ones(func, ones) || constant(func, y).is_some() {
+        return None;
+    }
+    if uses.get(quotient.index()) != Some(&1) && read_elsewhere(func, quotient, inst, uses) {
+        return None;
+    }
+    Some(Overflow { x, y, fits })
+}
+
+/// Puts `umul_overflow x, y` in front of `before` and gives its overflow bit.
+fn overflow_bit(func: &mut Func, before: Inst, x: Value, y: Value) -> Value {
+    let ty = func[x].ty;
+    let args = func.push_values(&[x, y]);
+    let data = InstData { args, ..InstData::new(Opcode::UMulOverflow) };
+    let span = func.span(before);
+    let product = func.create_inst(data, &[ty, ty.with_lane(Type::I1)], span);
+    func.insert_before(product, before);
+    func[product].results().nth(1).expect("two results were asked for")
 }
 
 /// `(x & 2^k) != 0 ? 2^m : 0` as `x & 2^k` shifted to bit `m`, and `(x & 2^k) != 0 ? v op 2^m : v`
@@ -4233,6 +4322,67 @@ mod tests {
             let masked = operands(&func, result)[0];
             assert_eq!(came_from(&func, masked).0, Opcode::And, "{c:#x} {s}");
         }
+    }
+
+    /// `x > ~0 / y` and its kin, with the comparison given back and nothing else reading the
+    /// quotient. `left` puts the quotient on the left of the comparison.
+    fn divided(ty: Type, pred: IntPred, left: bool) -> (Func, Block, Value, Value) {
+        let (_, mut func, block) = one_block(Type::int(1));
+        let x = func.append_param(block, ty);
+        let y = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let ones = build.iconst(ty, -1);
+        let quotient = build.binary(Opcode::UDiv, ones, y, Flags::NONE);
+        let out = if left { build.icmp(pred, quotient, x) } else { build.icmp(pred, x, quotient) };
+        build.ret(&[out]);
+        (func, block, x, y)
+    }
+
+    /// `val > UINT64_MAX / base` in `strtoint` of libuutil is the overflow bit of `val * base`,
+    /// and the other three ways to write the test are that bit or its negation. tamnd/rucc#4600.
+    #[test]
+    fn a_comparison_with_all_ones_divided_by_a_value_is_an_overflow_test() {
+        for (bits, pred, left, fits) in [
+            (64, IntPred::Ugt, false, false),
+            (64, IntPred::Ule, false, true),
+            (32, IntPred::Ult, true, false),
+            (32, IntPred::Uge, true, true),
+        ] {
+            let (mut func, block, x, y) = divided(Type::int(bits), pred, left);
+            assert!(simplify(&mut func), "i{bits} {pred:?}");
+            let mut result = returned(&func, block);
+            if fits {
+                assert_eq!(came_from(&func, result).0, Opcode::Xor, "i{bits} {pred:?}");
+                let args = operands(&func, result);
+                assert_eq!(number(&func, args[1]), -1, "i{bits} {pred:?}");
+                result = args[0];
+            }
+            assert_eq!(came_from(&func, result).0, Opcode::UMulOverflow, "i{bits} {pred:?}");
+            assert_eq!(operands(&func, result), [x, y], "i{bits} {pred:?}");
+        }
+    }
+
+    /// The division stays when something else reads it, and so the comparison stays too.
+    #[test]
+    fn a_comparison_with_a_quotient_read_elsewhere_stays() {
+        let ty = Type::int(64);
+        let (_, mut func, block) = one_block(ty);
+        let x = func.append_param(block, ty);
+        let y = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let ones = build.iconst(ty, -1);
+        let quotient = build.binary(Opcode::UDiv, ones, y, Flags::NONE);
+        let over = build.icmp(IntPred::Ugt, x, quotient);
+        let out = build.select(over, quotient, x);
+        build.ret(&[out]);
+        simplify(&mut func);
+        let products = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::UMulOverflow)
+            .count();
+        assert_eq!(products, 0);
+        assert_eq!(came_from(&func, over).0, Opcode::ICmp);
     }
 
     /// `(x >> s) pred c` returned from a function of `x`, at the width of `ty`.
