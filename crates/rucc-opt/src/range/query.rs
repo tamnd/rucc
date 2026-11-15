@@ -725,6 +725,16 @@ impl<'a> Ranges<'a> {
                     _ => Range::of(ty),
                 }
             }
+            Opcode::UDiv | Opcode::SDiv => {
+                let (a, b) = (operand(self, 0), operand(self, 1));
+                if a.width() != b.width() {
+                    return Range::of(ty);
+                }
+                match data.opcode {
+                    Opcode::UDiv => ops::udiv(a, b),
+                    _ => ops::sdiv(a, b),
+                }
+            }
             Opcode::Trunc => ops::trunc(operand(self, 0), width),
             Opcode::ZExt => ops::zext(operand(self, 0), width),
             Opcode::SExt => ops::sext(operand(self, 0), width),

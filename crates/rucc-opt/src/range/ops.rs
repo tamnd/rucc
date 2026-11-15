@@ -4,8 +4,8 @@
 //! table with an entry per opcode, and says the M4 subset is addition, subtraction,
 //! multiplication, the bitwise operations, the shifts, the comparisons, truncation, sign and zero
 //! extension, and negation. The overflow builtins came later, and only their flag: [`overflows`].
-//! Not division, not remainder, not the intrinsics: those are cheap to add later against the same tests and expensive to get subtly
-//! wrong now.
+//! Division came later too, in [`udiv`] and [`sdiv`]. Not remainder, not the intrinsics: those are
+//! cheap to add later against the same tests and expensive to get subtly wrong now.
 //!
 //! # Forwards and backwards
 //!
@@ -47,7 +47,7 @@
 
 use rucc_ir::{Flags, IntPred};
 
-use super::{Bits, Gathered, Range, clamp, mask, sign_bit, signed_limits};
+use super::{Bits, Gathered, Range, clamp, mask, sign_bit, signed, signed_limits};
 
 /// How many values of a shift count are worth walking one at a time.
 ///
@@ -268,6 +268,73 @@ pub fn mul(a: Range, b: Range, flags: Flags) -> Range {
         )
     })
     .narrow(low)
+}
+
+/// Unsigned division.
+///
+/// A divisor of zero is undefined, so the zero is taken out of the divisor first, and each pairing
+/// is then its low end over the high divisor up to its high end over the low one. This and
+/// [`sdiv`] are what show the kernel's `max()` that `DIV_ROUND_UP` of numbers that cannot be
+/// negative is not negative either, which its signedness check asks of a signed operand compared
+/// with an unsigned one, and which gcc's ranges see.
+///
+/// # Panics
+///
+/// Panics if the operands are of different widths.
+#[must_use]
+pub fn udiv(a: Range, b: Range) -> Range {
+    assert_eq!(a.width(), b.width(), "these are ranges of different widths");
+    let width = a.width();
+    let b = b.intersect(Range::other_than(0, width));
+    per_pair(a, b, |(al, ah), (bl, bh)| Range::between(al / bh, ah / bl, width))
+}
+
+/// Signed division, which rounds towards zero.
+///
+/// The divisor's zero is taken out as for [`udiv`]. Each operand is then cut where the sign
+/// changes, and with the divisor of one sign a quotient only ever moves one way as either operand
+/// does, so the four corners of each piece hold its least and its greatest. The least value over
+/// minus one is as undefined as a zero divisor, so a corner that does not fit is left out.
+///
+/// # Panics
+///
+/// Panics if the operands are of different widths.
+#[must_use]
+pub fn sdiv(a: Range, b: Range) -> Range {
+    assert_eq!(a.width(), b.width(), "these are ranges of different widths");
+    let width = a.width();
+    let b = b.intersect(Range::other_than(0, width));
+    let (_, most) = signed_limits(width);
+    let mut out = Range::empty(width);
+    for (al, ah) in signed_pieces(a) {
+        for (bl, bh) in signed_pieces(b) {
+            let corners = [(al, bl), (al, bh), (ah, bl), (ah, bh)]
+                .map(|(x, y)| x.checked_div(y).filter(|&q| q <= most));
+            let fitting = corners.iter().flatten();
+            let (Some(&lo), Some(&hi)) = (fitting.clone().min(), fitting.max()) else { continue };
+            // A corner that did not fit is the least value over minus one, the greatest quotient
+            // there could have been, so the pieces that do fit may come up to the limit.
+            let hi = if corners.contains(&None) { most } else { hi };
+            out = out.union(Range::signed_between(lo, hi, width));
+        }
+    }
+    out
+}
+
+/// The intervals of a range read as signed numbers, cut where the sign changes.
+fn signed_pieces(a: Range) -> Vec<(i128, i128)> {
+    let width = a.width();
+    let top = sign_bit(width);
+    let mut pieces = Vec::new();
+    for &(lo, hi) in a.pairs() {
+        if lo < top && hi >= top {
+            pieces.push((signed(lo, width), signed(top - 1, width)));
+            pieces.push((signed(top, width), signed(hi, width)));
+        } else {
+            pieces.push((signed(lo, width), signed(hi, width)));
+        }
+    }
+    pieces
 }
 
 /// The bitwise and.
@@ -1017,6 +1084,31 @@ mod tests {
             },
         );
         binary("mul nuw", |a, b| mul(a, b, Flags::NUW), |x, y| (x * y <= mask(W)).then_some(x * y));
+    }
+
+    #[test]
+    fn division_leaves_out_what_is_undefined() {
+        binary("udiv", udiv, |x, y| x.checked_div(y));
+        binary("sdiv", sdiv, |x, y| {
+            let quotient = as_signed(x).checked_div(as_signed(y))?;
+            fits_signed(quotient).then_some(quotient as u128 & mask(W))
+        });
+    }
+
+    #[test]
+    fn a_quotient_of_numbers_that_are_not_negative_is_not_negative() {
+        // max310x's `hold` is `DIV_ROUND_UP(baud * delay, MSEC_PER_SEC)` in `long`, with the
+        // product a 32 bit unsigned number, so it is the sum over a thousand.
+        let sum = Range::between(999, u128::from(u32::MAX) + 999, 64);
+        let hold = sdiv(sum, Range::between(1000, 1000, 64));
+        assert_eq!(hold.signed_bounds(), Some((0, 4_294_968)));
+        // Then `DIV_ROUND_UP((hold + 1) * USEC_PER_SEC, baud)`, again in `long` with `baud` 32 bit
+        // unsigned. The divisor can be zero, which leaves the quotient no more negative.
+        let dividend = Range::signed_between(999_999, 4_299_263_967_294, 64);
+        let divisor = Range::between(0, u128::from(u32::MAX), 64);
+        let (least, _) = sdiv(dividend, divisor).signed_bounds().expect("not empty");
+        assert_eq!(least, 0);
+        assert_eq!(udiv(Range::between(10, 20, 8), Range::between(0, 3, 8)).pairs(), [(3, 20)]);
     }
 
     #[test]
