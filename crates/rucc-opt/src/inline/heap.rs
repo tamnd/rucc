@@ -868,7 +868,8 @@ impl Heap<'_> {
         if calls_twice(module, target, self.how.names) {
             return Err(InlineFailure::Setjmp);
         }
-        let cold = func.attrs.set.contains(AttrSet::COLD)
+        let cold = self.how.size
+            || func.attrs.set.contains(AttrSet::COLD)
             || target.attrs.set.contains(AttrSet::COLD)
             || target.attrs.set.contains(AttrSet::NORETURN);
         if cold && grows(func, call, target, weighed.body, self.how) {

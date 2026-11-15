@@ -363,6 +363,10 @@ pub struct Limits {
     pub auto: u32,
     /// How much a call may grow a caller it is not hot in. gcc's `early-inlining-insns`.
     pub early: u32,
+    /// Whether the level optimizes for size, which is `-Os` and `-Oz`. gcc's
+    /// `cgraph_edge::maybe_hot_p` says that no call is hot there, so a call goes in only when the
+    /// program does not grow by it.
+    pub size: bool,
 }
 
 impl Limits {
@@ -373,7 +377,17 @@ impl Limits {
             single: rucc_cost::param!(INLINE_INSNS_SINGLE),
             auto: rucc_cost::param!(INLINE_INSNS_AUTO),
             early: rucc_cost::param!(INLINE_EARLY_INSNS),
+            size: false,
         }
+    }
+
+    /// gcc's numbers at `-Os` and `-Oz`, which are the ones at `-O2` with every call not hot.
+    /// NetBSD's i386 boot code is built with `-Os`, and with the calls weighed as hot there `qsort`
+    /// had a copy of `med3` and of `swapfunc` at each call, where gcc keeps both out of line.
+    /// tamnd/rucc#4097.
+    #[must_use]
+    pub fn os() -> Self {
+        Self { size: true, ..Self::o2() }
     }
 
     /// gcc's numbers at `-O3`, where each of the three is larger.
@@ -383,6 +397,7 @@ impl Limits {
             single: rucc_cost::param!(INLINE_INSNS_SINGLE_O3),
             auto: rucc_cost::param!(INLINE_INSNS_AUTO_O3),
             early: rucc_cost::param!(INLINE_EARLY_INSNS_O3),
+            size: false,
         }
     }
 }
@@ -518,6 +533,7 @@ pub fn run(
             limit: most,
             auto: limits.auto,
             early: limits.early,
+            size: limits.size,
             isa,
             names,
             growth,
@@ -583,6 +599,7 @@ pub fn run(
             limit: most,
             auto: limits.auto,
             early: limits.early,
+            size: limits.size,
             isa,
             names,
             growth,
@@ -1015,6 +1032,8 @@ struct How<'a> {
     auto: u32,
     /// How much a call may grow a caller it is not hot in whatever else is known.
     early: u32,
+    /// Whether no call is hot, which is so at `-Os` and `-Oz`. See [`Limits::size`].
+    size: bool,
     /// What a function without a `target` attribute of its own is built for.
     isa: Isa,
     /// What the names in the module are read from.
@@ -1201,7 +1220,8 @@ fn settle(
     // A caller written `cold`, which in the kernel is every `__init` and `__exit` function, is one
     // whose calls gcc never thinks of as hot, and it inlines a call that is not hot only when that
     // does not make the program larger.
-    let cold = module[id].attrs.set.contains(AttrSet::COLD);
+    // At `-Os` and `-Oz` no call is hot to gcc, so every caller is weighed as if it were cold.
+    let cold = module[id].attrs.set.contains(AttrSet::COLD) || how.size;
     // A call `main` makes outside its loops is not hot to gcc either, since `main` runs once, and
     // neither is one from a function that never comes back. gcc 16 keeps the four calls `main`
     // makes to a `static` setter of ten lines at `-O2`, where the first pass used to copy it into
@@ -2692,7 +2712,8 @@ fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> 
     // The calls that are hot are taken first and go in when they fit, so what the copy left out of
     // line has to pay for is the calls that are not, unless the callee is cold itself and every
     // call to it is weighed this way.
-    let sites = if callee.attrs.set.contains(AttrSet::COLD) { how.calls } else { how.cold };
+    let sites =
+        if callee.attrs.set.contains(AttrSet::COLD) || how.size { how.calls } else { how.cold };
     let sites = sites.get(&callee.name).copied().unwrap_or(1).max(1);
     !removable || growth * sites > size
 }

@@ -1274,6 +1274,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         OptLevel::O0 => None,
         _ if !opts.wants(inline::NAME) => None,
         OptLevel::O3 => Some(inline::Limits::o3()),
+        OptLevel::Os | OptLevel::Oz => Some(inline::Limits::os()),
         _ => Some(inline::Limits::o2()),
     };
     // `-fno-inline-functions-called-once` turns the called once half off alone. It is not a pass,
