@@ -132,6 +132,17 @@ enum Kind {
     Scalar,
 }
 
+/// Which level resolves a designation in the kencc dialect. See `kencc_level`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KenccLevel {
+    /// The level of the innermost brace pair, as in C.
+    Brace,
+    /// This structure, also when it has no brace pair of its own.
+    Here,
+    /// The element of this array that is next, which is a structure that has the member.
+    Element,
+}
+
 /// One step of a designation, resolved against the level it was written at.
 #[derive(Debug, Clone, Copy)]
 struct Step {
@@ -593,10 +604,32 @@ impl<'a> Checker<'a> {
         let mut next = 0;
         let mut high = 0;
         while let Some(item) = items.peek() {
+            // kencc gives a member name to the innermost structure, and not to the level of the
+            // innermost brace pair. See `kencc_level`.
+            let level = if pending.is_none() && !items.resolved && self.cx.kencc {
+                self.kencc_level(kind, item.designators)
+            } else {
+                KenccLevel::Brace
+            };
+            let mut elided = false;
             let (index, deeper, repeat) = match pending.take() {
                 Some(steps) => split(steps),
+                None if level == KenccLevel::Element => match self.advance(kind, next) {
+                    Some(index) => {
+                        elided = true;
+                        (index, Vec::new(), 1)
+                    }
+                    None => {
+                        if !braced {
+                            break;
+                        }
+                        self.excess(w, kind, item.span);
+                        items.bump();
+                        continue;
+                    }
+                },
                 None if !item.designators.is_empty() && !items.resolved => {
-                    if !braced {
+                    if !braced && level != KenccLevel::Here {
                         // The designation names a place in the innermost brace pair, which is
                         // not this one, so this level is done and the one that owns the brace
                         // takes the element.
@@ -631,7 +664,10 @@ impl<'a> Checker<'a> {
             };
             let sub = self.sub(place, kind, index).expect("a sub-object of this level");
             let written = w.entries.len();
-            if deeper.is_empty() {
+            if elided {
+                let inner = self.kind_of(sub.ty);
+                self.fill(w, sub, inner, items, false, None);
+            } else if deeper.is_empty() {
                 self.element(w, sub, items);
             } else {
                 let inner = self.kind_of(sub.ty);
@@ -1047,6 +1083,38 @@ impl<'a> Checker<'a> {
         }
         let ty = self.types.array(elem, ArrayLen::Fixed(len));
         self.tast.expr(Expr::new(ExprKind::Str(id), ty, Category::Lvalue), span)
+    }
+
+    /// Where kencc puts a designation that starts with a member name, at a level that has no
+    /// brace pair of its own or that is an array.
+    ///
+    /// C gives the designation to the level of the innermost brace pair. kencc gives it to the
+    /// innermost structure. In `init1` of `dcl.c`, an array of structures gives each member
+    /// name to the element that it fills, and a structure takes each member name that follows
+    /// one of its members. Thus `static Ctlr ctlr[1] = { .regs = r, .irq = i };` in
+    /// `usdhc.c` of the imx8 kernel fills element 0, which gcc rejects. The kencc rule
+    /// applies only when the member is in that structure. Otherwise the C rule applies, so an
+    /// initializer that both compilers take has the same meaning.
+    fn kencc_level(&self, kind: Kind, list: ast::DesignatorList) -> KenccLevel {
+        let Some(&(Designator::Field(name) | Designator::ObsoleteField(name))) =
+            self.ast[list].first()
+        else {
+            return KenccLevel::Brace;
+        };
+        match kind {
+            Kind::Record { record, .. } if self.find_field(record, name).is_some() => {
+                KenccLevel::Here
+            }
+            Kind::Array { elem, .. } => match self.kind_of(elem) {
+                Kind::Record { record, union: false }
+                    if self.find_field(record, name).is_some() =>
+                {
+                    KenccLevel::Element
+                }
+                _ => KenccLevel::Brace,
+            },
+            _ => KenccLevel::Brace,
+        }
     }
 
     /// Where a designation points, as steps from the level it was written at.

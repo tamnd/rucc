@@ -12,6 +12,9 @@
 //!   defines `void threadmain()` after `void threadmain(int, char *[])`.
 //! - An automatic array of no size has the width 0, as `adecl` in `cc/dcl.c` gives it. tr2post's
 //!   chartab.c has `struct charent *cp[];` in a function.
+//! - A member name in the list of an array of structures fills that member of the element
+//!   that is next, as `init1` in `cc/dcl.c` does. usdhc.c of the imx8 kernel has
+//!   `static Ctlr ctlr[1] = { .regs = ..., .irq = IRQusdhc1, };`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -27,7 +30,9 @@ const SOURCE: &str = "enum { A = 4, /* note */, B, };\n\
                       void threadmain(int argc, char *argv[]);\n\
                       void threadmain() { }\n\
                       int c = B;\n\
-                      int none(void) { Store *cp[]; return 3 + sizeof cp; }\n";
+                      int none(void) { Store *cp[]; return 3 + sizeof cp; }\n\
+                      typedef struct Ctlr { int *regs; int irq; } Ctlr;\n\
+                      Ctlr ctlr[2] = { .regs = (int*)16, .irq = 7, };\n";
 
 fn fixture(what: &str) -> PathBuf {
     let dir =
@@ -77,6 +82,9 @@ fn kencc_takes_what_the_commands_write() {
     assert!(!body(&asm, "threadmain").is_empty());
     let none = body(&asm, "none").join("\n");
     assert!(none.contains("movl\t$3, %eax"), "{none}");
+    // The two members are the members of element 0, and element 1 is zero.
+    let ctlr: Vec<&str> = asm.lines().skip_while(|l| *l != "ctlr:").skip(1).take(3).collect();
+    assert_eq!(ctlr, ["\t.quad\t16", "\t.long\t7", "\t.space\t20"], "{asm}");
 }
 
 #[test]
