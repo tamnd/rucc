@@ -72,3 +72,32 @@ fn a_zero_count_on_i386_is_a_search() {
         assert!(!text.contains("call"), "{level}\n{text}");
     }
 }
+
+/// NetBSD's libsa writes `htole32` and `htobe32` as four byte stores to a union and a read of the
+/// word. Scalar replacement leaves a dead `trunc` of each byte beside the shifts, and `bswap` only
+/// rewrites a tree whose nodes nothing else reads, so the bytes stayed shifts and masks. With `dce`
+/// in front of `bswap`, the first is the word as it came and the second is one `bswapl`.
+#[test]
+fn a_word_put_together_from_its_bytes_through_a_union_is_one_move_or_one_bswap() {
+    const UNION: &str = "\
+typedef unsigned int u32; typedef unsigned char u8;
+typedef union { u32 val; u8 bytes[4]; } un32;
+u32 htole32(u32 v) { un32 u; u.bytes[0] = v & 0xff; u.bytes[1] = (v >> 8) & 0xff;
+    u.bytes[2] = (v >> 16) & 0xff; u.bytes[3] = (v >> 24) & 0xff; return u.val; }
+u32 htobe32(u32 v) { un32 u; u.bytes[3] = v & 0xff; u.bytes[2] = (v >> 8) & 0xff;
+    u.bytes[1] = (v >> 16) & 0xff; u.bytes[0] = (v >> 24) & 0xff; return u.val; }
+";
+    for level in ["-O2", "-Os"] {
+        let text = compiled("union", UNION, level);
+        let body = |name: &str| {
+            let start = text.find(&format!("\n{name}:\n")).expect("the function is in the listing");
+            let end = text[start..].find(".size").map_or(text.len(), |at| start + at);
+            text[start..end].to_owned()
+        };
+        let le = body("htole32");
+        assert!(!le.contains("shr") && !le.contains("shl") && !le.contains("or"), "{level}\n{le}");
+        let be = body("htobe32");
+        assert!(be.contains("bswapl"), "{level}\n{be}");
+        assert!(!be.contains("shr") && !be.contains("shl"), "{level}\n{be}");
+    }
+}

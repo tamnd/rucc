@@ -463,6 +463,12 @@ const O1: &[&str] = &[
 /// time `simplify` and `thread` see them. `unmapped_area_topdown` in mm/vma.c stored the mask to
 /// the stack and tested the flag it holds twice, where gcc tests it once.
 ///
+/// `dce` runs right in front of `bswap`. `bswap` walks only into a node that the tree alone reads,
+/// and `sroa` leaves a dead `trunc` of each byte of a union that it takes apart. NetBSD libsa writes
+/// `htole32` and `htobe32` as four byte stores to a union and a read of the word. With the dead
+/// `trunc` beside each shift, no tree was rewritten, and `-Os` on i386 gave fourteen instructions
+/// where gcc gives none for `htole32` and three for `htobe32`. `-O3`, `-Os` and `-Oz` do the same.
+///
 /// `dce` runs once early, right in front of `short-circuit` and the first threading. The kernel's
 /// `WARN_ON` hands back the value it tested through a `__builtin_expect` nobody reads, and that
 /// read of the `&&` makes `thread` refuse the edge, since a block below would read a value the one
@@ -504,6 +510,7 @@ const O2: &[&str] = &[
     "load-forward",
     "redundant-load",
     "dse",
+    "dce",
     "bswap",
     "rejoin",
     "constant-p",
@@ -580,6 +587,7 @@ const O3: &[&str] = &[
     "load-forward",
     "redundant-load",
     "dse",
+    "dce",
     "bswap",
     "rejoin",
     "constant-p",
@@ -700,6 +708,7 @@ const OS: &[&str] = &[
     "number",
     "load-forward",
     "dse",
+    "dce",
     "bswap",
     "rejoin",
     "constant-p",
@@ -757,6 +766,7 @@ const OZ: &[&str] = &[
     "number",
     "load-forward",
     "dse",
+    "dce",
     "bswap",
     "rejoin",
     "constant-p",
