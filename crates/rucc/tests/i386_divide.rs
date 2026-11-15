@@ -242,3 +242,30 @@ int prefix(const char *s, u64 *o)
         }
     }
 }
+
+/// `val > UINT64_MAX / base` tests `val * base` for overflow, as `strtoint` in the NetBSD libuutil
+/// does, and gcc writes no division for it. With the division, the libuutil of rucc needed
+/// `__udivdi3` from `libgcc_s`. tamnd/rucc#4600.
+#[test]
+fn a_bound_of_all_ones_divided_by_a_value_is_no_call() {
+    const BOUND: &str = "\
+typedef unsigned long long u64;
+int over(u64 val, unsigned base) { return val > (u64)-1 / base; }
+int scan(const char *s, unsigned base, u64 *out) {
+    u64 val = 0, max = (u64)-1 / base;
+    int wrapped = 0;
+    for (; *s; s++) {
+        if (val > max)
+            wrapped = 1;
+        val = val * base + (unsigned)(*s - 48);
+    }
+    *out = val;
+    return wrapped;
+}
+";
+    for level in ["-O2", "-Os"] {
+        let listing = compiled(BOUND, level);
+        assert!(!listing.contains("__udivdi3"), "{level}: {listing}");
+        assert!(listing.contains("mull"), "{level}: {listing}");
+    }
+}
