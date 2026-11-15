@@ -70,6 +70,22 @@ pub(in crate::check) struct Annotations {
     /// The `-fstrict-flex-arrays` level a member's own `strict_flex_array` asked for, by record
     /// and array.
     strict_flex: Map<(RecordId, Symbol), u8>,
+    /// Each `counted_by` in a record without a tag whose counter is not among that record's own
+    /// members, which gcc 16 looks for again once the record is inside one with a tag.
+    unsettled: Vec<Unsettled>,
+}
+
+/// A `counted_by` gcc 16 has not yet looked for the counter of.
+#[derive(Debug, Clone, Copy)]
+struct Unsettled {
+    /// The record without a tag the member is in.
+    record: RecordId,
+    /// The member the attribute is on.
+    member: Symbol,
+    /// The counter it names.
+    counter: Symbol,
+    /// Where the attribute was written.
+    span: Span,
 }
 
 /// One argument of an attribute, as something two of them can be compared by.
@@ -185,7 +201,7 @@ impl Checker<'_> {
             let asked: Vec<Attribute> =
                 written.filter(|attr| self.gnu_name(attr) == "counted_by").collect();
             for attr in asked {
-                if let Some(counter) = self.counter(attr, fields, at) {
+                if let Some(counter) = self.counter(record, attr, fields, at) {
                     self.annotations.counters.insert((record, name), counter);
                     self.tast.record_counter(record, name, counter);
                 }
@@ -198,6 +214,101 @@ impl Checker<'_> {
                     self.tast.record_strict_flex(record, name, level);
                 }
             }
+        }
+        self.settle_counters(record, fields);
+    }
+
+    /// gcc 16 does not look for the counter of a `counted_by` in a record without a tag when that
+    /// record ends. It looks once the outermost record with a tag ends, among every member reached
+    /// from there through members without names, and does the same for a record without a tag
+    /// that is the type of a named member. Linux 7.4's `struct uid_gid_map` counts two pointers in
+    /// one anonymous structure by a member of the other. The counter is found and no error is
+    /// given, but it is not one the member's own record holds, so gcc has no count to use and
+    /// neither does this.
+    fn settle_counters(&mut self, record: RecordId, fields: &[(FieldDecl, Span)]) {
+        if self.annotations.unsettled.is_empty() {
+            return;
+        }
+        if self.types.record_info(record).tag.is_some() {
+            let mut inside = Vec::new();
+            for (decl, _) in fields.iter().filter(|(decl, _)| decl.name.is_none()) {
+                self.untagged_inside(decl.ty, &mut inside);
+            }
+            self.settle_in(&inside, |checker, counter| {
+                fields
+                    .iter()
+                    .find(|(field, _)| field.name == Some(counter))
+                    .map(|(field, _)| field.ty)
+                    .or_else(|| checker.anonymous_field(fields, counter))
+            });
+        }
+        for (decl, _) in fields.iter().filter(|(decl, _)| decl.name.is_some()) {
+            let TypeKind::Record(inner) = self.types.kind(self.types.canonical(decl.ty)) else {
+                continue;
+            };
+            if self.types.record_info(inner).tag.is_some() {
+                continue;
+            }
+            let mut inside = Vec::new();
+            self.untagged_inside(decl.ty, &mut inside);
+            self.settle_in(&inside, |checker, counter| checker.field_type_in(inner, counter));
+        }
+    }
+
+    /// The record `ty` is, if it has no tag, and every record without a tag it holds as a member
+    /// without a name, at any depth.
+    fn untagged_inside(&self, ty: TypeId, out: &mut Vec<RecordId>) {
+        let TypeKind::Record(record) = self.types.kind(self.types.canonical(ty)) else {
+            return;
+        };
+        if self.types.record_info(record).tag.is_some() || out.contains(&record) {
+            return;
+        }
+        out.push(record);
+        for field in &self.types.record_info(record).fields {
+            if field.name.is_none() {
+                self.untagged_inside(field.ty, out);
+            }
+        }
+    }
+
+    /// The type of member `name` of `record`, at any depth through members without names.
+    fn field_type_in(&self, record: RecordId, name: Symbol) -> Option<TypeId> {
+        let path = self.find_field(record, name)?;
+        let (mut record, mut ty) = (record, None);
+        for &index in &path {
+            let field = self.types.record_info(record).fields[index as usize].ty;
+            if let TypeKind::Record(next) = self.types.kind(self.types.canonical(field)) {
+                record = next;
+            }
+            ty = Some(field);
+        }
+        ty
+    }
+
+    /// Looks for the counter of each unsettled `counted_by` in one of `records` with `find`, in
+    /// gcc 16's words when it is not there or is not an integer.
+    fn settle_in(&mut self, records: &[RecordId], find: impl Fn(&Self, Symbol) -> Option<TypeId>) {
+        let (now, later): (Vec<Unsettled>, Vec<Unsettled>) =
+            std::mem::take(&mut self.annotations.unsettled)
+                .into_iter()
+                .partition(|unsettled| records.contains(&unsettled.record));
+        self.annotations.unsettled = later;
+        for Unsettled { member, counter, span, .. } in now {
+            let found = find(self, counter);
+            let (spelled, array) = (self.text(counter).to_owned(), self.text(member).to_owned());
+            let what = match found {
+                None => format!(
+                    "argument '{spelled}' to the 'counted_by' attribute is not a field \
+                     declaration in the same structure as '{array}'"
+                ),
+                Some(ty) if !is_integer(&self.types, self.types.canonical(ty)) => format!(
+                    "argument '{spelled}' to the 'counted_by' attribute is not a field \
+                     declaration with an integer type"
+                ),
+                Some(_) => continue,
+            };
+            self.report(Diagnostic::error(what, span).with_code("E0765"));
         }
     }
 
@@ -332,6 +443,7 @@ impl Checker<'_> {
     /// The member one `counted_by` names, once it has been checked to be one it may name.
     fn counter(
         &mut self,
+        record: RecordId,
         attr: Attribute,
         fields: &[(FieldDecl, Span)],
         at: usize,
@@ -385,6 +497,12 @@ impl Checker<'_> {
             .find(|(field, _)| field.name == Some(counter))
             .map(|(field, _)| field.ty)
             .or_else(|| self.anonymous_field(fields, counter));
+        let untagged = self.types.record_info(record).tag.is_none();
+        if found.is_none() && untagged && self.cx.gnuc >= 16 {
+            let unsettled = Unsettled { record, member: decl.name?, counter, span: attr.span };
+            self.annotations.unsettled.push(unsettled);
+            return None;
+        }
         let Some(found) = found else {
             let what = format!(
                 "argument '{spelled}' to the 'counted_by' attribute is not a field declaration in \

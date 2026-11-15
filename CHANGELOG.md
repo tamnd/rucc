@@ -236,6 +236,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - Under `-fkencc`, an array can have a `struct` or `union` element type that is not complete yet, as in kencc. The lex output of grap declares `extern struct symtab symtab[];` (#4331)
 - Under `-fkencc`, a carriage return with no newline after it is an ordinary byte and not a line ending, as in kencc. The control key table of aux/kbdfs has one in a character constant (#4331)
 `-mnop-mcount` in position independent code is refused only when the claimed gcc is older than 15, or beside `-fno-plt`, as gcc 15 and 16 do. Linux 7.4 probes the flag in Kconfig with no other flag, so a gcc 16 claim now gives the `CC_HAS_MNOP_MCOUNT` that gcc 16 gives (#4596).
+- A `counted_by` counter that sits outside an anonymous struct, in the tagged struct around it, is taken when rucc claims GCC 16, the way gcc 16 takes it, and `__builtin_counted_by_ref` on such a member gives a null `void *` as it does in gcc (#4598)
 
 ## 0.30.15
 

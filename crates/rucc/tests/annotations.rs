@@ -223,6 +223,22 @@ fn what_gcc_refuses_is_refused() {
             "the argument to '__builtin_counted_by_ref' must be a field of a structure",
         ),
         ("int g; int k = __builtin_has_attribute(g, nonsuch);", "unknown attribute 'nonsuch'"),
+        (
+            "struct T { union { struct { int a; };\n\
+               struct { int *p __attribute__((counted_by(nope))); }; }; };",
+            "argument 'nope' to the 'counted_by' attribute is not a field declaration in the same \
+             structure as 'p'",
+        ),
+        (
+            "struct T { float f; struct { int *p __attribute__((counted_by(f))); }; };",
+            "argument 'f' to the 'counted_by' attribute is not a field declaration with an \
+             integer type",
+        ),
+        (
+            "struct T { int n; struct { int *p __attribute__((counted_by(n))); } inner; };",
+            "argument 'n' to the 'counted_by' attribute is not a field declaration in the same \
+             structure as 'p'",
+        ),
     ];
     for (index, (source, message)) in cases.into_iter().enumerate() {
         let err = refused(&format!("refused{index}"), &format!("{source}\n"));
@@ -255,6 +271,31 @@ fn a_pointer_member_is_counted_as_gcc_16_counts_it() {
          void set(struct S *s) { *__builtin_counted_by_ref(s->p) = 5; }\n",
     );
     assert!(out.contains(", 4(%rdi)"), "the counter is not written:\n{out}");
+}
+
+/// gcc 16 looks for the counter of a member of an anonymous structure from the outermost record
+/// with a tag, so Linux 7.4's `struct uid_gid_map` counts the pointers of one anonymous structure
+/// by a member of the other. The counter is not in the pointer's own record, so gcc has no count
+/// for it, and `__builtin_counted_by_ref` of one is a null `void *`.
+#[test]
+fn a_counter_beside_an_anonymous_member_is_taken_and_counts_nothing() {
+    let out = listing(
+        "beside",
+        "struct uid_gid_extent { unsigned first, lower_first, count; };\n\
+         struct uid_gid_map {\n\
+         \tunion {\n\
+         \t\tstruct { struct uid_gid_extent extent[5]; unsigned nr_extents; };\n\
+         \t\tstruct {\n\
+         \t\t\tstruct uid_gid_extent *forward __attribute__((counted_by(nr_extents)));\n\
+         \t\t\tstruct uid_gid_extent *reverse __attribute__((counted_by(nr_extents)));\n\
+         \t\t};\n\
+         \t};\n\
+         };\n\
+         _Static_assert(_Generic(__builtin_counted_by_ref(((struct uid_gid_map *)0)->forward), \
+                        void *: 1, default: 0), \"void\");\n\
+         unsigned first(struct uid_gid_map *m) { return m->forward[0].first + m->nr_extents; }\n",
+    );
+    assert!(out.contains("first:"), "{out}");
 }
 
 /// Under a gcc 15 persona a pointer member is refused, and the messages are gcc 15's.
