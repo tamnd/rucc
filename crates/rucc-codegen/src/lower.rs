@@ -691,9 +691,16 @@ fn shared_with_input(
 /// across two calls before it. Pinned, the value is read from the stack straight into the
 /// register the input names. An input with nowhere left to go is left to the allocator, which
 /// hands out only registers with a low byte as long as it can.
+///
+/// A constant could be one too, as in `"iq"`, which is what the kernel's `__put_user_size` writes
+/// for a byte. An operand that is not a constant is in a register then, and the same goes for it.
+/// Under `-fomit-frame-pointer` the allocator gave it `ebp`, and `movb %bpl` stopped the assembler.
+/// Only an operand whose value is a constant the text is handed as itself is left out, which is
+/// what `constants` says for each.
 fn byte_inputs_pinned(
     pins: &mut [Option<(PhysReg, RegClass)>],
     list: &[AsmOperand<'_>],
+    constants: &[bool],
     constraints: &str,
     clobbered: &[(PhysReg, RegClass)],
     gpr: RegClass,
@@ -703,11 +710,11 @@ fn byte_inputs_pinned(
         let operand = &list[index];
         let entry = entries.get(index).copied().unwrap_or("");
         let byte = entry.chars().any(|c| matches!(c, 'q' | 'Q'))
-            && entry.chars().all(|c| matches!(c, 'r' | 'q' | 'Q' | '%'));
+            && entry.chars().all(|c| matches!(c, 'r' | 'q' | 'Q' | '%' | 'i' | 'n'));
         if operand.role != rucc_ir::AsmRole::Input
             || operand.value.is_none()
             || operand.memory
-            || operand.immediate
+            || constants.get(index).copied().unwrap_or(true)
             || operand.tied.is_some()
             || pins[index].is_some()
             || !byte
@@ -3157,9 +3164,7 @@ impl<'a> Lowering<'a> {
         let forwarded = made.forwarded.filter(|_| made.area <= self.stack.incoming);
         let block = self.at.expect("a block is being filled");
         let call = self.out.terminator(block).expect("the call just built");
-        if self.out[call].symbol.is_none() {
-            self.through_scratch(call);
-        }
+        let reachable = self.out[call].symbol.is_some() || self.through_scratch(call);
         // A function that gives back nothing drops what the callee gave back, which
         // `crate::tail::mark` only lets through when it is in an integer register.
         let values: Vec<Value> = if self.source.signature().returns.is_empty() {
@@ -3173,7 +3178,7 @@ impl<'a> Lowering<'a> {
         // epilogue has put the caller's back in it. gcc makes no such call a jump either.
         let linked = self.out[call].flags.contains(mir::Flags::PLT);
         let jumps = outgoing == 0 || forwarded.is_some();
-        if jumps && !x87 && !linked && self.sret().is_none() {
+        if jumps && reachable && !x87 && !linked && self.sret().is_none() {
             let returns =
                 std::iter::successors(self.out.next_inst(call), |&at| self.out.next_inst(at))
                     .collect();
@@ -3209,10 +3214,14 @@ impl<'a> Lowering<'a> {
     /// argument register the call does not use on AArch64. Both are what gcc picks. Left to the
     /// allocator the address could land in a kept register in a leaf, and a leaf's tail call has
     /// to become a jump.
-    fn through_scratch(&mut self, call: mir::Inst) {
+    ///
+    /// Whether there was one. On i386 under `-mregparm=3` a call of three arguments has them in
+    /// all three registers a callee may destroy, so the call stays a call and a `ret`, which is
+    /// what gcc makes of it too. The kernel's `do_swap` in lib/sort.c is one.
+    fn through_scratch(&mut self, call: mir::Inst) -> bool {
         let list = self.out[call].operands;
         let first = mir::defs(&self.out[list]);
-        let Some(address) = self.out[list].get(first).copied() else { return };
+        let Some(address) = self.out[list].get(first).copied() else { return false };
         let taken: Vec<PhysReg> = self.out[list][first..]
             .iter()
             .filter_map(|operand| match operand.constraint {
@@ -3225,9 +3234,9 @@ impl<'a> Lowering<'a> {
             .int_order
             .iter()
             .find(|reg| !self.conv.int_saved.contains(reg) && !taken.contains(reg));
-        if let Some(&reg) = free {
-            self.out[list][first] = address.with(Constraint::Fixed(reg));
-        }
+        let Some(&reg) = free else { return false };
+        self.out[list][first] = address.with(Constraint::Fixed(reg));
+        true
     }
 
     /// The pointer a function returning through memory was handed, or nothing in a function that
@@ -7398,7 +7407,16 @@ impl<'a> Lowering<'a> {
         let mut pins: Vec<_> = list.iter().map(|operand| self.pinned_here(operand)).collect();
         if !a64 && self.conv.word == 4 {
             bytes_pinned(&mut pins, list, constraints, &clobbered, self.gpr);
-            byte_inputs_pinned(&mut pins, list, constraints, &clobbered, self.gpr);
+            let constants: Vec<bool> = list
+                .iter()
+                .map(|operand| {
+                    operand.immediate
+                        && operand.value.is_some_and(|value| {
+                            self.bare_number(value).is_some() || self.named_address(value).is_some()
+                        })
+                })
+                .collect();
+            byte_inputs_pinned(&mut pins, list, &constants, constraints, &clobbered, self.gpr);
         }
         // A register the text spells and the list does not name, given to an output nothing reads
         // rather than taken away as a clobber. gcc reads no text, so it puts such an output in a
