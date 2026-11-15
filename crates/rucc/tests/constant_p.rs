@@ -10,6 +10,8 @@
 //! `test_bit` after `bitmap_clear`, and gcc answers one there. `u` is i2c-mux-pca9541's
 //! `udelay(data->select_timeout)` under a test that the timeout is 50, where the ranges give the
 //! yes and the division by 20000 next to it has to read the 50 as well or `__bad_udelay` stays.
+//! `m` is max310x's `max()` of `DIV_ROUND_UP` of a `long` by the baud rate, which only the ranges
+//! of a division show is not negative.
 
 use std::process::Command;
 
@@ -103,6 +105,17 @@ int u(struct mux *data, unsigned long timeout, volatile unsigned long *jiffies) 
     } while (*jiffies < timeout);
     return -1;
 }
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+struct port { unsigned int baud; unsigned int delay; };
+extern void fsleep(unsigned long);
+void m(struct port *one) {
+    if (one->baud) {
+        unsigned int hold = DIV_ROUND_UP(one->baud * one->delay, 1000L);
+        long x = DIV_ROUND_UP((hold + 1) * 1000000L, one->baud);
+        if (!__is_nonneg(x)) __compiletime_assert_1();
+        fsleep(x > 100U ? x : 100U);
+    }
+}
 "#;
 
 #[test]
@@ -162,6 +175,32 @@ fn asking_about_what_a_pointer_points_at_reads_nothing_through_it() {
             .collect::<Vec<_>>();
         assert!(through.is_empty(), "{level} reads through the pointer: {through:?}\n{listing}");
         assert!(listing.contains("xorl\t%eax, %eax"), "{level} answers zero:\n{listing}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A division in the operand is not made either, and with the checks of a zero divisor on, no zero
+/// divisor is reported for a division that never happened. gcc answers zero for each of these.
+#[test]
+fn asking_about_a_quotient_divides_nothing() {
+    let dir = std::env::temp_dir().join(format!("rucc-constant-p-div-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let source = concat!(
+        "int f(int a, int b) { return __builtin_constant_p(a / b); }\n",
+        "int g(int a, int b) { return __builtin_constant_p(a % b); }\n",
+    );
+    std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
+    for level in ["-O0", "-O1", "-O2"] {
+        let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args(["--target=x86_64-unknown-linux-gnu", level, "-S", "-o", "-"])
+            .arg("-fsanitize=integer-divide-by-zero,signed-integer-overflow")
+            .arg(dir.join("one.c"))
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let listing = String::from_utf8_lossy(&done.stdout);
+        assert!(done.status.success(), "{level}: {}", String::from_utf8_lossy(&done.stderr));
+        assert!(!listing.contains("div"), "{level} divides:\n{listing}");
+        assert!(!listing.contains("__ubsan_handle"), "{level} checks a division:\n{listing}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

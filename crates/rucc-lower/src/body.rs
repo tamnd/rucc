@@ -8289,8 +8289,12 @@ impl<'u> Body<'_, 'u> {
             }
             // The other question left for the IR, whose operand the checker also made sure is
             // one that working out changes nothing. The answer is the `int` the builtin gives.
+            // The operand is never evaluated, so none of the sanitizer checks are made of it, and
+            // a division in it does not report a zero divisor that was never divided by.
             ExprKind::ConstantP { value } => {
+                let checks = std::mem::take(&mut self.sanitize);
                 let value = self.value(value);
+                self.sanitize = checks;
                 let ty = self.value_type(self.tast()[expr].ty, span);
                 let data = InstData {
                     args: self.func.push_values(&[value]),

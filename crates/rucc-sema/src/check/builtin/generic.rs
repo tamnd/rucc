@@ -397,13 +397,18 @@ impl Checker<'_> {
     ///
     /// Reads of objects by name, constants, conversions, the arithmetic that cannot trap and a
     /// pointer followed with `*` or a subscript. No call, assignment or increment, and no read of anything
-    /// `volatile`. Division and remainder are left out, since the divisor may be zero and the
-    /// division is not something the optimizer takes back out.
+    /// `volatile`.
     ///
     /// `*p` is let through even though `p` may be null, because the read is never made:
     /// `rucc_opt::constant_p` takes the operand out with the question, whatever the answer. The
     /// kernel's `test_bit` asks `__builtin_constant_p(*(const unsigned long *)addr)` of a bitmap
     /// it has just cleared, and gcc answers one there.
+    ///
+    /// Division and remainder are let through for the same reason, since a division by zero that
+    /// is taken out with the question is never made either, and none of the sanitizer checks are
+    /// lowered for the operand. The kernel's `max()` asks whether
+    /// `DIV_ROUND_UP((hold + 1) * USEC_PER_SEC, one->baud)` in max310x is not negative, and gcc's
+    /// ranges answer one there.
     fn deferrable(&self, expr: ExprId) -> bool {
         let ty = self.tast[expr].ty;
         if self.types.quals(ty).has(Qualifiers::VOLATILE) || !is_real(&self.types, ty) {
@@ -441,11 +446,7 @@ impl Checker<'_> {
                         | UnaryOp::AddrOf
                 ) && self.quietly(operand)
             }
-            ExprKind::Binary { op, lhs, rhs } => {
-                !matches!(op, BinaryOp::Div | BinaryOp::Rem)
-                    && self.quietly(lhs)
-                    && self.quietly(rhs)
-            }
+            ExprKind::Binary { lhs, rhs, .. } => self.quietly(lhs) && self.quietly(rhs),
             ExprKind::Cond { cond, then, otherwise } => {
                 self.quietly(cond) && self.quietly(then) && self.quietly(otherwise)
             }

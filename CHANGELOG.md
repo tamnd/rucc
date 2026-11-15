@@ -237,6 +237,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 - Under `-fkencc`, a carriage return with no newline after it is an ordinary byte and not a line ending, as in kencc. The control key table of aux/kbdfs has one in a character constant (#4331)
 `-mnop-mcount` in position independent code is refused only when the claimed gcc is older than 15, or beside `-fno-plt`, as gcc 15 and 16 do. Linux 7.4 probes the flag in Kconfig with no other flag, so a gcc 16 claim now gives the `CC_HAS_MNOP_MCOUNT` that gcc 16 gives (#4596).
 - A `counted_by` counter that sits outside an anonymous struct, in the tagged struct around it, is taken when rucc claims GCC 16, the way gcc 16 takes it, and `__builtin_counted_by_ref` on such a member gives a null `void *` as it does in gcc (#4598)
+- `__builtin_constant_p` of an expression with a division or a remainder in it is no longer answered zero by the front end. The question goes to the optimizer as other arithmetic does, and the ranges now know what a signed or unsigned division gives. The division is taken out with the question, and no sanitizer check is made of the operand, since gcc never evaluates it. The `max()` in `max310x_rs485_config` of Linux 7.4 asks whether `DIV_ROUND_UP` of a `long` by the baud rate is not negative, and the kernel stopped there with a signedness error under allmodconfig. (#4601)
 
 ## 0.30.15
 
