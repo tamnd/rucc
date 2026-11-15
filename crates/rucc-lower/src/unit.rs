@@ -2922,7 +2922,14 @@ impl Unit<'_> {
     /// This is apart from [`Self::image`] so that an image can be built inside another one,
     /// which is what a compound literal used as a value in an initializer needs.
     fn pieces(&mut self, init: InitList, size: u64, span: Span) -> (Vec<Datum>, u64) {
-        let entries = self.in_image_order(&self.tast[init]);
+        let entries = self.tast[init].to_vec();
+        self.laid_out(&entries, size, span)
+    }
+
+    /// The data the entries of an initializer make, which is [`Self::pieces`] for entries that
+    /// need not be a whole list, as for the part of an object [`Self::part_image`] lays out.
+    fn laid_out(&mut self, entries: &[InitEntry], size: u64, span: Span) -> (Vec<Datum>, u64) {
+        let entries = self.in_image_order(entries);
         let mut packed = self.packed(&entries, size);
         let mut data: Vec<Datum> = Vec::with_capacity(entries.len());
         let mut at = 0;
@@ -3010,6 +3017,12 @@ impl Unit<'_> {
         }
         if let Some(literal) = self.literal_read(entry.value) {
             return self.literal_image(literal, self.tast.expr_span(entry.value));
+        }
+        let mut eval = Eval::new(self.tast, self.types, self.target, self.names).objects(true);
+        let record = eval.const_record(entry.value);
+        drop(eval.finish());
+        if let Some((object, offset)) = record {
+            return self.part_image(object, offset, entry.value);
         }
         if entry.reverse {
             if let Some(reversed) = self.reversed_datum(entry) {
@@ -3104,6 +3117,23 @@ impl Unit<'_> {
             return if size == 0 { Vec::new() } else { vec![Datum::Zero(size)] };
         };
         self.pieces(init, size, span).0
+    }
+
+    /// The bytes a read of part of a `const` object contributes where it is read, which are the
+    /// ones that object's own initializer put in the part, moved to where the part starts.
+    /// [`Eval::const_record`] has already said every entry is inside the part or outside it.
+    fn part_image(&mut self, object: DeclId, offset: u64, value: ExprId) -> Vec<Datum> {
+        let size = repr::size_of(self.types, self.target, self.tast[value].ty);
+        let Some(init) = self.tast[object].init else {
+            return if size == 0 { Vec::new() } else { vec![Datum::Zero(size)] };
+        };
+        let end = offset.saturating_add(size);
+        let entries: Vec<InitEntry> = self.tast[init]
+            .iter()
+            .filter(|entry| entry.offset >= offset && entry.offset < end)
+            .map(|&entry| InitEntry { offset: entry.offset - offset, ..entry })
+            .collect();
+        self.laid_out(&entries, size, self.tast.expr_span(value)).0
     }
 
     /// The bit-fields of an initializer, put together into the bytes they lie in.
