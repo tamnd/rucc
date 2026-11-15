@@ -915,6 +915,16 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
+        // A whole structure that is part of a `static const` object, which gcc lays in as the
+        // bytes that object's initializer put there. See [`Eval::const_record`].
+        if !w.constant {
+            let mut eval = self.eval();
+            let record = eval.const_record(value).is_some();
+            self.absorb(eval.finish());
+            if record {
+                return;
+            }
+        }
         // A `constexpr` object is folded the strict way and a static one the loose way, which is
         // the difference C23 6.6p10 leaves to the implementation and the difference gcc draws:
         // `char c[] = { "ab"[1], 0 };` is a static initializer it takes and

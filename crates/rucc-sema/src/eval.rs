@@ -1199,6 +1199,74 @@ impl<'a> Eval<'a> {
         Some(value)
     }
 
+    /// The `const` object a read of a whole structure or union is a part of, and the byte offset of
+    /// the part in it, where the read is the bytes that object's initializer put there.
+    ///
+    /// gcc takes `.parent = clk_main[0]` in an initializer for an object with static storage,
+    /// where `clk_main` is a `static const` array of structures, and a `static const` structure
+    /// named on its own as well. Linux 7.4's zx297520v3 clock driver, its nt36532 panel and the
+    /// Qualcomm PCIe multiphy are written that way. There is no constant for a value of several
+    /// members, so what comes back is where the bytes are and the caller lays them out. The object
+    /// has static storage, is `const` and is not `volatile`, and everything its initializer puts
+    /// in the part has to fold. An entry that starts outside the part and reaches into it, or
+    /// starts inside and reaches out, is refused, since the part would then hold half a value.
+    pub fn const_record(&mut self, expr: ExprId) -> Option<(DeclId, u64)> {
+        self.literals = true;
+        let expr = match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            _ => expr,
+        };
+        let ty = self.tast[expr].ty;
+        let quals = self.types.object_quals(self.types.canonical(ty));
+        if !matches!(bare(self.types, ty), TypeKind::Record(_))
+            || quals.has(Qualifiers::VOLATILE)
+            || self.depth >= OBJECT_DEPTH
+        {
+            return None;
+        }
+        let (decl, offset, bit, bits) = self.part(expr)?;
+        let node = &self.tast[decl];
+        let object = self.types.object_quals(self.types.canonical(node.ty));
+        if bit != 0
+            || bits != 0
+            || node.kind != DeclKind::Object
+            || node.duration == StorageDuration::Automatic
+            || !object.has(Qualifiers::CONST)
+            || object.has(Qualifiers::VOLATILE)
+        {
+            return None;
+        }
+        let init = node.init?;
+        let end = offset.checked_add(self.size_of(ty))?;
+        let entries = self.tast[init].to_vec();
+        self.depth += 1;
+        let folds = entries.iter().all(|entry| {
+            let size =
+                if entry.is_bit_field() { 0 } else { self.size_of(self.tast[entry.value].ty) };
+            let reach = entry.offset.saturating_add(size);
+            if entry.offset < offset || entry.offset >= end {
+                return entry.offset >= end || reach <= offset;
+            }
+            reach <= end
+                && (self.const_record(entry.value).is_some()
+                    || self.static_literal(entry.value)
+                    || self.eval(entry.value).is_ok())
+        });
+        self.depth -= 1;
+        folds.then_some((decl, offset))
+    }
+
+    /// Whether a value is a read of a compound literal with static storage, which was folded
+    /// where it was written.
+    fn static_literal(&self, expr: ExprId) -> bool {
+        let read = match self.tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            _ => expr,
+        };
+        matches!(self.tast[read].kind, ExprKind::CompoundLiteral(decl)
+            if self.tast[decl].duration != StorageDuration::Automatic)
+    }
+
     /// The object a part of one is in, with the byte, the bit and the bit-field width the part is
     /// at, through members and through elements at a constant index.
     fn part(&mut self, expr: ExprId) -> Option<(DeclId, u64, u32, u32)> {
