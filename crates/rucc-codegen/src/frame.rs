@@ -499,11 +499,12 @@ impl Frame {
         // to the frame, and it is less than the alignment of that cell. A large cell aligned to
         // more than sixteen bytes stays first, because the gap in front of it can be larger than
         // the bytes that the shorter accesses save.
-        order.sort_by_key(|&cell| {
+        let key = |cell: usize| {
             let Cell { size, align } = plan.cells()[cell];
             let large = size > SMALL_CELL && align <= SMALL_CELL;
             (large, std::cmp::Reverse(align), size % align != 0)
-        });
+        };
+        order.sort_by_key(|&cell| key(cell));
         cells.resize(plan.cells().len(), 0);
         for &cell in &order {
             let want = plan.cells()[cell].align;
@@ -528,6 +529,14 @@ impl Frame {
         // test does with what `pthread_join` hands back, then changes the local below it as it
         // does under gcc rather than the canary. The canary goes on the first word that leaves room
         // for all of them above what was placed before the locals.
+        //
+        // Cells the order above does not tell apart go the way gcc sorts them, the larger nearer
+        // the canary and then the one asked for last, which leaves locals of one size at rising
+        // addresses in the order they were declared. A test that runs one word off the end of an
+        // array then writes the next array, as it does under gcc, and not the one declared before.
+        // The VCAP KUnit test in Linux inverts `mskdata[12]` of a `u32 mskdata[12]`, and with the
+        // three arrays of that test the other way round the word was `keydata[0]` and the test
+        // failed.
         let mut canary = None;
         if layout.protect {
             let mut near: Vec<usize> =
@@ -535,7 +544,11 @@ impl Frame {
             near.sort_unstable();
             near.dedup();
             near.sort_by_key(|&cell| std::cmp::Reverse(plan.cells()[cell].size));
-            let rest = order.iter().copied().filter(|cell| !near.contains(cell));
+            let mut rest: Vec<usize> =
+                order.iter().copied().filter(|cell| !near.contains(cell)).collect();
+            rest.sort_by_key(|&cell| {
+                (key(cell), std::cmp::Reverse(plan.cells()[cell].size), std::cmp::Reverse(cell))
+            });
             let down_order: Vec<usize> = near.iter().copied().chain(rest).collect();
             let mut at = (top + plan.cells().iter().map(|cell| cell.size).sum::<u32>())
                 .next_multiple_of(word);
@@ -1630,6 +1643,22 @@ mod tests {
         // it, as the arm the check fails on makes one.
         assert_eq!(frame.size(), 56);
         assert_eq!((frame.size() + SYSV.return_address) % SYSV.stack_align, 0);
+    }
+
+    #[test]
+    fn protected_locals_of_one_size_rise_in_the_order_they_were_declared() {
+        // gcc's layout of the Linux VCAP KUnit test, three `u32[12]` with the first lowest, so
+        // that a word past the end of the second is the first word of the third.
+        let (func, allocation) = pressure(&SYSV, 4, 2);
+        let locals = [Local { size: 48, align: 4 }; 3];
+        let base = Layout::new(&SYSV, REGS);
+        let there = Layout { leaf: false, locals: &locals, protect: true, ..base };
+        let frame = Frame::of(&func, &allocation, &there);
+
+        let at = |local| frame.local(local).expect("a local that was asked for");
+        assert_eq!(at(0) + 48, at(1));
+        assert_eq!(at(1) + 48, at(2));
+        assert!(at(2) + 48 <= frame.canary().expect("a protected frame has a slot"));
     }
 
     #[test]

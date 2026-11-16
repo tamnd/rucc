@@ -3419,17 +3419,18 @@ mod tests {
         // block that returned does and the epilogue is on the arm the canary was unchanged on, so
         // a function whose canary changed never gives its frame back and never returns. The check
         // compares the canary with the word where the runtime keeps it, as gcc does, so it reads
-        // nothing into a second register. The slots go down from the canary, the first nearest it.
+        // nothing into a second register. The slots go down from the canary, and two of one size go
+        // the way gcc puts them, the last one asked for nearest it.
         assert_eq!(
             added(&lines),
             [
                 "$rsp = x64.sub_ri_64 $rsp, 24",
                 "$r10 = x64.mov_rm_64 [fs:40]",
                 "x64.mov_mr_64 $r10, [$rsp + 16]",
-                "x64.mov_mr_64 $rcx, [$rsp + 8]",
                 "x64.mov_mr_64 $rcx, [$rsp]",
-                "$rcx = x64.mov_rm_64 [$rsp + 8]",
+                "x64.mov_mr_64 $rcx, [$rsp + 8]",
                 "$rcx = x64.mov_rm_64 [$rsp]",
+                "$rcx = x64.mov_rm_64 [$rsp + 8]",
                 "$r11 = x64.mov_rm_64 [$rsp + 16]",
                 "$r11 = x64.cmp_set_ne_rm_64 $r11, [fs:40]",
                 "x64.br_cond_8 $r11, block1, block2",
