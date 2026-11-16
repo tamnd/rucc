@@ -2309,6 +2309,12 @@ fn moved_to_memory(
     // The operand to move: one of those the constraint lets go in memory, that nothing pins and
     // nothing is tied to, holding an integer or an address no wider than a register. An output only
     // when the statement is not an `asm goto`, whose outputs arrive on more than one edge.
+    //
+    // Not one already in memory, whose value is the address of the object the text names and not
+    // the object. Moved, the slot held the address and the text read and wrote the slot. The
+    // kernel's `__arch_try_cmpxchg64` on i386 is `"+m" (*ptr)` with `eax`, `edx`, `ebx` and `ecx`
+    // pinned, and `sched_clock_local` came out as `lock cmpxchg8b (%esp)` on the pointer it had
+    // just stored there, which never matched, so the clock spun forever and the boot hung.
     let entries: Vec<&str> = constraints.split(',').collect();
     let word = conv.word;
     let goto = !func[info.targets].is_empty();
@@ -2318,6 +2324,7 @@ fn moved_to_memory(
         let ty = func[value].ty;
         let bits = if ty.is_ptr() { word * 8 } else { ty.bits() };
         (operand.result.is_none() || !goto)
+            && !operand.memory
             && operand.tied.is_none()
             && crate::lower::pinned(operand).is_none()
             && !list.iter().any(|other| other.tied == Some(index))
