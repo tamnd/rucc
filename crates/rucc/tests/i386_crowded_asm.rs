@@ -71,6 +71,23 @@ void sub4(USItype *r, const USItype *x, const USItype *y)
 }
 ";
 
+/// The kernel's `__arch_try_cmpxchg64` for i386, whose object is `"+m"` with the four registers
+/// that have a byte pinned around it. Its address was moved to the frame as if it were the object,
+/// and `cmpxchg8b` compared the slot that held the pointer.
+const EXCHANGE: &str = "\
+typedef unsigned long long u64;
+_Bool try64(u64 *ptr, u64 *old, u64 new)
+{
+  _Bool ret;
+  unsigned lo = *old, hi = *old >> 32;
+  asm volatile(\"lock cmpxchg8b %[ptr]\"
+    : \"=@ccz\"(ret), [ptr] \"+m\"(*ptr), \"+a\"(lo), \"+d\"(hi)
+    : \"b\"((unsigned)new), \"c\"((unsigned)(new >> 32)) : \"memory\");
+  if (!ret) *old = (u64)hi << 32 | lo;
+  return ret;
+}
+";
+
 fn assembly(name: &str, source: &str, level: &str) -> String {
     let dir = std::env::temp_dir()
         .join(format!("rucc-i386-crowded-{}-{name}{level}", std::process::id()));
@@ -128,5 +145,17 @@ fn as_many_inputs_go_in_the_frame_as_there_are_no_registers_for() {
         assert!(lines[0].contains("subl") && lines[3].contains("sbbl"), "{level}: {text}");
         let framed = lines.iter().filter(|line| line.contains("(%esp)") || line.contains("(%ebp)"));
         assert!(framed.count() >= 2, "{level}: {text}");
+    }
+}
+
+#[test]
+fn an_object_in_memory_stays_where_its_address_says() {
+    for level in ["-O0", "-O1", "-O2", "-Os"] {
+        let text = assembly("exchange", EXCHANGE, level);
+        let line =
+            text.lines().find(|line| line.contains("cmpxchg8b")).expect("the asm is written");
+        let at = line.split_whitespace().last().expect("an operand");
+        assert!(at.starts_with('(') && at.ends_with(')'), "{level}: {line}\n{text}");
+        assert!(!at.contains("%esp") && !at.contains("%ebp"), "{level}: {line}\n{text}");
     }
 }
