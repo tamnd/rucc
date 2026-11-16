@@ -92,6 +92,17 @@
 //! rule that answers both, and a forwarder that has one gets taken apart by the other half of the
 //! worklist first.
 //!
+//! A block that only jumps can still have parameters when all it does with them is pass them on,
+//! which is what is left where two arms of a branch end in one `return` with different values.
+//! Such a block goes as well, on two more conditions. Every way into it is a `jump`, so that each
+//! one has its own end of a block to put its moves at, and its parameters are read nowhere but in
+//! its own jump, so that nothing below is left reading a value with no definition. Each way in then
+//! passes on what the block would have passed, with its own arguments in place of the parameters.
+//! The dominance argument above still holds for the rest, since those are not the block's own
+//! values. The kernel's security hooks end this way: `return` after the last `call_int_hook` is two
+//! arms that both return the call's result, one of them through a block like this, and it has to
+//! go for the arms to become one edge and the call to become a tail call.
+//!
 //! There is no exit block in this IR, so the second condition is not a condition. Abnormal edges
 //! are the ones into a block whose address is taken, which arrive from an `indirect_br` the graph
 //! reads from the other end, and those blocks are refused here the same way they are refused
@@ -1115,6 +1126,7 @@ fn straighten(
     let Some(entry) = func.entry() else { return false };
     let addressed = addressed(func);
     let mut edges = incoming(func);
+    let apart = read_apart(func);
     let mut work: VecDeque<Block> = func.blocks().collect();
     let mut queued: Set<Block> = work.iter().copied().collect();
     let mut gone: Set<Block> = Set::default();
@@ -1168,6 +1180,10 @@ fn straighten(
         let Some((term, into, args)) = forwards(func, block, entry, &addressed, &edges) else {
             continue;
         };
+        let params = func[block].params.clone();
+        if !params.is_empty() && !passes_on(func, &params, edges.get(&block), &apart, forward) {
+            continue;
+        }
         if !fuel.take() {
             stats.missed(NO_FUEL_FORWARD);
             break;
@@ -1185,6 +1201,11 @@ fn straighten(
             // later substitution rewrites a list in place and a shared one would be rewritten
             // once for every edge that named it.
             let call = func[at];
+            let passed = func[call.args].to_vec();
+            let instead = |&arg: &Value| {
+                params.iter().position(|&param| param == arg).map_or(arg, |i| passed[i])
+            };
+            let args: Vec<Value> = args.iter().map(instead).collect();
             let args = func.push_values(&args);
             func.set_block_call(at, BlockCall { block: into, args, ..call });
         }
@@ -1518,7 +1539,7 @@ fn forwards(
     addressed: &Set<Block>,
     edges: &Edges,
 ) -> Option<(Inst, Block, Vec<Value>)> {
-    if block == entry || addressed.contains(&block) || !func[block].params.is_empty() {
+    if block == entry || addressed.contains(&block) {
         return None;
     }
     let term = func.terminator(block)?;
@@ -1541,6 +1562,51 @@ fn forwards(
         return None;
     }
     Some((term, call.block, func[call.args].to_vec()))
+}
+
+/// Whether a forwarder with parameters can go, which is the two conditions this module's
+/// documentation adds for one.
+///
+/// Every way in is a `jump`, and no parameter is read anywhere but the block's own jump. A
+/// parameter another one was found to be the same as counts as read, since the reads of that one
+/// become reads of this one once the pass is done, and they would be reads of a value with no
+/// definition.
+fn passes_on(
+    func: &Func,
+    params: &[Value],
+    ins: Option<&Vec<(Block, Idx<BlockCall>)>>,
+    apart: &Set<Value>,
+    forward: &Map<Value, Value>,
+) -> bool {
+    let jumps = ins.into_iter().flatten().all(|&(from, _)| {
+        func.terminator(from).is_some_and(|term| func[term].opcode == Opcode::Jump)
+    });
+    jumps
+        && !params.iter().any(|param| apart.contains(param))
+        && !forward.values().any(|value| params.contains(value))
+}
+
+/// The block parameters that something reads outside the terminator of their own block.
+///
+/// Worked out once for the whole of step three. Taking a forwarder out moves what its jump passes
+/// to the jumps into it, so a value read only in its own block's jump before is still read only
+/// there after, and taking a parameter away only takes reads out. What this says can go stale only
+/// towards a parameter being kept that could have gone.
+fn read_apart(func: &Func) -> Set<Value> {
+    let mut apart = Set::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let own = func.is_terminator(inst);
+            let passed = func.successors(inst).flat_map(|call| func[call.args].iter().copied());
+            for value in func[func[inst].args].iter().copied().chain(passed) {
+                let Def::Param { block: at, .. } = func[value].def else { continue };
+                if at != block || !own {
+                    apart.insert(value);
+                }
+            }
+        }
+    }
+    apart
 }
 
 /// Whether a value is a result of the instruction that ends its block, which only an `asm goto`
@@ -3106,9 +3172,9 @@ block2:
 
     #[test]
     fn a_forwarder_with_a_parameter_goes_once_the_parameter_does() {
-        // The two halves of step three being one step. The block passes its own parameter on, so
-        // it is not a forwarder while it has one, and the parameter is the same value both ways
-        // in, so it does not have one for long.
+        // The two halves of step three being one step. The block passes its own parameter on, and
+        // the parameter is the same value both ways in, so the parameter goes first and the block
+        // then goes as a forwarder with nothing of its own.
         let mut func = taking_a_condition();
         let (carried, arms) = arms(&mut func);
         let forwarder = func.create_block();
@@ -3128,6 +3194,66 @@ block2:
         assert_eq!(blocks(&func), [0, 1, 2, 4]);
         let term = func.terminator(Block::from_usize(4)).expect("the exit has one");
         assert_eq!(func[func[term].args], [carried]);
+    }
+
+    #[test]
+    fn a_forwarder_that_only_passes_its_parameter_on_goes_with_it() {
+        // The end of a kernel security hook. Two arms return different values through a block
+        // that does nothing but pass its parameter to the return, and each arm is a jump, so each
+        // has its own end to put a move at. The arms then pass their own values straight to the
+        // return, which is what lets a call in one of them become a tail call.
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[Type::int(1)]).with_returns(&[int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let (carried, arms) = arms(&mut func);
+        let forwarder = func.create_block();
+        let param = func.append_param(forwarder, Type::int(32));
+        let exit = func.create_block();
+        let arrived = func.append_param(exit, Type::int(32));
+        let mut build = Builder::new(&mut func, arms[0]);
+        let mine = build.iconst(Type::int(32), 9);
+        build.jump(forwarder, &[mine]);
+        Builder::new(&mut func, arms[1]).jump(forwarder, &[carried]);
+        Builder::new(&mut func, forwarder).jump(exit, &[param]);
+        Builder::new(&mut func, exit).ret(&[arrived]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 1);
+        assert_eq!(blocks(&func), [0, 1, 2, 4]);
+        assert_eq!(goes_to(&func, 1), [4]);
+        assert_eq!(carries(&func, 1, 0), [mine]);
+        assert_eq!(carries(&func, 2, 0), [carried]);
+        module.add_func(func);
+        rucc_ir::verify(&module, &names).expect("the arms pass what the forwarder passed");
+    }
+
+    #[test]
+    fn a_forwarder_whose_parameter_is_read_below_it_stays() {
+        // The block only jumps, but the block it jumps to returns its parameter, which is legal
+        // because it dominates that block. Pointing the arms past it would leave the return with
+        // nothing to read, so it is not forwarded.
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut names = Interner::new();
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[Type::int(1)]).with_returns(&[int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let (carried, arms) = arms(&mut func);
+        let forwarder = func.create_block();
+        let param = func.append_param(forwarder, Type::int(32));
+        let exit = func.create_block();
+        let mut build = Builder::new(&mut func, arms[0]);
+        let mine = build.iconst(Type::int(32), 9);
+        build.jump(forwarder, &[mine]);
+        Builder::new(&mut func, arms[1]).jump(forwarder, &[carried]);
+        Builder::new(&mut func, forwarder).jump(exit, &[]);
+        Builder::new(&mut func, exit).ret(&[param]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::FORWARDED), 0);
+        module.add_func(func);
+        rucc_ir::verify(&module, &names).expect("the parameter still has its block");
     }
 
     #[test]
