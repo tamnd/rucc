@@ -76,10 +76,13 @@
 //! depends on the path. A block with one edge into it starts with what that block left, when it has
 //! been walked already, since there is only the one path. Merging the maps where paths meet is a
 //! dataflow problem rather than a walk, which is section 37.4's own answer for why this is the
-//! cheap half. What the scratch registers hold is not carried, because the passes after this one
-//! take it that nothing lives in a scratch register into another block. [`reloads`] folds a reload
-//! into a scratch register into the instruction that read it, and then the register is never
-//! written.
+//! cheap half. What the scratch registers hold is carried too, and that needs care, because the
+//! passes after this one look at the rest of a block only. [`reloads`] folds a reload into a
+//! scratch register into the instruction that read it, and then the register is never written. So
+//! when a move here reads a scratch register that the block before left, the pair goes into
+//! [`Cleaned::live`], and those passes keep the write. On i386 `ebx` is the scratch register, and
+//! `buf_read_file` in the NetBSD `bootxx_lfsv2` read the same pointer back into it in each arm of
+//! a branch after the test had read it there.
 //!
 //! # What clears it
 //!
@@ -162,7 +165,7 @@
 //! there safe is that the allocator wrote the instruction and owns the slot, and an instruction a
 //! lowering rule wrote is neither.
 //!
-//! Nothing crosses a block, on either half.
+//! Nothing crosses a block, on either half, but for what a block with one way in starts with.
 
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
@@ -176,12 +179,16 @@ use crate::combine::{A64_WIDENINGS, FOLDS, WIDENINGS};
 use crate::finish::Moves;
 
 /// What one function came to.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Cleaned {
     /// Moves taken out, because the place each wrote held what it was moving already.
     pub gone: usize,
     /// Loads out of the frame written as copies instead, because a register held the word.
     pub copied: usize,
+    /// The scratch registers that a later block reads as this block left them, with that block.
+    /// Each is live out of the block, which [`reloads`], [`forward`] and [`crate::finish::far`]
+    /// must know, since they look at the rest of a block only.
+    pub live: Set<(Block, PhysReg)>,
 }
 
 /// Takes out every move of the allocator's that puts a value where it is already, and reads the
@@ -213,27 +220,27 @@ pub fn clean(
     crowded: &Set<u32>,
     names: &mut Interner,
 ) -> Cleaned {
-    let blocks: Vec<Block> = func.blocks().collect();
+    let blocks = preorder(func);
     let mut cleaned = Cleaned::default();
     // Whether each opcode is a call or one the target does not have, asked once per opcode rather
     // than by name for every instruction. tamnd/rucc#2233.
     let mut stops: Map<Opcode, bool> = Map::default();
     let only = only_ways_in(func);
     let mut left: Map<Block, Holds> = Map::default();
+    // The scratch registers that each block passed on as it found them.
+    let mut through: Map<Block, Set<PhysReg>> = Map::default();
     for block in blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
         // What the one block that comes here left, when there is one and it has been walked. See
         // `only_ways_in`.
-        let mut holds = match only.get(&block) {
-            Some(from) if func[block].params.is_empty() => {
-                let mut holds = left.get(from).cloned().unwrap_or_default();
-                for &reg in scratch.1 {
-                    holds.wrote(scratch.0, Place::Reg(reg));
-                }
-                holds
-            }
-            _ => Holds::default(),
-        };
+        let from = only.get(&block).copied().filter(|_| func[block].params.is_empty());
+        let mut holds = from.and_then(|from| left.get(&from).cloned()).unwrap_or_default();
+        // The scratch registers that still hold what the block before left in them. A move here
+        // that reads one of them makes it live out of that block. See `Cleaned::live`.
+        let mut found: Set<PhysReg> = Set::default();
+        if from.is_some() {
+            found.extend(scratch.1.iter().copied());
+        }
         let mut gone: Vec<Inst> = Vec::new();
         for inst in insts {
             // One of the allocator's own moves, which is the only kind of instruction this edits
@@ -241,6 +248,11 @@ pub fn clean(
             if let Some(edit) = moves.at(inst) {
                 let shared = matches!(edit.mov.to, Place::Slot(slot) if crowded.contains(&slot));
                 if !shared && holds.same(edit.class, edit.mov.to, edit.mov.from) {
+                    if let (Place::Reg(reg), Some(from)) = (edit.mov.to, from) {
+                        if edit.class == scratch.0 && found.contains(&reg) {
+                            live(&mut cleaned.live, &only, &through, from, reg);
+                        }
+                    }
                     gone.push(inst);
                     cleaned.gone += 1;
                     continue;
@@ -248,13 +260,23 @@ pub fn clean(
                 // A load of a word a register has. The copy goes where the load was and the load
                 // goes, and what arrives in the register is the same either way, so the map is
                 // told about the move below whichever of the two instructions is left.
-                if let Some((to, from)) = instead(&holds, &edit) {
-                    let copy = copy(func, names, frame, edit.class, to, from);
+                if let Some((to, reg)) = instead(&holds, &edit) {
+                    if let Some(from) = from.filter(|_| edit.class == scratch.0) {
+                        if found.contains(&reg) {
+                            live(&mut cleaned.live, &only, &through, from, reg);
+                        }
+                    }
+                    let copy = copy(func, names, frame, edit.class, to, reg);
                     func.insert_before(inst, copy);
                     gone.push(inst);
                     cleaned.copied += 1;
                 }
                 holds.moved(edit.class, edit.mov.to, edit.mov.from);
+                if let Place::Reg(reg) = edit.mov.to {
+                    if edit.class == scratch.0 {
+                        found.remove(&reg);
+                    }
+                }
                 continue;
             }
             let opcode = func[inst].opcode;
@@ -264,6 +286,7 @@ pub fn clean(
             });
             if stop {
                 holds.nothing();
+                found.clear();
                 continue;
             }
             let mut addressing = false;
@@ -277,17 +300,66 @@ pub fn clean(
                 let Some(reg) = operand.reg.phys() else { continue };
                 addressing |= addresses(conv, framed, operand.class, reg);
                 holds.wrote(operand.class, Place::Reg(reg));
+                if operand.class == scratch.0 {
+                    found.remove(&reg);
+                }
             }
             if addressing {
                 holds.nothing();
+                found.clear();
             }
         }
         for inst in gone {
             func.remove_inst(inst);
         }
         left.insert(block, holds);
+        through.insert(block, found);
     }
     cleaned
+}
+
+/// Records a scratch register as live out of the block a block came from, and out of each block
+/// before that one which passed it on unchanged.
+///
+/// The value was written in the first block that is not one of those. Every block between that
+/// write and the read must keep the register, so each of them is recorded.
+fn live(
+    out: &mut Set<(Block, PhysReg)>,
+    only: &Map<Block, Block>,
+    through: &Map<Block, Set<PhysReg>>,
+    mut from: Block,
+    reg: PhysReg,
+) {
+    while out.insert((from, reg)) {
+        if !through.get(&from).is_some_and(|regs| regs.contains(&reg)) {
+            return;
+        }
+        let Some(&before) = only.get(&from) else { return };
+        from = before;
+    }
+}
+
+/// The blocks from the entry along the edges, each before the blocks it goes to first, and then the
+/// blocks no edge reaches in the order they have.
+///
+/// [`clean`] starts a block with what the one block that comes to it left, and that is only there
+/// when that block was walked first. In the order the blocks have, the two arms of a branch can
+/// come before the branch. In `buf_read_file` of the NetBSD `bootxx_lfsv2`, each arm of a test of
+/// `lfs_is64` read the pointer back from the frame into the register that held it already. In this
+/// order the one way into a block is the block that the walk came from, so it is always first.
+fn preorder(func: &Func) -> Vec<Block> {
+    let mut order = Vec::new();
+    let mut seen: Set<Block> = Set::default();
+    let mut stack: Vec<Block> = func.entry().into_iter().collect();
+    while let Some(block) = stack.pop() {
+        if !seen.insert(block) {
+            continue;
+        }
+        order.push(block);
+        stack.extend(func[block].succs.iter().rev().map(|call| call.block));
+    }
+    order.extend(func.blocks().filter(|block| !seen.contains(block)));
+    order
 }
 
 /// The block that is the only way into each block that has one.
@@ -445,6 +517,7 @@ pub fn reloads(
     moves: &Moves,
     machine: &MachineInsts,
     scratch: (RegClass, &[PhysReg]),
+    live: &Set<(Block, PhysReg)>,
     names: &mut Interner,
 ) -> usize {
     let mut done = 0;
@@ -458,7 +531,7 @@ pub fn reloads(
                 continue;
             }
             let Some(user) = reader(func, moves, &insts[at + 1..], class, reg) else { continue };
-            if wanted(func, &insts[at + 1..], user, class, reg) {
+            if wanted(func, &insts[at + 1..], user, class, reg, live.contains(&(block, reg))) {
                 continue;
             }
             let Some(plan) = reloaded(func, machine, names, load, user, (class, reg)) else {
@@ -506,6 +579,7 @@ pub fn forward(
     frame: &FrameInsts,
     scratch: (RegClass, &[PhysReg]),
     stack: PhysReg,
+    live: &Set<(Block, PhysReg)>,
     names: &Interner,
 ) -> usize {
     let (class, held) = scratch;
@@ -541,7 +615,8 @@ pub fn forward(
                 continue;
             }
             let after = &insts[at + 1..];
-            let Some(found) = readers(func, machine, names, after, class, (into, out)) else {
+            let kept = live.contains(&(block, into));
+            let Some(found) = readers(func, machine, names, after, class, (into, out), kept) else {
                 continue;
             };
             for (inst, index) in found {
@@ -557,6 +632,9 @@ pub fn forward(
 
 /// Every operand behind a copy that reads the scratch register it went into, up to the next write
 /// of that register, or `None` where one of them cannot read the register the copy came from.
+///
+/// `None` too where nothing in the block writes the register again and `kept` says that a later
+/// block reads it, since those reads are not in the block.
 fn readers(
     func: &Func,
     machine: &MachineInsts,
@@ -564,6 +642,7 @@ fn readers(
     after: &[Inst],
     class: RegClass,
     (into, out): (PhysReg, PhysReg),
+    kept: bool,
 ) -> Option<Vec<(Inst, usize)>> {
     let is =
         |operand: &Operand, reg: PhysReg| operand.class == class && operand.reg.phys() == Some(reg);
@@ -607,7 +686,7 @@ fn readers(
         }
         changed |= stop || operands.iter().any(|operand| operand.role.is_def() && is(operand, out));
     }
-    Some(found)
+    (!kept).then_some(found)
 }
 
 /// The first instruction behind a load into that register that reads it, where everything before
@@ -635,8 +714,16 @@ fn reader(
 /// Whether anything behind that instruction reads the register before something writes it.
 ///
 /// The instruction itself counts as the write when it is one. Only the rest of the block is
-/// looked at, which is enough for a scratch register and for nothing else.
-fn wanted(func: &Func, after: &[Inst], user: Inst, class: RegClass, reg: PhysReg) -> bool {
+/// looked at, which is enough for a scratch register and for nothing else. `out` says whether a
+/// later block reads the register as this block leaves it.
+fn wanted(
+    func: &Func,
+    after: &[Inst],
+    user: Inst,
+    class: RegClass,
+    reg: PhysReg,
+    out: bool,
+) -> bool {
     if touches(func, user, true, class, reg) {
         return false;
     }
@@ -648,7 +735,7 @@ fn wanted(func: &Func, after: &[Inst], user: Inst, class: RegClass, reg: PhysReg
             return false;
         }
     }
-    false
+    out
 }
 
 /// Whether that instruction writes the register, or reads it, by the role asked about.
@@ -1185,7 +1272,10 @@ mod tests {
         moves.record(spill, out(block, 0, R10));
         moves.record(reload, back(block, 0, R11));
 
-        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned { gone: 0, copied: 1 });
+        assert_eq!(
+            clean(&mut func, &moves, &mut names),
+            Cleaned { gone: 0, copied: 1, ..Cleaned::default() }
+        );
         assert_eq!(written(&func, block, &names), ["x64.mov_mr_64", "x64.mov_rr_64"]);
         assert_eq!(reads(&func, block, 1), vec![R10]);
     }
@@ -1218,7 +1308,10 @@ mod tests {
         moves.record(second, across(block, RAX, R10));
         moves.record(reload, back(block, 0, PhysReg::new(12)));
 
-        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned { gone: 0, copied: 1 });
+        assert_eq!(
+            clean(&mut func, &moves, &mut names),
+            Cleaned { gone: 0, copied: 1, ..Cleaned::default() }
+        );
         assert_eq!(reads(&func, block, 3), vec![RAX], "rax is register zero");
     }
 
@@ -1412,7 +1505,7 @@ mod tests {
     /// The pass that reads a reload in the instruction that wanted it, with the two registers
     /// x86-64 holds back.
     fn reloads(func: &mut Func, moves: &Moves, names: &mut Interner) -> usize {
-        super::reloads(func, moves, &MACHINE, (GPR, &[R10, R11]), names)
+        super::reloads(func, moves, &MACHINE, (GPR, &[R10, R11]), &Set::default(), names)
     }
 
     /// A comparison of two registers, which is what the selector writes for a loop's test.
@@ -1554,7 +1647,8 @@ mod tests {
     }
 
     fn forward(func: &mut Func, names: &Interner) -> usize {
-        super::forward(func, &MACHINE, &FRAME, (GPR, &[R10, R11]), SYSV.stack_pointer, names)
+        let live = Set::default();
+        super::forward(func, &MACHINE, &FRAME, (GPR, &[R10, R11]), SYSV.stack_pointer, &live, names)
     }
 
     /// A copy of the stack pointer into scratch, as a variable length array saves it, and a store
@@ -1674,11 +1768,12 @@ mod tests {
         }
     }
 
-    /// What a scratch register holds is not carried into the next block, because a later pass can
-    /// fold the reload into it away, and then nothing writes the register. The 128 bit signed
-    /// division in `xtask wide` read a stale `r10` like that.
+    /// What a scratch register holds is carried into the next block, and the register is then live
+    /// out of the block before. A later pass that folds the reload into the instruction that read
+    /// it must keep it, or nothing writes the register. The 128 bit signed division in `xtask wide`
+    /// read a stale `r10` like that.
     #[test]
-    fn a_scratch_register_is_not_carried_into_the_next_block() {
+    fn a_scratch_register_carried_into_the_next_block_keeps_its_reload() {
         let (mut names, mut func, top) = empty();
         let next = func.create_block();
         func.succs_mut(top).push(BlockCall::to(next));
@@ -1690,8 +1785,40 @@ mod tests {
         moves.record(early, back(top, 0, R10));
         moves.record(late, back(next, 0, RBX));
 
-        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned::default());
-        assert_eq!(func.insts(next).next(), Some(late), "the reload is still a reload");
+        let cleaned = clean(&mut func, &moves, &mut names);
+        assert_eq!(cleaned.copied, 1, "the reload in the next block reads r10");
+        assert!(cleaned.live.contains(&(top, R10)));
+        assert_ne!(func.insts(next).next(), Some(late), "the reload is a copy now");
+        let live = cleaned.live;
+        assert_eq!(
+            super::reloads(&mut func, &moves, &MACHINE, (GPR, &[R10, R11]), &live, &mut names),
+            0
+        );
+        assert_eq!(func.insts(top).next(), Some(early), "the reload into r10 stays");
+    }
+
+    /// A scratch register that a block passes on unchanged is live out of that block too, and out
+    /// of the block that wrote it.
+    #[test]
+    fn a_scratch_register_passed_on_is_live_out_of_each_block() {
+        let (mut names, mut func, top) = empty();
+        let middle = func.create_block();
+        let next = func.create_block();
+        func.succs_mut(top).push(BlockCall::to(middle));
+        func.succs_mut(middle).push(BlockCall::to(next));
+        let early = load(&mut func, &mut names, top, R10, 16);
+        add(&mut func, &mut names, middle, RAX, RBX);
+        let late = load(&mut func, &mut names, next, R10, 16);
+        add(&mut func, &mut names, next, RAX, R10);
+        let mut moves = Moves::default();
+        moves.record(early, back(top, 0, R10));
+        moves.record(late, back(next, 0, R10));
+
+        let cleaned = clean(&mut func, &moves, &mut names);
+        assert_eq!(cleaned.gone, 1, "the second reload goes");
+        let live: Vec<_> = [top, middle].into_iter().map(|block| (block, R10)).collect();
+        assert!(live.iter().all(|pair| cleaned.live.contains(pair)), "{:?}", cleaned.live);
+        assert_eq!(cleaned.live.len(), 2);
     }
 
     /// A block two edges come into could be arriving from either, and only one of them read the

@@ -1117,6 +1117,7 @@ pub fn far(
     insts: &FrameInsts,
     conv: &CallRegs,
     scratch: &[PhysReg],
+    live: &Set<(Block, PhysReg)>,
     names: &mut Interner,
 ) {
     let Some(reaches) = insts.reaches else { return };
@@ -1150,7 +1151,8 @@ pub fn far(
         // nothing reads again. The cleanup keeps a value in scratch from one instruction to the
         // next, so a register this instruction does not read can still be holding one. Taking
         // that register put the frame address in `x16` just before a store read the value it had.
-        let free = |reg: PhysReg| !read(reg) && (written(reg) || !live_after(func, inst, reg));
+        let free =
+            |reg: PhysReg| !read(reg) && (written(reg) || !live_after(func, inst, reg, live));
         let loaded = || {
             func[operands]
                 .iter()
@@ -1207,11 +1209,12 @@ pub fn far(
 }
 
 /// Whether something after that instruction in its block reads the register before anything
-/// writes it again.
+/// writes it again, or a later block reads it as this block leaves it.
 ///
-/// Only the block, because a scratch register is not live into another one. The cleanup follows
-/// what one holds from a move to its reader and starts again at the top of every block.
-fn live_after(func: &Func, inst: Inst, reg: PhysReg) -> bool {
+/// Only the block, and what the cleanup recorded in `live` about the blocks after it, since that
+/// is the only way a scratch register is live into another block. See
+/// [`crate::copies::Cleaned::live`].
+fn live_after(func: &Func, inst: Inst, reg: PhysReg, live: &Set<(Block, PhysReg)>) -> bool {
     let Some(block) = func.block_of(inst) else { return true };
     for next in func.insts(block).skip_while(|&at| at != inst).skip(1) {
         let operands = func[next].operands;
@@ -1225,7 +1228,7 @@ fn live_after(func: &Func, inst: Inst, reg: PhysReg) -> bool {
             return false;
         }
     }
-    false
+    live.contains(&(block, reg))
 }
 
 /// How many pages a probing prologue touches one after another before it writes a loop instead.
@@ -3819,7 +3822,7 @@ mod tests {
         let into = Mem::at(Operand::read(Reg::physical(X17), gpr));
         func.build(block, store).uses(Reg::physical(X16), gpr).mem(into).finish();
 
-        far(&mut func, &aarch64::FRAME, &AAPCS64, &[X16, X17], &mut names);
+        far(&mut func, &aarch64::FRAME, &AAPCS64, &[X16, X17], &Set::default(), &mut names);
         let insts: Vec<Inst> = func.insts(block).collect();
         assert!(insts.len() > 2, "the offset is out of reach and wants an address");
         for &inst in &insts[..insts.iter().position(|&at| at == reload).expect("still there")] {
@@ -3844,7 +3847,7 @@ mod tests {
         let into = Mem::at(Operand::read(Reg::physical(AAPCS64.stack_pointer), gpr));
         func.build(block, store).uses(Reg::physical(X17), gpr).mem(into).finish();
 
-        far(&mut func, &aarch64::FRAME, &AAPCS64, &[X16, X17], &mut names);
+        far(&mut func, &aarch64::FRAME, &AAPCS64, &[X16, X17], &Set::default(), &mut names);
         let text = print_func(&func, &names, &aarch64::REGS);
         let lines: Vec<&str> =
             text.lines().map(str::trim).filter(|line| line.contains("a64.")).collect();
