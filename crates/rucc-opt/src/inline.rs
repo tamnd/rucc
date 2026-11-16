@@ -194,7 +194,7 @@ enum Kind {
     /// false, and the build only links when that call is folded away.
     Small,
     /// A function nobody declared `inline` whose copy grows the caller by less than
-    /// `max-inline-insns-auto`, which is gcc's `-finline-small-functions`, on from `-O2`.
+    /// `max-inline-insns-auto`, which is gcc's `-finline-small-functions`, on from `-O2` and at `-Os`.
     ///
     /// The kernel is where it shows. A `static` helper like `reserve_space` in fs/nfs/nfs4xdr.c,
     /// three lines around a `BUG_ON`, is copied into each of its callers by gcc, and each copy is
@@ -434,7 +434,7 @@ pub fn run(
     // can only be one function, is a call to that function by the time gcc decides what to inline,
     // since its early passes have folded the load and the call. So it is here too, before any of
     // the calls are counted. See [`crate::image`].
-    let images = limit.map(|_| crate::image::Images::of(module, pic));
+    let images = limit.map(|limit| crate::image::Images::of(module, pic).for_size(limit.size));
     let images = images.filter(|images| !images.is_empty());
     let direct = |module: &mut Module| {
         let Some(images) = &images else { return };

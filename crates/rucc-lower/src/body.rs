@@ -37,8 +37,8 @@ use rucc_ir::{
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind,
-    Elementwise, Eval, ExprId, ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Linkage, Ordering,
-    OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
+    Elementwise, Eval, ExprId, ExprKind, ExprList, FrameAsk, InitEntry, InitList, JumpAsk, Linkage,
+    Ordering, OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_tuple::Arch;
@@ -4585,6 +4585,9 @@ impl<'u> Body<'_, 'u> {
         }
 
         let size = repr::size_of(self.types(), self.target(), ty);
+        if self.init_from_image(place, init, &entries, size, span) {
+            return;
+        }
         // The bytes the entries write, each counted once. `{ [0] = v, [0] = w }` writes the first
         // element twice and the second not at all, and adding the two up said the whole array was
         // written and left the second element holding whatever the stack held.
@@ -4605,7 +4608,16 @@ impl<'u> Body<'_, 'u> {
                 end = stop;
             }
         }
-        let zeroed = covered < size;
+        // An initializer that is mostly zero is a fill of the whole object and a store of each
+        // entry that is not zero, as gcc does (`gimplify_init_constructor`). It does this when
+        // more entries are zero than its clear ratio, which is 2 at `-Os` and 6 for speed, and
+        // fewer than a quarter of the entries are not zero. An all-zero UUID is eleven entries,
+        // and a store of each made eleven stores where one fill does the work.
+        let zeros =
+            entries.iter().filter(|entry| !entry.is_bit_field() && self.zero(entry.value)).count();
+        let ratio = if self.unit.for_size { 2 } else { 6 };
+        let sparse = zeros > ratio && (entries.len() - zeros) * 4 < entries.len();
+        let zeroed = covered < size || sparse;
         if zeroed {
             // What the initializer does not name is zero, and the padding between members is
             // zero as well, which is what makes a partly initialized structure comparable byte
@@ -4636,6 +4648,91 @@ impl<'u> Body<'_, 'u> {
                 continue;
             }
             self.store_entry(place, entry, span);
+        }
+    }
+
+    /// Copies the initializer of a local in memory from a constant image, when the build
+    /// optimizes for size and this is smaller than one store for each entry. Returns whether it
+    /// did.
+    ///
+    /// gcc does the same (`gimplify_init_constructor`). An initializer of constants only, with
+    /// more than one entry that is not zero, goes to `.rodata` when the object cannot be moved in
+    /// three pieces, which is the move ratio of x86 at `-Os`. The NetBSD `bootxx` has four GPT
+    /// type UUIDs in a local array. Each UUID is eleven entries, and a store of a byte constant
+    /// is eight bytes of code, so the stores made `boot1.o` too large for the boot block.
+    ///
+    /// The image is not used for an initializer that is mostly zero, because a fill and the few
+    /// stores are smaller than the image. It is also not used where a write must be seen as it
+    /// is: a volatile or atomic object, an object in another address space, a bit-field, and a
+    /// build that records when each local is written.
+    fn init_from_image(
+        &mut self,
+        place: Place,
+        init: InitList,
+        entries: &[InitEntry],
+        size: u64,
+        span: Span,
+    ) -> bool {
+        if !self.unit.for_size
+            || self.unit.begins
+            || self.is_volatile(place.ty)
+            || self.is_atomic(place.ty)
+            || !self.space(place.ty).is_empty()
+        {
+            return false;
+        }
+        let mut written: Vec<(u64, u64)> = Vec::with_capacity(entries.len());
+        let mut nonzero: u64 = 0;
+        for entry in entries {
+            if entry.is_bit_field()
+                || !self.constant_number(entry.value)
+                || self.is_volatile(self.tast()[entry.value].ty)
+            {
+                return false;
+            }
+            let stored = self.stored_size(entry);
+            if stored > 0 {
+                written.push((entry.offset, entry.offset + stored));
+            }
+            if !self.zero(entry.value) {
+                nonzero += 1;
+            }
+        }
+        // Two entries that write the same byte are kept as stores, since the image cannot hold
+        // both.
+        written.sort_unstable();
+        if written.windows(2).any(|pair| pair[1].0 < pair[0].1) {
+            return false;
+        }
+        let align = repr::align_of(self.types(), self.target(), place.ty);
+        let piece = u64::from(align.min(self.target().pointer_width / 8).max(1));
+        // A store of a constant is about eight bytes of code, and the copy is about sixteen.
+        if nonzero < 2 || size.div_ceil(piece) <= 3 || size + 16 > 8 * nonzero {
+            return false;
+        }
+        let symbol = self.unit.local_image(init, size, align, span);
+        let source = self.global_addr(symbol, span);
+        let destination = self.address_of(place, span);
+        self.copy_object(destination, source, place.ty, false, span);
+        true
+    }
+
+    /// Whether `expr` is a constant number through any conversions of it, which is what an image
+    /// can hold without a relocation.
+    fn constant_number(&self, expr: ExprId) -> bool {
+        let tast = self.tast();
+        let mut value = expr;
+        loop {
+            match tast[value].kind {
+                ExprKind::Convert {
+                    kind: Conversion::Lvalue | Conversion::ArrayDecay | Conversion::FunctionDecay,
+                    ..
+                }
+                | ExprKind::Convert { kind: Conversion::Hardbool, .. } => return false,
+                ExprKind::Convert { operand, .. } | ExprKind::Cast(operand) => value = operand,
+                ExprKind::Const(_) => return true,
+                _ => return false,
+            }
         }
     }
 

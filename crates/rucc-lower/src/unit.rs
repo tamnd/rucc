@@ -688,7 +688,7 @@ pub(crate) struct Unit<'a> {
     /// Whether the objects are laid out newest first. See [`Context::reorder`].
     reorder: bool,
     /// Whether the build optimizes for size. See [`Context::for_size`].
-    for_size: bool,
+    pub(crate) for_size: bool,
     /// The extensions the command line builds for. See [`Context::isa`].
     pub(crate) isa: rucc_target::Isa,
     /// Whether a value may be kept in a vector register. See [`Context::vector`].
@@ -3334,6 +3334,28 @@ impl Unit<'_> {
     /// in `.data` it lands on the same address as the next object, which modpost then names it by.
     fn zeros(&mut self, size: u64) -> DataList {
         self.module.push_data(&[Datum::Zero(size)])
+    }
+
+    /// The global that a local is copied from when its initializer is copied and not written
+    /// one entry at a time. It holds the image of `init`, is read only and is not shared with
+    /// other objects. See `init_from_image` in the body lowering.
+    pub(crate) fn local_image(
+        &mut self,
+        init: InitList,
+        size: u64,
+        align: u32,
+        span: Span,
+    ) -> Symbol {
+        let (data, _) = self.image(Some(init), size, span);
+        let symbol = self.names.intern(&format!(".Linit.{}", self.anonymous));
+        self.anonymous += 1;
+        let mut global = Global::new(symbol, size, align);
+        global.linkage = IrLinkage::Internal;
+        global.constant = true;
+        global.droppable = true;
+        global.init = Some(data);
+        self.module.add_global(global);
+        symbol
     }
 
     /// The global a string literal is emitted as, making it the first time it is asked for.

@@ -38,8 +38,9 @@ const PUSH_IMM: &str = "push_i_32";
 ///
 /// `calls` is each call that passes arguments on the stack with how many bytes of the outgoing area
 /// they take, which is `passing` on [`crate::lower::Stack`]. A call is left alone when its area is
-/// not a number of words the stack pointer may be left at for a call, which is every area under a
-/// sixteen byte boundary that is not a multiple of sixteen.
+/// not a number of words. When the area is not a multiple of the stack alignment, a `subl` of the
+/// difference goes in front of the pushes and the `addl` behind the call takes off the area and the
+/// difference, as gcc does at -Os. A call whose callee takes its own area off is then left alone.
 pub fn arguments(
     func: &mut mir::Func,
     calls: &[(mir::Inst, u32)],
@@ -61,12 +62,13 @@ pub fn arguments(
     let sp = mir::Reg::physical(stack);
     let mut pushed = Pushed { calls: 0, back: Vec::new() };
     for &(call, area) in calls {
-        if area == 0 || area % 4 != 0 || area % conv.stack_align != 0 {
+        if area == 0 || area % 4 != 0 {
             continue;
         }
-        let Some(plan) = plan(func, call, area, sp, &ops, machine, names) else { continue };
+        let pad = (conv.stack_align - area % conv.stack_align) % conv.stack_align;
+        let Some(plan) = plan(func, call, area, pad, sp, &ops, machine, names) else { continue };
         let at = cfa(func, call, conv);
-        pushed.back.extend(rewrite(func, call, area, &plan, &ops, conv, at));
+        pushed.back.extend(rewrite(func, call, area, pad, &plan, &ops, conv, at));
         pushed.calls += 1;
     }
     pushed
@@ -224,7 +226,8 @@ pub struct Pushed {
     /// How many calls.
     pub calls: usize,
     /// The `addl` behind each of those calls that takes its arguments off again, which a callee
-    /// that takes them off itself has none of.
+    /// that takes them off itself has none of, and the `subl` in front of the pushes that keeps the
+    /// stack pointer aligned at the call.
     pub back: Vec<mir::Inst>,
 }
 
@@ -247,10 +250,14 @@ struct Plan {
 }
 
 /// The stores of that call's arguments, when they can be pushes and the pushes are fewer bytes.
+///
+/// `pad` is how many bytes go below the area so the stack pointer is aligned at the call.
+#[allow(clippy::too_many_arguments)]
 fn plan(
     func: &mir::Func,
     call: mir::Inst,
     area: u32,
+    pad: u32,
     sp: mir::Reg,
     ops: &Ops,
     machine: &MachineInsts,
@@ -331,14 +338,17 @@ fn plan(
             && func[func[next].operands].iter().any(|op| op.role.is_def() && op.reg == sp)
     });
     if popped.is_some_and(|sub| {
-        func[sub].imm.map(|imm| func[imm].0) != Some(i64::from(area))
+        pad != 0
+            || func[sub].imm.map(|imm| func[imm].0) != Some(i64::from(area))
             || func.cfi_after(sub).next().is_some()
     }) {
         return None;
     }
+    let padded = if pad == 0 { 0 } else { arith_bytes(pad) };
     let before: usize = stores.iter().map(|&store| stored_bytes(func, store, ops)).sum();
     let after: usize = stores.iter().map(|&store| pushed_bytes(func, store, ops)).sum::<usize>()
-        + if popped.is_some() { 0 } else { arith_bytes(area) };
+        + padded
+        + if popped.is_some() { 0 } else { arith_bytes(area + pad) };
     let gone = if popped.is_some() { arith_bytes(area) } else { 0 };
     (after < before + gone).then_some(Plan { stores, popped })
 }
@@ -441,18 +451,40 @@ fn cfa(func: &mir::Func, call: mir::Inst, conv: &CallRegs) -> Option<i32> {
     None
 }
 
-/// The stores taken out, a push of each in front of the call from the top word down, and the area
-/// given back behind it. Gives back the `addl` it wrote for that, when it wrote one.
+/// The stores taken out, the `subl` of `pad` bytes when there are any, a push of each in front of
+/// the call from the top word down, and the area and the pad given back behind it. Gives back the
+/// `subl` and the `addl` it wrote, which write the stack pointer.
+#[allow(clippy::too_many_arguments)]
 fn rewrite(
     func: &mut mir::Func,
     call: mir::Inst,
     area: u32,
+    pad: u32,
     plan: &Plan,
     ops: &Ops,
     conv: &CallRegs,
     cfa: Option<i32>,
-) -> Option<mir::Inst> {
+) -> Vec<mir::Inst> {
+    let sp = mir::Reg::physical(conv.stack_pointer);
+    let class = conv.int_class;
     let mut below = cfa;
+    let mut written = Vec::new();
+    if pad != 0 {
+        let span = func.span(call);
+        let sub = func
+            .build_loose(ops.sub)
+            .at(span)
+            .def(sp, class)
+            .uses(sp, class)
+            .imm(i64::from(pad))
+            .finish();
+        func.insert_before(call, sub);
+        written.push(sub);
+        below = below.and_then(|offset| offset.checked_add(i32::try_from(pad).ok()?));
+        if let Some(offset) = below {
+            func.cfi.push((sub, mir::CfiOp::DefCfaOffset(offset)));
+        }
+    }
     for &store in plan.stores.iter().rev() {
         let data = func[store];
         let span = func.span(store);
@@ -474,30 +506,29 @@ fn rewrite(
             func.cfi.push((push, mir::CfiOp::DefCfaOffset(offset)));
         }
     }
-    let (back, added) = match plan.popped {
+    let back = match plan.popped {
         Some(sub) => {
             func.remove_inst(sub);
-            (call, None)
+            call
         }
         None => {
-            let sp = mir::Reg::physical(conv.stack_pointer);
-            let class = conv.int_class;
             let span = func.span(call);
             let add = func
                 .build_loose(ops.add)
                 .at(span)
                 .def(sp, class)
                 .uses(sp, class)
-                .imm(i64::from(area))
+                .imm(i64::from(area + pad))
                 .finish();
             func.insert_after(call, add);
-            (add, Some(add))
+            written.push(add);
+            add
         }
     };
     if let Some(offset) = cfa {
         func.cfi.push((back, mir::CfiOp::DefCfaOffset(offset)));
     }
-    added
+    written
 }
 
 #[cfg(test)]
@@ -683,9 +714,38 @@ mod tests {
     }
 
     #[test]
-    fn a_call_on_a_sixteen_byte_boundary_keeps_its_stores() {
+    fn a_call_on_a_sixteen_byte_boundary_is_padded_to_it() {
+        let mut names = Interner::new();
+        let (mut func, call) = printf(&mut names, |func, block, names| {
+            func.build(block, op(names, "mov_mr_32"))
+                .uses(Reg::physical(ECX), GPR)
+                .mem(Mem::at(sp()).plus(8))
+                .finish();
+        });
+        let (count, lines) = pushed(&mut names, &mut func, &[(call, 12)], &SYSV);
+        assert_eq!(count, 1, "{lines:#?}");
+        assert!(lines[0].starts_with("x64.sub_ri_32") && lines[0].contains('4'), "{lines:#?}");
+        assert!(lines[1].starts_with("x64.push_32"), "{lines:#?}");
+        assert!(lines[4].starts_with("x64.call"), "{lines:#?}");
+        assert!(lines[5].starts_with("x64.add_ri_32") && lines[5].contains("16"), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_padded_call_that_is_not_shorter_keeps_its_stores() {
         let mut names = Interner::new();
         let (mut func, call) = printf(&mut names, |_, _, _| {});
+        let (count, _) = pushed(&mut names, &mut func, &[(call, 8)], &SYSV);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn a_padded_call_whose_callee_takes_its_arguments_off_keeps_its_stores() {
+        let mut names = Interner::new();
+        let (mut func, call) = printf(&mut names, |_, _, _| {});
+        let sub = op(&mut names, "sub_ri_32");
+        let esp = Reg::physical(ESP);
+        let back = func.build_loose(sub).def(esp, GPR).uses(esp, GPR).imm(8).finish();
+        func.insert_after(call, back);
         let (count, _) = pushed(&mut names, &mut func, &[(call, 8)], &SYSV);
         assert_eq!(count, 0);
     }
