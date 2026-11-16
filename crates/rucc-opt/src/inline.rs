@@ -2703,7 +2703,11 @@ fn early(callee: &Func, growth: usize, how: &How<'_>) -> bool {
 fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> bool {
     let cost = 1 + func[func[call].args].len() + usize::from(func[call].results > 0);
     let growth = size.saturating_sub(cost);
-    if early(callee, growth, how) {
+    // At `-Os` and `-Oz` gcc's early inliner weighs every call as cold too, and takes one only when
+    // the caller does not grow. The accessors of `lfs_accessors.h` grow `buf_read_file` in the
+    // NetBSD `bootxx_lfsv2` by two each, and gcc keeps `lfs_sb_getfsbtodb` out of line for its many
+    // callers where rucc put a copy in each of them.
+    if growth == 0 || !how.size && early(callee, growth, how) {
         return false;
     }
     let removable = callee.linkage == Linkage::Internal
