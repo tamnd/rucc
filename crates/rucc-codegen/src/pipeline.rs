@@ -1780,7 +1780,7 @@ pub fn compile_recording(
         joins.iter().all(|compare| joined.contains(compare)),
         "a comparison the rename took as joined was not"
     );
-    copies::clean(
+    let cleaned = copies::clean(
         &mut func,
         &moves,
         machine.shapes,
@@ -1801,7 +1801,7 @@ pub fn compile_recording(
     // the instructions, for the reason the cleanup is. Not at `-O0`, whose output is the one
     // somebody reads a variable's slot out of in a debugger and expects to see read.
     if flags.reloads {
-        copies::reloads(&mut func, &moves, machine.shapes, (int, held), names);
+        copies::reloads(&mut func, &moves, machine.shapes, (int, held), &cleaned.live, names);
         // After the reloads, which fold a load into the instruction that wanted it, where this
         // only ever takes out a copy between two registers.
         copies::forward(
@@ -1810,6 +1810,7 @@ pub fn compile_recording(
             machine.insts,
             (int, held),
             machine.conv.stack_pointer,
+            &cleaned.live,
             names,
         );
     }
@@ -1831,7 +1832,7 @@ pub fn compile_recording(
 
     // After the moves are cleaned up, since that pass follows what the scratch registers hold, and
     // before the schedule, which should see the extra `add` as the instruction it is.
-    far(&mut func, machine.insts, machine.conv, held, names);
+    far(&mut func, machine.insts, machine.conv, held, &cleaned.live, names);
 
     // After the allocator's moves have been cleaned up, because a schedule chosen around a move
     // that is about to be taken out is a schedule built around an instruction that is not in the
