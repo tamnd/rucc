@@ -1280,12 +1280,13 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // `-fno-inline-functions-called-once` turns the called once half off alone. It is not a pass,
     // so the toggle only ever means this and never adds or removes anything from the list.
     let once = opts.wants(inline::ONCE);
-    // `-finline-small-functions`, which gcc turns on from `-O2` and not for size.
-    let auto = opts
-        .toggles
-        .iter()
-        .rfind(|(it, _)| it == inline::SMALL)
-        .map_or(matches!(opts.level, OptLevel::O2 | OptLevel::O3), |&(_, on)| on);
+    // `-finline-small-functions`, which gcc turns on from `-O2` and for size too. At `-Os` and
+    // `-Oz` no call is hot, so the second pass takes a call only when the program does not grow by
+    // it, as `block_map` of the NetBSD i386 boot code, whose one copy goes with its last call.
+    let auto = opts.toggles.iter().rfind(|(it, _)| it == inline::SMALL).map_or(
+        matches!(opts.level, OptLevel::O2 | OptLevel::O3 | OptLevel::Os | OptLevel::Oz),
+        |&(_, on)| on,
+    );
     // Before the inliner too, because the passes the inliner runs over a body can already take a
     // load out of a loop. Nothing takes a load out of a loop at `-O0`. See [`reread`].
     if opts.reread && opts.level != OptLevel::O0 {
@@ -1386,7 +1387,8 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // module. Only when the run has that pass in it, since it is a copy of the module's read only
     // data and nothing else would ever look at it.
     let images = if passes.iter().any(|pass| pass.name() == image::NAME) {
-        Arc::new(image::Images::of(module, opts.interposition))
+        let small = matches!(opts.level, OptLevel::Os | OptLevel::Oz);
+        Arc::new(image::Images::of(module, opts.interposition).for_size(small))
     } else {
         Arc::default()
     };

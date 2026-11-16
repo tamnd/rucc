@@ -373,6 +373,9 @@ fn spelled(func: &Func, inst: Inst, images: &Images) -> Option<Vec<Write>> {
     let offset = u64::try_from(offset).ok()?;
     let writes = images.spell(name, offset, size)?;
     let stores = writes.iter().filter(|write| !matches!(write, Write::Zero(_))).count();
+    if images.small && size.div_ceil(images.pointer) > 3 && size + 16 <= 8 * stores as u64 {
+        return None;
+    }
     (stores <= MOST).then_some(writes)
 }
 
@@ -550,6 +553,8 @@ pub struct Images {
     bodies: Set<Symbol>,
     /// Every function that never comes back, by declaration or by `crate::noreturn`.
     gone: Set<Symbol>,
+    /// Whether the level optimizes for size. See [`Images::for_size`].
+    small: bool,
 }
 
 impl Images {
@@ -596,7 +601,21 @@ impl Images {
             signatures,
             bodies,
             gone,
+            small: false,
         }
+    }
+
+    /// The same images for a level that optimizes for size, which is `-Os` and `-Oz`.
+    ///
+    /// A copy out of a read only object is then kept as a copy when the stores it comes to are
+    /// larger, by the rule `rucc_lower` uses when it puts the constant initializer of a local in an
+    /// image and copies it. gcc expands a constant constructor that cannot be moved by pieces as a
+    /// copy out of the constant pool, and spelling the copy out again as stores undid that. A
+    /// store of a constant is about eight bytes of code, and the copy is about sixteen.
+    #[must_use]
+    pub fn for_size(mut self, small: bool) -> Self {
+        self.small = small;
+        self
     }
 
     /// Whether that name is read only data this module defines and nothing else can replace.

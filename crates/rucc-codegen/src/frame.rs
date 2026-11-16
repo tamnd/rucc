@@ -134,6 +134,10 @@ use rucc_target::{CallRegs, ClassMoves, PhysReg, RegClass, RegFile};
 
 use crate::slots::{Cell, Slots};
 
+/// The largest cell that is put among the small ones nearest the stack pointer. See where the
+/// cells are ordered in [`Frame::of`].
+const SMALL_CELL: u32 = 16;
+
 /// One register the prologue puts away in the frame, and where in the frame it goes.
 ///
 /// A pushed register does not need one of these, because where it goes is wherever the stack
@@ -486,9 +490,19 @@ impl Frame {
         // alignment and none at all in front of a narrower one. A cell shared by a wide thing and
         // a strict one is exactly how a size that is not a multiple of its own alignment arises,
         // so without this a frame could come out larger for sharing than it was for not.
+        //
+        // The cells of no more than sixteen bytes go before the larger ones, which is where gcc
+        // puts its spill slots and its small locals. An access near the stack pointer takes a
+        // displacement of one byte where one past 127 bytes takes four. In the NetBSD `boot1.c`
+        // a sector buffer of 512 bytes went first, and fifty accesses to spill slots above it
+        // were three bytes longer each. Only the gap in front of the first large cell is added
+        // to the frame, and it is less than the alignment of that cell. A large cell aligned to
+        // more than sixteen bytes stays first, because the gap in front of it can be larger than
+        // the bytes that the shorter accesses save.
         order.sort_by_key(|&cell| {
             let Cell { size, align } = plan.cells()[cell];
-            (std::cmp::Reverse(align), size % align != 0)
+            let large = size > SMALL_CELL && align <= SMALL_CELL;
+            (large, std::cmp::Reverse(align), size % align != 0)
         });
         cells.resize(plan.cells().len(), 0);
         for &cell in &order {
