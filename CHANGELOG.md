@@ -242,6 +242,7 @@ A branch on two tests of the same kind against zero is now one test of their `or
 A static initializer may now read a whole structure out of a `static const` object, or an element or member of one, as gcc allows. The bytes come from that object's own initializer. allmodconfig on 7.4 has three drivers that do this, the zx297520v3 clock driver, the nt36532 panel and the Qualcomm PCIe multiphy (#4604)
 A riscv64 difference such as `.long 1b - .` in a table outside code now takes off a `.L0 ` label with no addend, as gas does, instead of the section and an offset that ld 2.42 reads the wrong way round. The kernel's runtime const table came out wrong and patched the wrong instructions in `__d_alloc` (#4605)
 An i386 asm operand already in memory, such as `"+m" (*ptr)`, is no longer moved to a frame slot when the pinned registers run out. The slot held the pointer and the text worked on the slot, so the kernel's `cmpxchg8b` in `sched_clock_local` never matched and a tinyconfig boot hung before calibrating the delay loop (#4607)
+A block that only passes its parameters on to a jump is now taken out like any other forwarder, so long as every way into it is a `jump` and nothing below reads the parameters. Where two arms of a branch end in one `return` with different values, the arms now become one edge, which lets a call in one of them become a tail call. The kernel's security hooks end this way, and each one was a `call` and a `ret` where gcc has a `jmp` (#4610)
 
 ## 0.30.15
 
