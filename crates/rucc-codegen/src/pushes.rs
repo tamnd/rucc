@@ -20,11 +20,14 @@
 //!
 //! It runs after the allocator, the frame and every pass that moves an instruction, since what it
 //! asks is about registers and about where the stack pointer is: each store is one of the call's,
-//! nothing between it and the call writes the register it stores or touches the outgoing area, and
-//! together the stores write the whole of the area the call passes, which [`crate::lower`] wrote
-//! down for each call as it built it. The pushes go straight in front of the call, so nothing else
-//! runs while the stack pointer is lower than the frame says it is, and the unwind table gets a row
-//! for each push and one for the way back when it counts the frame from the stack pointer.
+//! nothing between the stores and the call touches the outgoing area, and together the stores write
+//! the whole of the area the call passes, which [`crate::lower`] wrote down for each call as it
+//! built it. The pushes go straight in front of the call when nothing between a store and the call
+//! writes the register it stores. When something does, the push of that register goes in front of
+//! the instruction that writes it, as gcc does, and each address counted from the stack pointer
+//! between the first push and the call is moved by what was pushed in front of it. The unwind table
+//! gets a row for each push and one for the way back when it counts the frame from the stack
+//! pointer.
 
 use rucc_base::Interner;
 use rucc_mir as mir;
@@ -247,6 +250,12 @@ struct Plan {
     stores: Vec<mir::Inst>,
     /// The `subl` behind the call that puts back what a callee that cleans up took, which goes.
     popped: Option<mir::Inst>,
+    /// The instruction the push of each word goes in front of, from the bottom of the area up.
+    anchors: Vec<mir::Inst>,
+    /// Each address counted from the stack pointer that a push moves, with its new displacement.
+    moved: Vec<(mir::MemRef, i32)>,
+    /// What goes below the area.
+    fill: Pad,
 }
 
 /// The stores of that call's arguments, when they can be pushes and the pushes are fewer bytes.
@@ -283,8 +292,6 @@ fn plan(
     let words = usize::try_from(area / 4).ok()?;
     let mut stores: Vec<Option<mir::Inst>> = vec![None; words];
     let mut found = 0;
-    // The registers written between the instruction the walk is at and the call.
-    let mut written: Vec<mir::Reg> = Vec::new();
     let order: Vec<mir::Inst> = func.insts(block).collect();
     let at = order.iter().position(|&inst| inst == call)?;
     for &inst in order[..at].iter().rev() {
@@ -295,9 +302,7 @@ fn plan(
         let operands = &func[data.operands];
         if let Some(word) = word_stored(func, inst, area, sp, ops) {
             let source = (data.opcode == ops.store).then(|| operands[0].reg);
-            if stores[word].is_some()
-                || source.is_some_and(|reg| reg == sp || written.contains(&reg))
-                || func.cfi_after(inst).next().is_some()
+            if stores[word].is_some() || source == Some(sp) || func.cfi_after(inst).next().is_some()
             {
                 return None;
             }
@@ -329,9 +334,15 @@ fn plan(
                 return None;
             }
         }
-        written.extend(operands.iter().filter(|op| op.role.is_def()).map(|op| op.reg));
     }
     let stores: Vec<mir::Inst> = stores.into_iter().collect::<Option<_>>()?;
+    let places: Vec<usize> = stores
+        .iter()
+        .map(|&store| order.iter().position(|&inst| inst == store))
+        .collect::<Option<_>>()?;
+    let start = places.iter().copied().min()?;
+    let (anchors, moved, grown) =
+        places_of(func, &order[start..=at], &stores, &places, start, pad, sp, ops)?;
     // Behind the call, the `subl` that gives a callee that cleans up its area back, or nothing.
     let popped = func.next_inst(call).filter(|&next| {
         func[next].opcode == ops.sub
@@ -344,13 +355,101 @@ fn plan(
     }) {
         return None;
     }
-    let padded = padding(func, &stores, pad, ops).bytes();
+    // A pad pushed in front of a push that is not at the call can only be of the register of the
+    // top word, which is the one register sure to be set there.
+    let placed = anchors.iter().any(|&anchor| anchor != call);
+    let fill = padding(func, if placed { &stores[words - 1..] } else { &stores }, pad, ops);
     let before: usize = stores.iter().map(|&store| stored_bytes(func, store, ops)).sum();
     let after: usize = stores.iter().map(|&store| pushed_bytes(func, store, ops)).sum::<usize>()
-        + padded
+        + fill.bytes()
+        + grown
         + if popped.is_some() { 0 } else { arith_bytes(area + pad) };
     let gone = if popped.is_some() { arith_bytes(area) } else { 0 };
-    (after < before + gone).then_some(Plan { stores, popped })
+    (after < before + gone).then_some(Plan { stores, popped, anchors, moved, fill })
+}
+
+/// Where the push of each store goes, the new displacement of each address counted from the stack
+/// pointer that the pushes move, and how many bytes longer those addresses get.
+///
+/// `run` is the instructions from the first store to the call, which is the last of them, and
+/// `places` is where each store is in the block, from the bottom word of the area up. The push of
+/// a word goes in front of the call, or in front of the first instruction behind its store that
+/// writes the register it pushes, and never behind the push of a word under it, since the top word
+/// is pushed first. It goes after the last instruction in front of its store that writes that
+/// register, and the call is left alone when that cannot be.
+///
+/// An address counted from the stack pointer behind a push is the number of bytes pushed in front
+/// of it further from the stack pointer, the pad too. The call is left alone when an address that
+/// moves is also the address of another instruction, which would move with it.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn places_of(
+    func: &mir::Func,
+    run: &[mir::Inst],
+    stores: &[mir::Inst],
+    places: &[usize],
+    start: usize,
+    pad: u32,
+    sp: mir::Reg,
+    ops: &Ops,
+) -> Option<(Vec<mir::Inst>, Vec<(mir::MemRef, i32)>, usize)> {
+    let call = run.len() - 1;
+    let writes = |at: usize, reg: mir::Reg| {
+        func[func[run[at]].operands].iter().any(|op| op.role.is_def() && op.reg == reg)
+    };
+    let mut at = Vec::with_capacity(stores.len());
+    let mut latest = call;
+    for (&store, &place) in stores.iter().zip(places) {
+        let place = place - start;
+        let data = &func[store];
+        let (first, last) = if data.opcode == ops.store {
+            let reg = func[data.operands][0].reg;
+            (
+                (0..place).rev().find(|&i| writes(i, reg)).map_or(0, |i| i + 1),
+                (place + 1..call).find(|&i| writes(i, reg)).unwrap_or(call),
+            )
+        } else {
+            (0, call)
+        };
+        latest = latest.min(last);
+        if latest < first {
+            return None;
+        }
+        at.push(latest);
+    }
+    let top = *at.last()?;
+    let mut moved: Vec<(mir::MemRef, i32)> = Vec::new();
+    let mut grown = 0;
+    for (index, &inst) in run.iter().enumerate().take(call).skip(top) {
+        let data = &func[inst];
+        let Some(mem) = data.mem else { continue };
+        let amode = func[mem];
+        let based = amode
+            .base
+            .and_then(|base| func[data.operands].get(usize::from(base)))
+            .is_some_and(|op| op.reg == sp);
+        if stores.contains(&inst) || !based {
+            continue;
+        }
+        let pushes = at.iter().filter(|&&anchor| anchor <= index).count();
+        let shift = i32::try_from(pad).ok()? + 4 * i32::try_from(pushes).ok()?;
+        let disp = amode.disp.checked_add(shift)?;
+        if moved.iter().any(|&(other, _)| other == mem) {
+            return None;
+        }
+        grown += disp_bytes(disp).saturating_sub(disp_bytes(amode.disp));
+        moved.push((mem, disp));
+    }
+    if !moved.is_empty() {
+        let shifted = &run[top..call];
+        let shared = func.blocks().flat_map(|block| func.insts(block)).any(|inst| {
+            !shifted.contains(&inst)
+                && func[inst].mem.is_some_and(|mem| moved.iter().any(|&(other, _)| other == mem))
+        });
+        if shared {
+            return None;
+        }
+    }
+    Some((at.iter().map(|&index| run[index]).collect(), moved, grown))
 }
 
 /// Which word of the area that instruction stores, when it is a four byte store of a register or a
@@ -512,7 +611,8 @@ fn rewrite(
     let class = conv.int_class;
     let mut below = cfa;
     let mut written = Vec::new();
-    if let Pad::Pushes(register, words) = padding(func, &plan.stores, pad, ops) {
+    let first = plan.anchors.last().copied().unwrap_or(call);
+    if let Pad::Pushes(register, words) = plan.fill {
         let span = func.span(call);
         for _ in 0..words {
             let push = match register {
@@ -520,7 +620,7 @@ fn rewrite(
                 None => func.build_loose(ops.push_imm).at(span).imm(0),
             }
             .finish();
-            func.insert_before(call, push);
+            func.insert_before(first, push);
             below = below.map(|offset| offset + 4);
             if let Some(offset) = below {
                 func.cfi.push((push, mir::CfiOp::DefCfaOffset(offset)));
@@ -535,14 +635,14 @@ fn rewrite(
             .uses(sp, class)
             .imm(i64::from(pad))
             .finish();
-        func.insert_before(call, sub);
+        func.insert_before(first, sub);
         written.push(sub);
         below = below.and_then(|offset| offset.checked_add(i32::try_from(pad).ok()?));
         if let Some(offset) = below {
             func.cfi.push((sub, mir::CfiOp::DefCfaOffset(offset)));
         }
     }
-    for &store in plan.stores.iter().rev() {
+    for (&store, &anchor) in plan.stores.iter().zip(&plan.anchors).rev() {
         let data = func[store];
         let span = func.span(store);
         let push = if data.opcode == ops.store {
@@ -556,12 +656,18 @@ fn rewrite(
                 None => build.finish(),
             }
         };
-        func.insert_before(call, push);
-        func.remove_inst(store);
+        func.insert_before(anchor, push);
         below = below.map(|offset| offset + 4);
         if let Some(offset) = below {
             func.cfi.push((push, mir::CfiOp::DefCfaOffset(offset)));
         }
+    }
+    // Only now, since a push can go in front of the store of a word under it.
+    for &store in &plan.stores {
+        func.remove_inst(store);
+    }
+    for &(mem, disp) in &plan.moved {
+        func[mem].disp = disp;
     }
     let back = match plan.popped {
         Some(sub) => {
@@ -682,11 +788,51 @@ mod tests {
     }
 
     #[test]
-    fn a_register_written_after_its_store_is_not_pushed() {
+    fn a_register_written_after_its_store_is_pushed_in_front_of_the_write() {
         let mut names = Interner::new();
         let (mut func, call) = printf(&mut names, |func, block, names| {
             func.build(block, op(names, "mov_ri_32")).def(Reg::physical(EAX), GPR).imm(1).finish();
         });
+        let (count, lines) = pushed(&mut names, &mut func, &[(call, 8)], words());
+        assert_eq!(count, 1, "{lines:#?}");
+        assert!(lines[0].starts_with("x64.push_32"), "{lines:#?}");
+        assert!(lines[1].starts_with("x64.mov_ri_32"), "{lines:#?}");
+        assert!(lines[2].starts_with("x64.push_i_32") && lines[2].contains(".LC0"), "{lines:#?}");
+        assert!(lines[3].starts_with("x64.call"), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_slot_read_behind_a_push_is_read_from_as_far_above_it() {
+        let mut names = Interner::new();
+        let (mut func, call) = printf(&mut names, |func, block, names| {
+            func.build(block, op(names, "mov_ri_32")).def(Reg::physical(EAX), GPR).imm(1).finish();
+            func.build(block, op(names, "mov_rm_32"))
+                .def(Reg::physical(ECX), GPR)
+                .mem(Mem::at(sp()).plus(12))
+                .finish();
+        });
+        let (count, lines) = pushed(&mut names, &mut func, &[(call, 8)], words());
+        assert_eq!(count, 1, "{lines:#?}");
+        assert!(lines[2].starts_with("x64.mov_rm_32") && lines[2].contains("16"), "{lines:#?}");
+        assert!(!lines[2].contains("12"), "{lines:#?}");
+    }
+
+    #[test]
+    fn two_words_from_one_register_written_between_their_stores_are_left_alone() {
+        // The bottom word would have to be pushed before the top one.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let eax = Reg::physical(EAX);
+        func.build(block, op(&mut names, "mov_mr_32")).uses(eax, GPR).mem(Mem::at(sp())).finish();
+        func.build(block, op(&mut names, "mov_ri_32")).def(eax, GPR).imm(1).finish();
+        func.build(block, op(&mut names, "mov_mr_32"))
+            .uses(eax, GPR)
+            .mem(Mem::at(sp()).plus(4))
+            .finish();
+        let callee = names.intern("g");
+        let call = func.build(block, op(&mut names, "call")).symbol(callee).finish();
+        func.build(block, op(&mut names, "ret")).finish();
         let (count, lines) = pushed(&mut names, &mut func, &[(call, 8)], words());
         assert_eq!(count, 0, "{lines:#?}");
         assert!(lines.iter().all(|line| !line.contains("push")), "{lines:#?}");

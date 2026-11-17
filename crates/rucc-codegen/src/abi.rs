@@ -1072,6 +1072,12 @@ pub fn call(
     // them can be this function's own parameter, whose bytes are where another argument goes.
     let mut stores = forwarded.then(Vec::new);
     let mut words = Vec::new();
+    // On i386, the one convention with four byte words, the top word is stored first, which is the
+    // order the arguments are pushed in when [`crate::pushes`] makes the stores pushes. Each push
+    // can then go where its store is, whatever the allocator puts in the register after it.
+    if conv.word == 4 {
+        on_stack.sort_by_key(|&(.., up)| std::cmp::Reverse(up));
+    }
     for (reg, class, store, up) in on_stack {
         let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
         let at = i32::try_from(up).expect("an argument area under two gigabytes");

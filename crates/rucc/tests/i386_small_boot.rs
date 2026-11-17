@@ -253,3 +253,27 @@ fn a_wide_value_changed_in_place_is_changed_where_it_is() {
         assert_eq!(stores, 0, "no word is stored back from a register:\n{text}");
     }
 }
+
+/// Two calls of seven arguments, read from a structure and from a local array, as `blkdevstrategy`
+/// is called in libsa. The allocator writes a register again after it stores an argument from it,
+/// and each argument is still pushed, in front of that write.
+const STRATEGY: &str = "\
+struct s { unsigned a, b, c, d; unsigned *p; };
+unsigned g7(unsigned, unsigned, unsigned, unsigned, unsigned *, unsigned, unsigned);
+unsigned w(struct s *p, unsigned x, unsigned y) {
+  unsigned loc[4] = { x, y, x ^ y, x + y };
+  unsigned r = g7(p->a, x, p->d, p->b + y, &loc[1], p->c, x * y);
+  return r + g7(p->p[1], p->p[2], r, loc[2], &loc[3], p->p[0] + loc[0], p->a);
+}
+";
+
+#[test]
+fn an_argument_whose_register_is_written_again_is_still_pushed() {
+    let text = listing("strategy", STRATEGY, &[]);
+    let w = body(&text, "w");
+    // Four saved registers, and for each call seven arguments and a pad of one word.
+    let pushes = w.iter().filter(|line| line.starts_with("pushl")).count();
+    assert_eq!(pushes, 4 + 2 * 8, "{text}");
+    let taken = w.iter().filter(|line| **line == "addl\t$32, %esp").count();
+    assert_eq!(taken, 2, "{text}");
+}
