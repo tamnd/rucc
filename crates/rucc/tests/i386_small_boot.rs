@@ -83,18 +83,21 @@ fn a_mostly_zero_local_is_cleared_first() {
 }
 
 /// Three words of arguments under a sixteen byte alignment. gcc pushes them at -Os behind a
-/// `subl $4, %esp` and takes off sixteen bytes after the call.
+/// `subl $4, %esp` and takes off sixteen bytes after the call. rucc pushes the register of the top
+/// argument one more time as the pad, because a `pushl` is one byte and the `subl` is three.
 const PADDED: &str = "\
 int h(int, int, int);
 int f(int a) { return h(a, a + 1, a + 2) + 1; }
 ";
 
 #[test]
-fn arguments_are_pushed_behind_a_pad() {
+fn arguments_are_pushed_behind_a_pad_of_one_push() {
     let text = listing("padded", PADDED, &[]);
     let f = body(&text, "f");
-    assert!(f.contains(&"subl\t$4, %esp"), "{text}");
-    assert_eq!(f.iter().filter(|line| line.starts_with("push")).count(), 3, "{text}");
+    assert!(!f.contains(&"subl\t$4, %esp"), "{text}");
+    let pushes: Vec<_> = f.iter().filter(|line| line.starts_with("push")).collect();
+    assert_eq!(pushes.len(), 4, "{text}");
+    assert_eq!(pushes[0], pushes[1], "{text}");
     assert!(f.contains(&"addl\t$16, %esp"), "{text}");
 }
 
