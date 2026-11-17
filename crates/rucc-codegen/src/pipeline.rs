@@ -1534,7 +1534,7 @@ pub fn compile_recording(
         bits::sized(&mut func, machine.bits, names, gpr, machine.conv.word);
     }
     let allocating = Instant::now();
-    let (allocation, used) = rucc_regalloc::run_first(
+    let (mut allocation, used) = rucc_regalloc::run_first(
         &mut func,
         &tried,
         env,
@@ -1573,6 +1573,9 @@ pub fn compile_recording(
     // what the stack pointer is on and the spills and reloads are that move, so the frame is only
     // grown. Every cell over that alignment is a spill slot, since a local over it was refused
     // above. NetBSD is the convention this is for (libquadmath's `printf_fp.c`, tamnd/rucc#4449).
+    // A copy between two slots that went in one cell moves nothing, so it comes out before the
+    // frame is worked out, which may then save a register only the copy went through.
+    allocation.edits = share.unmoved(std::mem::take(&mut allocation.edits));
     let mut share = share;
     let mut insts = machine.insts;
     if let Some(inst) = stack.grown_at {

@@ -173,3 +173,57 @@ fn small_functions_are_weighed_at_os() {
     let said = remarks("small-off", SMALL, &["-fno-inline-small-functions"]);
     assert!(!said.contains("call is unlikely"), "{said}");
 }
+
+/// A loop with more 64-bit values than i386 has registers, as the GPT code of libsa has. Each value
+/// that is spilled moves from one slot to the next on the back edge, and a load and a store through
+/// one register do that move. When the two slots of such a copy are never wanted at once, they go
+/// in one cell and the copy comes out. rucc made 15 of these copies before, and gcc makes fewer.
+const LOOKUP: &str = "\
+typedef unsigned long long u64; typedef unsigned int u32;
+struct ent { u64 lba, end; u32 attr; unsigned char type[16]; };
+static struct ent tab[64];
+u64 lookup(u64 start, u32 n, u32 per, const unsigned char *want, int *found) {
+  u64 cur = start, best = 0, bend = 0, alt = 0; u32 i, j, k = 0;
+  for (i = 0; i < n; i += per) {
+    u64 blk = cur + (i / per);
+    for (j = 0; j < per && i + j < n; j++) {
+      struct ent *e = &tab[(i + j) & 63];
+      if (e->attr & 8) { alt += e->lba ^ blk; continue; }
+      if (best == 0 && e->type[0] == want[0]) { best = e->lba + blk; bend = e->end; k++; }
+      else if (e->type[1] == want[1]) { bend += e->end - alt; alt = best ^ bend; }
+      else { best += j; alt -= blk; }
+    }
+    cur += per + (alt & 3);
+  }
+  *found = k;
+  return best * 31 + bend * 7 + alt + cur;
+}
+";
+
+/// The number of loads from a slot that the next line stores in another slot.
+fn slot_copies(lines: &[&str]) -> usize {
+    let load = |line: &str| {
+        let rest = line.strip_prefix("movl\t")?;
+        let (from, reg) = rest.split_once(", ")?;
+        (from.ends_with("(%esp)") && reg.starts_with("%e")).then(|| reg.to_string())
+    };
+    let store = |line: &str| {
+        let rest = line.strip_prefix("movl\t")?;
+        let (reg, to) = rest.split_once(", ")?;
+        (to.ends_with("(%esp)") && reg.starts_with("%e")).then(|| reg.to_string())
+    };
+    lines
+        .windows(2)
+        .filter(
+            |pair| matches!((load(pair[0]), store(pair[1])), (Some(one), Some(two)) if one == two),
+        )
+        .count()
+}
+
+#[test]
+fn a_copy_between_two_slots_that_are_never_wanted_at_once_comes_out() {
+    let text = listing("lookup", LOOKUP, &[]);
+    let lookup = body(&text, "lookup");
+    let copies = slot_copies(&lookup);
+    assert!(copies <= 13, "{copies} copies from slot to slot:\n{text}");
+}
