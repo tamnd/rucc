@@ -994,6 +994,54 @@ pub static UPDATES: &[Update] = &[
     },
 ];
 
+/// The high halves of a wide value worked on in place, which are the add with carry and the
+/// subtract with borrow.
+///
+/// [`UPDATES`] for the instructions that take the carry of the low half into the high one. A wide
+/// sum on i386 is an add of the low words and an `adc` of the high words, see [`crate::carry`], so
+/// `*p += x` on a `long long` is a load of each half, the two of them and a store of each half.
+/// [`pairs`] takes that run, and reads these rows for its second half. The add with carry
+/// commutes, because the carry goes in whichever source the memory is.
+pub static CARRIED_UPDATES: &[Update] = &[
+    Update {
+        from: "adc_rr_32",
+        into: "adc_mr_32",
+        load: "mov_rm_32",
+        store: "mov_mr_32",
+        commutes: true,
+    },
+    Update {
+        from: "adc_rr_64",
+        into: "adc_mr_64",
+        load: "mov_rm_64",
+        store: "mov_mr_64",
+        commutes: true,
+    },
+    Update {
+        from: "sbb_rr_32",
+        into: "sbb_mr_32",
+        load: "mov_rm_32",
+        store: "mov_mr_32",
+        commutes: false,
+    },
+    Update {
+        from: "sbb_rr_64",
+        into: "sbb_mr_64",
+        load: "mov_rm_64",
+        store: "mov_mr_64",
+        commutes: false,
+    },
+];
+
+/// The same high halves against a constant. `adc $0` is the high word of a `long long` that had a
+/// word added to it, which is the commonest of these.
+pub static CARRIED_BUMPS: &[Bump] = &[
+    Bump { from: "adc_ri_32", into: "adc_mi_32", load: "mov_rm_32", store: "mov_mr_32" },
+    Bump { from: "adc_ri_64", into: "adc_mi_64", load: "mov_rm_64", store: "mov_mr_64" },
+    Bump { from: "sbb_ri_32", into: "sbb_mi_32", load: "mov_rm_32", store: "mov_mr_32" },
+    Bump { from: "sbb_ri_64", into: "sbb_mi_64", load: "mov_rm_64", store: "mov_mr_64" },
+];
+
 /// One arithmetic instruction against a constant that could work on memory, and the load and the
 /// store that would be the rest of the run.
 ///
@@ -1432,6 +1480,256 @@ fn constant(
     Some(Bumped { load, alu: insts[alu], store, bump, imm })
 }
 
+/// One half of a wide run, as positions in the block, and what its store becomes.
+#[derive(Debug, Clone, Copy)]
+struct Half {
+    /// The load that read the half.
+    load: usize,
+    /// The store that put the answer back.
+    store: usize,
+    /// The instruction the store becomes.
+    into: &'static str,
+    /// The source the arithmetic is left reading, when it reads a register.
+    kept: Option<Operand>,
+    /// The constant the arithmetic was against, when it reads no register.
+    imm: Option<i64>,
+}
+
+/// Puts every wide value read, changed and written back in halves into two instructions that work
+/// on memory, and gives back how many.
+///
+/// `*p += x` on a `long long` on i386 is six instructions after selection and [`crate::carry`]:
+///
+/// ```text
+///   movl (%eax), %ecx
+///   movl 4(%eax), %edx
+///   addl %esi, %ecx               ->    addl %esi, (%eax)
+///   adcl %edi, %edx                     adcl %edi, 4(%eax)
+///   movl %ecx, (%eax)
+///   movl %edx, 4(%eax)
+/// ```
+///
+/// [`stores`] cannot take either half. Between the load of the low word and its store there is the
+/// load of the high word, which touches memory, and the `adc`, which reads the carry the add would
+/// take with it to where the store is.
+///
+/// The two stores become the two instructions, in their order, so the add still sets the carry
+/// straight in front of the `adc` that reads it. That needs the low store first and the high store
+/// straight behind it, and nothing between the `adc` and the low store that reads or writes the
+/// condition state. The four accesses happen in another order after this: the low word is read and
+/// written before the high word is read. That is the same program only if the two words are not the
+/// same bytes, so the high store has to name the place one half above the low one.
+///
+/// `pending` is kept the way [`stores`] keeps it. Each store is still waiting on its entry and the
+/// load beside it names the same place, so the loads' entries are taken off.
+pub fn pairs(
+    func: &mut Func,
+    machine: &MachineInsts,
+    flags: &FlagInsts,
+    names: &mut Interner,
+    pending: &mut Pending<'_>,
+) -> usize {
+    let mut reads = Reads::of(func);
+    let mut done = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for high in 1..insts.len() {
+            let Some((low, top)) = pair(func, &reads, machine, flags, names, &insts, high) else {
+                continue;
+            };
+            let loads = (insts[low.load], insts[top.load]);
+            let stored = (insts[low.store], insts[top.store]);
+            if !pending.alike(loads.0, stored.0)
+                || !pending.alike(loads.1, stored.1)
+                || !pending.alike(stored.0, stored.1)
+            {
+                continue;
+            }
+            let mut set = Changes::new();
+            set.rewrite(stored.0, planned(func, machine, names, stored.0, &low));
+            set.rewrite(stored.1, planned(func, machine, names, stored.1, &top));
+            set.remove(insts[high]);
+            set.remove(insts[high - 1]);
+            set.remove(loads.1);
+            set.remove(loads.0);
+            if set.commit(func, &mut reads, names, machine).is_ok() {
+                pending.moved(loads.0, &[]);
+                pending.moved(loads.1, &[]);
+                done += 1;
+            }
+        }
+    }
+    done
+}
+
+/// The wide run whose high half is the instruction at that position, or `None`.
+///
+/// The low half is the instruction straight in front of it, which is where [`crate::carry`] puts
+/// the add whose carry the `adc` reads. Each half is then asked what [`run`] and [`constant`] ask
+/// of a run, and the two together are asked what keeps them one program.
+fn pair(
+    func: &Func,
+    reads: &Reads,
+    machine: &MachineInsts,
+    flags: &FlagInsts,
+    names: &Interner,
+    insts: &[Inst],
+    high: usize,
+) -> Option<(Half, Half)> {
+    let low = high.checked_sub(1)?;
+    let name = |at: usize| machine.bare(names.resolve(func[insts[at]].opcode.name()));
+    let (under, over) = (name(low), name(high));
+    let parts = |name: &str| {
+        let operation = name.split('_').next().unwrap_or_default().to_owned();
+        (operation, name.rsplit('_').next().unwrap_or_default().to_owned())
+    };
+    let ((operation, width), (carry, same)) = (parts(under), parts(over));
+    if !matches!((operation.as_str(), carry.as_str()), ("add", "adc") | ("sub", "sbb")) {
+        return None;
+    }
+    if width != same {
+        return None;
+    }
+    let bytes = match width.as_str() {
+        "32" => 4,
+        "64" => 8,
+        _ => return None,
+    };
+    let bottom = half(func, reads, machine, names, insts, low, (UPDATES, BUMPS))?;
+    let top = half(func, reads, machine, names, insts, high, (CARRIED_UPDATES, CARRIED_BUMPS))?;
+    if top.store != bottom.store + 1 {
+        return None;
+    }
+    if !places_apart(func, insts[bottom.store], insts[top.store], bytes) {
+        return None;
+    }
+    // The add moves down to where the low store is, so what it passes has to have no opinion about
+    // the condition state, for the reason [`quiet`] gives.
+    if !quiet(func, flags, names, insts, (high, bottom.store)) {
+        return None;
+    }
+    // The registers the two instructions left are reading, which nothing between the first load
+    // and the low store may write, and nothing there may touch memory except the run itself.
+    let run = [insts[bottom.load], insts[top.load], insts[low], insts[high]];
+    let address = |at: usize| func[func[insts[at]].operands][1..].to_vec();
+    let mut wanted: Vec<Reg> = address(bottom.store)
+        .iter()
+        .chain(&address(top.store))
+        .map(|operand| operand.reg)
+        .collect();
+    wanted.extend(bottom.kept.iter().chain(&top.kept).map(|operand| operand.reg));
+    let first = bottom.load.min(top.load);
+    let clear =
+        insts[first + 1..bottom.store].iter().filter(|inst| !run.contains(inst)).all(|&inst| {
+            let name = names.resolve(func[inst].opcode.name());
+            if machine.calls(name) || !machine.has(name) || machine.touches_mem(name) {
+                return false;
+            }
+            !func[func[inst].operands]
+                .iter()
+                .any(|operand| operand.role.is_def() && wanted.contains(&operand.reg))
+        });
+    clear.then_some((bottom, top))
+}
+
+/// One half of a wide run, found from its arithmetic at that position, or `None`.
+///
+/// Walked forwards to the store, since the arithmetic is where [`pair`] starts, and back to the
+/// load. The rows are [`UPDATES`] and [`BUMPS`] for the low half and [`CARRIED_UPDATES`] and
+/// [`CARRIED_BUMPS`] for the high one.
+fn half(
+    func: &Func,
+    reads: &Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    insts: &[Inst],
+    alu: usize,
+    rows: (&'static [Update], &'static [Bump]),
+) -> Option<Half> {
+    let inst = insts[alu];
+    let bare = machine.bare(names.resolve(func[inst].opcode.name()));
+    let operands = func[func[inst].operands].to_vec();
+    let answer = *operands.first()?;
+    if !answer.role.is_def() || reads.count(answer.reg) != 1 {
+        return None;
+    }
+    let last = insts.len().min(alu + WINDOW + 1);
+    let store = (alu + 1..last).find(|&k| {
+        func[func[insts[k]].operands]
+            .iter()
+            .any(|operand| !operand.role.is_def() && operand.reg == answer.reg)
+    })?;
+    let stored = func[func[insts[store]].operands].to_vec();
+    let value = *stored.first()?;
+    if insisted(func, insts[store]) || value.role.is_def() || value.reg != answer.reg {
+        return None;
+    }
+    let kind = machine.bare(names.resolve(func[insts[store]].opcode.name()));
+    let earliest = alu.saturating_sub(WINDOW);
+    let loaded = |source: Operand, by: &str| {
+        if reads.count(source.reg) != 1 {
+            return None;
+        }
+        let from = (earliest..alu).rev().find(|&k| writes(func, insts[k], source.reg))?;
+        let load = insts[from];
+        let right = machine.bare(names.resolve(func[load].opcode.name())) == by;
+        (right && !insisted(func, load) && same_place(func, load, insts[store])).then_some(from)
+    };
+    let (updates, bumps) = rows;
+    if let Some(update) = updates.iter().find(|row| row.from == bare && row.store == kind) {
+        let [_, first, second] = operands[..] else { return None };
+        let both = [(first, second), (second, first)];
+        let tried = if update.commutes { &both[..] } else { &both[..1] };
+        return tried.iter().find_map(|&(source, kept)| {
+            let load = loaded(source, update.load)?;
+            Some(Half { load, store, into: update.into, kept: Some(kept), imm: None })
+        });
+    }
+    let bump = bumps.iter().find(|row| row.from == bare && row.store == kind)?;
+    let [_, source] = operands[..] else { return None };
+    let imm = func[func[inst].imm?].0;
+    // The constant run's mode moves one place towards the front, see [`constant`].
+    let mem = func[func[insts[store]].mem?];
+    if mem.base == Some(0) || mem.index == Some(0) {
+        return None;
+    }
+    let load = loaded(source, bump.load)?;
+    Some(Half { load, store, into: bump.into, kept: None, imm: Some(imm) })
+}
+
+/// What the store of one half becomes, which is [`updated`] or [`bumped`] for that half.
+fn planned(
+    func: &Func,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    store: Inst,
+    half: &Half,
+) -> Plan {
+    let operands = func[func[store].operands].to_vec();
+    let opcode = Opcode::new(names.join(machine.prefix, half.into));
+    let mem = func[store].mem.map(|mem| func[mem]);
+    let symbol = func[store].symbol;
+    match half.kept {
+        Some(kept) => Plan {
+            opcode,
+            operands: [kept].into_iter().chain(operands[1..].iter().copied()).collect(),
+            imm: None,
+            amode: mem,
+            symbol,
+        },
+        None => {
+            let back = |at: Option<u8>| at.map(|at| at - 1);
+            Plan {
+                opcode,
+                operands: operands[1..].to_vec(),
+                imm: half.imm,
+                amode: mem.map(|mem| Amode { base: back(mem.base), index: back(mem.index), ..mem }),
+                symbol,
+            }
+        }
+    }
+}
+
 /// Whether the program insisted on this access happening exactly as it is written.
 ///
 /// Which is `volatile`, and is the one question in this module that is not about what the
@@ -1452,13 +1750,22 @@ fn writes(func: &Func, inst: Inst, reg: Reg) -> bool {
 /// the positions line up, and the registers are compared anyway rather than the positions, because
 /// what makes two addresses one place is which registers they read.
 fn same_place(func: &Func, one: Inst, other: Inst) -> bool {
+    places_apart(func, one, other, 0)
+}
+
+/// Whether the second instruction names the place that many bytes above the place the first names.
+///
+/// [`same_place`] with the displacements that far apart, which is how [`pairs`] knows the high
+/// half of a wide value is not the low half's bytes.
+fn places_apart(func: &Func, one: Inst, other: Inst, gap: i32) -> bool {
     let (Some(here), Some(there)) = (func[one].mem, func[other].mem) else { return false };
     let (here, there) = (func[here], func[there]);
     if func[one].symbol != func[other].symbol {
         return false;
     }
+    let Some(disp) = here.disp.checked_add(gap) else { return false };
     let bare = |amode: Amode| Amode { base: None, index: None, ..amode };
-    if bare(here) != bare(there) {
+    if bare(Amode { disp, ..here }) != bare(there) {
         return false;
     }
     let same = |left: Option<u8>, right: Option<u8>| match (left, right) {
@@ -1812,6 +2119,145 @@ mod tests {
         let mut pending =
             Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
         stores(func, &MACHINE, &FLAGS, names, &mut pending)
+    }
+
+    /// A load of a word at that displacement off that base.
+    fn word_at(
+        func: &mut Func,
+        names: &mut Interner,
+        block: mir::Block,
+        base: Reg,
+        disp: i32,
+    ) -> Reg {
+        let into = func.new_vreg(GPR);
+        let mov = op(names, "mov_rm_32");
+        func.build(block, mov)
+            .def(into, GPR)
+            .mem(Mem { disp, ..Mem::at(Operand::read(base, GPR)) })
+            .finish();
+        into
+    }
+
+    /// A store of a word at that displacement off that base.
+    fn put_at(
+        func: &mut Func,
+        names: &mut Interner,
+        block: mir::Block,
+        base: Reg,
+        disp: i32,
+        value: Reg,
+    ) {
+        let mov = op(names, "mov_mr_32");
+        func.build(block, mov)
+            .uses(value, GPR)
+            .mem(Mem { disp, ..Mem::at(Operand::read(base, GPR)) })
+            .finish();
+    }
+
+    /// The pair walk, with lists nothing is on.
+    fn paired(func: &mut Func, names: &mut Interner) -> usize {
+        let mut addresses = Vec::new();
+        let mut arguments = Vec::new();
+        let mut dynamic = Vec::new();
+        let mut pending =
+            Pending { addresses: &mut addresses, arguments: &mut arguments, dynamic: &mut dynamic };
+        pairs(func, &MACHINE, &FLAGS, names, &mut pending)
+    }
+
+    /// `*p += x` on a `long long` on i386, with the high word of `x` a register.
+    #[test]
+    fn a_wide_value_read_changed_and_written_back_becomes_two_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let (low, high) = (func.new_vreg(GPR), func.new_vreg(GPR));
+        let under = word_at(&mut func, &mut names, block, base, 8);
+        let over = word_at(&mut func, &mut names, block, base, 12);
+        let sum = alu(&mut func, &mut names, block, "add_rr_32", under, low);
+        let carried = alu(&mut func, &mut names, block, "adc_rr_32", over, high);
+        put_at(&mut func, &mut names, block, base, 8, sum);
+        put_at(&mut func, &mut names, block, base, 12, carried);
+
+        assert_eq!(paired(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.add_mr_32", "x64.adc_mr_32"]);
+        let insts: Vec<Inst> = func.insts(block).collect();
+        let disp = |inst: Inst| func[func[inst].mem.expect("it writes memory")].disp;
+        assert_eq!((disp(insts[0]), disp(insts[1])), (8, 12), "each half where its store was");
+        assert_eq!(func[func[insts[0]].operands][0].reg, low, "the low word it adds");
+        assert_eq!(func[func[insts[1]].operands][0].reg, high, "the high word it adds");
+    }
+
+    /// `*p += n` with `n` a word, whose high half is the carry and a constant zero.
+    #[test]
+    fn a_word_added_to_a_wide_value_in_place_is_an_add_and_an_add_of_the_carry() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let word = func.new_vreg(GPR);
+        let under = word_at(&mut func, &mut names, block, base, 0);
+        let over = word_at(&mut func, &mut names, block, base, 4);
+        let sum = alu(&mut func, &mut names, block, "add_rr_32", word, under);
+        let carried = alu_imm(&mut func, &mut names, block, "adc_ri_32", over, 0);
+        put_at(&mut func, &mut names, block, base, 0, sum);
+        put_at(&mut func, &mut names, block, base, 4, carried);
+
+        assert_eq!(paired(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["x64.add_mr_32", "x64.adc_mi_32"]);
+        let high = func.insts(block).nth(1).expect("the high half");
+        assert_eq!(func[func[high].imm.expect("the constant")].0, 0);
+        assert_eq!(func[func[high].mem.expect("it writes memory")].base, Some(0));
+    }
+
+    /// Two halves that are the same bytes. Read both and write both is not read, write, read and
+    /// write, so the run stays six instructions.
+    #[test]
+    fn a_wide_run_whose_halves_are_the_same_place_stays_six_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let (low, high) = (func.new_vreg(GPR), func.new_vreg(GPR));
+        let under = word_at(&mut func, &mut names, block, base, 0);
+        let over = word_at(&mut func, &mut names, block, base, 0);
+        let sum = alu(&mut func, &mut names, block, "add_rr_32", under, low);
+        let carried = alu(&mut func, &mut names, block, "adc_rr_32", over, high);
+        put_at(&mut func, &mut names, block, base, 0, sum);
+        put_at(&mut func, &mut names, block, base, 0, carried);
+
+        assert_eq!(paired(&mut func, &mut names), 0);
+        assert_eq!(func.insts(block).count(), 6);
+    }
+
+    /// The high store in front of the low one. The add would come after the `adc` that reads its
+    /// carry, so the run stays six instructions.
+    #[test]
+    fn a_wide_run_that_stores_the_high_half_first_stays_six_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let (low, high) = (func.new_vreg(GPR), func.new_vreg(GPR));
+        let under = word_at(&mut func, &mut names, block, base, 0);
+        let over = word_at(&mut func, &mut names, block, base, 4);
+        let sum = alu(&mut func, &mut names, block, "sub_rr_32", under, low);
+        let carried = alu(&mut func, &mut names, block, "sbb_rr_32", over, high);
+        put_at(&mut func, &mut names, block, base, 4, carried);
+        put_at(&mut func, &mut names, block, base, 0, sum);
+
+        assert_eq!(paired(&mut func, &mut names), 0);
+        assert_eq!(func.insts(block).count(), 6);
+    }
+
+    /// A subtract whose loaded word is the right source, which is register minus memory and has no
+    /// instruction that leaves the answer in memory.
+    #[test]
+    fn a_wide_subtraction_taking_memory_away_from_a_register_stays_six_instructions() {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let (low, high) = (func.new_vreg(GPR), func.new_vreg(GPR));
+        let under = word_at(&mut func, &mut names, block, base, 0);
+        let over = word_at(&mut func, &mut names, block, base, 4);
+        let sum = alu(&mut func, &mut names, block, "sub_rr_32", low, under);
+        let carried = alu(&mut func, &mut names, block, "sbb_rr_32", high, over);
+        put_at(&mut func, &mut names, block, base, 0, sum);
+        put_at(&mut func, &mut names, block, base, 4, carried);
+
+        assert_eq!(paired(&mut func, &mut names), 0);
+        assert_eq!(func.insts(block).count(), 6);
     }
 
     /// The shape the second walk is for, which is what `*p += x` is.

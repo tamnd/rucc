@@ -227,3 +227,29 @@ fn a_copy_between_two_slots_that_are_never_wanted_at_once_comes_out() {
     let copies = slot_copies(&lookup);
     assert!(copies <= 13, "{copies} copies from slot to slot:\n{text}");
 }
+
+/// A file offset moved on in place, as each read of libsa does with `fp->f_seekp += n`. gcc adds
+/// into the two words where they are, with an `adcl` for the high word, and rucc read both words,
+/// added them in registers and wrote both back.
+const SEEK: &str = "\
+typedef long long off_t;
+struct file { off_t f_seekp; unsigned int f_buf_size; };
+void moved(struct file *fp, unsigned int n) { fp->f_seekp += n; }
+void back(struct file *fp, off_t d) { fp->f_seekp -= d; }
+";
+
+#[test]
+fn a_wide_value_changed_in_place_is_changed_where_it_is() {
+    let text = listing("seek", SEEK, &[]);
+    let moved = body(&text, "moved");
+    assert!(moved.iter().any(|line| line.starts_with("addl") && line.ends_with(")")), "{text}");
+    assert!(moved.iter().any(|line| line.starts_with("adcl") && line.ends_with(")")), "{text}");
+    let back = body(&text, "back");
+    assert!(back.iter().any(|line| line.starts_with("subl") && line.ends_with(")")), "{text}");
+    assert!(back.iter().any(|line| line.starts_with("sbbl") && line.ends_with(")")), "{text}");
+    for lines in [&moved, &back] {
+        let stores =
+            lines.iter().filter(|line| line.starts_with("movl\t%") && line.ends_with(")")).count();
+        assert_eq!(stores, 0, "no word is stored back from a register:\n{text}");
+    }
+}

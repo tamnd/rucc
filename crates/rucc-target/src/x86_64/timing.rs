@@ -145,11 +145,11 @@ fn plain(form: Form) -> Timing {
         // and a store. The store is the scarce part, the way the load is the scarce part above,
         // and the latency is not a number anything waits on for the reason a store's is not:
         // nothing in a register is waiting for it.
-        AluMr => (1 + LOAD, Unit::Store),
+        AluMr | AluCarryMr => (1 + LOAD, Unit::Store),
         // The same again with the other source a constant, which costs what the register form
         // costs. Where the second source came from is not something the machine spends a cycle on
         // once the address is known, and a constant is on the instruction.
-        AluMi => (1 + LOAD, Unit::Store),
+        AluMi | AluCarryMi => (1 + LOAD, Unit::Store),
         // The same with no second source at all, which costs what the one with a constant costs,
         // for the reason that one costs what the register form does.
         UnaryM => (1 + LOAD, Unit::Store),

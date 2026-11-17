@@ -43,17 +43,18 @@ use crate::operand::{Constraint, OperandDesc};
 use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 
 use Form::{
-    Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
-    ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi,
-    CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpSetX87Status,
-    CmpSetX87StatusBoth, CmpXchg, CmpXchgFlags, Convert, ConvertFromVec, ConvertToVec, ConvertVec,
-    CpuId, CtrlX87, DivQuo, DivRem, DivWide, EhReturn, Exchange, FusedVec, Jcc, Jmp, JmpAway,
-    JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulRi,
-    MulWide, Nop, Pop, PopX87, Prefetch, Push, PushImm, PushX87, Ret, RetPop, RetVal, RetVal2,
-    RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble, ShiftDoubleCl, ShiftRi,
-    ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad,
-    StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template,
-    Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    Align, AluCarry, AluCarryI, AluCarryMi, AluCarryMr, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec,
+    ArgVal, ArgValVec, ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm,
+    CmpSet, CmpSetMi, CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both,
+    CmpSetX87Status, CmpSetX87StatusBoth, CmpXchg, CmpXchgFlags, Convert, ConvertFromVec,
+    ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, EhReturn, Exchange,
+    FusedVec, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec,
+    Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushImm, PushX87,
+    Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl,
+    ShiftDouble, ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
+    StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore,
+    StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR,
+    UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -160,6 +161,25 @@ pub enum Form {
     /// rather than having a form to itself: what a probe wants out of it is the write and not the
     /// value, and the machine does not know the difference.
     AluMi,
+    /// The add with carry and the subtract with borrow working on memory rather than on a
+    /// register.
+    ///
+    /// [`Form::AluMr`] with the condition state read the way [`Form::AluCarry`] reads it. A
+    /// `long long` added into its place on i386 is an add of the low words into memory and then
+    /// this, the high words with the carry of the first, which is what gcc writes for `*p += x`.
+    /// It is a form of its own for the reason [`Form::AluCarry`] is one: the list of what reads the
+    /// state is taken off the forms, so an instruction that reads the carry has to be findable by
+    /// its form.
+    ///
+    /// No lowering rule produces one. `rucc_codegen::combine` writes it out of the two loads, the
+    /// two arithmetic instructions and the two stores of a wide value read, changed and written
+    /// back.
+    AluCarryMr,
+    /// The same instruction as [`Form::AluCarryMr`] with a constant where its register source is.
+    ///
+    /// `adcl $0, 4(%eax)`, which is the high word of a `long long` that had a word added to it
+    /// and nothing else. The operand vector is [`Form::AluMi`]'s, which is empty.
+    AluCarryMi,
     /// Two-address arithmetic on one register, which is negation and complement.
     UnaryR,
     /// The same instruction as [`Form::UnaryR`] working on memory rather than on a register.
@@ -1369,8 +1389,8 @@ impl Form {
             DivWide => &DIV_WIDE,
             Lea => &ADDRESS,
             Load => &LOAD,
-            AluMr | Store => &STORE,
-            AluMi | UnaryM | StoreImm => &ALU_MI,
+            AluMr | AluCarryMr | Store => &STORE,
+            AluMi | AluCarryMi | UnaryM | StoreImm => &ALU_MI,
             RetVal => &RET_VAL,
             RetVal2 => &RET_VAL_2,
             EhReturn => &EH_RETURN,
@@ -1425,6 +1445,7 @@ impl Form {
                 | AluRi
                 | MulRi
                 | AluCarryI
+                | AluCarryMi
                 | AluMi
                 | ShiftRi
                 | ShiftDouble
@@ -1450,6 +1471,8 @@ impl Form {
                 | AluRm
                 | AluMr
                 | AluMi
+                | AluCarryMr
+                | AluCarryMi
                 | UnaryM
                 | CmpSetRm
                 | CmpRm
@@ -1498,6 +1521,8 @@ impl Form {
             Load | AluRm
                 | AluMr
                 | AluMi
+                | AluCarryMr
+                | AluCarryMi
                 | UnaryM
                 | CmpSetRm
                 | CmpRm
@@ -1635,6 +1660,16 @@ pub static INSTS: &[(&str, Form)] = &[
     ("sbb_ri_16", AluCarryI),
     ("sbb_ri_32", AluCarryI),
     ("sbb_ri_64", AluCarryI),
+    // The same two working on memory, at the two widths a wide value is made of halves of: the
+    // words of a `long long` on i386 and the quads of an `__int128` on x86-64.
+    ("adc_mr_32", AluCarryMr),
+    ("adc_mr_64", AluCarryMr),
+    ("sbb_mr_32", AluCarryMr),
+    ("sbb_mr_64", AluCarryMr),
+    ("adc_mi_32", AluCarryMi),
+    ("adc_mi_64", AluCarryMi),
+    ("sbb_mi_32", AluCarryMi),
+    ("sbb_mi_64", AluCarryMi),
     ("and_rr_8", AluRr),
     ("and_rr_16", AluRr),
     ("and_rr_32", AluRr),
@@ -2838,7 +2873,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 843);
+        assert_eq!(described, 851);
     }
 
     #[test]
@@ -2878,6 +2913,7 @@ mod tests {
                         form,
                         Store
                             | AluMr
+                            | AluCarryMr
                             | RetVal
                             | RetVal2
                             | RetValVec
@@ -2908,6 +2944,7 @@ mod tests {
                             | ArithX87
                             | UnaryX87
                             | AluMi
+                            | AluCarryMi
                             | UnaryM
                             | StoreImm
                             | Landing
@@ -3100,6 +3137,7 @@ mod tests {
                             | PushImm
                             | Barrier
                             | AluMi
+                            | AluCarryMi
                             | UnaryM
                             | StoreImm
                             | CmpMi

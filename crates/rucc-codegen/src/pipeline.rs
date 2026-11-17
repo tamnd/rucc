@@ -1217,6 +1217,9 @@ pub fn compile_recording(
     // The run that reads a place, computes on it and writes it back goes first, because it is three
     // instructions the selector wrote and taking the load out of the middle one first would leave
     // the same run written a second way.
+    // The two halves of a wide value read, changed and written back go before that, because each
+    // half is a run of its own that the walk below cannot take while the other half is in the way.
+    combine::pairs(&mut func, machine.shapes, machine.flags, names, &mut pending);
     combine::stores(&mut func, machine.shapes, machine.flags, names, &mut pending);
     combine::loads(&mut func, machine.shapes, names, &mut pending);
     // Those two can leave the address of a name with a reader that reads and writes memory, as
