@@ -2679,7 +2679,18 @@ fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
     if forward.is_empty() {
         return;
     }
-    let with = |value: Value| forward.get(&value).copied().unwrap_or(value);
+    // A value can be sent on to one that is itself sent on, as the truncation of a widened
+    // parameter is sent to the parameter and the parameter to the one made again in its place, so
+    // each value goes to the end of its chain and not one step along it.
+    let with = |mut value: Value| {
+        for _ in 0..=forward.len() {
+            match forward.get(&value) {
+                Some(&next) if next != value => value = next,
+                _ => break,
+            }
+        }
+        value
+    };
     for block in func.blocks().collect::<Vec<_>>() {
         for inst in func.insts(block).collect::<Vec<Inst>>() {
             let args = func[inst].args;
@@ -3777,6 +3788,26 @@ mod tests {
             [Type::int(32), Type::int(32)],
             "two halves come back"
         );
+    }
+
+    /// The narrow parameter is made again because the wide one beside it is split, and the
+    /// truncation of its widened copy is that parameter, so what reads the truncation reads the
+    /// parameter made again and not the one that was taken away.
+    #[test]
+    fn at_thirty_two_bits_a_truncated_widening_of_a_parameter_is_the_new_parameter() {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let (mut func, entry, params) = shell(&mut names, &[long(), int], &[int]);
+        let mut build = Builder::new(&mut func, entry);
+        let widened = build.unary(Opcode::ZExt, params[1], long());
+        let back = build.unary(Opcode::Trunc, widened, int);
+        build.ret(&[back]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("%?"), "every value read is defined: {text}");
+        assert!(text.contains("block0(%0: i32, %1: i32, %2: i32)"), "three words: {text}");
+        assert!(text.contains("return %2"), "the narrow parameter comes back: {text}");
     }
 
     #[test]
