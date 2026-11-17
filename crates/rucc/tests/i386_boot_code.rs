@@ -261,6 +261,23 @@ fn minus_one_is_an_or_into_the_register_at_os() {
     assert!(fail.contains(&"movl\t$-1, %eax"), "the move reads nothing at -O2\n{text}");
 }
 
+/// The high word of a `long long` that nothing reads, as each accessor of `lfs_accessors.h` in the
+/// NetBSD `bootxx_lfsv2` has. The load of that word goes, and a `volatile` one stays.
+const HIGH: &str = "\
+struct s { char pad[0xc0]; unsigned long long m; };
+unsigned low(struct s *p, unsigned x) { return x & p->m; }
+unsigned kept(volatile struct s *p, unsigned x) { return x & p->m; }
+";
+
+#[test]
+fn a_high_word_that_nothing_reads_is_not_loaded_at_os() {
+    let text = listing_of(HIGH, "high-os", &[]);
+    let low = body(&text, "low");
+    assert!(!low.iter().any(|line| line.contains("196(")), "nothing reads the high word\n{text}");
+    let kept = body(&text, "kept");
+    assert!(kept.iter().any(|line| line.contains("196(")), "a volatile load stays\n{text}");
+}
+
 /// A local in the frame across a call whose arguments are pushed, which is a frame with more in it
 /// than the outgoing area and a local a debugger finds from the call frame address.
 const LOCAL: &str = "\
