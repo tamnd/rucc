@@ -137,7 +137,7 @@ use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::live::{Area, Live, Range};
 use rucc_regalloc::order::{Order, Point};
-use rucc_regalloc::rewrite::At;
+use rucc_regalloc::rewrite::{At, Edit};
 use rucc_target::FrameInsts;
 
 use crate::frame::Local;
@@ -168,6 +168,12 @@ pub struct Slots {
     slots: Vec<usize>,
     /// Where each local that went in beside something else is wanted, and `None` for the rest.
     shared: Vec<Option<Vec<Range>>>,
+    /// The first of the two moves of each copy from one slot into another that [`Slots::share`]
+    /// put in one cell, which makes the copy one that moves nothing.
+    joined: Vec<usize>,
+    /// The slot whose number each slot's moves go by, which for a slot a copy joined to another is
+    /// the first slot of its cell, and for every other slot is itself.
+    named: Vec<u32>,
 }
 
 impl Slots {
@@ -191,6 +197,8 @@ impl Slots {
             slots: (locals.len()..cells.len()).collect(),
             shared: vec![None; locals.len()],
             cells,
+            joined: Vec::new(),
+            named: Vec::new(),
         }
     }
 
@@ -221,6 +229,7 @@ impl Slots {
         }
         let held = spilled(allocation, widths.len());
         let moved = moved(allocation, widths.len());
+        let Copied { joined, follows } = copied(allocation, &held, &moved, widths);
         for (slot, &width) in widths.iter().enumerate() {
             // A slot no value lives in is one only the moves touch: a value in a register put
             // away around a call, or a register the legalizer borrowed. Where those moves are is
@@ -229,13 +238,64 @@ impl Slots {
                 Some(reg) => allocation
                     .live
                     .area(reg)
-                    .map(|live| merged(live.pieces().chain(moved[slot].iter().copied()))),
-                None if !moved[slot].is_empty() => Some(merged(moved[slot].iter().copied())),
+                    .map(|live| merged(live.pieces().chain(moved[slot].iter().map(|&(_, r)| r)))),
+                None if !moved[slot].is_empty() => {
+                    Some(merged(moved[slot].iter().map(|&(_, range)| range)))
+                }
                 None => None,
             };
             wants.push(Want { what: What::Slot(slot), size: width, align: width, area });
         }
-        fit(wants, locals.len(), widths.len(), BUDGET)
+        // The slots that copies join go in as one want, with the area of all of them, so the cell
+        // is the first that suits them all.
+        for &(first, then) in &follows {
+            let area = wants[locals.len() + then].area.take();
+            let all = &mut wants[locals.len() + first];
+            all.area = all.area.take().zip(area).map(|(one, two)| union(&one, &two));
+        }
+        let mut slots = fit(wants, locals.len(), widths.len(), BUDGET, &follows);
+        slots.joined = joined;
+        slots.named = (0..widths.len()).filter_map(|slot| u32::try_from(slot).ok()).collect();
+        for &(first, then) in &follows {
+            if let (Ok(first), Some(named)) = (u32::try_from(first), slots.named.get_mut(then)) {
+                *named = first;
+            }
+        }
+        slots
+    }
+
+    /// The moves of the function with the copies that [`Slots::share`] made into ones that move
+    /// nothing taken out, and with every slot a copy joined to another named by the first slot of
+    /// its cell.
+    ///
+    /// Such a copy loads a word from a cell into a register and stores it back into the same cell.
+    /// The register was free at that point, which is why the allocator took it, so nothing reads
+    /// what the load put in it. The slots get one name because [`crate::copies::clean`] knows what
+    /// a slot holds by its number, and two numbers for one cell would have it believe a word is
+    /// still in one of them after a store through the other.
+    #[must_use]
+    pub fn unmoved(&self, edits: Vec<Edit>) -> Vec<Edit> {
+        if self.joined.is_empty() {
+            return edits;
+        }
+        let gone: Set<usize> = self.joined.iter().flat_map(|&first| [first, first + 1]).collect();
+        let name = |place: Place| match place {
+            Place::Slot(slot) => {
+                let named = usize::try_from(slot).ok().and_then(|slot| self.named.get(slot));
+                Place::Slot(named.copied().unwrap_or(slot))
+            }
+            Place::Reg(_) => place,
+        };
+        edits
+            .into_iter()
+            .enumerate()
+            .filter(|(at, _)| !gone.contains(at))
+            .map(|(_, mut edit)| {
+                edit.mov.to = name(edit.mov.to);
+                edit.mov.from = name(edit.mov.from);
+                edit
+            })
+            .collect()
     }
 
     /// The cells the frame is made of, which is what [`crate::frame`] places.
@@ -283,8 +343,14 @@ impl Slots {
     /// store as one of a word the slot still holds.
     #[must_use]
     pub fn crowded(&self) -> Set<u32> {
+        // A slot that goes by the name of another is the same slot here.
+        let named = |slot: usize| {
+            self.named.get(slot).is_none_or(|&named| usize::try_from(named).ok() == Some(slot))
+        };
         let mut count = vec![0_usize; self.cells.len()];
-        for &cell in self.locals.iter().chain(&self.slots) {
+        let own =
+            self.slots.iter().enumerate().filter(|&(slot, _)| named(slot)).map(|(_, cell)| cell);
+        for &cell in self.locals.iter().chain(own) {
             count[cell] += 1;
         }
         self.slots
@@ -334,8 +400,18 @@ enum What {
 /// What `budget` is is comparisons of one thing against one cell, which is what costs. Past that
 /// everything left opens a cell of its own, which is the layout a frame had before this pass
 /// existed, and the wants are in a settled order so which ones those are is settled too.
-fn fit(mut wants: Vec<Want>, locals: usize, slots: usize, mut budget: usize) -> Slots {
-    let mut order: Vec<usize> = (0..wants.len()).collect();
+///
+/// Each of `follows` is two slots, and the second goes in the cell of the first. Its want has no
+/// area, since the first one's has the area of both.
+fn fit(
+    mut wants: Vec<Want>,
+    locals: usize,
+    slots: usize,
+    mut budget: usize,
+    follows: &[(usize, usize)],
+) -> Slots {
+    let after: Set<usize> = follows.iter().map(|&(_, to)| locals + to).collect();
+    let mut order: Vec<usize> = (0..wants.len()).filter(|want| !after.contains(want)).collect();
     order.sort_by_key(|&want| {
         let Want { size, align, .. } = wants[want];
         (Reverse(align), Reverse(size), want)
@@ -396,12 +472,17 @@ fn fit(mut wants: Vec<Want>, locals: usize, slots: usize, mut budget: usize) -> 
         }
         held[cell] += 1;
     }
+    for &(from, to) in follows {
+        let cell = of_slot[from];
+        of_slot[to] = cell;
+        held[cell] += 1;
+    }
     let shared = areas
         .into_iter()
         .zip(&of_local)
         .map(|(area, &cell)| area.filter(|_| held[cell] > 1))
         .collect();
-    Slots { cells, locals: of_local, slots: of_slot, shared }
+    Slots { cells, locals: of_local, slots: of_slot, shared, joined: Vec::new(), named: Vec::new() }
 }
 
 /// Which value the allocator put in each spill slot, by slot number.
@@ -1142,27 +1223,177 @@ fn crossing(func: &Func) -> Set<Reg> {
 ///
 /// A point either side of where each of them stands, which is the gap between two points the move
 /// really goes in. See the note on the moves in the module documentation.
-fn moved(allocation: &Allocation, slots: usize) -> Vec<Vec<Range>> {
+///
+/// Each range comes with the index of the move it is for, which is what [`copied`] asks.
+fn moved(allocation: &Allocation, slots: usize) -> Vec<Vec<(usize, Range)>> {
     let order = &allocation.order;
     let mut moved = vec![Vec::new(); slots];
-    for edit in &allocation.edits {
-        let at = match edit.at {
-            At::Before(inst) => order.early(inst),
-            At::After(inst) => order.late(inst),
-            At::StartOf(block) => order.start(block),
-            At::EndOf(block) => order.end(block),
-        };
+    for (index, edit) in allocation.edits.iter().enumerate() {
+        let at = point(order, edit.at);
         let around =
             Range { start: at.saturating_sub(1), end: at.saturating_add(1).min(order.points()) };
         for place in [edit.mov.to, edit.mov.from] {
             if let Place::Slot(slot) = place {
                 if let Some(at) = usize::try_from(slot).ok().and_then(|slot| moved.get_mut(slot)) {
-                    at.push(around);
+                    at.push((index, around));
                 }
             }
         }
     }
     moved
+}
+
+/// The point an edit stands at.
+fn point(order: &Order, at: At) -> Point {
+    match at {
+        At::Before(inst) => order.early(inst),
+        At::After(inst) => order.late(inst),
+        At::StartOf(block) => order.start(block),
+        At::EndOf(block) => order.end(block),
+    }
+}
+
+/// The copies from one spill slot into another that [`copied`] makes into nothing, and the slots
+/// that go in one cell for it.
+struct Copied {
+    /// The index of the first of the two moves of each copy.
+    joined: Vec<usize>,
+    /// Pairs of slots, the second of which goes in the cell of the first.
+    follows: Vec<(usize, usize)>,
+}
+
+/// The most slots one cell takes this way, which keeps what one join costs small.
+const JOINED: usize = 32;
+
+/// The copies from one spill slot into another that can be made into nothing by putting the two
+/// slots in one cell.
+///
+/// The allocator writes such a copy as a load of the first slot into a free register and a store
+/// of that register into the second, which is two moves at one point. On i386 that is most often a
+/// value that goes round a loop and was spilled on both sides of the edge, and gcc keeps such a
+/// value in one place.
+///
+/// The slots are put in groups. A copy joins the group of its first slot to the group of its second
+/// where the two slots are of one width, each holds one value, nothing else reads the register
+/// before it is written again, and no slot of one group is wanted where a slot of the other is.
+/// The slot copied from is wanted up to the copy and the slot copied into from it on, so the two
+/// sides of a copy do not clash with each other. A copy inside one group stays as it is.
+fn copied(
+    allocation: &Allocation,
+    held: &[Option<Reg>],
+    moved: &[Vec<(usize, Range)>],
+    widths: &[u32],
+) -> Copied {
+    let edits = &allocation.edits;
+    let order = &allocation.order;
+    let mut at: Map<Point, Vec<usize>> = Map::default();
+    for (index, edit) in edits.iter().enumerate() {
+        at.entry(point(order, edit.at)).or_default().push(index);
+    }
+    let slot = |place: Place| match place {
+        Place::Slot(slot) => usize::try_from(slot).ok().filter(|&slot| slot < widths.len()),
+        Place::Reg(_) => None,
+    };
+    // The gap each move really goes in, which is narrower than the one [`moved`] gives it. A move
+    // in front of an instruction goes after the point before it, and every other move goes after
+    // its own point: an edge reads what leaves a block at the block's end and a store follows the
+    // instruction that wrote the value.
+    let end = order.points();
+    let gaps: Vec<Range> = edits
+        .iter()
+        .map(|edit| {
+            let at = point(order, edit.at);
+            match edit.at {
+                At::Before(_) => Range { start: at.saturating_sub(1), end: at },
+                _ => Range { start: at, end: at.saturating_add(1).min(end) },
+            }
+        })
+        .collect();
+    let lives: Vec<Option<Area<'_>>> =
+        held.iter().map(|reg| reg.and_then(|reg| allocation.live.area(reg))).collect();
+    // Each group is a list of slots, and `group` says which list a slot is in.
+    let mut group: Vec<usize> = (0..widths.len()).collect();
+    let mut groups: Vec<Vec<usize>> = (0..widths.len()).map(|slot| vec![slot]).collect();
+    // The half of the area round each move of a joined copy that its slot wants.
+    let mut halves: Map<usize, Range> = Map::default();
+    let mut joined = Vec::new();
+    let area = |members: &[usize], halves: &Map<usize, Range>| {
+        let mut pieces = Vec::new();
+        for &member in members {
+            pieces.extend(lives[member].into_iter().flat_map(Area::pieces));
+            pieces.extend(
+                moved[member].iter().map(|&(index, _)| *halves.get(&index).unwrap_or(&gaps[index])),
+            );
+        }
+        merged(pieces)
+    };
+    // Round again while a pass joins something, since a copy can clash only with another copy that
+    // a later one in the list takes out.
+    let mut joining = true;
+    while joining {
+        joining = false;
+        for first in 0..edits.len().saturating_sub(1) {
+            let (load, store) = (&edits[first], &edits[first + 1]);
+            let Place::Reg(through) = load.mov.to else { continue };
+            if store.mov.from != Place::Reg(through)
+                || load.at != store.at
+                || load.class != store.class
+            {
+                continue;
+            }
+            let (Some(from), Some(to)) = (slot(load.mov.from), slot(store.mov.to)) else {
+                continue;
+            };
+            if widths[from] != widths[to] || lives[from].is_none() || lives[to].is_none() {
+                continue;
+            }
+            let (one, two) = (group[from], group[to]);
+            if one == two || groups[one].len() + groups[two].len() > JOINED {
+                continue;
+            }
+            // Nothing reads the register after the copy until something writes it again. A move at
+            // the same point but another place in the order of edits is not known to come after, so
+            // it may not read the register at all.
+            let here = point(order, load.at);
+            let mut written = false;
+            let mut unread = true;
+            for &other in at.get(&here).into_iter().flatten() {
+                let edit = &edits[other];
+                let read = edit.mov.from == Place::Reg(through);
+                if edit.at != load.at {
+                    unread &= !read;
+                } else if other > first + 1 {
+                    unread &= written || !read;
+                    written |= edit.mov.to == Place::Reg(through);
+                }
+            }
+            if !unread {
+                continue;
+            }
+            let after = here.saturating_add(1).min(end);
+            halves.insert(first, Range { start: here.saturating_sub(1), end: here });
+            halves.insert(first + 1, Range { start: after, end: after });
+            if clashes(&area(&groups[one], &halves), &area(&groups[two], &halves)) {
+                halves.remove(&first);
+                halves.remove(&(first + 1));
+                continue;
+            }
+            let gone = std::mem::take(&mut groups[two]);
+            for &member in &gone {
+                group[member] = one;
+            }
+            groups[one].extend(gone);
+            joined.push(first);
+            joining = true;
+        }
+    }
+    let mut follows = Vec::new();
+    for members in &groups {
+        if let Some((&first, rest)) = members.split_first() {
+            follows.extend(rest.iter().map(|&then| (first, then)));
+        }
+    }
+    Copied { joined, follows }
 }
 
 /// The same stretches of the function, in order, with everything that touches joined up.
@@ -1767,10 +1998,10 @@ mod tests {
         // Three that are never both wanted, which is one run of bytes for the three of them when
         // there is anything to spend on finding that out.
         let three = || vec![slot(0, 0, 10), slot(1, 20, 30), slot(2, 40, 50)];
-        assert_eq!(fit(three(), 0, 3, BUDGET).cells().len(), 1);
+        assert_eq!(fit(three(), 0, 3, BUDGET, &[]).cells().len(), 1);
         // One comparison puts the second beside the first and leaves nothing for the third.
-        assert_eq!(fit(three(), 0, 3, 1).cells().len(), 2);
-        assert_eq!(fit(three(), 0, 3, 0).cells().len(), 3);
+        assert_eq!(fit(three(), 0, 3, 1, &[]).cells().len(), 2);
+        assert_eq!(fit(three(), 0, 3, 0, &[]).cells().len(), 3);
     }
 
     #[test]
