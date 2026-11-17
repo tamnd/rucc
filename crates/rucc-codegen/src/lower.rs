@@ -2195,14 +2195,29 @@ impl<'a> Lowering<'a> {
 
     /// Writes down what was built for an IR instruction since `before`, when the instruction has
     /// no effects and all of it went into the block it started in. See [`Self::unread`].
+    ///
+    /// A load counts when it is a plain one. A `volatile` load or one through a segment is an
+    /// access the program asked for, and so is the canary's, and the unwind table covers one that
+    /// can fault to a landing pad. The high word of a `long long` on i386 is the common case of a
+    /// plain one that nothing reads: [`crate::wide`] loads both words, and an `and` with a 32 bit
+    /// value reads the low one only. Each accessor of `lfs_accessors.h` in the NetBSD
+    /// `bootxx_lfsv2` loaded a high word that nothing read. Each instruction of a load is a group
+    /// of its own, so the load of the high word can go when the low word is read.
     fn effectless_since(
         &mut self,
         inst: Inst,
         started: Option<mir::Block>,
         before: Option<mir::Inst>,
     ) {
-        let opcode = self.source[inst].opcode;
-        if opcode.has_effects() || opcode == Opcode::Load || self.at != started {
+        let data = &self.source[inst];
+        let opcode = data.opcode;
+        // A load has effects to the IR, which keeps it in the order the program reads memory in.
+        // Here nothing is moved, and a plain one that nothing reads can go. One that can fault
+        // to a landing pad stays, because the unwind table covers it.
+        let load = opcode == Opcode::Load
+            && !data.flags.intersects(Flags::KEEP.union(Flags::GUARD))
+            && !self.source.unwinds_to_pad(inst);
+        if (opcode.has_effects() && !load) || self.at != started {
             return;
         }
         let Some(at) = self.at else { return };
@@ -2214,7 +2229,11 @@ impl<'a> Lowering<'a> {
         let (insts, groups) = &mut self.effectless;
         let start = insts.len();
         insts.extend(std::iter::successors(Some(first), |&one| self.out.next_inst(one)));
-        groups.push((start, insts.len()));
+        if opcode == Opcode::Load {
+            groups.extend((start..insts.len()).map(|one| (one, one + 1)));
+        } else {
+            groups.push((start, insts.len()));
+        }
     }
 
     /// Takes out what was built for an IR instruction with no effects when nothing reads it.
@@ -11729,12 +11748,14 @@ mod tests {
         let i64 = Type::int(64);
         let (mut names, mut func, block, args) = blank(&[i64]);
         let mut build = Builder::new(&mut func, block);
-        build.load(Type::int(32), args[0], plain(), Flags::default());
+        // Returned, because a plain load that nothing reads is not written.
+        let value = build.load(Type::int(32), args[0], plain(), Flags::default());
+        build.ret(&[value]);
 
-        assert_eq!(
-            lower(&mut names, &func),
-            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
-             %1:gpr = x64.mov_rm_32 [%0]\n}\n"
+        let text = lower(&mut names, &func);
+        assert!(
+            text.contains("%0:gpr($rdi) = x64.arg_val_64\n    %1:gpr = x64.mov_rm_32 [%0]\n"),
+            "{text}"
         );
     }
 
@@ -11771,7 +11792,8 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let eight = build.iconst(i64, 8);
         let field = build.binary(Opcode::Or, args[0], eight, Flags::default());
-        build.load(i64, field, plain(), Flags::default());
+        let value = build.load(i64, field, plain(), Flags::default());
+        build.ret(&[value]);
 
         // The address was extracted as an `or` of a constant, which is an addition of it when the
         // low bits of the base are known to be clear, and an access has a rule for an addition and
@@ -11782,11 +11804,9 @@ mod tests {
 
         // With the addition in the class the access takes that, and the `or` is never written.
         form(&mut func, field, Opcode::Add, &[args[0], eight]);
-        assert_eq!(
-            lower(&mut names, &func),
-            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
-             %1:gpr = x64.mov_rm_64 [%0 + 8]\n}\n"
-        );
+        let text = lower(&mut names, &func);
+        assert!(text.contains("%1:gpr = x64.mov_rm_64 [%0 + 8]\n"), "{text}");
+        assert!(!text.contains("x64.or_"), "{text}");
     }
 
     #[test]
@@ -11822,7 +11842,8 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let twelve = build.iconst(i64, 12);
         let field = build.binary(Opcode::Add, args[0], twelve, Flags::default());
-        build.load(i64, field, plain(), Flags::default());
+        let value = build.load(i64, field, plain(), Flags::default());
+        build.ret(&[value]);
         let alone = lower(&mut names, &func);
 
         // An `or` in the class changes nothing, because the extracted form is offered first and
@@ -11839,14 +11860,15 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let twelve = build.iconst(i64, 12);
         let field = build.binary(Opcode::Add, args[0], twelve, Flags::default());
-        build.load(Type::int(64), field, plain(), Flags::default());
+        let value = build.load(Type::int(64), field, plain(), Flags::default());
+        build.ret(&[value]);
 
         // Two IR instructions and one machine instruction, which is what every read of a field
         // of a structure comes to.
-        assert_eq!(
-            lower(&mut names, &func),
-            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
-             %1:gpr = x64.mov_rm_64 [%0 + 12]\n}\n"
+        let text = lower(&mut names, &func);
+        assert!(
+            text.contains("%0:gpr($rdi) = x64.arg_val_64\n    %1:gpr = x64.mov_rm_64 [%0 + 12]\n"),
+            "{text}"
         );
     }
 
@@ -11857,7 +11879,8 @@ mod tests {
         let mut build = Builder::new(&mut func, block);
         let big = build.iconst(i64, i128::from(i32::MAX) + 1);
         let far = build.binary(Opcode::Add, args[0], big, Flags::default());
-        build.load(Type::int(32), far, plain(), Flags::default());
+        let value = build.load(Type::int(32), far, plain(), Flags::default());
+        build.ret(&[value]);
 
         // A displacement is signed and 32 bits. The rule that folds one has a guard that turns
         // this down, so the addition stays and the load reads through what it produced. Nobody
