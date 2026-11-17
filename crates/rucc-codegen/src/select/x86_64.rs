@@ -971,11 +971,21 @@ mod tests {
         let swapped = crate::combine::FOLDS.iter().filter_map(|fold| fold.swapped);
         let stores = crate::combine::UPDATES.iter().map(|update| update.into);
         let constants = crate::combine::BUMPS.iter().map(|bump| bump.into);
+        // And the high half of a wide value worked on in place, which reads the carry.
+        let carried = crate::combine::CARRIED_UPDATES.iter().map(|update| update.into);
+        let carried = carried.chain(crate::combine::CARRIED_BUMPS.iter().map(|bump| bump.into));
         // And the load that widens on the way in, which only a load that a widening reads becomes.
         let widened = crate::combine::WIDENINGS.iter().map(|fold| fold.into);
         // And the test of a bit against memory, at the width of every load that can fill it.
         let tests = crate::combine::TESTS.iter().map(|fold| fold.into);
-        loads.chain(swapped).chain(stores).chain(constants).chain(widened).chain(tests).collect()
+        loads
+            .chain(swapped)
+            .chain(stores)
+            .chain(constants)
+            .chain(carried)
+            .chain(widened)
+            .chain(tests)
+            .collect()
     }
 
     #[test]

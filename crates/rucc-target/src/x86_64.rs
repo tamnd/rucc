@@ -1261,7 +1261,7 @@ static COMPARES: [Compare; 100] = [
 /// door lists them, and they are the eight rows here that carry no condition in their names. What
 /// they read is [`Reads::Carry`], which is the group nothing in [`ZEROING`] is good for, so they
 /// can only stop the pass and never point it at the wrong bits.
-static READERS: [Reader; 248] = [
+static READERS: [Reader; 256] = [
     Reader { name: "adc_rr_8", reads: Reads::Carry },
     Reader { name: "adc_rr_16", reads: Reads::Carry },
     Reader { name: "adc_rr_32", reads: Reads::Carry },
@@ -1278,6 +1278,14 @@ static READERS: [Reader; 248] = [
     Reader { name: "sbb_ri_16", reads: Reads::Carry },
     Reader { name: "sbb_ri_32", reads: Reads::Carry },
     Reader { name: "sbb_ri_64", reads: Reads::Carry },
+    Reader { name: "adc_mr_32", reads: Reads::Carry },
+    Reader { name: "adc_mr_64", reads: Reads::Carry },
+    Reader { name: "sbb_mr_32", reads: Reads::Carry },
+    Reader { name: "sbb_mr_64", reads: Reads::Carry },
+    Reader { name: "adc_mi_32", reads: Reads::Carry },
+    Reader { name: "adc_mi_64", reads: Reads::Carry },
+    Reader { name: "sbb_mi_32", reads: Reads::Carry },
+    Reader { name: "sbb_mi_64", reads: Reads::Carry },
     Reader { name: "cmp_set_e_8", reads: Reads::Zero },
     Reader { name: "cmp_set_e_16", reads: Reads::Zero },
     Reader { name: "cmp_set_e_32", reads: Reads::Zero },
@@ -2490,6 +2498,8 @@ mod tests {
                     shape,
                     Form::AluCarry
                         | Form::AluCarryI
+                        | Form::AluCarryMr
+                        | Form::AluCarryMi
                         | Form::CmpSet
                         | Form::CmpSetRi
                         | Form::CmpSetRm
@@ -2505,7 +2515,10 @@ mod tests {
         assert_eq!(entries, readers);
 
         for entry in &READERS {
-            if matches!(form(entry.name), Some(Form::AluCarry | Form::AluCarryI)) {
+            if matches!(
+                form(entry.name),
+                Some(Form::AluCarry | Form::AluCarryI | Form::AluCarryMr | Form::AluCarryMi)
+            ) {
                 assert_eq!(entry.reads, Reads::Carry, "{} reads a condition", entry.name);
                 continue;
             }
