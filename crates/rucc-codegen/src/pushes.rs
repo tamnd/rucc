@@ -38,7 +38,7 @@ const PUSH_IMM: &str = "push_i_32";
 ///
 /// `calls` is each call that passes arguments on the stack with how many bytes of the outgoing area
 /// they take, which is `passing` on [`crate::lower::Stack`]. A call is left alone when its area is
-/// not a number of words. When the area is not a multiple of the stack alignment, a `subl` of the
+/// not a number of words. When the area is not a multiple of the stack alignment, a pad of the
 /// difference goes in front of the pushes and the `addl` behind the call takes off the area and the
 /// difference, as gcc does at -Os. A call whose callee takes its own area off is then left alone.
 pub fn arguments(
@@ -344,7 +344,7 @@ fn plan(
     }) {
         return None;
     }
-    let padded = if pad == 0 { 0 } else { arith_bytes(pad) };
+    let padded = padding(func, &stores, pad, ops).bytes();
     let before: usize = stores.iter().map(|&store| stored_bytes(func, store, ops)).sum();
     let after: usize = stores.iter().map(|&store| pushed_bytes(func, store, ops)).sum::<usize>()
         + padded
@@ -413,6 +413,49 @@ fn arith_bytes(area: u32) -> usize {
     if area <= 127 { 3 } else { 6 }
 }
 
+/// What goes below the area of a call so that the stack pointer is aligned at the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pad {
+    /// Nothing, because the area is aligned.
+    None,
+    /// That many pushes of a register, or of the constant 0 when there is no register.
+    Pushes(Option<mir::Operand>, u32),
+    /// A `subl` of that many bytes.
+    Sub(u32),
+}
+
+impl Pad {
+    /// How many bytes the pad is.
+    fn bytes(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Pushes(Some(_), words) => words as usize,
+            Self::Pushes(None, words) => 2 * words as usize,
+            Self::Sub(pad) => arith_bytes(pad),
+        }
+    }
+}
+
+/// The pad of `pad` bytes below the area those stores write.
+///
+/// One or two words are pushes of a register that an argument is pushed from, as the `-Os`
+/// peepholes of gcc write: a `pushl %reg` is one byte where the `subl` is three. The register
+/// holds what the call passes, because nothing between the store and the call writes it, so the
+/// push reads a register that is set. One word and no register is a `pushl $0` of two bytes. A
+/// larger pad is a `subl`.
+fn padding(func: &mir::Func, stores: &[mir::Inst], pad: u32, ops: &Ops) -> Pad {
+    let register = stores
+        .iter()
+        .rev()
+        .find(|&&store| func[store].opcode == ops.store)
+        .map(|&store| func[func[store].operands][0]);
+    match (pad, register) {
+        (0, _) => Pad::None,
+        (4, _) | (8, Some(_)) => Pad::Pushes(register, pad / 4),
+        _ => Pad::Sub(pad),
+    }
+}
+
 /// How far above the stack pointer the unwind table says the frame is at the call, or `None` when
 /// it counts the frame from another register, which no push changes.
 ///
@@ -451,9 +494,9 @@ fn cfa(func: &mir::Func, call: mir::Inst, conv: &CallRegs) -> Option<i32> {
     None
 }
 
-/// The stores taken out, the `subl` of `pad` bytes when there are any, a push of each in front of
-/// the call from the top word down, and the area and the pad given back behind it. Gives back the
-/// `subl` and the `addl` it wrote, which write the stack pointer.
+/// The stores taken out, the pad of `pad` bytes when there are any, a push of each in front of the
+/// call from the top word down, and the area and the pad given back behind it. Gives back the
+/// `subl` and the `addl` it wrote, which write the stack pointer. See [`padding`] for the pad.
 #[allow(clippy::too_many_arguments)]
 fn rewrite(
     func: &mut mir::Func,
@@ -469,7 +512,21 @@ fn rewrite(
     let class = conv.int_class;
     let mut below = cfa;
     let mut written = Vec::new();
-    if pad != 0 {
+    if let Pad::Pushes(register, words) = padding(func, &plan.stores, pad, ops) {
+        let span = func.span(call);
+        for _ in 0..words {
+            let push = match register {
+                Some(source) => func.build_loose(ops.push).at(span).uses(source.reg, source.class),
+                None => func.build_loose(ops.push_imm).at(span).imm(0),
+            }
+            .finish();
+            func.insert_before(call, push);
+            below = below.map(|offset| offset + 4);
+            if let Some(offset) = below {
+                func.cfi.push((push, mir::CfiOp::DefCfaOffset(offset)));
+            }
+        }
+    } else if pad != 0 {
         let span = func.span(call);
         let sub = func
             .build_loose(ops.sub)
@@ -724,10 +781,40 @@ mod tests {
         });
         let (count, lines) = pushed(&mut names, &mut func, &[(call, 12)], &SYSV);
         assert_eq!(count, 1, "{lines:#?}");
-        assert!(lines[0].starts_with("x64.sub_ri_32") && lines[0].contains('4'), "{lines:#?}");
-        assert!(lines[1].starts_with("x64.push_32"), "{lines:#?}");
+        assert!(lines[0].starts_with("x64.push_32"), "{lines:#?}");
+        assert_eq!(lines[0], lines[1], "the pad is a push of the top argument's register");
         assert!(lines[4].starts_with("x64.call"), "{lines:#?}");
         assert!(lines[5].starts_with("x64.add_ri_32") && lines[5].contains("16"), "{lines:#?}");
+    }
+
+    #[test]
+    fn a_pad_of_two_words_is_two_pushes_of_a_register_and_with_none_a_sub() {
+        // `f(5, x)` and `f(5, 6)`, which pass eight bytes under a sixteen byte boundary.
+        let call = |names: &mut Interner, register: bool| {
+            let mut func = Func::new(names.intern("f"));
+            let block = func.create_block();
+            func.build(block, op(names, "mov_mi_32")).mem(Mem::at(sp())).imm(5).finish();
+            let top =
+                func.build(block, op(names, if register { "mov_mr_32" } else { "mov_mi_32" }));
+            let top = if register { top.uses(Reg::physical(EAX), GPR) } else { top.imm(6) };
+            top.mem(Mem::at(sp()).plus(4)).finish();
+            let call = func.build(block, op(names, "call")).uses(Reg::physical(ESP), GPR).finish();
+            func.build(block, op(names, "ret")).finish();
+            (func, call)
+        };
+        let mut names = Interner::new();
+        let (mut func, at) = call(&mut names, true);
+        let (count, lines) = pushed(&mut names, &mut func, &[(at, 8)], &SYSV);
+        assert_eq!(count, 1, "{lines:#?}");
+        assert!(lines[0].starts_with("x64.push_32"), "{lines:#?}");
+        assert_eq!(lines[0], lines[1], "{lines:#?}");
+        assert_eq!(lines[1], lines[2], "the pad pushes the register of the top word: {lines:#?}");
+        assert!(lines[4].starts_with("x64.call"), "{lines:#?}");
+        let (mut func, at) = call(&mut names, false);
+        let (count, lines) = pushed(&mut names, &mut func, &[(at, 8)], &SYSV);
+        assert_eq!(count, 1, "{lines:#?}");
+        assert!(lines[0].starts_with("x64.sub_ri_32") && lines[0].contains('8'), "{lines:#?}");
+        assert!(lines[3].starts_with("x64.call"), "{lines:#?}");
     }
 
     #[test]
