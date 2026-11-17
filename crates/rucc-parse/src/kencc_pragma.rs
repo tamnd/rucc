@@ -18,13 +18,21 @@
 //!   at the place of the line, as `pragvararg` does. A line that kencc cannot read is kept as
 //!   bad, and the checker gives the kencc error only under `-F`, because kencc reads the line
 //!   only then.
-//! - `profile` and `fpround` change nothing that rucc writes yet.
+//! - `profile on` and `profile yes` turn profiling on, and any other word, or no word, turns it
+//!   off, as `pragprofile` does. A word whose characters after the first start with a number
+//!   other than zero also turns it on, because kencc reads the word with `atoi(name+1)`. It is on
+//!   at the start of each file. A function definition whose body ends while it is off is not
+//!   profiled. The object writer of the Plan 9 targets sets `NOPROF` on the `TEXT` of that
+//!   function, so `6l -p` and `7l -p` put no call of `_profin` and `_profout` in it. The function
+//!   also gets the effect of `noipa`. Such code, as `_restore` in `libc/port/profile.c`, depends
+//!   on the real calls and on the registers of the calling convention.
+//! - `fpround` changes nothing that rucc writes yet.
 //!
 //! `#pragma once` never gets here, because the preprocessor reads it. kencc ignores it, so a
 //! header included twice is read twice. A header that kencc reads twice with no error gives the
 //! same declarations when rucc reads it once, so rucc keeps `once`.
 
-use rucc_ast::RecordKind;
+use rucc_ast::{DeclSpecsId, RecordKind};
 use rucc_base::Symbol;
 use rucc_diag::Span;
 use rucc_lex::{Keyword, Punct, Token};
@@ -40,6 +48,7 @@ impl Parser<'_> {
             "pack" => self.kencc_pack(&line[1..]),
             "lib" => self.kencc_lib(&line[1..], span),
             "incomplete" => self.kencc_incomplete(&line[1..], span),
+            "profile" => self.kencc_profile(&line[1..]),
             "varargck" => {
                 let pragma = self.kencc_varargck(&line[1..]);
                 let decls = self.pragma_place();
@@ -59,6 +68,34 @@ impl Parser<'_> {
             (None, None) => 0,
         };
         self.packs.set_current(bytes);
+    }
+
+    /// `#pragma profile`, as `pragprofile` in `cc/dpchk.c` reads it. The value is
+    /// `atoi(name+1)`, and `on` and `yes` give 1.
+    fn kencc_profile(&mut self, rest: &[Token]) {
+        let on = match rest.first().and_then(|token| token.ident()) {
+            Some(word) => {
+                let name = self.cx.interner.resolve(word);
+                let mut digits = name.chars().skip(1).take_while(char::is_ascii_digit);
+                matches!(name, "on" | "yes") || digits.any(|digit| digit != '0')
+            }
+            None => false,
+        };
+        self.packs.noprof = !on;
+    }
+
+    /// The specifiers of a function definition whose body ends at the cursor. When `#pragma
+    /// profile` is off there, they are a copy with [`rucc_ast::DeclSpecs::noprof`] set. kencc writes the
+    /// `TEXT` of a function when it has read the closing brace, so a line after the brace is for
+    /// the next function.
+    pub(crate) fn kencc_profile_mark(&mut self, specs: DeclSpecsId) -> DeclSpecsId {
+        self.read_packs(self.cursor.index());
+        if !self.packs.noprof {
+            return specs;
+        }
+        let mut marked = self.ast[specs];
+        marked.noprof = true;
+        self.ast.add_specs(marked)
     }
 
     /// `#pragma lib "name"`, which `macprag` in `cc/macbody` reads. The name is a plain string.

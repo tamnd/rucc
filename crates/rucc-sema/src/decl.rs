@@ -604,6 +604,12 @@ impl DeclFlags {
     /// [`Self::NO_INSTRUMENT`] is.
     pub const NO_ASAN: Self = Self(1 << 51);
 
+    /// kencc's `#pragma profile` was off where the body of this function definition ended, so
+    /// `6l -p` and `7l -p` put no call of `_profin` and `_profout` in it. Only `-fkencc` sets it,
+    /// and always with [`Self::NOIPA`] and [`Self::NOINLINE`]. Merged the way [`Self::NOINLINE`]
+    /// is.
+    pub const NOPROF: Self = Self(1 << 62);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

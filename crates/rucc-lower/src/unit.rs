@@ -1547,6 +1547,11 @@ impl Unit<'_> {
         if node.flags.contains(DeclFlags::MS_HOOK) {
             func.attrs.set |= AttrSet::MS_HOOK;
         }
+        // And the one that keeps the profiler of `6l -p` and `7l -p` out of it. See
+        // `rucc_asm::plan9`.
+        if node.flags.contains(DeclFlags::NOPROF) {
+            func.attrs.set |= AttrSet::NOPROF;
+        }
         // And the one that has its address read out of the table where it is only declared.
         // See `rucc_codegen::elsewhere`.
         if node.flags.contains(DeclFlags::NODIRECT) {

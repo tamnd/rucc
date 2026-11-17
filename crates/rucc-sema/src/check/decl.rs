@@ -102,7 +102,7 @@ struct Declared {
     /// [`DeclFlags::NO_LOOP_IDIOM`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_PROFILE`], [`DeclFlags::NO_STACK_PROTECTOR`],
     /// [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`], [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
     /// [`DeclFlags::CF_CHECK`], [`DeclFlags::FORCE_ALIGN`], [`DeclFlags::NO_REORDER`], [`DeclFlags::MS_HOOK`],
-    /// [`DeclFlags::UNINITIALIZED`] and the `ZERO_` bits and nothing else.
+    /// [`DeclFlags::NOPROF`], [`DeclFlags::UNINITIALIZED`] and the `ZERO_` bits and nothing else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
     /// one, as [`DeclFlags::DLLIMPORT`] and [`DeclFlags::DLLEXPORT`] and nothing else.
@@ -373,7 +373,8 @@ impl Checker<'_> {
                     Some(linkage == Linkage::External),
                     specs.span,
                 )
-                | self.shared_section(&[specs.attrs], DeclKind::Function),
+                | self.shared_section(&[specs.attrs], DeclKind::Function)
+                | kencc_noprof(&specs),
             // The specifiers only, for the reason `noreturn` above reads them only. What a
             // definition says here is almost always `dllexport`, and `__declspec` is written in
             // front of the declaration, which is where the specifiers are.
@@ -1935,6 +1936,7 @@ impl Checker<'_> {
                 DeclFlags::RETAIN,
                 DeclFlags::NOINLINE,
                 DeclFlags::NOIPA,
+                DeclFlags::NOPROF,
                 DeclFlags::NO_STRICT_ALIASING,
                 DeclFlags::OPTIMIZE_NONE,
                 DeclFlags::WRAPV,
@@ -2807,6 +2809,17 @@ fn pushed(pushed: Option<ast::PushedVisibility>) -> Option<Visibility> {
         ast::PushedVisibility::Hidden => Visibility::Hidden,
         ast::PushedVisibility::Protected => Visibility::Protected,
     })
+}
+
+/// What kencc's `#pragma profile off` gives a function definition. A function that is not
+/// profiled is code such as `_restore` in `libc/port/profile.c`, which depends on the real calls
+/// and on the registers of the calling convention, so it also gets the effect of `noipa`.
+fn kencc_noprof(specs: &ast::DeclSpecs) -> DeclFlags {
+    if specs.noprof {
+        DeclFlags::NOPROF | DeclFlags::NOIPA | DeclFlags::NOINLINE
+    } else {
+        DeclFlags::NONE
+    }
 }
 
 /// The stronger of two definition states, which is what a redeclaration leaves behind.

@@ -209,6 +209,7 @@ fn listing(
         marks: marks.then_some(0),
         moved: false,
         crc: crc(isa),
+        plan9: target.object_format == rucc_target::ObjectFormat::Plan9,
     };
     if arch == Arch::Aarch64 && writer.crc {
         writer.out.push_str("\t.arch_extension\tcrc\n");
@@ -298,6 +299,7 @@ pub(crate) fn template(
         marks: None,
         moved: false,
         crc: false,
+        plan9: false,
     };
     writer.inst(func, block, inst, names.resolve(func.name))?;
     Ok(writer.out)
@@ -330,6 +332,8 @@ struct Writer<'a> {
     /// Whether the unit is built for AArch64's CRC32 extension, which is what the assembler was
     /// told at the top of the file. See the module documentation.
     crc: bool,
+    /// Whether the listing is for a Plan 9 target, which `crate::plan9` reads into an object.
+    plan9: bool,
 }
 
 /// What the frame is at one place in a function, as the unwind rows say it: the register the
@@ -511,6 +515,12 @@ impl Writer<'_> {
                 let _ = writeln!(ahead, "{label}:");
                 self.pad(&mut ahead, patch.pad, patch.before);
             }
+        }
+        // A function that kencc's `#pragma profile off` covers. No assembler of GNU has this
+        // line, so only the listing of a Plan 9 target has it, and `crate::plan9` sets `NOPROF`
+        // on the `TEXT` of the function.
+        if self.plan9 && func.noprof {
+            let _ = writeln!(self.out, "\t.noprof\t{name}");
         }
         let fill = self.fill();
         self.directives.open(&mut self.out, &name, align, fill, binding, seen, &ahead);

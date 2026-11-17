@@ -24,7 +24,9 @@
 //!   of a function and each `addq` before a return are removed when that is exact.
 
 use rucc_base::hash::{Map, Set};
-use rucc_object::plan9::{Addr6, History, Machine, NSNAME, Object, Prog6, Progs, amd64 as a6};
+use rucc_object::plan9::{
+    Addr6, History, Machine, NOPROF, NSNAME, Object, Prog6, Progs, amd64 as a6,
+};
 
 use crate::Trouble;
 
@@ -318,7 +320,7 @@ fn directive_anywhere(name: &str, args: &str, line: usize) -> Result<(), Trouble
     match name {
         ".globl" | ".global" | ".weak" | ".local" | ".type" | ".size" | ".hidden"
         | ".protected" | ".internal" | ".ident" | ".file" | ".loc" | ".p2align" | ".balign"
-        | ".align" | ".comm" | ".lcomm" => Ok(()),
+        | ".align" | ".comm" | ".lcomm" | ".noprof" => Ok(()),
         _ if name.starts_with(".cfi_") => Ok(()),
         _ => Err(trouble(
             line,
@@ -335,12 +337,20 @@ struct Scope {
     defined: Set<String>,
     /// The common symbols, with their sizes, in order.
     commons: Vec<(String, i64)>,
+    /// The functions that a `.noprof` line names. The compiler writes this line for a function
+    /// that kencc's `#pragma profile off` covers. Its `TEXT` gets `NOPROF`, so `6l -p` and `7l -p`
+    /// put no profiling calls in it.
+    noprof: Set<String>,
 }
 
 impl Scope {
     fn new(lines: &[Line<'_>]) -> Self {
-        let mut scope =
-            Scope { global: Set::default(), defined: Set::default(), commons: Vec::new() };
+        let mut scope = Scope {
+            global: Set::default(),
+            defined: Set::default(),
+            commons: Vec::new(),
+            noprof: Set::default(),
+        };
         for line in lines {
             match line.item {
                 Item::Label(label) => {
@@ -349,6 +359,11 @@ impl Scope {
                 Item::Directive(".globl" | ".global" | ".weak", args) => {
                     for name in args.split(',') {
                         scope.global.insert(name.trim().to_owned());
+                    }
+                }
+                Item::Directive(".noprof", args) => {
+                    for name in args.split(',') {
+                        scope.noprof.insert(name.trim().to_owned());
                     }
                 }
                 Item::Directive(name @ (".comm" | ".lcomm"), args) => {
@@ -378,6 +393,11 @@ impl Scope {
             }
         }
         scope
+    }
+
+    /// The flags of the `TEXT` of a function: `NOPROF` when a `.noprof` line names it.
+    fn text_flags(&self, name: &str) -> u8 {
+        if self.noprof.contains(name) { NOPROF } else { 0 }
     }
 
     /// Whether other objects cannot see the symbol.
@@ -929,7 +949,7 @@ impl Out<'_> {
             .collect();
         let frame = frame(body, &insns);
         let mut text = Addr6::symbol(self.scope.class(name), &self.scope.object_name(name), 0);
-        text.scale = 0;
+        text.scale = self.scope.text_flags(name);
         let line = body.first().map_or(0, |l| l.number);
         self.frame = frame.unwrap_or(0);
         let first = self.progs.len();
@@ -1537,6 +1557,14 @@ mod tests {
 
     fn names(progs: &[Prog6]) -> Vec<&'static str> {
         progs.iter().map(|p| Machine::Amd64.opcode_name(p.op).unwrap_or("?")).collect()
+    }
+
+    #[test]
+    fn a_noprof_line_sets_noprof_on_the_text() {
+        let p = progs("\t.text\n\t.noprof\tf\n\t.globl\tf\nf:\n\tret\n\t.globl\tg\ng:\n\tret\n");
+        assert_eq!(names(&p), ["ATEXT", "ARET", "ATEXT", "ARET", "AEND"]);
+        assert_eq!(p[0].from.scale, NOPROF);
+        assert_eq!(p[2].from.scale, 0);
     }
 
     #[test]

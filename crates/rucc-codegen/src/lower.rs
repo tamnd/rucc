@@ -2086,6 +2086,7 @@ impl<'a> Lowering<'a> {
         out.section = source.section;
         out.retain = source.attrs.set.contains(AttrSet::RETAIN);
         out.hook = source.attrs.set.contains(AttrSet::MS_HOOK);
+        out.noprof = source.attrs.set.contains(AttrSet::NOPROF);
         // Carried rather than worked out here, because where a function was declared is a fact
         // about the source and this is a long way past it. What wants it is the line table.
         out.declared = source.declared;
