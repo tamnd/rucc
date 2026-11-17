@@ -2776,9 +2776,10 @@ mod tests {
         // be given the same register as the remainder, because a value written early was live at
         // one point and that point was in front of where the remainder was written. The copy that
         // takes the quotient nowhere then landed on top of the remainder. The remainder is written
-        // early as well now, which is a separate thing the target has to say and is why both
-        // answers read `early` here: `rdx` is filled by the sign extension before the division
-        // reads its divisor, so nothing else may be sitting in it at that point either.
+        // early as well now, which is a separate thing the target has to say: `rdx` is filled by
+        // the sign extension before the division reads its divisor, so nothing else may be sitting
+        // in it at that point either. The quotient is written when the division finishes, so it
+        // can have `rax` where the dividend dies, and no copy takes it anywhere.
         //
         // What asks whether the second argument is zero reads as a test rather than a comparison
         // because `crate::shorten` runs last and writes the shorter of the two, which asks the
@@ -2789,19 +2790,17 @@ mod tests {
              block0:\n    \
              $rdi($rdi) = x64.arg_val_32\n    \
              $rsi($rsi) = x64.arg_val_32\n    \
-             $rcx = x64.mov_rr_64 $rdi, block1\n\
+             $rax = x64.mov_rr_64 $rdi\n    \
+             $rcx = x64.mov_rr_64 $rsi, block1\n\
              \nblock1:\n    \
-             x64.test_rr_32 $rsi\n    \
+             x64.test_rr_32 $rcx\n    \
              x64.jcc_e block3, block2\n\
              \nblock2:\n    \
+             early $rdx($rdx), $rax($rax) = x64.idiv_rem_32 $rax($rax), $rcx\n    \
              $rax = x64.mov_rr_64 $rcx\n    \
-             early $rdx($rdx), early $rax($rax) = x64.idiv_rem_32 $rax($rax), $rsi\n    \
-             $rdi = x64.mov_rr_64 $rax\n    \
-             $rcx = x64.mov_rr_64 $rsi\n    \
-             $rsi = x64.mov_rr_64 $rdx\n    \
+             $rcx = x64.mov_rr_64 $rdx\n    \
              x64.jmp block1\n\
              \nblock3:\n    \
-             $rax = x64.mov_rr_64 $rcx\n    \
              x64.ret_val_32 $rax($rax)\n    \
              x64.ret\n\
              }\n"

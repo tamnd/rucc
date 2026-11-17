@@ -1148,9 +1148,14 @@ static DIV_QUO: [OperandDesc; 4] = [
 // even though it is what the instruction produces rather than the answer it throws away: what an
 // early definition says is that the register is gone before the operands are read, and that is
 // true of this one whichever of the two answers ends up in it.
+//
+// The quotient in `rax` is written when the division finishes, as it is in the form above. The
+// program does not read it, so the value is dead where it is written. Written early, it was live
+// at the point where the dividend is read out of `rax`, so it could not have `rax`, and the
+// allocator put it in another register and added a move out of `rax` that nothing reads.
 static DIV_REM: [OperandDesc; 4] = [
     OperandDesc::write_early(GPR).with(Constraint::Fixed(RDX)),
-    OperandDesc::write_early(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR),
 ];
@@ -2991,13 +2996,11 @@ mod tests {
         assert_eq!(rem[0].constraint, Constraint::Fixed(RDX));
         assert_eq!(rem[0].role, Role::EarlyDef, "the divisor may not be where the remainder goes");
         assert_eq!(rem[1].constraint, Constraint::Fixed(RAX));
-        // Both answers are written early here and one of them is not, and the difference is which
-        // register the division also reads. `rdx` is filled by the sign extension before the
-        // divisor is read whichever answer is being kept, so both forms have to say so about it.
-        // `rax` holds the dividend, and an operand that reads a register claims it where the
-        // operands are read, which is the same point an early definition would claim it at, so the
-        // quotient has nothing left to say.
-        assert_eq!(rem[1].role, Role::EarlyDef);
+        // `rdx` is filled by the sign extension before the divisor is read whichever answer is
+        // being kept, so both forms write it early. `rax` is written when the division finishes in
+        // both forms. The quotient the remainder form throws away is dead where it is written, and
+        // a late definition lets it have `rax` where the dividend dies, with no move out of it.
+        assert_eq!(rem[1].role, Role::Def);
         assert_eq!(quo[0].role, Role::Def);
         assert_eq!(quo[2].role, Role::Use);
     }
