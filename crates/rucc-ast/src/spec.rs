@@ -54,6 +54,10 @@ pub struct DeclSpecs {
     /// What `#pragma GCC target` and `#pragma GCC optimize` left in effect where the declaration
     /// starts, which a function gets ahead of whatever its own attributes say.
     pub options: PragmaOptions,
+    /// Whether kencc's `#pragma profile` was off where the body of this function definition
+    /// ended. kencc writes the `TEXT` of a function at the end of its body, so the state there
+    /// applies. Only `-fkencc` sets it, and only on the specifiers of a definition.
+    pub noprof: bool,
     /// From the first specifier to the last.
     pub span: Span,
     /// Where the specifiers proper start, after the `[[...]]` written in front of the
@@ -131,6 +135,7 @@ impl DeclSpecs {
             attrs: AttrList::EMPTY,
             pushed: None,
             options: PragmaOptions::NONE,
+            noprof: false,
             span,
             first: span,
         }

@@ -510,7 +510,7 @@ impl Out<'_> {
             self.symbol(a7::D_OREG, name, 0),
             con(frame.size.map_or(0, |n| n + 8)),
         );
-        text.reg = 0;
+        text.reg = self.scope.text_flags(name);
         self.push(text);
         let size = frame.size.unwrap_or(0);
         if frame.fp {
@@ -1298,6 +1298,15 @@ mod tests {
 
     fn ops(listing: &str) -> Vec<&'static str> {
         progs(listing).iter().map(|p| Machine::Arm64.opcode_name(p.op).unwrap_or("?")).collect()
+    }
+
+    #[test]
+    fn a_noprof_line_sets_noprof_on_the_text() {
+        let listing = "\t.text\n\t.noprof f\n\t.globl f\nf:\n\tret\n\t.globl g\ng:\n\tret\n";
+        let p = progs(listing);
+        assert_eq!(ops(listing), ["ATEXT", "ARETURN", "ATEXT", "ARETURN", "AEND"]);
+        assert_eq!(p[0].reg, rucc_object::plan9::NOPROF);
+        assert_eq!(p[2].reg, 0);
     }
 
     #[test]

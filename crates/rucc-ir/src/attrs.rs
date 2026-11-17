@@ -291,6 +291,10 @@ impl AttrSet {
     /// unit to do and what GCC's `ieee_extended_intel_96_round_53` folds to. The bits in memory
     /// are the x87 format as ever. The pass that folds operations on `f80` constants reads this.
     pub const X87_ROUND_53: Self = Self(1 << 45);
+    /// The linker of a Plan 9 target puts no call of `_profin` and `_profout` in the function
+    /// under `-p`, from kencc's `#pragma profile off`. The object writer sets `NOPROF` on its
+    /// `TEXT`. Always set with [`Self::NOIPA`].
+    pub const NOPROF: Self = Self(1 << 46);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -429,6 +433,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::INLINE_MEMSET, "inline_memset"),
     (AttrSet::NO_ASAN, "no_asan"),
     (AttrSet::X87_ROUND_53, "x87_round_53"),
+    (AttrSet::NOPROF, "noprof"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

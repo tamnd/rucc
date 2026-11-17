@@ -281,6 +281,7 @@ impl Parser<'_> {
             self.poison_stmt(at)
         };
         self.scopes.pop();
+        let specs = if self.cx.kencc { self.kencc_profile_mark(specs) } else { specs };
         let params = self.ast.add_decl_list(&params);
         let span = self.span_from(start);
         self.add_decl(Decl::Function { specs, declarator, params, body }, span)

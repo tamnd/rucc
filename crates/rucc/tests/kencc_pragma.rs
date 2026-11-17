@@ -2,9 +2,9 @@
 //!
 //! Design: tamnd/rucc#4150, and 06.5 of the rucc-plan9 plan.
 //!
-//! kencc acts on `pack` and `lib` and ignores every other pragma with no message. `pack on`
-//! packs the records after it, and `pack off` stops it. `lib "name"` asks the linker for a
-//! library.
+//! kencc acts on `pack`, `lib` and `profile` and ignores every other pragma with no message.
+//! `pack on` packs the records after it, and `pack off` stops it. `lib "name"` asks the linker for
+//! a library. `profile off` keeps the profiler of the linker out of the functions after it.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -78,4 +78,41 @@ fn lib_asks_the_linker_for_the_library() {
     let (ok, _, err) = run("bad-lib", &flags, "#pragma lib lib9p\nint x;\n");
     assert!(!ok);
     assert!(err.contains("syntax in `#pragma lib`"), "{err}");
+}
+
+/// `libc/port/profile.c` of 9front has this form. `_restore` puts `arg` back in the register of the
+/// first argument, so its call must stay. The functions after `profile off` get `NOPROF`, which the
+/// listing of a Plan 9 target says with a `.noprof` line, and the functions after `profile on` do
+/// not.
+const PROFILE: &str = "static unsigned long restore(unsigned long, unsigned long ret) { return ret; }\n\
+                       #pragma profile off\n\
+                       static unsigned long _restore(unsigned long, unsigned long ret) { return ret; }\n\
+                       unsigned long profin(unsigned long arg, unsigned long ret) { return _restore(arg, ret); }\n\
+                       #pragma profile on\n\
+                       unsigned long profiled(unsigned long arg, unsigned long ret) { return restore(arg, ret); }\n";
+
+#[test]
+fn profile_off_keeps_the_profiler_out_and_the_calls_in() {
+    for target in ["--target=x86_64-plan9", "--target=aarch64-plan9"] {
+        let flags = [target, "-O2", "-S", "-o", "-", "-fkencc"];
+        let (ok, out, err) = run("profile", &flags, PROFILE);
+        assert!(ok, "{err}");
+        let noprof: Vec<&str> = out
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".noprof"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(noprof, ["_restore", "profin"], "{target}:\n{out}");
+        // A call, or a jump at the end of `profin`.
+        let calls: &[&str] =
+            if target.contains("x86_64") { &["call", "jmp"] } else { &["bl", "b"] };
+        assert!(
+            out.lines().any(|line| {
+                let mut words = line.split_whitespace();
+                words.next().is_some_and(|op| calls.contains(&op))
+                    && words.next() == Some("_restore")
+            }),
+            "{target}: the call of _restore is gone:\n{out}"
+        );
+    }
 }

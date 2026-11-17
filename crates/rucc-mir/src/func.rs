@@ -368,6 +368,11 @@ pub struct Func {
     /// a fixed run of bytes the patcher reads for, which an encoder free to pick its own forms
     /// would not write. See `rucc_asm::hook`.
     pub hook: bool,
+    /// Whether the linker of a Plan 9 target puts no profiling calls in the function, from
+    /// kencc's `#pragma profile off`. Carried for the reason [`Func::binding`] is. The listing of
+    /// a Plan 9 target says it with a `.noprof` line, and the object writer sets `NOPROF` on the
+    /// `TEXT` of the function.
+    pub noprof: bool,
     /// The name each block something outside the function refers to was given, in block order.
     ///
     /// What asks for one is GNU's address of a label in the initializer of an object with static
@@ -556,6 +561,7 @@ impl Func {
             patch: None,
             mcount: None,
             hook: false,
+            noprof: false,
             labels: Vec::new(),
             landings: Vec::new(),
             declared: Span::DUMMY,

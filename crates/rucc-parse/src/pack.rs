@@ -53,6 +53,9 @@ pub(crate) struct Packs {
     pub(crate) options: crate::options::Options,
     /// What `#pragma scalar_storage_order` has in effect, set by `order.rs`, true for big-endian.
     pub(crate) order: Option<bool>,
+    /// Whether kencc's `#pragma profile` is off, set by `kencc_pragma.rs`. It is on at the start
+    /// of each file.
+    pub(crate) noprof: bool,
 }
 
 impl Packs {
@@ -131,7 +134,7 @@ impl Parser<'_> {
     ///
     /// The bound is exclusive, so a line written between the closing brace and whatever follows
     /// it belongs to the next record rather than to the one that just closed.
-    fn read_packs(&mut self, to: usize) {
+    pub(crate) fn read_packs(&mut self, to: usize) {
         while let Some(pragma) = self.tokens.pragmas.get(self.packs.next) {
             if pragma.before as usize >= to {
                 return;
