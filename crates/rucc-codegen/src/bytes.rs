@@ -83,6 +83,7 @@ fn named(func: &Func, inst: Inst, prefix: &str, names: &Interner) -> Option<Vec<
 pub fn reach(func: &mut Func, prefix: &str, class: RegClass, names: &mut Interner) {
     let exchange = Opcode::new(names.intern(&format!("{prefix}xchg_rr_32")));
     let whole = Opcode::new(names.intern(&format!("{prefix}test_ri_32")));
+    let compare = Opcode::new(names.intern(&format!("{prefix}cmp_rr_32")));
     let all: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in all {
         let Some(bytes) = named(func, inst, prefix, names) else { continue };
@@ -96,12 +97,18 @@ pub fn reach(func: &mut Func, prefix: &str, class: RegClass, names: &mut Interne
         if stuck.is_empty() {
             continue;
         }
-        if names.resolve(func[inst].opcode.name()).strip_prefix(prefix) == Some("test_rr_8")
-            && zero_only(func, inst, prefix, names)
-        {
+        let name = names.resolve(func[inst].opcode.name()).strip_prefix(prefix);
+        if name == Some("test_rr_8") && zero_only(func, inst, prefix, names) {
             let imm = func.add_imm(0xff);
             func[inst].opcode = whole;
             func[inst].imm = Some(imm);
+            continue;
+        }
+        if name == Some("cmp_rr_8")
+            && zero_only(func, inst, prefix, names)
+            && func[operands].iter().all(|op| widened(func, inst, op.reg, prefix, names))
+        {
+            func[inst].opcode = compare;
             continue;
         }
         let named: Vec<PhysReg> = func[operands].iter().filter_map(|op| op.reg.phys()).collect();
@@ -137,6 +144,30 @@ pub fn reach(func: &mut Func, prefix: &str, class: RegClass, names: &mut Interne
             func.insert_after(inst, after);
         }
     }
+}
+
+/// Whether the last instruction in front of `inst` in its block that writes `reg` is a zero
+/// extension of a byte, which leaves the register holding its low byte and nothing above it. A
+/// load of a byte is one, since it is written `movzbl` so that it does not read the rest of the
+/// register.
+///
+/// A `cmpb` of two such registers and a `cmpl` of them leave the same zero and the same carry, so
+/// where [`zero_only`] says nothing else is read the whole registers are compared, and neither
+/// needs a low byte. The NetBSD libc `strncmp` compares two bytes it read with `movzbl`, and the
+/// two were in `esi` and `edi` with two exchanges on either side of the `cmpb`.
+fn widened(func: &Func, inst: Inst, reg: Reg, prefix: &str, names: &Interner) -> bool {
+    let Some(block) = func.block_of(inst) else { return false };
+    let Some(reg) = reg.phys() else { return false };
+    let before: Vec<Inst> = func.insts(block).take_while(|&at| at != inst).collect();
+    for &at in before.iter().rev() {
+        let writes =
+            func[func[at].operands].iter().any(|op| op.role.is_def() && op.reg.phys() == Some(reg));
+        if writes {
+            let name = names.resolve(func[at].opcode.name()).strip_prefix(prefix);
+            return matches!(name, Some("mov_rm_8" | "movzx_8_32" | "movzx_rm_8_32"));
+        }
+    }
+    false
 }
 
 /// Whether everything that reads the flags an instruction leaves, up to the next instruction that
