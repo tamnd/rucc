@@ -125,7 +125,7 @@ pub fn lift(
         return 0;
     }
 
-    let mut live = live(func, machine, names);
+    let mut live = live(func, machine, joined, names);
     let mut emptied = 0;
     for (edge, above, other) in found {
         let copies: Option<Vec<(mir::Inst, Copy)>> = func
@@ -319,12 +319,24 @@ fn previous(func: &mir::Func, inst: mir::Inst) -> Option<mir::Inst> {
 /// read at its end. A block that leaves the function reads what its last instructions name and
 /// nothing else, since a return names what it returns and the epilogue puts back what a call keeps
 /// out of the frame.
-fn live(func: &mir::Func, machine: &MachineInsts, names: &Interner) -> Vec<Set> {
+///
+/// The byte of a comparison the layout folds into its branch is not written, and the branch does
+/// not read it, since the branch reads the flags. So a register that holds a value across such a
+/// comparison is live in front of it, and the copies on the other edge of a branch above it may
+/// not overwrite that register. See `crate::layout::joined`.
+fn live(
+    func: &mir::Func,
+    machine: &MachineInsts,
+    joined: &rucc_base::hash::Set<mir::Inst>,
+    names: &Interner,
+) -> Vec<Set> {
     let blocks: Vec<mir::Block> = func.blocks().collect();
     let mut gen_: Vec<Set> = vec![Set::default(); func.block_count()];
     let mut kill: Vec<Set> = vec![Set::default(); func.block_count()];
     for &block in &blocks {
         let (gen_, kill) = (&mut gen_[block.index()], &mut kill[block.index()]);
+        let last = func.terminator(block);
+        let mut byte = None;
         for inst in func.insts(block) {
             if gen_.all {
                 break;
@@ -337,10 +349,13 @@ fn live(func: &mir::Func, machine: &MachineInsts, names: &Interner) -> Vec<Set> 
                 break;
             }
             for key in keys(func, inst, false) {
-                if !kill.contains(&key) {
+                if !kill.contains(&key) && !(Some(inst) == last && Some(key) == byte) {
                     gen_.insert(key);
                 }
             }
+            let folded =
+                joined.contains(&inst).then(|| func[func[inst].operands].first().and_then(key));
+            byte = folded.flatten().or(byte);
             // A call writes only the top of a register AArch64 keeps the low half of, so a double
             // in d8 is still there behind it and whatever reads it there reads what was in front.
             // See [`mir::Constraint::Above`].
@@ -348,7 +363,9 @@ fn live(func: &mir::Func, machine: &MachineInsts, names: &Interner) -> Vec<Set> 
                 operand.role.is_def() && !matches!(operand.constraint, mir::Constraint::Above(_))
             });
             for key in written.filter_map(key) {
-                kill.insert(key);
+                if folded.flatten() != Some(key) {
+                    kill.insert(key);
+                }
             }
         }
         for arm in &func[block].succs {
@@ -578,6 +595,58 @@ mod tests {
 
         assert_eq!(lifted(&mut func, &Moves::default(), &mut names), 0);
         assert_eq!(func.insts(made[1]).count(), 1);
+    }
+
+    /// The exit of the loop starts with a comparison that the layout folds into its branch, and
+    /// the block after that reads `rsi`. The byte of the comparison is `rsi`, but it is never
+    /// written, so `rsi` still holds the value from the loop there, and the copy into `rsi` on the
+    /// back edge stays. When the two are not folded, the comparison writes `rsi` and the copy goes.
+    /// A loop in a fuzzed function of the bootxx harness got a reload in front of its branch this
+    /// way, and the exit read the reloaded value.
+    #[test]
+    fn a_copy_into_a_register_a_folded_comparison_on_the_exit_keeps_stays() {
+        for (folded, gone) in [(true, 0), (false, 1)] {
+            let mut names = Interner::new();
+            let (mut func, made) = looped(&mut names, None);
+            func.build(made[1], op(&mut names, "mov_rr_64"))
+                .def(Reg::physical(RSI), GPR)
+                .uses(Reg::physical(RAX), GPR)
+                .finish();
+            let [exit, read, other] =
+                [func.create_block(), func.create_block(), func.create_block()];
+            let compare = func
+                .build(exit, op(&mut names, "cmp_set_l_32"))
+                .def(Reg::physical(RSI), GPR)
+                .operand(Operand::read(Reg::physical(RAX), GPR))
+                .operand(Operand::read(Reg::physical(RCX), GPR))
+                .finish();
+            func.build(exit, op(&mut names, "br_cond_8"))
+                .operand(Operand::read(Reg::physical(RSI), GPR))
+                .finish();
+            *func.succs_mut(exit) = vec![BlockCall::to(read), BlockCall::to(other)];
+            func.build(read, op(&mut names, "ret"))
+                .operand(Operand::read(Reg::physical(RSI), GPR))
+                .finish();
+            func.build(other, op(&mut names, "ret")).finish();
+            *func.succs_mut(made[0]) = vec![
+                BlockCall::to(made[1]).taken(Weight::parts(9)),
+                BlockCall::to(exit).taken(Weight::parts(1)),
+            ];
+            let joined: rucc_base::hash::Set<mir::Inst> =
+                if folded { [compare].into_iter().collect() } else { Default::default() };
+
+            let moved = lift(
+                &mut func,
+                &BRANCH,
+                &FRAME,
+                &MACHINE,
+                &FLAGS,
+                &Moves::default(),
+                &joined,
+                &mut names,
+            );
+            assert_eq!(moved, gone, "folded: {folded}");
+        }
     }
 
     /// A branch with an even split whose two edges both write `rsi`, which the block they join
