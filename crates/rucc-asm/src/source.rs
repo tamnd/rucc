@@ -813,29 +813,32 @@ impl Reader {
     /// preprocessor can be read directly: a `# 42 "foo.h"` line marker is a comment and nothing has
     /// to know it is one.
     fn strip(&self, raw: &str, commenting: &mut bool) -> Result<String, Trouble> {
-        let mut out = String::with_capacity(raw.len());
+        // The work is on bytes, because a name or a string can hold UTF-8 (Plan 9 C writes
+        // `τconv`), and each mark that this looks for is ASCII. A cut at an ASCII byte is a cut
+        // at a character boundary, so the bytes that come out are UTF-8 again.
+        let mut out: Vec<u8> = Vec::with_capacity(raw.len());
         let bytes = raw.as_bytes();
         let mut i = 0;
         let mut quote = None;
         while i < bytes.len() {
-            let rest = &raw[i..];
+            let rest = &bytes[i..];
             if *commenting {
-                if let Some(end) = rest.find("*/") {
+                if let Some(end) = rest.windows(2).position(|w| w == b"*/") {
                     *commenting = false;
                     // A space, because a comment between two words is a separator and pasting the
                     // two together would make one word out of them.
-                    out.push(' ');
+                    out.push(b' ');
                     i += end + 2;
                 } else {
-                    return Ok(out);
+                    return Ok(utf8(out));
                 }
                 continue;
             }
-            let ch = bytes[i] as char;
+            let ch = bytes[i];
             if let Some(mark) = quote {
                 out.push(ch);
-                if ch == '\\' && i + 1 < bytes.len() {
-                    out.push(bytes[i + 1] as char);
+                if ch == b'\\' && i + 1 < bytes.len() {
+                    out.push(bytes[i + 1]);
                     i += 2;
                     continue;
                 }
@@ -845,30 +848,30 @@ impl Reader {
                 i += 1;
                 continue;
             }
-            if ch == '"' {
-                quote = Some('"');
+            if ch == b'"' {
+                quote = Some(b'"');
                 out.push(ch);
                 i += 1;
                 continue;
             }
             // A quote and the character after it is that character's number, so the character is
             // not a comment whatever it is. FreeBSD's boot0.S writes `.set ASCII_BEL,'#'`.
-            if ch == '\'' && i + 1 < bytes.len() {
+            if ch == b'\'' && i + 1 < bytes.len() {
                 let used = if bytes[i + 1] == b'\\' && i + 2 < bytes.len() { 3 } else { 2 };
-                out.extend(bytes[i..i + used].iter().map(|&byte| byte as char));
+                out.extend_from_slice(&bytes[i..i + used]);
                 i += used;
                 continue;
             }
-            if rest.starts_with("/*") {
+            if rest.starts_with(b"/*") {
                 *commenting = true;
                 i += 2;
                 continue;
             }
             // On AArch64 a `#` in front of a number is part of the number, so only one that starts
             // the line is a comment, which is still enough for the line markers.
-            let marker = ch == '#' && (!self.aarch64 || out.trim().is_empty());
-            if rest.starts_with("//") || marker {
-                return Ok(out);
+            let marker = ch == b'#' && (!self.aarch64 || out.iter().all(u8::is_ascii_whitespace));
+            if rest.starts_with(b"//") || marker {
+                return Ok(utf8(out));
             }
             out.push(ch);
             i += 1;
@@ -876,7 +879,7 @@ impl Reader {
         if quote.is_some() {
             return Err(self.bad("a string was opened and the line ended before it closed"));
         }
-        Ok(out)
+        Ok(utf8(out))
     }
 
     /// One statement, which is any number of labels and then at most one directive.
@@ -1398,7 +1401,7 @@ impl Reader {
                 continue;
             }
             let end =
-                at + rest[at..].find(|ch: char| !carries_on(ch as u8)).unwrap_or(rest.len() - at);
+                at + rest[at..].find(|ch: char| !carries_on_char(ch)).unwrap_or(rest.len() - at);
             let word = &rest[at..end];
             let after = at.checked_sub(1).map(|before| bytes[before]);
             let alone = starts(byte) && !matches!(after, Some(b'%' | b'\\'));
@@ -6812,7 +6815,7 @@ impl Parser<'_> {
             self.at += name.len() + 2;
             return name.to_owned();
         }
-        let end = body.find(|ch: char| !carries_on(ch as u8)).unwrap_or(body.len());
+        let end = body.find(|ch: char| !carries_on_char(ch)).unwrap_or(body.len());
         let word = body[..end].to_owned();
         self.at += end;
         word
@@ -7065,7 +7068,7 @@ fn labelled(text: &str) -> Option<(String, usize)> {
     if bytes.is_empty() || !(starts(bytes[0]) || bytes[0].is_ascii_digit()) {
         return None;
     }
-    let end = text.find(|ch: char| !carries_on(ch as u8))?;
+    let end = text.find(|ch: char| !carries_on_char(ch))?;
     let colon = end + text[end..].find(|ch: char| ch != ' ' && ch != '\t')?;
     // Not `::`, which is a different thing in gas, and not a bare name with nothing after it.
     if bytes.get(colon) != Some(&b':') || bytes.get(colon + 1) == Some(&b':') {
@@ -7082,7 +7085,7 @@ fn assigned(text: &str) -> Option<(&str, &str)> {
     if bytes.is_empty() || !starts(bytes[0]) {
         return None;
     }
-    let end = text.find(|ch: char| !carries_on(ch as u8)).unwrap_or(text.len());
+    let end = text.find(|ch: char| !carries_on_char(ch)).unwrap_or(text.len());
     let rest = text[end..].trim_start().strip_prefix('=')?;
     if rest.starts_with('=') {
         return None;
@@ -7116,12 +7119,19 @@ fn slot_i386(bytes: &[u8]) -> Reference {
 
 /// Whether a name may start with this.
 fn starts(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'.' | b'$')
+    // gas takes each byte over 0x7F as a letter of a name, so a name can be UTF-8: Plan 9 C
+    // writes `τconv`.
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'.' | b'$') || !byte.is_ascii()
 }
 
 /// Whether a name may go on with this.
 fn carries_on(byte: u8) -> bool {
     starts(byte) || byte.is_ascii_digit()
+}
+
+/// Whether a name may go on with this character, as [`carries_on`] for a byte.
+fn carries_on_char(ch: char) -> bool {
+    !ch.is_ascii() || carries_on(ch as u8)
 }
 
 /// The name a numbered local label is kept under while the file is being read.
@@ -7890,6 +7900,18 @@ _tls$tlv$init:
     fn words(assembled: &Assembled, name: &str) -> Vec<u32> {
         let bytes = bytes(assembled, name);
         bytes.chunks(4).map(|word| u32::from_le_bytes(word.try_into().unwrap())).collect()
+    }
+
+    #[test]
+    fn a_name_may_be_utf8_as_plan9_c_writes_it() {
+        // `τconv` of 9front's libc, with a comment after it so that the line is cut.
+        let read = aarch64("\t.text\n_τconv: // τ\n\tbl _τfmt\n\tret\n");
+        assert_eq!(words(&read, ".text"), [0x9400_0000, 0xd65f_03c0]);
+        let text = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        assert_eq!(text.relocs.len(), 1);
+        assert_eq!(text.relocs[0].symbol, "_τfmt");
+        let read = assembled("\t.text\nτconv:\n\tcall τfmt\n\t.ascii \"τ#\" # τ\n");
+        assert_eq!(bytes(&read, ".text")[0], 0xe8);
     }
 
     #[test]
@@ -11688,4 +11710,11 @@ nop
             relocs(&read, ".text").into_iter().map(|(_, _, kind, _)| kind).collect();
         assert_eq!(kinds[..2], [Reference::Call, Reference::Call]);
     }
+}
+
+/// The bytes of a line that [`Reader::strip`] kept, as text. A cut that `strip` makes is always
+/// at an ASCII byte, so the bytes are UTF-8 when the line was. A `'` in front of the first byte of
+/// a character that is more than one byte long takes only part of it, so the check stays.
+fn utf8(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
