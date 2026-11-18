@@ -2726,6 +2726,19 @@ impl<'u> Body<'_, 'u> {
     fn va_arg(&mut self, list: ExprId, ty: TypeId, span: Span) -> Option<Value> {
         let result = repr::value_type(self.types(), self.target(), ty)?;
         let size = repr::size_of(self.types(), self.target(), ty);
+        if let Some(bytes) = self.walked(result) {
+            let list = self.value(list);
+            let here = self.va_step(list, bytes, span);
+            let info = MemInfo {
+                size: bytes,
+                align: u32::try_from(bytes.next_power_of_two().min(4)).unwrap_or(4),
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            return Some(self.build(span).load(result, here, info, Flags::NONE));
+        }
         let quad = result == Type::float(rucc_ir::Float::F128) && self.target().quad_in_integers();
         if (result.is_int() || quad)
             && size * 8 == 2 * u64::from(self.target().pointer_width)
@@ -2763,6 +2776,9 @@ impl<'u> Body<'_, 'u> {
     fn va_object(&mut self, list: ExprId, ty: TypeId, span: Span) -> Value {
         let list = self.value(list);
         let size = repr::size_of(self.types(), self.target(), ty);
+        if self.walks_list() {
+            return self.va_step(list, size, span);
+        }
         let align = repr::align_of(self.types(), self.target(), ty);
         let info = MemInfo {
             size,
@@ -2783,6 +2799,90 @@ impl<'u> Body<'_, 'u> {
         build.value(data, Type::PTR)
     }
 
+    /// Whether the list here is a plain pointer that the walk can be written out for in the IR.
+    ///
+    /// This is i386, where `va_list` is a `char *` and every argument is in the argument area, in
+    /// a slot of its size rounded up to four bytes. The backend writes the same walk for
+    /// [`Opcode::VaArg`], but it does that after the optimizer has run. The list is then still an
+    /// object in memory whose address the instruction takes, so it cannot go into a register,
+    /// and each `va_arg` loads it, steps it and stores it again. When the walk is written here,
+    /// the list is only loaded and stored, and the optimizer can keep it in a register.
+    fn walks_list(&self) -> bool {
+        self.target().tuple.arch() == Arch::X86 && self.target().pointer_width == 32
+    }
+
+    /// The number of bytes that a `va_arg` of this type reads, where the walk is written out here.
+    ///
+    /// These are the scalars that the backend reads from a slot. Other types, such as a vector,
+    /// keep [`Opcode::VaArg`].
+    fn walked(&self, result: Type) -> Option<u64> {
+        if !self.walks_list() || !result.is_scalar() {
+            return None;
+        }
+        if result.is_ptr() {
+            return Some(u64::from(self.target().pointer_width / 8));
+        }
+        (result.is_int() || result.is_float()).then(|| u64::from(result.bits().div_ceil(8)))
+    }
+
+    /// One step of the walk: the address of the next argument, with the list moved past it.
+    ///
+    /// The slot of an argument of `size` bytes is that size rounded up to a word.
+    fn va_step(&mut self, list: Value, size: u64, span: Span) -> Value {
+        let word = u64::from(self.target().pointer_width / 8);
+        let info = MemInfo {
+            size: word,
+            align: u32::try_from(word).unwrap_or(4),
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let step = i128::from(size.max(1).next_multiple_of(word));
+        let bits = self.target().pointer_width;
+        let mut build = self.build(span);
+        let here = build.load(Type::PTR, list, info, Flags::NONE);
+        let step = build.iconst(Type::int(bits), step);
+        let args = build.func().push_values(&[here, step]);
+        let next = build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        build.store(next, list, info, Flags::NONE);
+        here
+    }
+
+    /// `va_start`, `va_end` and `va_copy` where the list is a pointer that the walk is written
+    /// out for.
+    ///
+    /// `va_start` writes a slot of its own, and the list is then given the value of that slot. So
+    /// the only instruction that takes the address of the list is gone, and the list can go into
+    /// a register. `va_copy` is a copy of one pointer, and `va_end` is nothing.
+    fn va_pointer(&mut self, opcode: Opcode, lists: &[Value], span: Span) {
+        let word = u64::from(self.target().pointer_width / 8);
+        let info = MemInfo {
+            size: word,
+            align: u32::try_from(word).unwrap_or(4),
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        match (opcode, lists) {
+            (Opcode::VaStart, &[list]) => {
+                let slot = self.scratch(word, info.align, span);
+                let mut build = self.build(span);
+                let args = build.func().push_values(&[slot]);
+                build.inst(InstData { args, ..InstData::new(Opcode::VaStart) }, &[]);
+                let first = build.load(Type::PTR, slot, info, Flags::NONE);
+                build.store(first, list, info, Flags::NONE);
+            }
+            (Opcode::VaCopy, &[dst, src]) => {
+                let mut build = self.build(span);
+                let from = build.load(Type::PTR, src, info, Flags::NONE);
+                build.store(from, dst, info, Flags::NONE);
+            }
+            _ => {}
+        }
+    }
+
     /// `__builtin_va_start`, `__builtin_va_end` and `__builtin_va_copy`, which are the three of
     /// the family that read nothing and answer nothing.
     ///
@@ -2792,6 +2892,10 @@ impl<'u> Body<'_, 'u> {
     /// stops being read here and something later may want to know that.
     fn va_effect(&mut self, opcode: Opcode, lists: &[ExprId], span: Span) {
         let lists: Vec<Value> = lists.iter().map(|&list| self.value(list)).collect();
+        if self.walks_list() {
+            self.va_pointer(opcode, &lists, span);
+            return;
+        }
         let mut build = self.build(span);
         let args = build.func().push_values(&lists);
         build.inst(InstData { args, ..InstData::new(opcode) }, &[]);
