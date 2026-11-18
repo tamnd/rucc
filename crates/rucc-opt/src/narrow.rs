@@ -91,6 +91,17 @@
 //! rewritten, and it rules the pair out when the dividend cannot be the most negative narrow value
 //! or the divisor cannot be minus one where the division is.
 //!
+//! A merge of loads. The lfs accessors of the NetBSD boot code read a field of the superblock from
+//! one of two layouts, so `lfs_sb_getbsize (fs)` is a branch with a load of eight bytes on each
+//! arm and a block parameter that takes the two. Most callers use only the low four bytes. On
+//! i386 a load of eight bytes is two loads, and the load of the high half was written for nothing
+//! on each arm. A block parameter whose one reader is a truncation, and whose every incoming value
+//! narrows for nothing, is given the narrow type. What narrows for nothing is what the arithmetic
+//! shape takes as a leaf, and two more things: a plain load with no other reader, which then reads
+//! only the narrow bytes, at the same address on a little endian target, and a block parameter of
+//! this kind, whose truncation is the next one this removes. The lfs accessors need both, because
+//! one merge passes `x & ~(y - 1)` of two other merges to the next one.
+//!
 //! # What it does not narrow
 //!
 //! Not a division of sign extensions the ranges cannot clear, for the reason just given. Not a
@@ -113,7 +124,8 @@
 //! narrowed to the widest of them rather than to none. That is the first box of issue 375.
 
 use rucc_ir::{
-    Block, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value, ValueList,
+    Block, Def, Extra, Facts, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode,
+    Type, Value, ValueList,
 };
 
 use crate::range::query::Ranges;
@@ -122,6 +134,9 @@ use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// Recorded once for each subtree redone at the narrow width.
 const NARROWED: &str = "arithmetic redone at the width the program truncates it to";
+
+/// Recorded once for each block parameter whose loads are read at the narrow width.
+const MERGED: &str = "a merge of loads read at the width it is truncated to";
 
 /// Recorded for a subtree that would have been redone if there had been fuel for it.
 const NO_FUEL: &str = "arithmetic left wide, the pass ran out of fuel";
@@ -163,7 +178,8 @@ impl Pass for Narrow {
         let mut stats = Stats::new();
         let mut uses = count(func);
         let cleared = cleared(func, an);
-        let seen = Seen { uses: &[], cleared: &cleared };
+        let little = an.outside().little_endian() == Some(true);
+        let seen = Seen { uses: &[], cleared: &cleared, merging: false };
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
                 let seen = Seen { uses: &uses, ..seen };
@@ -186,6 +202,9 @@ impl Pass for Narrow {
                 stats.optimized(NARROWED);
             }
         }
+        if little {
+            merges(func, &mut uses, Seen { merging: true, ..seen }, fuel, &mut stats);
+        }
         stats
     }
 }
@@ -197,6 +216,11 @@ struct Seen<'a> {
     uses: &'a [u32],
     /// The signed divisions of sign extensions the ranges say are not the pair that raises.
     cleared: &'a [Inst],
+    /// Whether a load and a merge are leaves, which only [`merges`] asks for, and only on a
+    /// little endian target, where the low bytes of an integer in memory are at its address. A
+    /// truncated load elsewhere is often of an address that is stored or loaded again at the full
+    /// width, and a later pass makes those one access only when the widths are the same.
+    merging: bool,
 }
 
 /// The signed divisions and remainders of sign extensions that cannot be the one that raises.
@@ -266,6 +290,11 @@ enum Plan {
     Constant(i128),
     /// An operation redone, which is the recursive case and the reason this is a tree.
     Nested(Box<Redo>),
+    /// A load with no other reader, which is read at the narrow width in place.
+    Load(Value),
+    /// A block parameter that [`merges`] gives the narrow type. Here it is truncated, and that
+    /// truncation is the one reader that `merges` then asks for.
+    Merged(Value),
 }
 
 /// Whether this is a truncation of arithmetic that can be redone narrow, and what it becomes.
@@ -345,7 +374,16 @@ fn plan(func: &Func, value: Value, ty: Type, seen: Seen<'_>, depth: u32) -> Opti
     if let Some((imm, wide)) = constant(func, value) {
         return Some(Plan::Constant(imm.signed(wide)));
     }
-    redo(func, value, ty, seen, depth - 1).map(|redo| Plan::Nested(Box::new(redo)))
+    if let Some(redo) = redo(func, value, ty, seen, depth - 1) {
+        return Some(Plan::Nested(Box::new(redo)));
+    }
+    if !seen.merging || seen.uses[value.index()] != 1 {
+        return None;
+    }
+    if plain(func, value) {
+        return Some(Plan::Load(value));
+    }
+    (depth > 1 && merged(func, value, ty, seen, depth - 1)).then_some(Plan::Merged(value))
 }
 
 /// Whether an operation's low bits depend only on the low bits of what went into it.
@@ -776,6 +814,172 @@ fn build(func: &mut Func, before: Inst, ty: Type, plan: &Plan, uses: &mut Vec<u3
             let data = InstData { args, extra: redo.extra, ..InstData::new(redo.opcode) };
             written(func, before, data, redo.ty, uses)
         }
+        Plan::Load(value) => {
+            narrowed(func, *value, ty);
+            *value
+        }
+        Plan::Merged(value) => {
+            let args = listed(func, (*value, None), uses);
+            let data = InstData { args, ..InstData::new(Opcode::Trunc) };
+            written(func, before, data, ty, uses)
+        }
+    }
+}
+
+/// Removes a value that nothing reads, and what only it read, as far as the operations that the
+/// arithmetic shape replaces.
+fn bury(func: &mut Func, value: Value, uses: &mut [u32]) {
+    if uses[value.index()] != 0 {
+        return;
+    }
+    let Def::Result { inst, .. } = func[value].def else { return };
+    let data = &func[inst];
+    let pure = low_bits_only(data.opcode)
+        || matches!(data.opcode, Opcode::SExt | Opcode::ZExt | Opcode::Trunc | Opcode::IConst);
+    if !pure || data.results().count() != 1 {
+        return;
+    }
+    let args: Vec<Value> = func[data.args].to_vec();
+    func.remove_inst(inst);
+    for arg in args {
+        uses[arg.index()] -= 1;
+        bury(func, arg, uses);
+    }
+}
+
+/// The terminator, the argument list and the argument of each edge into this parameter's block,
+/// or nothing when the parameter is not one of a block that something jumps to.
+fn incoming(func: &Func, param: Value) -> Option<Vec<(Inst, ValueList, Value)>> {
+    let Def::Param { block, index } = func[param].def else { return None };
+    if Some(block) == func.entry() {
+        return None;
+    }
+    let mut found = Vec::new();
+    for from in func.blocks() {
+        let Some(terminator) = func.terminator(from) else { continue };
+        for call in func.successors(terminator) {
+            if call.block == block {
+                found.push((terminator, call.args, *func[call.args].get(index as usize)?));
+            }
+        }
+    }
+    (!found.is_empty()).then_some(found)
+}
+
+/// Whether this block parameter can be given the narrow type: an integer that is wider, with no
+/// declaration to keep its width for, and each value passed to it one that narrows for nothing.
+fn merged(func: &Func, param: Value, ty: Type, seen: Seen<'_>, depth: u32) -> bool {
+    let wide = func[param].ty;
+    if !wide.is_int() || !wide.is_scalar() || wide.bits() <= ty.bits() || ty.bits() % 8 != 0 {
+        return false;
+    }
+    if func.value_decls(param).next().is_some() {
+        return false;
+    }
+    incoming(func, param).is_some_and(|edges| {
+        edges.iter().all(|&(_, _, arg)| plan(func, arg, ty, seen, depth).is_some())
+    })
+}
+
+/// Whether this value is a load of an integer that is not atomic and not volatile, so that a
+/// narrower load at the same address reads all of it that is used.
+fn plain(func: &Func, value: Value) -> bool {
+    if !func[value].ty.is_int() || !func[value].ty.is_scalar() {
+        return false;
+    }
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    let data = &func[inst];
+    let Extra::Mem(mem) = data.extra else { return false };
+    data.opcode == Opcode::Load
+        && func[mem].order == MemOrder::NotAtomic
+        && !data.flags.intersects(Flags::KEEP)
+}
+
+/// Makes a [`plain`] load read only the narrow bytes, which are at its address on a little endian
+/// target.
+fn narrowed(func: &mut Func, value: Value, ty: Type) {
+    let Def::Result { inst, .. } = func[value].def else { return };
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let bytes = u64::from(ty.bits() / 8);
+    let old = func[mem];
+    let align = old.align.min(u32::try_from(bytes).unwrap_or(u32::MAX));
+    let at = func.add_mem(MemInfo { size: bytes, align, ..old });
+    func[inst].extra = Extra::Mem(at);
+    func.retype(value, ty);
+    func.set_facts(value, Facts::NONE);
+}
+
+/// How many block parameters one run gives the narrow type, as a bound on the walk.
+const MERGES: u32 = 256;
+
+/// Gives each block parameter that one truncation reads the narrow type, with each value passed
+/// to it narrowed in front of the edge that passes it.
+///
+/// A merge that is a leaf of what is passed is truncated there, so the walk starts again after
+/// each change, to find that truncation too.
+fn merges(
+    func: &mut Func,
+    uses: &mut Vec<u32>,
+    seen: Seen<'_>,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+) {
+    let mut budget = MERGES;
+    'again: while budget > 0 {
+        let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+        for inst in found {
+            let data = &func[inst];
+            if data.opcode != Opcode::Trunc {
+                continue;
+            }
+            let (Some(&param), Some(result)) = (func[data.args].first(), data.first_result) else {
+                continue;
+            };
+            let ty = func[result].ty;
+            if !narrowable(ty) || uses[param.index()] != 1 {
+                continue;
+            }
+            let Def::Param { index, .. } = func[param].def else { continue };
+            let seen = Seen { uses, ..seen };
+            if !merged(func, param, ty, seen, DEPTH) {
+                continue;
+            }
+            let Some(edges) = incoming(func, param) else { continue };
+            let plans: Option<Vec<_>> = edges
+                .into_iter()
+                .map(|(at, list, arg)| {
+                    plan(func, arg, ty, seen, DEPTH).map(|plan| (at, list, arg, plan))
+                })
+                .collect();
+            let Some(plans) = plans else { continue };
+            if !fuel.take() {
+                stats.missed(NO_FUEL);
+                continue;
+            }
+            budget -= 1;
+            for (at, list, arg, plan) in plans {
+                let narrow = build(func, at, ty, &plan, uses);
+                uses[narrow.index()] += 1;
+                uses[arg.index()] -= 1;
+                let mut place = 0;
+                func.rewrite(list, |value| {
+                    let passed = if place == index as usize { narrow } else { value };
+                    place += 1;
+                    passed
+                });
+                bury(func, arg, uses);
+            }
+            func.retype(param, ty);
+            func.set_facts(param, Facts::NONE);
+            let mut forward = rucc_base::hash::Map::default();
+            forward.insert(result, param);
+            crate::uses::substitute(func, &forward);
+            uses[param.index()] = uses[result.index()];
+            func.remove_inst(inst);
+            stats.optimized(MERGED);
+            continue 'again;
+        }
+        break;
     }
 }
 
@@ -1890,5 +2094,153 @@ mod tests {
         );
         assert_eq!(left(&func, block), 2);
         assert_eq!(func[last(&func, block)].opcode, Opcode::Return);
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use std::sync::Arc;
+
+    use rucc_base::Interner;
+    use rucc_ir::{Module, parse, print, verify_func};
+
+    use crate::narrow::Narrow;
+    use crate::outside::Outside;
+    use crate::{Fuel, Pass};
+
+    /// Runs the pass over `@f` with this data layout, insists the result verifies, and gives back
+    /// its text.
+    fn run(layout: &str, body: &str) -> String {
+        let text = format!(
+            "; ModuleID = 'narrow.c'\n; format 0\ntarget triple = \"i386-unknown-netbsd\"\ntarget datalayout = \"{layout}\"\n\nfunc @f(ptr, i32) -> i32, linkage(external) {{\n{body}}}\n"
+        );
+        let mut names = Interner::new();
+        let mut module: Module = parse(&text, &mut names).expect("the text parses");
+        let id = module.funcs().last().expect("one function");
+        let outside = Arc::new(Outside::of(&module));
+        let mut an = crate::machine::fixtures::analyses().about(outside);
+        Narrow.run(&mut module[id], &mut an, &mut Fuel::unlimited());
+        if let Err(errors) = verify_func(&module, &module[id], &names) {
+            panic!("{errors:#?}\n{}", print(&module, &names));
+        }
+        print(&module, &names)
+    }
+
+    const LITTLE: &str = "e-p:32:32-i64:32-f80:32-S128";
+    const BIG: &str = "E-p:32:32-i64:32-f80:32-S128";
+
+    /// `lfs_sb_getbsize (fs)` truncated to an `int`: a load of eight bytes on each arm of a
+    /// branch, and a merge that only the truncation reads.
+    const ACCESSOR: &str = "block0(%0: ptr, %1: i32):
+    %2 = iconst.i32 0
+    %3 = icmp eq %1, %2
+    br_if %3, block1, block2
+
+block1:
+    %4 = load.i64 %0, align 4
+    jump block3(%4)
+
+block2:
+    %5 = iconst.i32 8
+    %6 = ptr_add %0, %5
+    %7 = load.i64 %6, align 4
+    jump block3(%7)
+
+block3(%8: i64):
+    %9 = trunc.i32 %8
+    return %9
+";
+
+    fn count(text: &str, what: &str) -> usize {
+        text.matches(what).count()
+    }
+
+    #[test]
+    fn a_truncated_merge_of_two_loads_is_a_merge_of_two_narrow_loads() {
+        let out = run(LITTLE, ACCESSOR);
+        assert_eq!(count(&out, " = load.i32 "), 2, "{out}");
+        assert_eq!(count(&out, " = load.i64 "), 0, "{out}");
+        assert_eq!(count(&out, " = trunc"), 0, "{out}");
+        assert_eq!(count(&out, "block3(%8: i32):"), 1, "{out}");
+    }
+
+    #[test]
+    fn a_constant_on_one_edge_is_written_again_at_the_narrow_width() {
+        let body =
+            ACCESSOR.replace("    %4 = load.i64 %0, align 4\n", "    %4 = iconst.i64 4294967303\n");
+        let out = run(LITTLE, &body);
+        assert_eq!(count(&out, " = load.i32 "), 1, "{out}");
+        assert_eq!(count(&out, " = iconst.i32 7"), 1, "{out}");
+        assert_eq!(count(&out, " = trunc"), 0, "{out}");
+    }
+
+    /// The lfs shape, where what one merge passes is arithmetic on another merge.
+    #[test]
+    fn a_merge_passed_through_arithmetic_to_a_second_merge_narrows_too() {
+        let body = ACCESSOR.replace(
+            "block3(%8: i64):
+    %9 = trunc.i32 %8
+    return %9
+",
+            "block3(%8: i64):
+    %9 = iconst.i64 1
+    %10 = sub %8, %9
+    br_if %3, block4, block5
+
+block4:
+    jump block6(%10)
+
+block5:
+    %11 = iconst.i32 16
+    %12 = ptr_add %0, %11
+    %13 = load.i64 %12, align 4
+    jump block6(%13)
+
+block6(%14: i64):
+    %15 = trunc.i32 %14
+    return %15
+",
+        );
+        let out = run(LITTLE, &body);
+        assert_eq!(count(&out, " = load.i32 "), 3, "{out}");
+        assert_eq!(count(&out, " = load.i64 "), 0, "{out}");
+        assert_eq!(count(&out, " = trunc"), 0, "{out}");
+    }
+
+    #[test]
+    fn a_big_endian_target_keeps_the_wide_loads() {
+        let out = run(BIG, ACCESSOR);
+        assert_eq!(count(&out, " = load.i64 "), 2, "{out}");
+        assert_eq!(count(&out, " = trunc.i32 "), 1, "{out}");
+    }
+
+    #[test]
+    fn a_volatile_load_keeps_the_wide_merge() {
+        let body = ACCESSOR.replace("%4 = load.i64 %0", "%4 = load.i64.volatile %0");
+        let out = run(LITTLE, &body);
+        assert_eq!(count(&out, " = load.i64"), 2, "{out}");
+        assert_eq!(count(&out, " = trunc.i32 "), 1, "{out}");
+    }
+
+    #[test]
+    fn a_load_with_a_second_reader_keeps_the_wide_merge() {
+        let body = ACCESSOR
+            .replace("    jump block3(%4)\n", "    store %4 -> %0, align 4\n    jump block3(%4)\n");
+        let out = run(LITTLE, &body);
+        assert_eq!(count(&out, " = load.i64 "), 2, "{out}");
+        assert_eq!(count(&out, " = trunc.i32 "), 1, "{out}");
+    }
+
+    /// A truncated load that is not passed to a merge stays wide, because another access of
+    /// the same address at the full width is something a later pass can make one with it.
+    #[test]
+    fn a_truncated_load_outside_a_merge_is_left_wide() {
+        let body = "block0(%0: ptr, %1: i32):
+    %2 = load.i64 %0, align 4
+    %3 = trunc.i32 %2
+    return %3
+";
+        let out = run(LITTLE, body);
+        assert_eq!(count(&out, " = load.i64 "), 1, "{out}");
     }
 }
