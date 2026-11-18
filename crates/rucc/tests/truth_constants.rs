@@ -2,7 +2,9 @@
 //!
 //! `!b` on a `_Bool` the front end kept as a value is `xor` with a one. The byte rules took an
 //! immediate and the one bit rules did not, so the one went into a register of its own first:
-//! `movb $1, %al; xorb %al, %dil`, where gcc writes a single `xorb $1`.
+//! `movb $1, %al; xorb %al, %dil`, where gcc writes a single `xorl $1`. The `xor` is done on the
+//! whole register rather than on its low byte, which is what gcc writes and what
+//! `rucc_codegen::shorten` makes of a byte instruction whose condition state nothing reads.
 //!
 //! The same goes for a pointer compared with `NULL`, which the front end writes as a zero made a
 //! pointer. The cast hid the zero from the rules, so the zero went into a register to compare
@@ -29,7 +31,7 @@ fn assembly(what: &str, source: &str) -> String {
 #[test]
 fn a_truth_value_flipped_by_a_constant_is_one_instruction() {
     let text = assembly("flip", "_Bool flip(_Bool a) { return a ^ 1; }\n");
-    assert!(text.contains("xorb\t$1, %"), "{text}");
+    assert!(text.contains("xorl\t$1, %"), "{text}");
     assert!(!text.contains("movb\t$1"), "{text}");
 }
 

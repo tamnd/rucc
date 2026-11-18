@@ -11509,7 +11509,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// does.
     ///
     /// gcc 13.3.0 writes the same loop for the same functions, down to which register holds the
-    /// value that is put back.
+    /// value that is put back. The operation inside it is done on the whole register at every
+    /// width, as gcc does it, since only the part the exchange stores is ever read.
     #[test]
     fn a_bitwise_read_modify_write_is_a_loop_around_the_compare_and_exchange() {
         let widths = [("char", "b", "%cl"), ("short", "w", "%cx"), ("int", "l", "%ecx")];
@@ -11526,7 +11527,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
                     text.contains(&format!("cmpxchg{suffix}\t{reg}, (%rdi)")),
                     "{ty} {name}: {text}"
                 );
-                assert!(text.contains(&format!("{insn}{suffix}\t")), "{ty} {name}: {text}");
+                assert!(text.contains(&format!("{insn}l\t")), "{ty} {name}: {text}");
                 // The tab matters on the second of these, since `cmpxchg` ends in the other name.
                 assert!(!text.contains("\txadd"), "{ty} {name} is not an add: {text}");
                 assert!(!text.contains("\txchg"), "{ty} {name} is not an exchange: {text}");
