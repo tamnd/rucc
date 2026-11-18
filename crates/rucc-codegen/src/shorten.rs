@@ -5,7 +5,7 @@
 //! about the back end never learning what it is compiling for, and names three of these as free
 //! before any of that is settled and one as waiting for it.
 //!
-//! Nine rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! Ten rewrites. A move of zero into a register becomes an exclusive or of the register with
 //! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
 //! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
 //! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
@@ -68,6 +68,15 @@
 //! file, and on one machine it went from 1.043 of gcc to 1.028 with this and to 1.031 with three
 //! bytes of nothing put after each byte move instead. So most of what this buys there is where the
 //! code behind it falls, and the wait is the rest, which came out ahead in each of the three pairs.
+//!
+//! And arithmetic on a byte or a half word of a register becomes the same arithmetic on all of it,
+//! where the condition state is dead and the goal is not size. `addb %bl, %cl` keeps the rest of
+//! `%rcx` and so waits for whatever wrote it, for the reason the byte move above does, and `addl
+//! %ebx, %ecx` leaves the same low byte and waits on nothing else. gcc does the arithmetic of an
+//! `unsigned char` at thirty two bits. The maple tree keeps its node offsets in bytes, and on each
+//! `brk` of the kernel bench rucc ran about 150 byte additions and subtractions there where gcc ran
+//! 24. The wide instruction sets the state from the wide answer, which is why it waits on the state
+//! being dead the way the exclusive or does.
 //!
 //! And a move of minus one into a register becomes the `or` of minus one into it where the goal is
 //! size. `movl $-1, %eax` is five bytes and `orl $-1, %eax` is three, since the `or` carries its
@@ -237,6 +246,7 @@ pub fn shorter(
     let wanted = wanted.chain(short.clearing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.narrowing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.whole.iter().map(|entry| entry.into));
+    let wanted = wanted.chain(short.whole_arithmetic.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.byte_testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.stepping.iter().map(|entry| entry.into));
@@ -284,6 +294,19 @@ pub fn shorter(
                 let into = whole_form(func, short, names, &opcodes, inst);
                 if into.is_some_and(|(op, number)| {
                     written_whole(func, &mut counts, machine, names, inst, op, number)
+                }) {
+                    took += 1;
+                    known = Known::of(&mut seen, func, short, flags, names, inst);
+                }
+            }
+            // Arithmetic on part of a register, written as the arithmetic on all of it. The same
+            // trade for the same reason, and the wide instruction writes the state from the wide
+            // answer, so this waits on the state being dead as well. What stands there afterwards
+            // writes the state the way the narrow one did, so the walk past it is unchanged.
+            if !small && !live && known.arithmetic {
+                let into = arithmetic_form(func, short, names, &opcodes, inst);
+                if into.is_some_and(|(op, number)| {
+                    written_whole_with(func, &mut counts, machine, names, inst, op, number)
                 }) {
                     took += 1;
                     known = Known::of(&mut seen, func, short, flags, names, inst);
@@ -620,6 +643,8 @@ struct Known {
     narrowing: bool,
     /// Whether it writes part of a register and has a move that writes all of it.
     whole: bool,
+    /// Whether it does arithmetic on part of a register and has the same arithmetic on all of it.
+    arithmetic: bool,
     /// Whether it has a test of the low byte.
     byte_testing: bool,
     /// Whether it has a shorter way of comparing against zero.
@@ -662,6 +687,7 @@ impl Known {
                 clearing: has(|short, bare| short.clearing.iter().any(|entry| entry.name == bare)),
                 narrowing: has(|short, bare| short.narrowed(bare).is_some()),
                 whole: has(|short, bare| short.whole(bare).is_some()),
+                arithmetic: has(|short, bare| short.whole_arithmetic(bare).is_some()),
                 byte_testing: has(|short, bare| short.byte_tested(bare).is_some()),
                 testing: has(|short, bare| short.tested(bare).is_some()),
                 splitting: bare.and_then(|bare| flags.compare(bare)).is_some_and(|entry| {
@@ -831,6 +857,66 @@ fn written_whole(
 ) -> bool {
     let mut set = Changes::new();
     set.rewrite(inst, Plan { opcode, imm: Some(number), ..Plan::of(func, inst) });
+    set.commit(func, counts, names, machine).is_ok()
+}
+
+/// The arithmetic on the whole register that leaves the part this one works on as this one leaves
+/// it, and the number it carries then, for one that carries a number.
+///
+/// The number is spread from the top bit of the part rather than cut to it. Its bits in the part
+/// are the ones this one carried, nothing reads the bits above, and a byte's minus one spread is
+/// still a number the wide instruction carries in one byte.
+///
+/// Not for an instruction a template wrote or one that works on memory, for the reasons
+/// [`whole_form`] has. Not for one that reads the same register twice either. The exclusive or of
+/// a byte with itself is how the low byte of a wider value is cleared and the rest of it kept,
+/// which is what the clearing rewrite here writes, and there the bits above the part are exactly
+/// the ones still wanted.
+fn arithmetic_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    inst: mir::Inst,
+) -> Option<(mir::Opcode, Option<i64>)> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let whole = short.whole_arithmetic(name)?;
+    let data = &func[inst];
+    if data.mem.is_some() || data.flags.contains(mir::Flags::TEMPLATE) {
+        return None;
+    }
+    let read: Vec<mir::Reg> = func[data.operands]
+        .iter()
+        .filter(|operand| operand.role == Role::Use)
+        .map(|operand| operand.reg)
+        .collect();
+    if read.iter().enumerate().any(|(at, reg)| read[..at].contains(reg)) {
+        return None;
+    }
+    if whole.writes == 0 || whole.writes >= u64::BITS {
+        return None;
+    }
+    let spread = u64::BITS - whole.writes;
+    let number = data.imm.map(|at| (func[at].0 << spread) >> spread);
+    let opcode = opcodes.iter().find(|&&(at, _)| at == whole.into).map(|&(_, opcode)| opcode)?;
+    Some((opcode, number))
+}
+
+/// Rewrites the instruction as `opcode`, carrying `number` where it carried one.
+///
+/// The operands are the ones it had. Both instructions are two address arithmetic of the same form
+/// at two widths, so the register written is still the first one read.
+fn written_whole_with(
+    func: &mut mir::Func,
+    counts: &mut changes::Reads,
+    machine: &MachineInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    opcode: mir::Opcode,
+    number: Option<i64>,
+) -> bool {
+    let mut set = Changes::new();
+    set.rewrite(inst, Plan { opcode, imm: number, ..Plan::of(func, inst) });
     set.commit(func, counts, names, machine).is_ok()
 }
 
@@ -1827,6 +1913,90 @@ mod tests {
 
         assert_eq!(takes(&mut func, &mut names), 2);
         assert_eq!(shape(&func, &names, block), ["xor_rr_32"]);
+    }
+
+    /// Arithmetic on a byte is done on the whole register at a level that wanted fast code, so it
+    /// waits on its sources and not on whatever wrote the rest of the register. Each of the seven,
+    /// at both widths, with the number it carries spread from the top of the part.
+    #[test]
+    fn arithmetic_on_a_byte_is_done_on_the_whole_register() {
+        for width in [8, 16] {
+            for name in ["add", "sub", "and", "or", "xor"] {
+                let (mut names, mut func, block) = empty();
+                let value = func.new_vreg(GPR);
+                let other = func.new_vreg(GPR);
+                let rr = op(&mut names, &format!("{name}_rr_{width}"));
+                let ri = op(&mut names, &format!("{name}_ri_{width}"));
+                let both = func
+                    .build(block, rr)
+                    .operand(reuse(value))
+                    .uses(value, GPR)
+                    .uses(other, GPR)
+                    .finish();
+                let number = if width == 8 { 0xf0 } else { 0xfff0 };
+                let one = func.build(block, ri).operand(reuse(value)).uses(value, GPR);
+                let one = one.imm(number).finish();
+
+                assert_eq!(takes(&mut func, &mut names), 2, "{name} {width}");
+                let wide = [format!("{name}_rr_32"), format!("{name}_ri_32")];
+                assert_eq!(shape(&func, &names, block), wide, "{name} {width}");
+                assert_eq!(regs(&func, both), [value, value, other], "{name} {width}");
+                assert_eq!(imm(&func, one), Some(-16), "{name} {width}");
+            }
+            for name in ["neg", "not"] {
+                let (mut names, mut func, block) = empty();
+                let value = func.new_vreg(GPR);
+                let part = op(&mut names, &format!("{name}_r_{width}"));
+                func.build(block, part).operand(reuse(value)).uses(value, GPR).finish();
+
+                assert_eq!(takes(&mut func, &mut names), 1, "{name} {width}");
+                assert_eq!(shape(&func, &names, block), [format!("{name}_r_32")]);
+            }
+        }
+    }
+
+    /// The wide addition sets the carry, the sign and the overflow from the wide answer, so a byte
+    /// addition whose state something reads stays a byte addition.
+    #[test]
+    fn arithmetic_on_a_byte_whose_state_is_read_stays() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let add = op(&mut names, "add_ri_8");
+        let set = op(&mut names, "set_e");
+        func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(3).finish();
+        func.build(block, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["add_ri_8", "set_e"]);
+    }
+
+    /// The exclusive or of a byte with itself is the way the low byte of a wider value is cleared
+    /// with the rest of it kept, so it stays a byte instruction. So does arithmetic a template
+    /// wrote, and arithmetic at a level that wanted small code.
+    #[test]
+    fn a_byte_cleared_in_place_or_written_by_a_template_stays() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let xor = op(&mut names, "xor_rr_8");
+        func.build(block, xor).operand(reuse(value)).uses(value, GPR).uses(value, GPR).finish();
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["xor_rr_8"]);
+
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let add = op(&mut names, "add_ri_8");
+        let part = func.build(block, add).flags(mir::Flags::TEMPLATE).operand(reuse(value));
+        part.uses(value, GPR).imm(3).finish();
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["add_ri_8"]);
+
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let add = op(&mut names, "add_ri_8");
+        func.build(block, add).operand(reuse(value)).uses(value, GPR).imm(3).finish();
+        assert_eq!(small(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["add_ri_8"]);
     }
 
     /// A byte move a template wrote stays a byte move. The program may be keeping something in the

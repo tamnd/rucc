@@ -784,6 +784,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     clearing: &LOW_BYTE_CLEARS,
     narrowing: &NARROWER_MOVES,
     whole: &WHOLE_MOVES,
+    whole_arithmetic: &WHOLE_ARITHMETIC,
     byte_testing: &BYTE_TESTS,
     testing: &ZERO_COMPARES,
     stepping: &STEPS,
@@ -879,6 +880,47 @@ static NARROWER_MOVES: [Narrowed; 5] = [
 static WHOLE_MOVES: [Narrowed; 2] = [
     Narrowed { name: "mov_ri_8", into: "mov_ri_32", writes: 8 },
     Narrowed { name: "mov_ri_16", into: "mov_ri_32", writes: 16 },
+];
+
+/// Arithmetic on a byte or a half word of a register, done on the whole register instead.
+///
+/// `addb %bl, %cl` keeps the other fifty six bits of `%rcx`, so it waits for whatever wrote `%rcx`
+/// last for the same reason the byte move in [`WHOLE_MOVES`] does, and the half word form carries a
+/// prefix byte as well. `addl %ebx, %ecx` leaves the same low byte and waits only on its sources.
+/// An add, a subtract, the three bitwise operations, a negation and a complement all give the low
+/// bits of their answer from the low bits of what they read and nothing above, which is why these
+/// seven and no others are here. gcc does the arithmetic of an `unsigned char` at thirty two bits,
+/// and the kernel's maple tree, whose node offsets are bytes, ran about 150 byte additions and
+/// subtractions on each `brk` of the kernel bench where gcc ran 24.
+///
+/// The condition state is not the same, since the wide instruction sets the sign, the carry and
+/// the overflow from the wide answer, so the pass takes these only where nothing reads the state.
+#[rustfmt::skip]
+static WHOLE_ARITHMETIC: [Narrowed; 24] = [
+    Narrowed { name: "add_rr_8", into: "add_rr_32", writes: 8 },
+    Narrowed { name: "add_ri_8", into: "add_ri_32", writes: 8 },
+    Narrowed { name: "sub_rr_8", into: "sub_rr_32", writes: 8 },
+    Narrowed { name: "sub_ri_8", into: "sub_ri_32", writes: 8 },
+    Narrowed { name: "and_rr_8", into: "and_rr_32", writes: 8 },
+    Narrowed { name: "and_ri_8", into: "and_ri_32", writes: 8 },
+    Narrowed { name: "or_rr_8", into: "or_rr_32", writes: 8 },
+    Narrowed { name: "or_ri_8", into: "or_ri_32", writes: 8 },
+    Narrowed { name: "xor_rr_8", into: "xor_rr_32", writes: 8 },
+    Narrowed { name: "xor_ri_8", into: "xor_ri_32", writes: 8 },
+    Narrowed { name: "neg_r_8", into: "neg_r_32", writes: 8 },
+    Narrowed { name: "not_r_8", into: "not_r_32", writes: 8 },
+    Narrowed { name: "add_rr_16", into: "add_rr_32", writes: 16 },
+    Narrowed { name: "add_ri_16", into: "add_ri_32", writes: 16 },
+    Narrowed { name: "sub_rr_16", into: "sub_rr_32", writes: 16 },
+    Narrowed { name: "sub_ri_16", into: "sub_ri_32", writes: 16 },
+    Narrowed { name: "and_rr_16", into: "and_rr_32", writes: 16 },
+    Narrowed { name: "and_ri_16", into: "and_ri_32", writes: 16 },
+    Narrowed { name: "or_rr_16", into: "or_rr_32", writes: 16 },
+    Narrowed { name: "or_ri_16", into: "or_ri_32", writes: 16 },
+    Narrowed { name: "xor_rr_16", into: "xor_rr_32", writes: 16 },
+    Narrowed { name: "xor_ri_16", into: "xor_ri_32", writes: 16 },
+    Narrowed { name: "neg_r_16", into: "neg_r_32", writes: 16 },
+    Narrowed { name: "not_r_16", into: "not_r_32", writes: 16 },
 ];
 
 /// Testing bits of a register in its low byte, when every bit the constant names is in that byte.

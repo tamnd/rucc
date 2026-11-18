@@ -117,6 +117,11 @@ pub struct ShortInsts {
     /// the first one writes, and the number the second one carries is the first one's number cut
     /// to that many bits.
     pub whole: &'static [Narrowed],
+    /// Every instruction that does arithmetic on part of a register and leaves the rest of it as
+    /// it was, and the same arithmetic on the whole register. [`Narrowed::writes`] is the part the
+    /// first one works on, which is all of the answer anything reads, and an immediate the second
+    /// one carries is the first one's spread from the top bit of that part.
+    pub whole_arithmetic: &'static [Narrowed],
     /// Every test of a register against a constant that has a test of the low byte asking the same
     /// thing, for a constant whose bits all sit below [`Narrowed::writes`]. Empty on a machine where
     /// some register has no low byte to name, since the pass rewriting these does not ask which
@@ -173,6 +178,12 @@ impl ShortInsts {
     #[must_use]
     pub fn whole(&self, name: &str) -> Option<Narrowed> {
         self.whole.iter().find(|entry| entry.name == name).copied()
+    }
+
+    /// The arithmetic on the whole register, for the instruction of that name.
+    #[must_use]
+    pub fn whole_arithmetic(&self, name: &str) -> Option<Narrowed> {
+        self.whole_arithmetic.iter().find(|entry| entry.name == name).copied()
     }
 
     /// The test of the low byte that asks what the instruction of that name asks.

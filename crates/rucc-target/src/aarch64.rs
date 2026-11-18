@@ -538,6 +538,7 @@ pub static SHORT: ShortInsts = ShortInsts {
     clearing: &[],
     narrowing: &[],
     whole: &[],
+    whole_arithmetic: &[],
     byte_testing: &[],
     testing: &[],
     stepping: &[],
