@@ -166,6 +166,20 @@ impl Checker<'_> {
                     );
                     return self.poison(span);
                 }
+                if self.unchecked.contains(&decl) {
+                    let spelled = self.text(name).to_owned();
+                    self.report(
+                        Diagnostic::error(
+                            format!(
+                                "internal error: the body of '{spelled}' was not checked because \
+                                 nothing seemed to reach it"
+                            ),
+                            span,
+                        )
+                        .with_code("E0886"),
+                    );
+                    return self.poison(span);
+                }
                 // Said at every use, a call inside the function's own body included, which is
                 // what gcc does. In `check/advice.rs`.
                 self.heed_deprecated(decl, span);

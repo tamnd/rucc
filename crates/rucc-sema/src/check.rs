@@ -422,6 +422,13 @@ pub struct Checker<'a> {
     pub(in crate::check) incomplete_lines: Vec<IncompleteLine>,
     /// The records that a `#pragma incomplete` line has marked so far.
     pub(in crate::check) incomplete_records: rucc_base::hash::Set<RecordId>,
+    /// For each external declaration, whether it is a definition whose body is not checked,
+    /// because nothing in the unit reaches it. See [`Checker::set_unreached`].
+    pub(in crate::check) unreached: Vec<bool>,
+    /// Whether the external declaration being checked is one of those.
+    pub(in crate::check) unreached_now: bool,
+    /// The functions whose bodies were not checked for that reason.
+    pub(in crate::check) unchecked: rucc_base::hash::Set<DeclId>,
     /// The state of the kencc format check, under `-fkencc-format` only. See
     /// `check/varargck.rs`.
     pub(in crate::check) varargck: Option<varargck::Varargck>,
@@ -527,6 +534,9 @@ impl<'a> Checker<'a> {
             extern_registers: Vec::new(),
             incomplete_lines: Vec::new(),
             incomplete_records: rucc_base::hash::Set::default(),
+            unreached: Vec::new(),
+            unreached_now: false,
+            unchecked: rucc_base::hash::Set::default(),
             varargck: None,
             kencc_prototypes: rucc_base::hash::Map::default(),
             anonymous_spellings: rucc_base::hash::Map::default(),
@@ -596,6 +606,19 @@ impl<'a> Checker<'a> {
     ///
     /// The declarations are checked in the order they were written, since that is the order the
     /// scopes are built in and the order the diagnostics belong in.
+    /// Gives the checker the definitions whose bodies it need not check, one flag for each
+    /// external declaration, as `rucc_parse::unreached` works them out. Call this before
+    /// [`Checker::check_unit`].
+    ///
+    /// The declaration of such a function is checked as any other is, and the function is
+    /// defined, so that a second definition is still an error. Its body is not looked at, and
+    /// the function is left with none, which is all the lowering needs of a function nothing
+    /// calls. A use of it that the checker does meet is a mistake in working the flags out, and
+    /// is reported as one rather than lowered as a call to nothing.
+    pub fn set_unreached(&mut self, unreached: Vec<bool>) {
+        self.unreached = unreached;
+    }
+
     pub fn check_unit(&mut self) {
         // Copied out because it is a shared reference with the checker's own lifetime, so holding
         // it does not borrow the checker that each declaration is checked through.
@@ -612,7 +635,9 @@ impl<'a> Checker<'a> {
             let index = u32::try_from(index).unwrap_or(u32::MAX);
             self.mark_incomplete_before(index);
             self.read_varargck_before(index);
+            self.unreached_now = self.unreached.get(index as usize).copied().unwrap_or(false);
             self.check_decl(decl);
+            self.unreached_now = false;
         }
         self.mark_incomplete_before(u32::MAX);
         // kencc reads a line after the last declaration too, and says what is wrong with it.
