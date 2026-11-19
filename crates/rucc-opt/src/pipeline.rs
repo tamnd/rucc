@@ -677,6 +677,15 @@ const O3: &[&str] = &[
 /// makes the code larger. `fsread` in `boot2` works out the cylinder group of an inode, which is
 /// `inode / fs_ipg`, twice in one block for the UFS1 start of the group and divided twice.
 ///
+/// `redundant-load` runs after `load-forward`, as it does at `-O2`. `load-forward` forgets what it
+/// knows at the end of each block, so a field that one block reads and a later block reads again is
+/// two loads. `redundant-load` sees that no store or call can change the field between the two and
+/// uses the first value. In NetBSD's `bootxx`, `buf_read_file` reads `f_fsdata` and the block size of
+/// the file system again in each arm of its tests. Each of the six images got smaller, from 24 bytes
+/// for `ffsv1` to 100 bytes for `lfsv1`, except `lfsv2`, which got larger by 20 bytes. There the
+/// one flag that tells a 32 bit from a 64 bit super block stays in a register across the function,
+/// and the pointer to the super block goes to the stack.
+///
 /// `step-sink` runs last, when nothing after it will move an instruction in a block again. It puts
 /// `p + 1` after the last read of `p`, so the two share a register, and the copy loop of `boot2`
 /// lost three copies on its back edge.
@@ -707,6 +716,7 @@ const OS: &[&str] = &[
     "rangetest",
     "number",
     "load-forward",
+    "redundant-load",
     "dse",
     "dce",
     "bswap",
@@ -739,8 +749,8 @@ const OS: &[&str] = &[
 /// rather have the branch than the bytes, and every reason to want the do-while form here is a
 /// speed reason.
 ///
-/// `thread` and `rangetest` run again after `phiopt`, `number` after `load-forward`, and `step-sink`
-/// runs last, as at `-Os`.
+/// `thread` and `rangetest` run again after `phiopt`, `number` and `redundant-load` after
+/// `load-forward`, and `step-sink` runs last, as at `-Os`.
 const OZ: &[&str] = &[
     "expect",
     "fold",
@@ -765,6 +775,7 @@ const OZ: &[&str] = &[
     "rangetest",
     "number",
     "load-forward",
+    "redundant-load",
     "dse",
     "dce",
     "bswap",
