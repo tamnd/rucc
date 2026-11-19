@@ -704,9 +704,11 @@ fn named(text: &str, name: &str, symbol: &mut Named) -> Result<(), Error> {
         }
         None => (name, 0),
     };
-    let symbolic =
-        name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || "_.$".contains(c))
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || "_.$".contains(c));
+    // A character that is not ASCII is a letter of a name, as gas takes it, since Plan 9 C
+    // writes `τconv`.
+    let letter = |c: char| !c.is_ascii() || c.is_ascii_alphabetic() || "_.$".contains(c);
+    let symbolic = name.chars().next().is_some_and(letter)
+        && name.chars().all(|c| letter(c) || c.is_ascii_digit());
     let numbered = name.len() > 1
         && name.ends_with(['b', 'f'])
         && name[..name.len() - 1].bytes().all(|b| b.is_ascii_digit());
