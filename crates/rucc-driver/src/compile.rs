@@ -366,6 +366,20 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         },
     );
     clock.lap("parse");
+    // The bodies of the inline functions of the headers that nothing in the unit reaches are not
+    // checked when code is written, since no code is written for them either. `-fsyntax-only`
+    // and the printed trees still check every body. tamnd/rucc-kernel#244.
+    let writes = matches!(
+        opts.emit,
+        EmitKind::Object | EmitKind::Asm | EmitKind::Archive | EmitKind::Executable
+    );
+    let unreached = if writes && !opts.kencc {
+        rucc_parse::unreached(&tokens, &parsed, &sess.interner, |span| {
+            sess.sources.lookup_file(span.lo) != Some(file)
+        })
+    } else {
+        Vec::new()
+    };
     drop(tokens);
     let parse_failed = parsed.diagnostics.iter().any(|d| d.severity.is_fatal());
     diagnostics.extend(parsed.diagnostics);
@@ -441,6 +455,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         );
         checker.set_incomplete_lines(&incomplete_lines);
         checker.set_varargck_lines(&varargck_lines);
+        checker.set_unreached(unreached);
         checker.check_unit();
         // After the whole file, because a `#pragma weak` applies to the name wherever the line
         // stands relative to its declarations.
@@ -17121,5 +17136,37 @@ away:
         assert!(text.contains("__x86.get_pc_thunk.bx:\nmovl (%esp), %ebx\nret\n"), "{text}");
         opts.emit = EmitKind::Object;
         assert_eq!(run(&opts, source).messages, Vec::<String>::new());
+    }
+
+    /// tamnd/rucc-kernel#244. The body of an inline function of a header that nothing reaches is
+    /// not checked when code is written, and `-fsyntax-only` still checks it. A body that is
+    /// reached is checked either way, and so is one the file itself writes.
+    #[test]
+    fn an_inline_function_of_a_header_that_nothing_reaches_is_not_checked() {
+        let header = "static inline int bad(void) { return undeclared; }\n\
+                      static inline int good(int x) { return x + 1; }\n\
+                      static inline int under(void) { return good(2); }\n";
+        let run_with = |emit: EmitKind, source: &str| {
+            let mut opts = options();
+            opts.emit = emit;
+            let mut fs = MemoryFileSystem::new();
+            fs.insert("/h.h", header.to_owned().into_bytes());
+            fs.insert("/main.c", source.to_owned().into_bytes());
+            compile(&opts, "/main.c", &fs)
+        };
+        let source = "#include \"/h.h\"\nint f(void) { return good(1); }\n";
+        let result = run_with(EmitKind::Object, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "{result:?}");
+        assert!(matches!(result.artifact, Artifact::Object { .. }));
+        let result = run_with(EmitKind::SyntaxOnly, source);
+        assert!(result.messages.iter().any(|m| m.contains("undeclared")), "{result:?}");
+
+        let source = "#include \"/h.h\"\nint f(void) { return bad(); }\n";
+        let result = run_with(EmitKind::Object, source);
+        assert!(result.messages.iter().any(|m| m.contains("undeclared")), "{result:?}");
+
+        let source = "static inline int own(void) { return missing; }\nint f(void) { return 0; }\n";
+        let result = run_with(EmitKind::Object, source);
+        assert!(result.messages.iter().any(|m| m.contains("missing")), "{result:?}");
     }
 }

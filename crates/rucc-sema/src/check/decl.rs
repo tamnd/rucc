@@ -507,6 +507,14 @@ impl Checker<'_> {
         let refused = self.sme_refused_definition(merged, &[specs.attrs], span);
         let quiet = std::mem::replace(&mut self.sme_quiet, refused || !emitted);
         let forwards = !emitted || self.tast[id].linkage == Linkage::Internal;
+        // A body nothing reaches, from the inline functions of the headers. See
+        // `Checker::set_unreached`.
+        if self.unreached_now && !nested && self.tast[id].linkage == Linkage::Internal {
+            self.sme_quiet = quiet;
+            self.unchecked.insert(id);
+            self.tast.record_definition(id, span);
+            return Some(id);
+        }
         let outer = self.defining.replace(id);
         let (stmt, params) = self.function_body(ty, name, span, params, body, forwards);
         self.defining = outer;

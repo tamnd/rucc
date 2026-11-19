@@ -90,6 +90,9 @@ pub struct Parsed {
     /// The unit's kencc `#pragma varargck` lines, in the order they were written, which the
     /// checker reads at the place of each line under `-F`.
     pub varargck_pragmas: Vec<crate::VarargckLine>,
+    /// For each external declaration, the index of the token after its end, which is where the
+    /// next one starts.
+    pub ends: Vec<u32>,
 }
 
 impl Parsed {
@@ -192,6 +195,7 @@ impl<'a> Parser<'a> {
         for line in &mut self.varargck_pragmas {
             line.decls = count(line.decls);
         }
+        let ends = ends.iter().map(|&end| u32::try_from(end).unwrap_or(u32::MAX)).collect();
         Parsed {
             ast: self.ast,
             diagnostics: self.errors.finish(),
@@ -201,6 +205,7 @@ impl<'a> Parser<'a> {
             extname_pragmas: self.extname_pragmas,
             incomplete_pragmas: self.incomplete_pragmas,
             varargck_pragmas: self.varargck_pragmas,
+            ends,
         }
     }
 

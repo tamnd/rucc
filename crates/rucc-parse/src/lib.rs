@@ -81,6 +81,7 @@ mod order;
 mod pack;
 mod spec;
 mod stmt;
+mod unreached;
 mod visibility;
 mod weak;
 
@@ -91,6 +92,7 @@ pub use crate::kencc_pragma::{IncompletePragma, Varargck, VarargckLine, Varargck
 pub use crate::parser::{Context, MAX_NESTING, Parsed, Parser};
 pub use crate::recover::{Poison, push_about, skip_past_declaration, skip_to_statement_end};
 pub use crate::scope::{IdentKind, Scopes, TagKind};
+pub use crate::unreached::unreached;
 pub use crate::weak::WeakPragma;
 
 /// Parses a translation unit.
