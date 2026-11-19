@@ -633,6 +633,11 @@ impl<'a> Walk<'a> {
         else {
             return Clobber::Unknown;
         };
+        // Nothing may write a `const` object, so no def on any path is the one this reads, and
+        // there is no need to walk every path back to the start to find that out.
+        if self.alias.invariant(&reference) {
+            return Clobber::NoClobber;
+        }
         self.counts.walks += 1;
         let mut budget = self.limit;
         let mut seen = std::mem::take(&mut self.seen);
@@ -657,9 +662,29 @@ impl<'a> Walk<'a> {
     pub fn settled(&mut self, load: Inst) -> Option<Value> {
         let reference = self.alias.reads(load)?;
         let version = self.func.mem_in(load)?;
+        // A `const` object reads the same at every version, so the oldest is the start of the
+        // chain. The walk below would get there too, but it goes down every way into a join
+        // again for each join above it, and nine `if`s in a row with a call in each were enough
+        // to spend its budget. That is `current` in the kernel's `do_syscall_64`, which read it
+        // again after every call.
+        if self.alias.invariant(&reference) {
+            if let Some(start) = self.start() {
+                return Some(start);
+            }
+        }
         let mut budget = self.limit;
         self.stopped.clear();
         Some(self.settle(&reference, version, &mut budget))
+    }
+
+    /// The version of memory `mem_entry` makes, which is where the chain starts.
+    fn start(&self) -> Option<Value> {
+        let entry = self.func.entry()?;
+        let first = self.func.insts(entry).next()?;
+        if self.func[first].opcode != Opcode::MemEntry {
+            return None;
+        }
+        self.func.mem_out(first)
     }
 
     /// One step of [`Self::settled`].
