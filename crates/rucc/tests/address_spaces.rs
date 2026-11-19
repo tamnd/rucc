@@ -145,6 +145,33 @@ fn the_address_of_an_object_in_a_segment_is_its_offset() {
     assert!(!out.contains("%gs:gs"), "{out}");
 }
 
+/// `current` in the kernel is a `const` in `__seg_gs`, and gcc reads it once in a function
+/// however many calls and branches come after. rucc read it again after every call in
+/// `do_syscall_64`, where nine `if`s in a row were enough to stop it seeing that the two reads
+/// were of something nothing writes. Older configs reach it through `uintptr_t` instead.
+#[test]
+fn the_kernel_reads_current_once() {
+    let mut source = String::from(
+        "struct task { long flags, state, x; };\n\
+         extern __seg_gs __typeof__(struct task *const __seg_gs) cur;\n\
+         extern struct task *const old;\n\
+         #define GET() (*(typeof(cur) *)(&(cur)))\n\
+         #define OLD() (*(struct task *const __seg_gs *)(unsigned long)&old)\n\
+         long f(long);\n",
+    );
+    for (name, read) in [("now", "GET()"), ("then", "OLD()")] {
+        source.push_str(&format!("long {name}(long n) {{\n  long x = {read}->flags;\n"));
+        for bit in 0..12 {
+            source.push_str(&format!("  if (n & {}) n = f(n);\n", 1 << bit));
+        }
+        source.push_str("  asm volatile(\"cli\" ::: \"memory\");\n");
+        source.push_str(&format!("  return n + x + {read}->x;\n}}\n"));
+    }
+    let out = listing("current", &source);
+    assert_eq!(out.matches("%gs:cur(%rip)").count(), 1, "{out}");
+    assert_eq!(out.matches("%gs:old(%rip)").count(), 1, "{out}");
+}
+
 /// The shape of the kernel's probe, which is what turns the feature on.
 #[test]
 fn the_kernel_probe_compiles() {

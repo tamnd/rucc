@@ -257,7 +257,8 @@ pub enum Origin {
     /// A named object, by the symbol its address was taken by.
     Global(Symbol),
     /// An address this function cannot follow any further back: a parameter, something loaded
-    /// out of memory, what a call returned, or an integer turned into a pointer.
+    /// out of memory, what a call returned, or an integer turned into a pointer, unless the
+    /// integer was a global's address just before.
     Unknown(Value),
 }
 
@@ -275,7 +276,13 @@ impl Origin {
 /// costs the offset layer and nothing else: the origin is still the origin, because adding an
 /// unknown number of bytes to a pointer does not move it to a different object.
 #[must_use]
-pub fn origin(func: &Func, mut value: Value) -> (Origin, Option<i64>) {
+pub fn origin(func: &Func, value: Value) -> (Origin, Option<i64>) {
+    walk(func, value, true)
+}
+
+/// [`origin`], going back through an integer only when `integers` is true, so that the walk it
+/// starts from there goes back through one and no more.
+fn walk(func: &Func, mut value: Value, integers: bool) -> (Origin, Option<i64>) {
     let mut offset = Some(0i64);
     for _ in 0..CHASE_LIMIT {
         let Def::Result { inst, .. } = func[value].def else {
@@ -309,6 +316,27 @@ pub fn origin(func: &Func, mut value: Value) -> (Origin, Option<i64>) {
             // object out is a use this function can see, and [`keeps_address`] is what decides
             // which uses those are.
             Opcode::CapOf => value = func[data.args][0],
+            // A global's address turned into an integer and straight back is the same address,
+            // and the kernel reads every per-CPU variable that way: `__my_cpu_ptr` casts through
+            // `uintptr_t` to move the address into `__seg_gs`. Only a global is taken through,
+            // so a local whose address became an integer is still of unknown origin here. The
+            // integer has to be 64 bits or more, which holds every address on every target, so
+            // that nothing was cut off on the way.
+            Opcode::IntToPtr if integers => {
+                let inner = func[data.args][0];
+                let Def::Result { inst: cast, .. } = func[inner].def else {
+                    return (Origin::Unknown(value), offset);
+                };
+                if func[cast].opcode != Opcode::PtrToInt || func[inner].ty.bits() < 64 {
+                    return (Origin::Unknown(value), offset);
+                }
+                let (Origin::Global(name), past) = walk(func, func[func[cast].args][0], false)
+                else {
+                    return (Origin::Unknown(value), offset);
+                };
+                let offset = offset.zip(past).and_then(|(so_far, past)| so_far.checked_add(past));
+                return (Origin::Global(name), offset);
+            }
             _ => return (Origin::Unknown(value), offset),
         }
     }
@@ -1251,6 +1279,54 @@ mod tests {
         let mut alias = Alias::new(&f, &outside);
         let (a, b) = two(&alias, &f);
         assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
+    }
+
+    /// The address `of` turned into an integer of `bits` and back into a pointer.
+    fn through_integer(build: &mut Builder<'_>, of: Value, bits: u32) -> Value {
+        let number = build.unary(Opcode::PtrToInt, of, Type::int(bits));
+        build.unary(Opcode::IntToPtr, number, Type::PTR)
+    }
+
+    #[test]
+    fn a_global_through_an_integer_is_still_the_global() {
+        // What `__my_cpu_ptr` does to every per-CPU variable in the kernel.
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let x = names.intern("x");
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let base = global(&mut build, &mut module, x);
+        let inside = at(&mut build, base, 8);
+        let back = through_integer(&mut build, inside, 64);
+        let past = at(&mut build, back, 4);
+        build.ret(&[]);
+        assert_eq!(origin(&f, back), (Origin::Global(x), Some(8)));
+        assert_eq!(origin(&f, past), (Origin::Global(x), Some(12)));
+    }
+
+    #[test]
+    fn a_local_through_an_integer_is_of_unknown_origin() {
+        let mut names = Interner::new();
+        let _module = module(&mut names);
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let slot = local(&mut build, 16);
+        let back = through_integer(&mut build, slot, 64);
+        build.ret(&[]);
+        assert_eq!(origin(&f, back), (Origin::Unknown(back), Some(0)));
+    }
+
+    #[test]
+    fn a_global_through_an_integer_too_narrow_for_an_address_is_of_unknown_origin() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let x = names.intern("x");
+        let mut f = func(&mut names, &[]);
+        let mut build = builder(&mut f);
+        let base = global(&mut build, &mut module, x);
+        let back = through_integer(&mut build, base, 32);
+        build.ret(&[]);
+        assert_eq!(origin(&f, back), (Origin::Unknown(back), Some(0)));
     }
 
     #[test]
